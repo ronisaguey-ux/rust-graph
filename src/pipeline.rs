@@ -429,7 +429,7 @@ fn resolve_file(
     stats: &mut Stats,
 ) -> io::Result<()> {
     let scope = scope_of(&facts.tag);
-    let mut resolver = Resolver { index, source: reader };
+    let mut resolver = Resolver::new(index, reader);
     for import in &facts.imports {
         let mut row = String::from("{\"file\":");
         push_string(&mut row, path);

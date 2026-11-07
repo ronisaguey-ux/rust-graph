@@ -2,7 +2,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_rust-graph");
 
@@ -199,4 +200,94 @@ fn an_erlang_clause_runs_to_its_period_across_lines() {
     let json = tree.json();
     assert!(json.contains(r#""caller":"a.erl:f","callee":"a.erl:g""#), "{json}");
     assert!(json.contains(r#""caller":"a.erl:f","callee":"a.erl:h""#), "{json}");
+}
+
+/// Build `tree`, killing it past `limit`: a regression must fail, not stall.
+fn build_within(tree: &Tree, limit: Duration) -> String {
+    let dir = std::env::temp_dir().join(format!("rust-graph-cli-{}-out", tree.0.file_name().unwrap().to_string_lossy()));
+    let out = dir.with_extension("json");
+    let mut child = Command::new(BIN)
+        .arg("build")
+        .arg(&tree.0)
+        .args(["--stdout", "--no-cache"])
+        .stdout(fs::File::create(&out).unwrap())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > limit {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let _ = fs::remove_file(&out);
+            panic!("build still running after {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let json = fs::read_to_string(&out).unwrap();
+    fs::remove_file(&out).unwrap();
+    json
+}
+
+/// `count` files or classes, each pointing at all the others.
+fn others(count: usize, line: impl Fn(usize) -> String) -> impl Fn(usize) -> String {
+    move |me| (0..count).filter(|other| *other != me).map(&line).collect()
+}
+
+const CYCLE_LIMIT: Duration = Duration::from_secs(5);
+
+#[test]
+fn cyclic_bases_do_not_stall_the_build() {
+    let count = 10;
+    let bases = others(count, |other| format!("C{other}, "));
+    let source: String = (0..count).map(|me| format!("class C{me}({}):\n    def go(self):\n        self.missing()\n\n", bases(me))).collect();
+    let tree = Tree::new("cycle-bases", &[("a.py", &source)]);
+    let json = build_within(&tree, CYCLE_LIMIT);
+    assert!(json.contains("a.py:C9.go"), "{json}");
+}
+
+#[test]
+fn cyclic_aliased_imports_do_not_stall_the_build() {
+    let count = 10;
+    let imports = others(count, |other| format!("from m{other} import x\n"));
+    let files: Vec<(String, String)> =
+        (0..count).map(|me| (format!("m{me}.py"), format!("{}def f{me}():\n    x()\n", imports(me)))).collect();
+    let refs: Vec<(&str, &str)> = files.iter().map(|(path, body)| (path.as_str(), body.as_str())).collect();
+    let tree = Tree::new("cycle-alias", &refs);
+    let json = build_within(&tree, CYCLE_LIMIT);
+    assert!(json.contains("m9.py:f9"), "{json}");
+}
+
+#[test]
+fn cyclic_star_exports_do_not_stall_the_build() {
+    let count = 10;
+    let exports = others(count, |other| format!("export * from './m{other}';\n"));
+    let files: Vec<(String, String)> =
+        (0..count).map(|me| (format!("m{me}.js"), format!("{}function f{me}() {{\n  nothing_here();\n}}\n", exports(me)))).collect();
+    let refs: Vec<(&str, &str)> = files.iter().map(|(path, body)| (path.as_str(), body.as_str())).collect();
+    let tree = Tree::new("cycle-star", &refs);
+    let json = build_within(&tree, CYCLE_LIMIT);
+    assert!(json.contains("m9.js:f9"), "{json}");
+}
+
+#[test]
+fn a_method_inside_a_base_cycle_still_binds() {
+    let source = "class A(B):\n    def go(self):\n        self.run()\n\nclass B(A, C):\n    pass\n\nclass C(A):\n    def run(self):\n        pass\n";
+    let tree = Tree::new("cycle-found", &[("a.py", source)]);
+    let json = build_within(&tree, CYCLE_LIMIT);
+    assert!(json.contains(r#""callee":"a.py:C.run""#), "{json}");
+}
+
+/// `X` first fails one step above the depth cap, where the walk stops short of
+/// `Z`. That failure may only rule out deeper visits, so the short path still binds.
+#[test]
+fn a_class_first_met_near_the_depth_cap_stays_reachable() {
+    let mut source = String::from("class A(L1, X):\n    def go(self):\n        self.run()\n\n");
+    for step in 1..=5 {
+        source.push_str(&format!("class L{step}(L{}):\n    pass\n\n", step + 1));
+    }
+    source.push_str("class L6(X):\n    pass\n\nclass X(Y):\n    pass\n\nclass Y(Z):\n    pass\n\nclass Z:\n    def run(self):\n        pass\n");
+    let tree = Tree::new("cycle-cap", &[("a.py", &source)]);
+    let json = build_within(&tree, CYCLE_LIMIT);
+    assert!(json.contains(r#""callee":"a.py:Z.run""#), "{json}");
 }

@@ -9,6 +9,7 @@ use crate::facts::{Facts, Import, IMPORT_STAR, KIND_CLASS};
 use crate::index::{family, hash, Index, Row};
 
 const MAX_FOLLOW: usize = 8;
+const MAX_DEAD_ENDS: usize = 1 << 16;
 const CONSTRUCTORS: [&str; 5] = ["__init__", "constructor", "initialize", "init", "new"];
 const EXTENSIONS: [&str; 13] = ["", ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rb", ".lua", ".php", ".pm", ".go"];
 
@@ -55,9 +56,36 @@ pub trait ImportSource {
     fn bases_of(&mut self, file: u32, class: &str) -> Vec<String>;
 }
 
+/// Searches that found nothing, each with the shallowest depth it failed from.
+///
+/// Cyclic bases and re-exports make the walk branch at every step up to
+/// `MAX_FOLLOW`, which is `branches^8` lookups without this. A plain visited set
+/// would stop that but change answers: a class first met at the depth cap can
+/// still succeed from a shorter path. A failure does transfer the other way,
+/// since a deeper start only has less of the same walk left, so skipping those
+/// leaves every result as it was. Forgetting an entry costs time, never accuracy.
+#[derive(Default)]
+struct DeadEnds(HashMap<(u32, u64, u64), usize>);
+
+impl DeadEnds {
+    fn covers(&self, key: (u32, u64, u64), depth: usize) -> bool {
+        self.0.get(&key).is_some_and(|seen| *seen <= depth)
+    }
+
+    fn record(&mut self, key: (u32, u64, u64), depth: usize) {
+        if self.0.len() >= MAX_DEAD_ENDS {
+            self.0.clear();
+        }
+        let seen = self.0.entry(key).or_insert(depth);
+        *seen = depth.min(*seen);
+    }
+}
+
 pub struct Resolver<'a, S: ImportSource> {
-    pub index: &'a Index,
-    pub source: &'a mut S,
+    index: &'a Index,
+    source: &'a mut S,
+    dead_methods: DeadEnds,
+    dead_paths: DeadEnds,
 }
 
 fn parent(path: &str) -> &str {
@@ -78,7 +106,11 @@ fn join(dir: &str, relative: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-impl<S: ImportSource> Resolver<'_, S> {
+impl<'a, S: ImportSource> Resolver<'a, S> {
+    pub fn new(index: &'a Index, source: &'a mut S) -> Self {
+        Resolver { index, source, dead_methods: DeadEnds::default(), dead_paths: DeadEnds::default() }
+    }
+
     fn exact(&self, stem_path: &str, file: u32) -> Option<u32> {
         let family = self.index.families[file as usize];
         let last = stem_path.rsplit('/').next()?;
@@ -172,6 +204,14 @@ impl<S: ImportSource> Resolver<'_, S> {
             return None;
         }
         let imports = self.source.imports_of(file);
+        if imports.is_empty() {
+            return None;
+        }
+        let path = names.iter().fold(0, |path: u64, name| path.rotate_left(7) ^ hash(name));
+        let key = (file, path, names.len() as u64);
+        if self.dead_paths.covers(key, depth) {
+            return None;
+        }
         for import in imports.iter().filter(|import| import.alias == first && import.kind != IMPORT_STAR) {
             if let Some(found) = self.through(import, rest, file, depth + 1) {
                 return Some(found);
@@ -184,6 +224,7 @@ impl<S: ImportSource> Resolver<'_, S> {
                 }
             }
         }
+        self.dead_paths.record(key, depth);
         None
     }
 
@@ -198,13 +239,18 @@ impl<S: ImportSource> Resolver<'_, S> {
     }
 
     fn method(&mut self, file: u32, class: &str, name: &str, depth: usize) -> Option<Row> {
-        if let Some(row) = self.index.member(file, hash(class), hash(name)) {
+        let key = (file, hash(class), hash(name));
+        if let Some(row) = self.index.member(file, key.1, key.2) {
             return Some(row);
         }
-        if depth >= MAX_FOLLOW {
+        if depth >= MAX_FOLLOW || self.dead_methods.covers(key, depth) {
             return None;
         }
-        for base in self.source.bases_of(file, class) {
+        let bases = self.source.bases_of(file, class);
+        if bases.is_empty() {
+            return None;
+        }
+        for base in bases {
             if self.index.class_in(file, hash(&base)) {
                 if let Some(row) = self.method(file, &base, name, depth + 1) {
                     return Some(row);
@@ -220,6 +266,7 @@ impl<S: ImportSource> Resolver<'_, S> {
                 }
             }
         }
+        self.dead_methods.record(key, depth);
         None
     }
 
