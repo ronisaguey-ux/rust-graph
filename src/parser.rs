@@ -1,0 +1,1736 @@
+//! One forward walk over a file's tokens. Tokens collect into a statement; a
+//! statement either opens a block (a definition, a branch) or becomes flow
+//! events on the function it sits in. The only state is the open-block stack.
+
+use crate::expr::{lexeme, Emit};
+use crate::facts::{Facts, Import, Symbol, IMPORT_MODULE, IMPORT_STAR, KIND_CLASS, KIND_FUNCTION, KIND_MODULE};
+use crate::json::push_string;
+use crate::langs::{Blocks, Imports, Language};
+use crate::lexer::{Kind, Lexer, Token};
+
+const MODIFIERS: [&str; 34] = [
+    "export", "default", "public", "private", "protected", "internal", "static", "final", "abstract", "async", "pub",
+    "virtual", "override", "inline", "extern", "sealed", "open", "data", "partial", "local", "declare", "readonly",
+    "unsafe", "pure", "external", "view", "payable", "friend", "rec", "impure", "elemental", "recursive", "shared", "module",
+];
+const CONTROL: [&str; 24] = [
+    "if", "elif", "elsif", "elseif", "else", "for", "foreach", "while", "until", "unless", "switch", "match", "try",
+    "catch", "except", "finally", "rescue", "ensure", "do", "loop", "when", "with", "select", "repeat",
+];
+/// A word that continues the branch just closed instead of following it.
+const ARMS: [&str; 11] =
+    ["else", "elif", "elsif", "elseif", "catch", "except", "finally", "rescue", "ensure", "when", "case"];
+const NOT_A_NAME: [&str; 10] = ["return", "sizeof", "new", "function", "throw", "await", "yield", "assert", "print", "defined"];
+/// A `{` straight after one of these is a value or a destructuring pattern.
+const VALUE_FOLLOWS: [&str; 7] = ["return", "import", "export", "const", "let", "var", "type"];
+const SQL_DDL: &[&str] = &["create", "alter", "drop"];
+const COLUMN_SKIP: [&str; 15] = [
+    "module", "import", "data", "type", "newtype", "class", "instance", "where", "infixl", "infixr", "infix", "deriving",
+    "open", "exposing", "port",
+];
+const COBOL_HEADINGS: [&str; 4] = ["division", "section", "id", "program-id"];
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum FrameKind {
+    Module,
+    Class,
+    Function,
+    Control,
+    Plain,
+}
+
+struct Frame {
+    kind: FrameKind,
+    symbol: usize,
+    class: String,
+    receiver: String,
+    /// Column of the statement that opened the frame (indent blocks).
+    col: u32,
+    /// A statement interrupted by this block: `app.get('/x', (req) => {`.
+    saved: Option<(Vec<Token>, Vec<u8>)>,
+    /// The symbol this frame defines, whose end line it sets on closing.
+    defines: Option<usize>,
+}
+
+#[derive(Default)]
+struct Head {
+    name: String,
+    owner: String,
+    params: Vec<String>,
+    receiver: String,
+    /// Tokens after this index are the body (`def f(x) = x + 1`).
+    body: Option<usize>,
+}
+
+pub struct Parser<'a> {
+    src: &'a [u8],
+    lang: &'static Language,
+    lexer: Lexer<'a>,
+    stmt: Vec<Token>,
+    brackets: Vec<u8>,
+    frames: Vec<Frame>,
+    facts: Facts,
+    /// A branch whose block just closed; the next word decides if it goes on.
+    closed_branch: bool,
+    /// The next `{` belongs to an arm of the open branch.
+    rearmed: bool,
+    /// Pascal: a header waiting for its `begin`.
+    pending: Option<Head>,
+    last_line: u32,
+}
+
+pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
+    let parser = Parser {
+        src,
+        lang,
+        lexer: Lexer::new(src, lang),
+        stmt: Vec::with_capacity(64),
+        brackets: Vec::with_capacity(8),
+        frames: Vec::with_capacity(8),
+        facts: Facts { tag: lang.tag.to_string(), ..Facts::default() },
+        closed_branch: false,
+        rearmed: false,
+        pending: None,
+        last_line: 1,
+    };
+    parser.run()
+}
+
+impl<'a> Parser<'a> {
+    fn text(&self, token: &Token) -> String {
+        lexeme(self.src, token, self.lang)
+    }
+
+    fn raw<'t>(&self, token: &'t Token) -> &'a [u8] {
+        &self.src[token.start as usize..token.end as usize]
+    }
+
+    fn is_op(&self, token: &Token, op: &[u8]) -> bool {
+        token.kind == Kind::Op && self.raw(token) == op
+    }
+
+    fn word_at(&self, toks: &[Token], index: usize) -> Option<String> {
+        toks.get(index).filter(|token| token.kind == Kind::Ident).map(|token| self.text(token))
+    }
+
+    fn top(&self) -> &Frame {
+        self.frames.last().expect("the module frame is never popped")
+    }
+
+    fn run(mut self) -> Facts {
+        self.facts.symbols.push(Symbol { key: "<module>".into(), kind: KIND_MODULE, line: 1, ..Symbol::default() });
+        self.frames.push(Frame {
+            kind: FrameKind::Module,
+            symbol: 0,
+            class: String::new(),
+            receiver: String::new(),
+            col: 0,
+            saved: None,
+            defines: None,
+        });
+        loop {
+            let token = self.lexer.next();
+            self.last_line = token.line;
+            match token.kind {
+                Kind::Eof => break,
+                Kind::Newline => self.on_newline(),
+                Kind::Directive => self.directive(&token),
+                Kind::Op => self.on_op(token),
+                _ => {
+                    self.settle_branch(Some(&token));
+                    self.stmt.push(token);
+                }
+            }
+        }
+        self.end_statement();
+        self.settle_branch(None);
+        while self.frames.len() > 1 {
+            self.pop_frame();
+        }
+        self.facts.symbols[0].end_line = self.last_line;
+        self.facts.lines = self.last_line;
+        self.facts
+    }
+
+    fn uses_braces(&self) -> bool {
+        self.lang.blocks == Blocks::Brace
+    }
+
+    fn on_newline(&mut self) {
+        if !self.brackets.is_empty() || self.stmt.is_empty() {
+            return;
+        }
+        if self.lang.tag == "OBJC" && self.is_op(&self.stmt[0], b"@") {
+            self.stmt.clear();
+            return;
+        }
+        if self.lang.semicolons || self.lang.period_only {
+            return;
+        }
+        if let Some(last) = self.stmt.last() {
+            let continues = last.kind == Kind::Op
+                && !matches!(self.raw(last), b")" | b"]" | b"}" | b":" | b"++" | b"--" | b"=" | b"!" | b"?");
+            let trailing_equal = last.kind == Kind::Op && self.raw(last) == b"=" && self.lang.blocks != Blocks::Indent;
+            if continues || trailing_equal {
+                return;
+            }
+        }
+        self.end_statement();
+    }
+
+    fn on_op(&mut self, token: Token) {
+        let raw = self.raw(&token);
+        if raw.len() != 1 {
+            self.stmt.push(token);
+            return;
+        }
+        match raw[0] {
+            b'(' | b'[' => {
+                self.brackets.push(raw[0]);
+                self.stmt.push(token);
+            }
+            b')' | b']' => {
+                let open = if raw[0] == b')' { b'(' } else { b'[' };
+                if let Some(at) = self.brackets.iter().rposition(|byte| *byte == open) {
+                    self.brackets.truncate(at);
+                }
+                self.stmt.push(token);
+            }
+            b'{' => self.on_open_brace(token),
+            b'}' => self.on_close_brace(token),
+            b';' if self.brackets.is_empty() => self.end_statement(),
+            b'.' if self.lang.period_ends && self.brackets.is_empty() && self.at_sentence_end(&token) => {
+                self.stmt.push(token);
+                self.end_statement();
+            }
+            _ => self.stmt.push(token),
+        }
+    }
+
+    fn at_sentence_end(&self, token: &Token) -> bool {
+        self.src.get(token.end as usize).is_none_or(u8::is_ascii_whitespace)
+    }
+
+    fn on_open_brace(&mut self, token: Token) {
+        if self.uses_braces() && self.is_block() {
+            self.settle_branch(None);
+            self.open_block();
+        } else {
+            self.brackets.push(b'{');
+            self.stmt.push(token);
+        }
+    }
+
+    fn on_close_brace(&mut self, token: Token) {
+        if self.brackets.last() == Some(&b'{') {
+            self.brackets.pop();
+            self.stmt.push(token);
+            return;
+        }
+        if !self.uses_braces() {
+            self.stmt.push(token);
+            return;
+        }
+        self.end_statement();
+        self.settle_branch(None);
+        self.close_block();
+    }
+
+    /// Whether a `{` here starts statements rather than a value.
+    fn is_block(&self) -> bool {
+        let Some(last) = self.stmt.last() else { return true };
+        if self.lang.tag == "TCL" && last.kind == Kind::Ident && self.has_def_word(&self.stmt) {
+            return false;
+        }
+        if self.is_op(last, b"=>") || (self.is_op(last, b"->") && !self.brackets.is_empty()) {
+            return true;
+        }
+        if !self.brackets.is_empty() {
+            return self.is_op(last, b")") && self.function_word_in_tail();
+        }
+        if self.has_def_word(&self.stmt) {
+            return true;
+        }
+        if last.kind == Kind::Op {
+            let raw = self.raw(last);
+            if raw != b")" && raw != b">" && raw != b"]" && raw != b"}" {
+                return false;
+            }
+        }
+        let last_word = self.word_at(&self.stmt, self.stmt.len() - 1);
+        if last_word.is_some_and(|word| VALUE_FOLLOWS.contains(&word.as_str())) {
+            return false;
+        }
+        !(self.top_level_assign(&self.stmt).is_some() && !self.is_op(last, b")"))
+    }
+
+    fn function_word_in_tail(&self) -> bool {
+        self.stmt.iter().rev().take(32).any(|token| {
+            token.kind == Kind::Ident && self.lang.defs.iter().any(|word| word.as_bytes() == self.raw(token))
+        })
+    }
+
+    fn has_def_word(&self, toks: &[Token]) -> bool {
+        let mut index = 0;
+        while index < toks.len().min(8) {
+            match self.word_at(toks, index) {
+                Some(word) if self.lang.defs.contains(&word.as_str()) => return true,
+                Some(word) if MODIFIERS.contains(&word.as_str()) => index += 1,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    fn open_block(&mut self) {
+        let mut stmt = std::mem::take(&mut self.stmt);
+        let in_expression = !self.brackets.is_empty();
+        let rearmed = std::mem::take(&mut self.rearmed);
+        let start_col = stmt.first().map_or(0, |token| token.col);
+        if in_expression {
+            let head = self.lambda_head(&stmt);
+            let brackets = std::mem::take(&mut self.brackets);
+            self.push_function(head, start_col, Some((stmt, brackets)));
+            return;
+        }
+        if rearmed {
+            self.final_arm(&stmt);
+            self.control_condition(&stmt);
+            self.stmt.clear();
+            return;
+        }
+        self.import_of(&stmt);
+        if let Some((name, bases)) = self.class_head(&stmt) {
+            self.push_class(name, bases, start_col);
+        } else if let Some(head) = self.function_head(&stmt, true) {
+            self.push_function(head, start_col, None);
+        } else if self.head_word(&stmt).is_some_and(|word| CONTROL.contains(&word.as_str())) {
+            self.open_control(&stmt, start_col);
+        } else {
+            self.statement(&stmt);
+            let symbol = self.top().symbol;
+            let class = self.top().class.clone();
+            let receiver = self.top().receiver.clone();
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None });
+        }
+        stmt.clear();
+        self.stmt = stmt;
+    }
+
+    fn open_control(&mut self, stmt: &[Token], col: u32) {
+        self.control_condition_before(stmt);
+        self.event("[\"b\"]");
+        self.loop_binding(stmt);
+        let symbol = self.top().symbol;
+        let class = self.top().class.clone();
+        let receiver = self.top().receiver.clone();
+        self.frames.push(Frame { kind: FrameKind::Control, symbol, class, receiver, col, saved: None, defines: None });
+    }
+
+    /// `["f"]`: this arm has no condition, so the arms together cover every case.
+    fn final_arm(&mut self, header: &[Token]) {
+        if self.word_at(header, 0).as_deref() == Some("else") && header.len() == 1 {
+            self.event("[\"f\"]");
+        }
+    }
+
+    fn control_condition(&mut self, stmt: &[Token]) {
+        self.control_condition_before(stmt);
+        self.loop_binding(stmt);
+    }
+
+    fn binding_index(&self, stmt: &[Token]) -> Option<usize> {
+        let mut depth = 0;
+        for (index, token) in stmt.iter().enumerate() {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    _ => {}
+                }
+            }
+            if depth <= 1 && token.kind == Kind::Ident && index > 0 && matches!(self.raw(token), b"in" | b"of" | b"as") {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn control_condition_before(&mut self, stmt: &[Token]) {
+        if self.binding_index(stmt).is_none() && stmt.len() > 1 {
+            self.expression_event("x", &stmt[1..]);
+        }
+    }
+
+    /// `for a, b in c`, `for (const a of b)`, `with c as a`.
+    fn loop_binding(&mut self, stmt: &[Token]) {
+        let Some(at) = self.binding_index(stmt) else { return };
+        let is_with = self.raw(&stmt[at]) == b"as";
+        let (targets, value) = if is_with { (&stmt[at + 1..], &stmt[1..at]) } else { (&stmt[1..at], &stmt[at + 1..]) };
+        self.assignment(targets, value, stmt[0].line, false);
+    }
+
+    fn head_word(&self, toks: &[Token]) -> Option<String> {
+        toks.iter().find(|token| token.kind == Kind::Ident).map(|token| self.text(token)).filter(|_| toks[0].kind == Kind::Ident)
+    }
+
+    fn add_symbol(&mut self, name: String, owner: String, kind: u8, line: u32, params: Vec<String>) -> usize {
+        let base = if owner.is_empty() { name.clone() } else { format!("{owner}.{name}") };
+        let taken = self.facts.symbols.iter().any(|symbol| symbol.key == base);
+        let key = if taken { format!("{base}@{line}") } else { base };
+        self.facts.symbols.push(Symbol { key, name, owner, kind, line, end_line: line, params, ..Symbol::default() });
+        self.facts.symbols.len() - 1
+    }
+
+    fn push_class(&mut self, name: String, bases: Vec<String>, col: u32) {
+        let line = self.last_line;
+        let index = self.add_symbol(name.clone(), String::new(), KIND_CLASS, line, Vec::new());
+        self.facts.symbols[index].bases = bases;
+        let symbol = self.top().symbol;
+        self.frames.push(Frame {
+            kind: FrameKind::Class,
+            symbol,
+            class: name,
+            receiver: String::new(),
+            col,
+            saved: None,
+            defines: Some(index),
+        });
+    }
+
+    fn push_function(&mut self, head: Head, col: u32, saved: Option<(Vec<Token>, Vec<u8>)>) {
+        let index = self.define(head.name, head.owner, head.params, self.last_line);
+        let class = self.facts.symbols[index].owner.clone();
+        self.frames.push(Frame {
+            kind: FrameKind::Function,
+            symbol: index,
+            class,
+            receiver: head.receiver,
+            col,
+            saved,
+            defines: Some(index),
+        });
+    }
+
+    fn define(&mut self, name: String, owner: String, mut params: Vec<String>, line: u32) -> usize {
+        let owner = if owner.is_empty() && self.top().kind == FrameKind::Class { self.top().class.clone() } else { owner };
+        if params.first().is_some_and(|first| matches!(first.as_str(), "self" | "cls" | "this")) {
+            params.remove(0);
+        }
+        if params.is_empty() {
+            params = self.lang.implicit_params.iter().map(|param| param.to_string()).collect();
+        }
+        let name = if name.is_empty() { format!("<anonymous>@{line}") } else { name };
+        self.add_symbol(name, owner, KIND_FUNCTION, line, params)
+    }
+
+    fn pop_frame(&mut self) -> Frame {
+        let frame = self.frames.pop().expect("a frame to pop");
+        if let Some(index) = frame.defines {
+            self.facts.symbols[index].end_line = self.last_line;
+        }
+        frame
+    }
+
+    fn close_block(&mut self) {
+        if self.frames.len() <= 1 {
+            return;
+        }
+        if self.top().kind == FrameKind::Control {
+            self.closed_branch = true;
+            return;
+        }
+        let frame = self.pop_frame();
+        if let Some((stmt, brackets)) = frame.saved {
+            self.stmt = stmt;
+            self.brackets = brackets;
+            self.stmt.push(Token { kind: Kind::Lambda, start: 0, end: 0, line: self.last_line, col: 0, interp: None });
+        }
+    }
+
+    /// After a closed branch: an arm word reopens it, anything else ends it.
+    fn settle_branch(&mut self, next: Option<&Token>) {
+        if !self.closed_branch {
+            return;
+        }
+        self.closed_branch = false;
+        let is_arm = next.is_some_and(|token| token.kind == Kind::Ident && ARMS.contains(&self.text(token).as_str()));
+        if is_arm {
+            self.event("[\"e\"]");
+            self.rearmed = true;
+        } else {
+            self.event("[\"j\"]");
+            self.pop_frame();
+        }
+    }
+
+    fn event(&mut self, text: &str) {
+        let symbol = self.top().symbol;
+        let events = &mut self.facts.symbols[symbol].events;
+        if !events.is_empty() {
+            events.push(',');
+        }
+        events.push_str(text);
+    }
+
+    fn with_emit(&mut self, toks: &[Token], write: impl FnOnce(&mut Emit, &mut String)) -> String {
+        let symbol = self.top().symbol;
+        let receiver = self.top().receiver.clone();
+        let mut calls = std::mem::take(&mut self.facts.symbols[symbol].calls);
+        let mut out = String::new();
+        let mut emit = Emit { src: self.src, lang: self.lang, toks, pos: 0, calls: &mut calls, receiver: &receiver };
+        write(&mut emit, &mut out);
+        self.facts.symbols[symbol].calls = calls;
+        out
+    }
+
+    fn expression_event(&mut self, form: &str, toks: &[Token]) {
+        let Some(first) = toks.first() else { return };
+        let line = first.line;
+        let value = self.values(toks);
+        if value != "0" || form == "r" {
+            self.event(&format!("[\"{form}\",{line},{value}]"));
+        }
+    }
+
+    /// A whole expression; several top-level values become one tuple.
+    fn values(&mut self, toks: &[Token]) -> String {
+        let (items, count) = {
+            let mut count = 0;
+            let items = self.with_emit(toks, |emit, out| count = emit.list(out, 0, false));
+            (items, count)
+        };
+        match count {
+            0 => "0".to_string(),
+            1 => items,
+            _ => format!("[\"t\",[{items}]]"),
+        }
+    }
+
+    fn end_statement(&mut self) {
+        if self.stmt.is_empty() {
+            self.brackets.clear();
+            return;
+        }
+        let stmt = std::mem::take(&mut self.stmt);
+        self.brackets.clear();
+        match self.lang.blocks {
+            Blocks::Brace => self.brace_statement(&stmt),
+            Blocks::Indent => self.indent_statement(&stmt),
+            Blocks::End => self.end_family_statement(&stmt),
+            Blocks::BeginEnd => self.pascal_statement(&stmt),
+            Blocks::NamedEnd => self.named_end_statement(&stmt),
+            Blocks::Column => self.column_statement(&stmt),
+        }
+        let mut stmt = stmt;
+        stmt.clear();
+        self.stmt = stmt;
+    }
+
+    fn brace_statement(&mut self, stmt: &[Token]) {
+        let rearmed = std::mem::take(&mut self.rearmed);
+        let word = self.head_word(stmt);
+        if matches!(word.as_deref(), Some("case" | "default")) {
+            if self.top().kind == FrameKind::Control {
+                self.event("[\"e\"]");
+            }
+            if let Some(colon) = stmt.iter().position(|token| self.is_op(token, b":")) {
+                self.simple_statement(&stmt[colon + 1..]);
+            }
+            return;
+        }
+        if rearmed {
+            // `else x = y;`: the arm is this one statement.
+            self.final_arm(&stmt[..1]);
+            self.simple_statement(&stmt[1..]);
+            self.event("[\"j\"]");
+            self.pop_frame();
+            return;
+        }
+        if let Some(word) = word.filter(|word| matches!(word.as_str(), "if" | "for" | "while" | "foreach")) {
+            let _ = word;
+            if let Some(end) = self.matching_close(stmt, 1) {
+                if end + 1 < stmt.len() {
+                    self.expression_event("x", &stmt[2..end]);
+                    self.event("[\"b\"]");
+                    self.simple_statement(&stmt[end + 1..]);
+                    self.event("[\"j\"]");
+                    return;
+                }
+            }
+        }
+        if self.import_of(stmt) {
+            return;
+        }
+        if self.function_head(stmt, false).is_some_and(|head| head.body.is_some()) {
+            let head = self.function_head(stmt, false).unwrap_or_default();
+            self.inline_function(head, stmt);
+            return;
+        }
+        self.simple_statement(stmt);
+    }
+
+    fn matching_close(&self, stmt: &[Token], open: usize) -> Option<usize> {
+        if !stmt.get(open).is_some_and(|token| self.is_op(token, b"(")) {
+            return None;
+        }
+        let mut depth = 0;
+        for (index, token) in stmt.iter().enumerate().skip(open) {
+            if self.is_op(token, b"(") {
+                depth += 1;
+            } else if self.is_op(token, b")") {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+        }
+        None
+    }
+
+    /// A definition whose body is the rest of its statement.
+    fn inline_function(&mut self, head: Head, stmt: &[Token]) {
+        let body = head.body.unwrap_or(stmt.len());
+        self.push_function(head, stmt[0].col, None);
+        self.expression_event("r", &stmt[body..]);
+        self.last_line = stmt[stmt.len() - 1].line;
+        self.pop_frame();
+    }
+
+    fn indent_statement(&mut self, stmt: &[Token]) {
+        let col = stmt[0].col;
+        let word = self.head_word(stmt);
+        let arm = word.as_deref().is_some_and(|word| ARMS.contains(&word));
+        while self.frames.len() > 1 && self.top().col >= col {
+            if self.top().col == col && arm && self.top().kind == FrameKind::Control {
+                self.event("[\"e\"]");
+                self.after_header(stmt, None);
+                return;
+            }
+            if self.top().kind == FrameKind::Control {
+                self.event("[\"j\"]");
+            }
+            self.pop_frame();
+        }
+        if self.import_of(stmt) {
+            return;
+        }
+        let colon = self.suite_colon(stmt);
+        let header = &stmt[..colon.unwrap_or(stmt.len())];
+        if let Some((name, bases)) = self.class_head(header) {
+            self.push_class(name, bases, col);
+        } else if let Some(mut head) = self.function_head(header, true) {
+            head.body = None;
+            self.push_function(head, col, None);
+        } else if word.as_deref().is_some_and(|word| CONTROL.contains(&word)) && colon.is_some() {
+            self.open_control(header, col);
+        } else {
+            self.simple_statement(stmt);
+            return;
+        }
+        self.after_header(stmt, colon);
+    }
+
+    /// The statement on the same line as a `:`.
+    fn after_header(&mut self, stmt: &[Token], colon: Option<usize>) {
+        let colon = colon.or_else(|| self.suite_colon(stmt));
+        if let Some(at) = colon {
+            if colon.is_some() && self.top().kind == FrameKind::Control && self.is_arm_header(stmt) {
+                self.final_arm(&stmt[..at]);
+                self.control_condition(&stmt[..at]);
+            }
+            if at + 1 < stmt.len() {
+                self.simple_statement(&stmt[at + 1..]);
+            }
+        }
+    }
+
+    fn is_arm_header(&self, stmt: &[Token]) -> bool {
+        self.head_word(stmt).is_some_and(|word| ARMS.contains(&word.as_str()))
+    }
+
+    /// The `:` that ends a block header, or a Nim `=`.
+    fn suite_colon(&self, stmt: &[Token]) -> Option<usize> {
+        let mut depth = 0;
+        let mut lambda = 0;
+        for (index, token) in stmt.iter().enumerate() {
+            if token.kind == Kind::Ident && self.raw(token) == b"lambda" {
+                lambda += 1;
+            }
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" | b"{" => depth += 1,
+                b")" | b"]" | b"}" => depth -= 1,
+                b":" if depth == 0 && lambda > 0 => lambda -= 1,
+                b":" if depth == 0 && self.lang.tag != "NIM" => {
+                    let first = self.head_word(stmt)?;
+                    let opens = CONTROL.contains(&first.as_str())
+                        || self.lang.defs.contains(&first.as_str())
+                        || self.lang.classes.contains(&first.as_str())
+                        || first == "async";
+                    return opens.then_some(index);
+                }
+                b":" if depth == 0 && index + 1 == stmt.len() => return Some(index),
+                b"=" if depth == 0 && self.lang.tag == "NIM" && self.has_def_word(stmt) => return Some(index),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn end_family_statement(&mut self, stmt: &[Token]) {
+        let Some(word) = self.head_word(stmt) else {
+            self.simple_statement(stmt);
+            return;
+        };
+        if self.lang.closers.contains(&word.as_str()) {
+            self.close_end_block();
+            return;
+        }
+        if ARMS.contains(&word.as_str()) && self.top().kind == FrameKind::Control {
+            self.event("[\"e\"]");
+            self.final_arm(stmt);
+            self.expression_event("x", &stmt[1..]);
+            return;
+        }
+        if self.import_of(stmt) {
+            return;
+        }
+        let one_liner = self.word_at(stmt, stmt.len() - 1).is_some_and(|last| self.lang.closers.contains(&last.as_str()));
+        let col = stmt[0].col;
+        if let Some((name, bases)) = self.class_head(stmt) {
+            if !one_liner {
+                self.push_class(name, bases, col);
+            }
+            return;
+        }
+        if let Some(head) = self.function_head(stmt, true) {
+            if self.lang.tag == "M" && self.top().kind == FrameKind::Function {
+                self.pop_frame();
+            }
+            let inline_body = stmt.windows(2).position(|pair| {
+                self.raw(&pair[0]) == b"do" && self.is_op(&pair[1], b":")
+            });
+            if let Some(at) = inline_body {
+                let mut head = head;
+                head.body = Some(at + 2);
+                self.inline_function(head, stmt);
+            } else if one_liner {
+                self.push_function(head, col, None);
+                self.simple_statement(&stmt[..stmt.len() - 1]);
+                self.pop_frame();
+            } else {
+                self.push_function(head, col, None);
+            }
+            return;
+        }
+        if self.lang.openers.contains(&word.as_str()) {
+            if one_liner {
+                self.simple_statement(stmt);
+            } else {
+                self.open_control(stmt, col);
+            }
+            return;
+        }
+        let opener = stmt.iter().position(|token| {
+            token.kind == Kind::Ident && self.lang.inline_openers.iter().any(|word| word.as_bytes() == self.raw(token))
+        });
+        if let Some(at) = opener {
+            self.simple_statement(&stmt[..at]);
+            let symbol = self.top().symbol;
+            let class = self.top().class.clone();
+            let receiver = self.top().receiver.clone();
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col, saved: None, defines: None });
+            return;
+        }
+        self.simple_statement(stmt);
+    }
+
+    fn close_end_block(&mut self) {
+        if self.frames.len() <= 1 {
+            return;
+        }
+        if self.top().kind == FrameKind::Control {
+            self.event("[\"j\"]");
+        }
+        self.pop_frame();
+    }
+
+    fn pascal_statement(&mut self, stmt: &[Token]) {
+        let Some(word) = self.head_word(stmt) else {
+            self.simple_statement(stmt);
+            return;
+        };
+        if self.import_of(stmt) {
+            return;
+        }
+        if self.lang.defs.contains(&word.as_str()) || self.has_def_word(stmt) {
+            self.pending = self.function_head(stmt, true);
+            return;
+        }
+        // `begin`, `end` and the block words arrive as the first word of what
+        // may be a longer statement, because they carry no `;` of their own.
+        let mut start = 0;
+        while let Some(word) = self.word_at(stmt, start) {
+            if word == "begin" || word == "try" || word == "repeat" {
+                match self.pending.take() {
+                    Some(head) => self.push_function(head, 0, None),
+                    None => {
+                        let symbol = self.top().symbol;
+                        let class = self.top().class.clone();
+                        self.frames.push(Frame {
+                            kind: FrameKind::Plain,
+                            symbol,
+                            class,
+                            receiver: String::new(),
+                            col: 0,
+                            saved: None,
+                            defines: None,
+                        });
+                    }
+                }
+                start += 1;
+            } else if self.lang.closers.contains(&word.as_str()) {
+                self.close_end_block();
+                start += 1;
+            } else {
+                break;
+            }
+        }
+        if start < stmt.len() {
+            self.simple_statement(&stmt[start..]);
+        }
+    }
+
+    fn named_end_statement(&mut self, stmt: &[Token]) {
+        let Some(word) = self.head_word(stmt) else {
+            self.simple_statement(stmt);
+            return;
+        };
+        if word == "end" {
+            let next = self.word_at(stmt, 1);
+            if next.is_none() || next.is_some_and(|next| self.lang.defs.contains(&next.as_str())) {
+                if self.top().kind == FrameKind::Function {
+                    self.pop_frame();
+                }
+            }
+            return;
+        }
+        if self.import_of(stmt) {
+            return;
+        }
+        if let Some(head) = self.function_head(stmt, true) {
+            self.push_function(head, stmt[0].col, None);
+            return;
+        }
+        self.simple_statement(stmt);
+    }
+
+    fn column_statement(&mut self, stmt: &[Token]) {
+        let limit = if self.lang.tag == "COBOL" { 7 } else { 0 };
+        // A SQL body is free to sit in column one; only DDL ends a routine.
+        let sql_body = self.lang.tag == "SQL" && !self.word_at(stmt, 0).is_some_and(|word| SQL_DDL.contains(&word.as_str()));
+        let starts_a_definition = stmt[0].col <= limit && !sql_body;
+        if starts_a_definition {
+            while self.frames.len() > 1 {
+                self.pop_frame();
+            }
+            if self.import_of(stmt) {
+                return;
+            }
+            if let Some(head) = self.column_head(stmt) {
+                let body = head.body.unwrap_or(stmt.len());
+                self.push_function(head, 0, None);
+                if body < stmt.len() {
+                    self.expression_event("r", &stmt[body..]);
+                }
+                return;
+            }
+            if self.function_head(stmt, true).is_some() {
+                let mut head = self.function_head(stmt, true).unwrap_or_default();
+                let body = head.body.take().unwrap_or(stmt.len());
+                self.push_function(head, 0, None);
+                if body < stmt.len() {
+                    self.expression_event("r", &stmt[body..]);
+                }
+                return;
+            }
+        }
+        self.simple_statement(stmt);
+    }
+
+    fn column_head(&self, stmt: &[Token]) -> Option<Head> {
+        let first = self.word_at(stmt, 0);
+        if self.lang.tag == "CLJ" {
+            let word = self.word_at(stmt, 1)?;
+            if !self.lang.defs.contains(&word.as_str()) {
+                return None;
+            }
+            let name = self.word_at(stmt, 2)?;
+            let open = stmt.iter().position(|token| self.is_op(token, b"["))?;
+            let close = stmt.iter().position(|token| self.is_op(token, b"]"))?;
+            let params = stmt[open + 1..close].iter().filter(|t| t.kind == Kind::Ident).map(|t| self.text(t)).collect();
+            return Some(Head { name, params, body: Some(close + 1), ..Head::default() });
+        }
+        if self.lang.tag == "SQL" {
+            let keyword = (0..stmt.len().min(5)).find(|at| self.word_at(stmt, *at).is_some_and(|word| self.lang.defs.contains(&word.as_str())))?;
+            let (name, owner, open) = self.name_chain(stmt, keyword + 1);
+            let params = self.group_at(stmt, open).map_or_else(Vec::new, |(first, close)| self.params(&stmt[first..close]));
+            return Some(Head { name, owner, params, ..Head::default() });
+        }
+        if self.lang.tag == "COBOL" {
+            let name = first?;
+            let plain = stmt.len() == 2 && self.is_op(&stmt[1], b".");
+            return (plain && !COBOL_HEADINGS.iter().any(|word| name.ends_with(word))).then(|| Head { name, ..Head::default() });
+        }
+        if self.lang.tag == "ERL" {
+            let name = first?;
+            let close = self.matching_close(stmt, 1)?;
+            let params = self.params(&stmt[2..close]);
+            let arrow = stmt.iter().position(|token| self.is_op(token, b"->"))?;
+            return Some(Head { name, params, body: Some(arrow + 1), ..Head::default() });
+        }
+        let mut index = 0;
+        if !self.lang.defs.is_empty() {
+            if !self.word_at(stmt, 0).is_some_and(|word| self.lang.defs.contains(&word.as_str())) {
+                return None;
+            }
+            index = 1;
+            while self.word_at(stmt, index).is_some_and(|word| MODIFIERS.contains(&word.as_str())) {
+                index += 1;
+            }
+        }
+        let name = self.word_at(stmt, index)?;
+        if COLUMN_SKIP.contains(&name.as_str()) || stmt.get(index + 1).is_some_and(|token| self.is_op(token, b"::")) {
+            return None;
+        }
+        let equal = stmt.iter().position(|token| self.is_op(token, b"="))?;
+        let params = stmt[index + 1..equal].iter().filter(|t| t.kind == Kind::Ident).map(|t| self.text(t)).collect();
+        Some(Head { name, params, body: Some(equal + 1), ..Head::default() })
+    }
+
+    fn directive(&mut self, token: &Token) {
+        let line = self.raw(token);
+        let text = String::from_utf8_lossy(line);
+        let rest = text.trim_start_matches('#').trim_start();
+        let is_include = rest.starts_with("include") || rest.starts_with("import");
+        if !is_include {
+            return;
+        }
+        if let (Some(open), Some(close)) = (rest.find('"'), rest.rfind('"')) {
+            if open < close {
+                self.facts.imports.push(Import {
+                    line: token.line,
+                    module: rest[open + 1..close].to_string(),
+                    kind: IMPORT_STAR,
+                    ..Import::default()
+                });
+            }
+        }
+    }
+
+    fn string_value(&self, token: &Token) -> String {
+        let text = String::from_utf8_lossy(self.raw(token));
+        text.trim_matches(|ch| matches!(ch, '"' | '\'' | '`')).to_string()
+    }
+
+    /// Records an import if this statement is one; true if nothing else is left in it.
+    fn import_of(&mut self, stmt: &[Token]) -> bool {
+        if stmt.is_empty() {
+            return false;
+        }
+        match self.lang.imports {
+            Imports::Python => self.python_import(stmt),
+            Imports::Js => self.js_import(stmt),
+            Imports::Path => self.path_import(stmt),
+            Imports::Include | Imports::None => false,
+        }
+    }
+
+    fn dotted(&self, toks: &[Token]) -> (String, usize) {
+        let mut text = String::new();
+        let mut index = 0;
+        while let Some(token) = toks.get(index) {
+            let raw = self.raw(token);
+            let joins = token.kind == Kind::Op && raw.iter().all(|byte| *byte == b'.');
+            if token.kind == Kind::Ident && !matches!(raw, b"import" | b"as") {
+                if text.ends_with(|ch: char| ch.is_alphanumeric() || ch == '_') {
+                    break;
+                }
+            } else if !joins {
+                break;
+            }
+            text.push_str(&String::from_utf8_lossy(raw));
+            index += 1;
+        }
+        (text, index)
+    }
+
+    fn python_import(&mut self, stmt: &[Token]) -> bool {
+        let line = stmt[0].line;
+        match self.word_at(stmt, 0).as_deref() {
+            Some("import") => {
+                let parts: Vec<&[Token]> = stmt[1..].split(|token| self.is_op(token, b",")).collect();
+                for part in parts {
+                    let (module, used) = self.dotted(part);
+                    let alias = if self.word_at(part, used).as_deref() == Some("as") {
+                        self.word_at(part, used + 1).unwrap_or_default()
+                    } else {
+                        module.clone()
+                    };
+                    self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+                }
+                true
+            }
+            Some("from") => {
+                let (module, used) = self.dotted(&stmt[1..]);
+                let names = &stmt[(used + 2).min(stmt.len())..];
+                let parts: Vec<&[Token]> = names.split(|token| token.kind == Kind::Op && matches!(self.raw(token), b"," | b"(" | b")")).collect();
+                for part in parts {
+                    let Some(first) = part.first() else { continue };
+                    if self.is_op(first, b"*") {
+                        self.facts.imports.push(Import { line, module: module.clone(), kind: IMPORT_STAR, ..Import::default() });
+                        continue;
+                    }
+                    let name = self.text(first);
+                    let alias = if part.len() >= 3 { self.text(&part[2]) } else { name.clone() };
+                    self.facts.imports.push(Import { line, module: module.clone(), name, alias, kind: IMPORT_MODULE });
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn js_import(&mut self, stmt: &[Token]) -> bool {
+        let Some(line) = stmt.first().map(|token| token.line) else {
+            return false;
+        };
+        let word = self.word_at(stmt, 0);
+        let from = stmt.iter().position(|token| token.kind == Kind::Ident && self.raw(token) == b"from");
+        let is_static = matches!(word.as_deref(), Some("import" | "export")) && !stmt.get(1).is_some_and(|t| self.is_op(t, b"("));
+        if is_static {
+            let module_at = match from {
+                Some(at) => at + 1,
+                None if word.as_deref() == Some("import") => 1,
+                None => return false,
+            };
+            let Some(module) = stmt.get(module_at).filter(|token| token.kind == Kind::Str).map(|token| self.string_value(token)) else {
+                return false;
+            };
+            self.js_bindings(&stmt[1..module_at.saturating_sub(1).max(1)], &module, line);
+            return true;
+        }
+        let Some(at) = stmt.iter().position(|token| token.kind == Kind::Ident && self.raw(token) == b"require") else {
+            return false;
+        };
+        let Some(module) = stmt[at..].iter().take(3).find(|token| token.kind == Kind::Str).map(|token| self.string_value(token)) else {
+            return false;
+        };
+        let Some(equal) = self.top_level_assign(stmt) else {
+            self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
+            return true;
+        };
+        let targets = &stmt[..equal];
+        if let Some(open) = targets.iter().position(|token| self.is_op(token, b"{")) {
+            self.js_named(&targets[open + 1..], &module, line, b":");
+        } else if let Some(name) = targets.iter().rev().find(|token| token.kind == Kind::Ident) {
+            let alias = self.text(name);
+            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+        }
+        true
+    }
+
+    fn js_bindings(&mut self, toks: &[Token], module: &str, line: u32) {
+        let mut index = 0;
+        while index < toks.len() {
+            let token = &toks[index];
+            if self.is_op(token, b"{") {
+                self.js_named(&toks[index + 1..], module, line, b"as");
+                return;
+            }
+            if self.is_op(token, b"*") {
+                let alias = if self.word_at(toks, index + 1).as_deref() == Some("as") {
+                    self.word_at(toks, index + 2).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let kind = if alias.is_empty() { IMPORT_STAR } else { IMPORT_MODULE };
+                self.facts.imports.push(Import { line, module: module.into(), alias, kind, ..Import::default() });
+                return;
+            }
+            if token.kind == Kind::Ident && self.raw(token) != b"type" {
+                let alias = self.text(token);
+                self.facts.imports.push(Import { line, module: module.into(), alias, kind: IMPORT_MODULE, ..Import::default() });
+            }
+            index += 1;
+        }
+    }
+
+    fn js_named(&mut self, toks: &[Token], module: &str, line: u32, rename: &[u8]) {
+        let close = toks.iter().position(|token| self.is_op(token, b"}")).unwrap_or(toks.len());
+        let parts: Vec<&[Token]> = toks[..close].split(|token| self.is_op(token, b",")).collect();
+        for part in parts {
+            let Some(first) = part.iter().find(|token| token.kind == Kind::Ident) else { continue };
+            let name = self.text(first);
+            let renamed = part.iter().position(|token| self.raw(token) == rename);
+            let alias = renamed.and_then(|at| part.get(at + 1)).map_or(name.clone(), |token| self.text(token));
+            self.facts.imports.push(Import { line, module: module.into(), name, alias, kind: IMPORT_MODULE });
+        }
+    }
+
+    fn path_import(&mut self, stmt: &[Token]) -> bool {
+        let mut start = 0;
+        while self.word_at(stmt, start).as_deref().is_some_and(|word| MODIFIERS.contains(&word)) {
+            start += 1;
+        }
+        let local_require = self.top_level_assign(stmt).filter(|equal| {
+            self.word_at(stmt, equal + 1).is_some_and(|word| self.lang.import_words.contains(&word.as_str()))
+        });
+        if let Some(equal) = local_require {
+            let module = stmt[equal..].iter().find(|token| token.kind == Kind::Str).map(|token| self.string_value(token));
+            let alias = stmt[..equal].iter().rev().find(|token| token.kind == Kind::Ident).map(|token| self.text(token));
+            if let (Some(module), Some(alias)) = (module, alias) {
+                self.facts.imports.push(Import { line: stmt[0].line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+                return true;
+            }
+            return false;
+        }
+        let Some(word) = self.word_at(stmt, start) else { return false };
+        if !self.lang.import_words.contains(&word.as_str()) {
+            return false;
+        }
+        let line = stmt[0].line;
+        let rest = &stmt[start + 1..];
+        let strings: Vec<&Token> = rest.iter().filter(|token| token.kind == Kind::Str).collect();
+        if !strings.is_empty() {
+            for (index, token) in rest.iter().enumerate() {
+                if token.kind != Kind::Str {
+                    continue;
+                }
+                let module = self.string_value(token);
+                let named = index > 0 && rest[index - 1].kind == Kind::Ident;
+                let last = module.rsplit('/').next().unwrap_or("").to_string();
+                let alias = if named { self.text(&rest[index - 1]) } else { last };
+                let kind = if self.lang.tag == "GO" || named { IMPORT_MODULE } else { IMPORT_STAR };
+                self.facts.imports.push(Import { line, module, alias, kind, ..Import::default() });
+            }
+            return true;
+        }
+        let mut module = String::new();
+        let mut alias = String::new();
+        let mut names: Vec<(String, String)> = Vec::new();
+        let mut index = 0;
+        while let Some(token) = rest.get(index) {
+            match token.kind {
+                Kind::Ident if self.raw(token) == b"as" => {
+                    alias = self.word_at(rest, index + 1).unwrap_or_default();
+                    index += 1;
+                }
+                Kind::Ident => module.push_str(&self.text(token)),
+                Kind::Op if self.is_op(token, b"{") => {
+                    let close = rest.iter().position(|t| self.is_op(t, b"}")).unwrap_or(rest.len());
+                    for part in rest[index + 1..close].split(|t| self.is_op(t, b",")) {
+                        if let Some(first) = part.iter().find(|t| t.kind == Kind::Ident) {
+                            let name = self.text(first);
+                            let renamed = part.last().filter(|_| part.len() >= 3).map_or(name.clone(), |t| self.text(t));
+                            names.push((name, renamed));
+                        }
+                    }
+                    break;
+                }
+                Kind::Op if matches!(self.raw(token), b"." | b"::" | b"\\" | b"/" | b":") => module.push('.'),
+                Kind::Op if self.is_op(token, b"*") => {
+                    self.facts.imports.push(Import {
+                        line,
+                        module: module.trim_end_matches('.').to_string(),
+                        kind: IMPORT_STAR,
+                        ..Import::default()
+                    });
+                    return true;
+                }
+                _ => break,
+            }
+            index += 1;
+        }
+        let module = module.trim_end_matches('.').to_string();
+        if module.is_empty() {
+            return false;
+        }
+        for (name, renamed) in names.iter() {
+            self.facts.imports.push(Import { line, module: module.clone(), name: name.clone(), alias: renamed.clone(), kind: IMPORT_MODULE });
+        }
+        if names.is_empty() {
+            let alias = if alias.is_empty() { module.rsplit('.').next().unwrap_or("").to_string() } else { alias };
+            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+        }
+        true
+    }
+
+    fn top_level_assign(&self, toks: &[Token]) -> Option<usize> {
+        let mut depth = 0;
+        for (index, token) in toks.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" | b"{" => depth += 1,
+                b")" | b"]" | b"}" => depth -= 1,
+                b"=" | b":=" | b"+=" | b"-=" | b".=" | b"|=" | b"||=" | b"&&=" | b"??=" | b"<-" if depth == 0 => return Some(index),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn class_head(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {
+        let mut index = 0;
+        while let Some(word) = self.word_at(toks, index) {
+            if self.lang.classes.contains(&word.as_str()) {
+                break;
+            }
+            if !MODIFIERS.contains(&word.as_str()) {
+                return None;
+            }
+            index += 1;
+        }
+        let keyword = self.word_at(toks, index)?;
+        if !self.lang.classes.contains(&keyword.as_str()) {
+            return None;
+        }
+        let mut at = index + 1;
+        if keyword == "impl" {
+            // `impl<T> Trait for Type`: the type owns the methods.
+            if let Some(after) = toks.iter().position(|t| t.kind == Kind::Ident && self.raw(t) == b"for") {
+                at = after + 1;
+            } else if toks.get(at).is_some_and(|t| self.is_op(t, b"<")) {
+                at = toks.iter().position(|t| self.is_op(t, b">"))? + 1;
+            }
+        }
+        let name = self.word_at(toks, at)?;
+        let mut bases = Vec::new();
+        let mut inherits = false;
+        for (offset, token) in toks[at + 1..].iter().enumerate() {
+            if token.kind == Kind::Op && matches!(self.raw(token), b"(" | b":" | b"<") {
+                inherits = true;
+            } else if token.kind == Kind::Ident {
+                let word = self.text(token);
+                if matches!(word.as_str(), "extends" | "implements" | "with") {
+                    inherits = true;
+                } else if inherits && !toks.get(at + 2 + offset).is_some_and(|t| self.is_op(t, b".")) {
+                    bases.push(word);
+                }
+            }
+        }
+        Some((name, bases))
+    }
+
+    /// The parameter list between two brackets.
+    fn params(&self, toks: &[Token]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut depth = 0;
+        let mut start = 0;
+        for (index, token) in toks.iter().enumerate() {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" | b"<" => depth += 1,
+                    b")" | b"]" | b"}" | b">" => depth -= 1,
+                    b"," if depth == 0 => {
+                        out.extend(self.param(&toks[start..index]));
+                        start = index + 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.extend(self.param(&toks[start..]));
+        out
+    }
+
+    fn param(&self, toks: &[Token]) -> Option<String> {
+        let mut depth = 0;
+        let mut end = toks.len();
+        let mut typed = false;
+        for (index, token) in toks.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" | b"<" => depth += 1,
+                b")" | b"]" | b">" => depth -= 1,
+                b"=" if depth == 0 => {
+                    end = index;
+                    break;
+                }
+                b":" if depth == 0 => {
+                    end = index;
+                    typed = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let names = toks[..end].iter().filter(|token| token.kind == Kind::Ident);
+        let word = if typed || self.lang.type_first { names.last() } else { names.into_iter().find(|token| !matches!(self.raw(token), b"mut" | b"ref" | b"var" | b"val" | b"in" | b"out")) };
+        word.map(|token| self.text(token)).filter(|name| name != "void")
+    }
+
+    fn name_chain(&self, toks: &[Token], mut at: usize) -> (String, String, usize) {
+        let mut parts = Vec::new();
+        while let Some(word) = self.word_at(toks, at) {
+            parts.push(word);
+            at += 1;
+            let joined = toks.get(at).is_some_and(|t| t.kind == Kind::Op && matches!(self.raw(t), b"." | b"::" | b":"));
+            let next_is_word = self.word_at(toks, at + 1).is_some();
+            if joined && next_is_word && self.lang.tag != "SCALA" {
+                at += 1;
+            } else {
+                break;
+            }
+        }
+        let name = parts.pop().unwrap_or_default();
+        let owner = parts.into_iter().filter(|part| !matches!(part.as_str(), "exports" | "module" | "prototype" | "self")).last();
+        (name, owner.unwrap_or_default(), at)
+    }
+
+    /// The bracketed group opening at `open`, as (first inner, closing index).
+    fn group_at(&self, toks: &[Token], open: usize) -> Option<(usize, usize)> {
+        let mut depth = 0;
+        for (index, token) in toks.iter().enumerate().skip(open) {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" | b"{" => depth += 1,
+                b")" | b"]" | b"}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((open + 1, index));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn skip_generics(&self, toks: &[Token], mut at: usize) -> usize {
+        if toks.get(at).is_some_and(|token| self.is_op(token, b"<")) {
+            let mut depth = 0;
+            while let Some(token) = toks.get(at) {
+                if self.is_op(token, b"<") {
+                    depth += 1;
+                } else if self.is_op(token, b">") {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at + 1;
+                    }
+                }
+                at += 1;
+            }
+        }
+        at
+    }
+
+    fn keyword_head(&self, toks: &[Token], keyword: usize) -> Option<Head> {
+        let mut head = Head::default();
+        let mut at = keyword + 1;
+        if toks.get(at).is_some_and(|token| self.is_op(token, b"*")) {
+            at += 1;
+        }
+        // Go: `func (s *Server) Handle(x string)`.
+        if self.lang.tag == "GO" && toks.get(at).is_some_and(|token| self.is_op(token, b"(")) {
+            let (inner, close) = self.group_at(toks, at)?;
+            let names: Vec<String> = toks[inner..close].iter().filter(|t| t.kind == Kind::Ident).map(|t| self.text(t)).collect();
+            if let (Some(first), Some(last)) = (names.first(), names.last()) {
+                head.receiver = first.clone();
+                head.owner = last.clone();
+            }
+            at = close + 1;
+        }
+        // MATLAB: `function [a, b] = f(c)`.
+        if self.lang.tag == "M" {
+            if let Some(equal) = toks.iter().position(|token| self.is_op(token, b"=")) {
+                at = equal + 1;
+            }
+        }
+        if toks.get(at).is_some_and(|token| token.kind == Kind::Ident) {
+            let (name, owner, next) = self.name_chain(toks, at);
+            head.name = name;
+            if !owner.is_empty() {
+                head.owner = owner;
+            }
+            at = next;
+        }
+        at = self.skip_generics(toks, at);
+        if toks.get(at).is_some_and(|token| self.is_op(token, b"(") || (self.lang.tag == "TCL" && self.is_op(token, b"{"))) {
+            let (inner, close) = self.group_at(toks, at)?;
+            head.params = self.params(&toks[inner..close]);
+            at = close + 1;
+        }
+        if let Some(equal) = toks[at.min(toks.len())..].iter().position(|token| self.is_op(token, b"=")) {
+            head.body = Some(at + equal + 1);
+        }
+        Some(head)
+    }
+
+    /// `name = function (a) {`, `name = (a) => ...`, `name <- function(a)`.
+    fn assigned_head(&self, toks: &[Token]) -> Option<Head> {
+        let equal = self.top_level_assign(toks)?;
+        // Only the chain touching the `=`: `export const f`, `const f: T` name `f`.
+        let mut start = equal.checked_sub(1).filter(|at| toks[*at].kind == Kind::Ident)?;
+        while start >= 2
+            && toks[start - 2].kind == Kind::Ident
+            && toks[start - 1].kind == Kind::Op
+            && matches!(self.raw(&toks[start - 1]), b"." | b":")
+        {
+            start -= 2;
+        }
+        let annotated = self.lang.tag != "LUA" && toks[start..equal].iter().any(|token| self.is_op(token, b":"));
+        let end = if annotated { start + 1 } else { equal };
+        let (name, owner, _) = self.name_chain(&toks[..end], start);
+        let rhs = &toks[equal + 1..];
+        let mut skip = 0;
+        while self.word_at(rhs, skip).is_some_and(|word| word == "async" || word == "local") {
+            skip += 1;
+        }
+        let first = self.word_at(rhs, skip);
+        if first.as_deref().is_some_and(|word| self.lang.defs.contains(&word) || word == "lambda") {
+            let mut head = if first.as_deref() == Some("lambda") {
+                let colon = rhs.iter().position(|token| self.is_op(token, b":"))?;
+                let params = self.params(&rhs[skip + 1..colon]);
+                Head { params, body: Some(equal + 1 + colon + 1), ..Head::default() }
+            } else {
+                let mut head = self.keyword_head(rhs, skip)?;
+                head.body = head.body.map(|body| body + equal + 1);
+                head
+            };
+            head.name = name;
+            head.owner = owner;
+            return Some(head);
+        }
+        let arrow = rhs.iter().position(|token| self.is_op(token, b"=>"))?;
+        let mut depth = 0;
+        for token in &rhs[..arrow] {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    _ => {}
+                }
+            }
+        }
+        if depth != 0 {
+            return None;
+        }
+        let params = self.arrow_params(&rhs[skip..arrow]);
+        let body = equal + 1 + arrow + 1;
+        Some(Head { name, owner, params, body: Some(body), ..Head::default() })
+    }
+
+    fn arrow_params(&self, toks: &[Token]) -> Vec<String> {
+        match toks.first() {
+            Some(token) if self.is_op(token, b"(") => {
+                let Some((inner, close)) = self.group_at(toks, 0) else { return Vec::new() };
+                self.params(&toks[inner..close])
+            }
+            Some(token) if token.kind == Kind::Ident => vec![self.text(token)],
+            _ => Vec::new(),
+        }
+    }
+
+    fn lambda_head(&self, stmt: &[Token]) -> Head {
+        let last = stmt.len() - 1;
+        if self.is_op(&stmt[last], b"=>") || self.is_op(&stmt[last], b"->") {
+            let mut start = last;
+            if last > 0 && self.is_op(&stmt[last - 1], b")") {
+                let mut depth = 0;
+                for index in (0..last).rev() {
+                    if self.is_op(&stmt[index], b")") {
+                        depth += 1;
+                    } else if self.is_op(&stmt[index], b"(") {
+                        depth -= 1;
+                        if depth == 0 {
+                            start = index;
+                            break;
+                        }
+                    }
+                }
+            } else if last > 0 {
+                start = last - 1;
+            }
+            return Head { params: self.arrow_params(&stmt[start..last]), ..Head::default() };
+        }
+        let keyword = stmt.iter().rposition(|token| {
+            token.kind == Kind::Ident && self.lang.defs.iter().any(|word| word.as_bytes() == self.raw(token))
+        });
+        keyword.and_then(|at| self.keyword_head(stmt, at)).unwrap_or_default()
+    }
+
+    /// `ret name(args) ... {` where no keyword says it is a function.
+    fn c_style_head(&self, toks: &[Token]) -> Option<Head> {
+        if self.top_level_assign(toks).is_some_and(|equal| !toks[..equal].iter().any(|t| self.is_op(t, b"("))) {
+            return None;
+        }
+        // `- (void)f:(char *)c`.
+        if self.lang.tag == "OBJC" && toks.first().is_some_and(|t| self.is_op(t, b"-") || self.is_op(t, b"+")) {
+            let (_, close) = self.group_at(toks, 1)?;
+            let name = self.word_at(toks, close + 1)?;
+            let mut params = Vec::new();
+            let mut at = close + 2;
+            while at < toks.len() {
+                if self.is_op(&toks[at], b":") {
+                    if let Some((_, end)) = self.group_at(toks, at + 1) {
+                        params.extend(self.word_at(toks, end + 1));
+                        at = end + 1;
+                    }
+                }
+                at += 1;
+            }
+            return Some(Head { name, params, ..Head::default() });
+        }
+        let mut depth = 0;
+        let mut group = None;
+        for (index, token) in toks.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" => {
+                    if depth == 0 {
+                        group = Some(index);
+                    }
+                    depth += 1;
+                }
+                b")" => depth -= 1,
+                b":" if depth == 0 && group.is_some() => break,
+                _ => {}
+            }
+        }
+        let open = group?;
+        if open == 0 {
+            return None;
+        }
+        let name_at = open - 1;
+        let name = self.word_at(toks, name_at)?;
+        if CONTROL.contains(&name.as_str()) || NOT_A_NAME.contains(&name.as_str()) {
+            return None;
+        }
+        if self.head_word(toks).is_some_and(|word| CONTROL.contains(&word.as_str())) {
+            return None;
+        }
+        let mut chain_start = name_at;
+        while chain_start >= 2
+            && toks[chain_start - 1].kind == Kind::Op
+            && matches!(self.raw(&toks[chain_start - 1]), b"::" | b".")
+            && toks[chain_start - 2].kind == Kind::Ident
+        {
+            chain_start -= 2;
+        }
+        let (_, owner, _) = self.name_chain(toks, chain_start);
+        let (inner, close) = self.group_at(toks, open)?;
+        let params = self.params(&toks[inner..close]);
+        Some(Head { name, owner, params, ..Head::default() })
+    }
+
+    fn function_head(&self, toks: &[Token], at_block: bool) -> Option<Head> {
+        let mut index = 0;
+        while let Some(word) = self.word_at(toks, index) {
+            if self.lang.defs.contains(&word.as_str()) {
+                return self.keyword_head(toks, index);
+            }
+            if !MODIFIERS.contains(&word.as_str()) {
+                break;
+            }
+            index += 1;
+        }
+        if let Some(head) = self.assigned_head(toks) {
+            return Some(head);
+        }
+        (at_block && self.uses_braces()).then(|| self.c_style_head(toks)).flatten()
+    }
+
+    fn simple_statement(&mut self, stmt: &[Token]) {
+        if stmt.is_empty() {
+            return;
+        }
+        let Some(first) = stmt.first() else { return };
+        let line = first.line;
+        if let Some(head) = self.assigned_head(stmt).filter(|head| head.body.is_some()) {
+            self.inline_function(head, stmt);
+            return;
+        }
+        self.statement(stmt);
+        let _ = line;
+    }
+
+    fn statement(&mut self, stmt: &[Token]) {
+        let Some(first) = stmt.first() else { return };
+        if self.import_of(stmt) {
+            return;
+        }
+        let word = self.word_at(stmt, 0);
+        if matches!(word.as_deref(), Some("return")) {
+            self.expression_event("r", &stmt[1..]);
+            return;
+        }
+        let line = first.line;
+        if let Some(equal) = self.top_level_assign(stmt) {
+            let augmented = self.raw(&stmt[equal]) != b"=" && !matches!(self.raw(&stmt[equal]), b":=" | b"<-");
+            self.note_class(&stmt[..equal], &stmt[equal + 1..]);
+            self.assignment(&stmt[..equal], &stmt[equal + 1..], line, augmented);
+        } else {
+            self.expression_event("x", stmt);
+        }
+    }
+
+    /// `repo = new Repo()` and `repo = Repo()` say what `repo.find` means.
+    fn note_class(&mut self, targets: &[Token], value: &[Token]) {
+        let mut at = 0;
+        let explicit = self.word_at(value, 0).as_deref() == Some("new");
+        if explicit {
+            at = 1;
+        }
+        let Some(class) = self.word_at(value, at) else { return };
+        let (_, owner, next) = self.name_chain(value, at);
+        let called = value.get(next).is_some_and(|token| self.is_op(token, b"("));
+        let capital = class.starts_with(|ch: char| ch.is_uppercase());
+        let name = if owner.is_empty() { class } else { self.name_chain(value, at).0 };
+        if called && (explicit || capital) && name.starts_with(|ch: char| ch.is_uppercase()) {
+            let target = self.target_path(targets);
+            if let Some(target) = target {
+                self.facts.vars.push((target, name));
+            }
+        }
+    }
+
+    fn target_path(&self, toks: &[Token]) -> Option<String> {
+        let mut end = toks.len();
+        let mut depth = 0;
+        for (index, token) in toks.iter().enumerate() {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"<" => depth += 1,
+                    b")" | b"]" | b">" => depth -= 1,
+                    b":" if depth == 0 => {
+                        end = index;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let toks = &toks[..end];
+        let mut at = toks.len();
+        if toks.last().is_some_and(|token| self.is_op(token, b"]")) {
+            at = toks.iter().position(|token| self.is_op(token, b"["))?;
+        }
+        let mut start = at;
+        while start > 0 {
+            let token = &toks[start - 1];
+            let joins = token.kind == Kind::Op && matches!(self.raw(token), b"." | b"->" | b"::");
+            if token.kind == Kind::Ident && (start == at || self.raw(&toks[start]) != b".") && start != at {
+                if !self.is_join(&toks[start]) {
+                    break;
+                }
+            }
+            if token.kind != Kind::Ident && !joins {
+                break;
+            }
+            start -= 1;
+        }
+        let mut path = String::new();
+        for token in &toks[start..at] {
+            if token.kind == Kind::Ident {
+                let word = self.text(token);
+                let receiver = self.top().receiver.as_str();
+                if word == "this" || (!receiver.is_empty() && word == receiver) {
+                    path.push_str("self");
+                } else {
+                    path.push_str(&word);
+                }
+            } else {
+                path.push('.');
+            }
+        }
+        (!path.is_empty()).then_some(path)
+    }
+
+    fn is_join(&self, token: &Token) -> bool {
+        token.kind == Kind::Op && matches!(self.raw(token), b"." | b"->" | b"::")
+    }
+
+    fn unpack_targets(&self, toks: &[Token]) -> Option<Vec<String>> {
+        let mut inner = toks;
+        while let Some(word) = self.word_at(inner, 0) {
+            if !matches!(word.as_str(), "const" | "let" | "var" | "my" | "our" | "local" | "val" | "mut") {
+                break;
+            }
+            inner = &inner[1..];
+        }
+        let wrapped = inner.first().is_some_and(|t| self.is_op(t, b"(") || self.is_op(t, b"[") || self.is_op(t, b"{"));
+        if wrapped {
+            let (start, close) = self.group_at(inner, 0)?;
+            if close + 1 == inner.len() {
+                inner = &inner[start..close];
+            } else {
+                return None;
+            }
+        } else if !inner.iter().any(|token| self.is_op(token, b",")) {
+            return None;
+        }
+        let mut targets = Vec::new();
+        let mut depth = 0;
+        let mut start = 0;
+        for (index, token) in inner.iter().enumerate() {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" => depth += 1,
+                    b")" | b"]" => depth -= 1,
+                    b"," if depth == 0 => {
+                        targets.extend(self.unpack_one(&inner[start..index]));
+                        start = index + 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        targets.extend(self.unpack_one(&inner[start..]));
+        Some(targets)
+    }
+
+    fn unpack_one(&self, part: &[Token]) -> Option<String> {
+        // `{ a: b }` binds `b`; `a, *b` binds `b`.
+        match part.iter().rposition(|token| self.is_op(token, b":")) {
+            Some(colon) => self.target_path(&part[colon + 1..]),
+            None => self.target_path(part),
+        }
+    }
+
+    fn assignment(&mut self, targets: &[Token], value: &[Token], line: u32, augmented: bool) {
+        let unpacked = self.unpack_targets(targets);
+        let weak = augmented || targets.last().is_some_and(|token| self.is_op(token, b"]"));
+        let names = match unpacked {
+            Some(names) => names,
+            None => self.target_path(targets).into_iter().collect(),
+        };
+        let expr = self.values(value);
+        if names.is_empty() {
+            if expr != "0" {
+                self.event(&format!("[\"x\",{line},{expr}]"));
+            }
+            return;
+        }
+        let mut text = format!("[\"a\",{line},[");
+        for (index, name) in names.iter().enumerate() {
+            if index > 0 {
+                text.push(',');
+            }
+            push_string(&mut text, name);
+        }
+        text.push_str(&format!("],{expr},{}]", u8::from(weak)));
+        self.event(&text);
+    }
+}
