@@ -2,7 +2,7 @@
 name = "rust-graph"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-only"
 description = "A code knowledge graph for 40+ languages. Rust std only, no parser libraries."
 
 [dependencies]

@@ -306,4 +306,9 @@ the point of the project, not a technicality.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
+
+AGPL, not MIT, on purpose: this engine is meant to stay open. Anyone who
+runs a modified rust-graph as a network service must publish their changes,
+which is the point of building it in public and keeping the analyser that
+consumes it private.
