@@ -1,25 +1,67 @@
 # rust-graph
 
-A code knowledge graph for 42 languages in one static binary. It has no parser
-libraries and no crates: Rust std only.
+A code knowledge graph for **42 languages** in one static binary. No parser
+libraries, no crates: Rust standard library only.
 
-It walks a tree, lexes each file once, and writes one JSON file with what it
-found: symbols, calls, imports and per-function value flow. It reports facts and
-does not judge them. It has no idea what a source, a sink or a vulnerability is;
-a reader decides that from the facts.
+It walks a source tree, lexes each file once, and writes a single JSON document
+with what it found — symbols, calls, imports and per-function value flow. It
+reports facts and does not judge them. It has no idea what a source, a sink or a
+vulnerability is; a reader decides that from the facts.
 
-## Build and run
+- **Zero dependencies.** `cargo build` needs nothing but a Rust toolchain. There
+  is no `tree-sitter`, no `serde`, no `regex`; the SHA-256, the JSON writer and
+  the lexer are in this repository.
+- **Deterministic.** The same tree produces the same bytes, on any machine.
+- **Bounded.** Facts spool to disk while the walk runs and the JSON is streamed
+  out, so peak memory does not scale with the size of the graph.
+- **Honest edges.** Every edge says whether the source states it (`EXTRACTED`) or
+  a heuristic chose it (`INFERRED`, with the strategy named). Ambiguity is
+  reported as `unresolved` rather than guessed.
 
-```
+## Why it exists
+
+Most code-graph tools assume a C toolchain and a parser library per language, an
+embedding database, or a hosted service. That is a fine trade for a workstation
+and a poor one for a build box that must stay small, offline and reproducible.
+rust-graph is the opposite bet: one binary you can `scp` anywhere, that reads a
+tree in a fraction of a second and writes a file you can grep, diff and archive.
+
+It is the graph engine behind a private static analyser, but nothing here is
+specific to that use. If you have a tree of source and want to know what calls
+what without installing anything, this is built for you.
+
+## Quick start
+
+```bash
+git clone https://github.com/ronisaguey-ux/rust-graph
+cd rust-graph
+
 cargo build --release
 ./target/release/rust-graph build path/to/repo
 ```
 
-The graph lands in `path/to/repo/.rust-graph/graph.json`. For a static binary:
+Three files land in `path/to/repo/.rust-graph/`:
 
-```
+| File | What it is |
+|:--|:--|
+| `graph.json` | the graph, schema below |
+| `report.md` | a short human summary: counts, languages, how calls resolved |
+| `facts.pack` | the per-file fact cache, opaque and safe to delete |
+
+For a fully static binary (no libc, runs on any Linux of the same architecture):
+
+```bash
 cargo build --release --target x86_64-unknown-linux-musl
 ```
+
+Write somewhere else, or to stdout:
+
+```bash
+rust-graph build path/to/repo --out /tmp/graphs
+rust-graph build path/to/repo --stdout | jq '.edges | length'
+```
+
+## Command line
 
 ```
 rust-graph build <root> [--out DIR] [--stdout] [--cache DIR] [--no-cache]
@@ -28,9 +70,21 @@ rust-graph languages
 rust-graph --version
 ```
 
-Each file's facts are cached by the SHA-256 of its content, under the engine
-version. A rebuild parses only what changed and then re-resolves the whole tree.
-Output is deterministic: the same tree gives the same bytes.
+| Flag | Meaning |
+|:--|:--|
+| `--out DIR` | Write `graph.json` here instead of `<root>/.rust-graph`. |
+| `--stdout` | Stream the graph to standard output; nothing is written. |
+| `--cache DIR` | Keep the per-file fact cache here instead of `<root>/.rust-graph/cache`. |
+| `--no-cache` | Parse everything; write no cache. |
+| `--max-files N` | Stop walking after N files and set `truncated: true`. |
+| `--max-file-bytes N` | Skip files larger than N bytes and count them in `too_large`. |
+
+`languages` prints one line per extension: `extension`, `tag`, `name`. It is the
+authoritative list and always matches the lexer.
+
+Exit status is `0` on success and `2` on a usage error, an unreadable root or an
+output path that cannot be written. A tree with no files is a success with an
+empty graph — that is a fact about the tree, not a failure.
 
 ## Output
 
@@ -50,53 +104,134 @@ Output is deterministic: the same tree gives the same bytes.
 }
 ```
 
+Paths are relative to the root and use `/` on every platform, so two graphs of
+the same tree compare equal regardless of where it was checked out. Symbol ids
+are `<path>:<qualified name>`, where the qualified name includes the owner for
+methods (`app/views.py:B.get`).
+
 `truncated` is true when `--max-files` stopped the walk, and `too_large` counts
-files skipped by `--max-file-bytes`. Check both before trusting a graph as whole.
+files skipped by `--max-file-bytes`. **Check both before trusting a graph as
+whole** — a truncated graph is a partial answer, not a clean one.
 
-Every edge is tagged. `EXTRACTED` means the source says so, through an import or
-a local definition. `INFERRED` means a heuristic chose the target, and `strategy`
-names it, for example `same-directory` or `unique-name`. A name with more than
-one candidate goes to `unresolved` rather than being guessed.
+### What an edge means
 
-`flows` records how values move inside each function, in source order. Events:
-
-| Event | Meaning |
+| Field | Values |
 |:--|:--|
-| `["a", line, [targets], value, weak]` | Assignment. `weak` is non-zero when the old value may survive. |
-| `["x", line, value]` | An expression evaluated for its effect. |
-| `["r", line, value]` | A returned value. |
+| `kind` | `call`, `inherit`, `include` |
+| `tag` | `EXTRACTED` — an import or a definition in the same file states it; `INFERRED` — a heuristic chose the target |
+| `strategy` | the heuristic that ran: `import`, `same-file`, `same-directory`, `qualified`, `unique-name`, `export-map` |
+| `line` | where the call appears, 1-based |
 
-Values:
+A call name with more than one plausible target goes to `unresolved` with the
+candidates, never to `edges`. A graph that resolves nothing is not wrong; it is
+telling you the tree did not give it enough to decide.
 
-| Form | Meaning |
-|:--|:--|
-| `0` | A constant. |
-| `["n", "a.b"]` | A name or attribute path. |
-| `["m", [e, …]]` | Values combined by an operator, a format string or a mapping. |
-| `["t", [e, …]]` | A tuple or list, element by element. |
-| `["c", id, recv, [arg, …]]` | A call. `id` indexes the symbol's `calls` table. |
-| `["k", "name", e]` | A keyword argument, only inside a call's arguments. |
+### Value flow
 
-The engine stops at facts. Following a value across files is the reader's job,
-which keeps one graph useful to many analyses.
+`flows` holds, per function, the local events (`assign`, `param`, `return`,
+`call`) and the calls it makes, in source order. This is what lets a reader ask
+"does this parameter reach that call" without a type system. It is a record of
+what the function does with its values, not a dataflow solution: no aliasing
+beyond direct assignment, no points-to analysis, no interprocedural fixpoint.
 
 ## Languages
 
-AWK, C, C#, C++, Clojure, COBOL, Crystal, D, Dart, Elixir, Elm, Erlang, F#,
-Fortran, Go, Groovy, Haskell, Java, JavaScript, Julia, Kotlin, Lua, Nim,
-Objective-C, OCaml, Pascal, Perl, PHP, PowerShell, Python, R, Ruby, Rust, Scala,
-Shell, Solidity, SQL, Swift, Tcl, TypeScript, Visual Basic, Zig.
+42 languages, 89 extensions. `.m` is resolved by content — Objective-C and
+MATLAB look alike at a glance and do not at the first line.
 
-`rust-graph languages` prints the extension table.
+| Language | Extensions |
+|:--|:--|
+| C | `.c` `.h` |
+| C++ | `.cc` `.cpp` `.cxx` `.hh` `.hpp` `.hxx` `.ipp` |
+| C# | `.cs` |
+| Clojure | `.clj` `.cljc` `.cljs` |
+| COBOL | `.cbl` `.cob` `.cpy` |
+| Crystal | `.cr` |
+| D | `.d` |
+| Dart | `.dart` |
+| Elixir | `.ex` `.exs` |
+| Elm | `.elm` |
+| Erlang | `.erl` `.hrl` |
+| F# | `.fs` `.fsx` |
+| Fortran | `.f` `.f03` `.f08` `.f90` `.f95` `.for` |
+| Go | `.go` |
+| Groovy | `.gradle` `.groovy` |
+| Haskell | `.hs` `.lhs` |
+| Java | `.java` |
+| JavaScript | `.js` `.jsx` `.mjs` `.cjs` |
+| Julia | `.jl` |
+| Kotlin | `.kt` `.kts` |
+| Lua | `.lua` |
+| Nim | `.nim` |
+| Objective-C | `.mm` `.m` (by content) |
+| OCaml | `.ml` `.mli` |
+| Pascal | `.pas` `.pp` `.dpr` |
+| Perl | `.pl` `.pm` |
+| PHP | `.php` `.phtml` |
+| PowerShell | `.ps1` `.psm1` |
+| Python | `.py` `.pyi` |
+| R | `.r` `.rmd` |
+| Ruby | `.rb` `.rake` `.gemspec` |
+| Rust | `.rs` |
+| Scala | `.sc` `.scala` |
+| Shell | `.sh` `.bash` `.zsh` `.ksh` |
+| Solidity | `.sol` |
+| SQL | `.sql` `.ddl` |
+| Swift | `.swift` |
+| Tcl | `.tcl` |
+| TypeScript | `.ts` `.tsx` `.mts` `.cts` |
+| Visual Basic | `.vb` `.bas` `.cls` `.vbs` |
+| Zig | `.zig` |
+| AWK | `.awk` |
 
-## Benchmark
+Adding a language means adding rows to one table (`src/langs.rs`) — extension,
+tag, keyword sets, comment style, definition patterns. There is no grammar to
+generate and no build step.
 
-Measured on an AMD Ryzen 5 7520U under Linux 7.0, with the static musl binary and
-`--no-cache`. The engine is single-threaded, so every figure is one core. The
-trees are synthetic Python, JavaScript and C files generated by
-`tests/benchmark.rs`, about 2.4 KB each. Real code varies. Reproduce with:
+## How it works
 
 ```
+walk  →  lex  →  parse  →  facts  →  resolve  →  stream JSON
+```
+
+1. **Walk.** Deterministic order, symlinks not followed, binary and oversized
+   files skipped and counted. File content is hashed as it is read.
+2. **Lex.** One pass per file with a per-language table: strings, comments,
+   numbers, identifiers. No syntax tree is built.
+3. **Parse.** Block and scope tracking finds definitions (function, method,
+   class, struct, interface, trait, module, macro) and the calls inside them.
+4. **Facts.** Each file's symbols, imports, calls and flows are written to the
+   cache keyed by its SHA-256, so an unchanged file is never lexed twice.
+5. **Resolve.** Imports first (exact, then module-relative, then package root),
+   then same-file, then same-directory, then a unique name across the tree.
+   Anything ambiguous is left unresolved.
+6. **Stream.** Sources, symbols, edges, imports and flows are written in chunks.
+   The graph is never materialised whole in memory.
+
+## Caching
+
+Facts are cached in one binary pack, `<root>/.rust-graph/facts.pack`: a magic
+header, the fact-format version, then one row per path with its SHA-256 and its
+facts. A rebuild re-hashes every file, reuses the rows whose hash is unchanged,
+and parses only the rest, then re-resolves the whole tree — resolution is cheap,
+parsing is not.
+
+The pack is versioned: a pack from another fact format is ignored rather than
+trusted, so an upgrade re-parses instead of producing a half-old graph. A torn or
+unreadable pack is treated the same way. `--no-cache` bypasses all of it and
+writes none.
+
+Two consequences worth knowing: rebuilding after touching one file is fast, and
+`git status` in the analysed repository will show `.rust-graph/` as untracked
+unless you add it to `.gitignore`.
+
+## Performance
+
+Numbers from this repository's benchmark, on one core of the development
+machine. The trees are synthetic Python, JavaScript and C files generated by
+`tests/benchmark.rs`, about 2.4 KB each. Real code varies. Reproduce with:
+
+```bash
 cargo test --release --target x86_64-unknown-linux-musl --test benchmark -- --nocapture --test-threads=1
 ```
 
@@ -138,12 +273,36 @@ short-lived small strings, and musl's `malloc` is slow at that: replacing it too
 1,000 files from 343 ms to 216 ms on the static build. It is the only `unsafe`
 code path of any size, and it has its own unit tests.
 
+## Design rules
+
+1. **No crates, ever.** A dependency is a supply-chain surface and a build
+   requirement. Everything needed is in this repository.
+2. **Deterministic output.** Same tree, same bytes — no hash-map iteration order
+   leaking into the file, no timestamps, no absolute paths.
+3. **Never guess silently.** Ambiguity is reported, not resolved by coin toss.
+4. **Bounded memory.** Streaming and spooling, not "it fits on my machine".
+5. **Facts, not verdicts.** The graph says what the code contains; callers decide
+   what it means.
+
 ## Prior art
 
 [rust-graph-research.md](rust-graph-research.md) covers the tools surveyed before
 and after this was written: licences, language coverage, schemas, incremental
 updates, memory and MCP interfaces, what was rejected and why. No code from any
 of them is included here.
+
+## Contributing
+
+Build, run the tests, and keep the output deterministic:
+
+```bash
+cargo test --release
+cargo test --release --target x86_64-unknown-linux-musl
+```
+
+A language is a table row plus a fixture; a resolution strategy needs a test that
+fails without it. If you add a dependency, the change will be rejected — that is
+the point of the project, not a technicality.
 
 ## License
 
