@@ -1,0 +1,15 @@
+[package]
+name = "rust-graph"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A code knowledge graph for 40+ languages. Rust std only, no parser libraries."
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
