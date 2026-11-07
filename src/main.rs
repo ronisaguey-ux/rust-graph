@@ -1,5 +1,6 @@
 //! rust-graph: a code knowledge graph. See README.md.
 
+mod alloc;
 mod expr;
 mod facts;
 mod index;
@@ -16,6 +17,8 @@ use std::process::ExitCode;
 
 use pipeline::Options;
 
+#[global_allocator]
+static POOL: alloc::Pool = alloc::Pool::new();
 
 const USAGE: &str = "usage: rust-graph build <root> [--out DIR] [--stdout] [--cache DIR] [--no-cache]
                         [--max-files N] [--max-file-bytes N]
