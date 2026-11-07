@@ -1,0 +1,11 @@
+[package]
+name = "rust-graph-deep"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "The grammar! macro for rust-graph's deep scan. Built on std proc_macro only."
+
+[lib]
+proc-macro = true
+
+[dependencies]
