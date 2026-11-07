@@ -5,7 +5,23 @@ edition = "2021"
 license = "AGPL-3.0-only"
 description = "A code knowledge graph for 40+ languages. Rust std only, no parser libraries."
 
+[workspace]
+members = ["crates/rust-graph-deep"]
+
+[features]
+parser = ["dep:rust-graph-deep"]
+
+[[bin]]
+name = "rust-graph"
+path = "src/main.rs"
+
+[[bin]]
+name = "rust-graph-deep-scan"
+path = "src/bin/rust-graph-deep-scan.rs"
+required-features = ["parser"]
+
 [dependencies]
+rust-graph-deep = { path = "crates/rust-graph-deep", optional = true }
 
 [profile.release]
 opt-level = 3
