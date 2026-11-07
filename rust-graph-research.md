@@ -337,7 +337,7 @@ for a 10,000-file tree, so there is no external baseline for our target.
 
 ## Answers to the six questions, for rust-graph
 
-- **Licence.** MIT repository, so nothing Apache-2.0 enters it. Everything here
+- **Licence.** Written when the repository was MIT; it is now AGPL-3.0-only. Everything here
   is a re-implementation of ideas, written from this document.
 - **Language coverage.** A data table of language families: comment and string
   syntax, definition keywords, block style (brace, indent, `end`). A one-pass
