@@ -291,3 +291,16 @@ fn a_class_first_met_near_the_depth_cap_stays_reachable() {
     let json = build_within(&tree, CYCLE_LIMIT);
     assert!(json.contains(r#""callee":"a.py:Z.run""#), "{json}");
 }
+
+#[test]
+#[ignore = "fix held until the holdout sweep closes; un-ignore with the fix"]
+fn a_python_star_import_ends_at_its_line() {
+    let tree = Tree::new("py-star", &[
+        ("a.py", "from m import *\ndef f():\n    helper()\n"),
+        ("m.py", "def helper():\n    pass\n"),
+    ]);
+    let json = tree.json();
+    assert!(json.contains(r#""id":"a.py:f""#), "{json}");
+    assert!(json.contains(r#""caller":"a.py:f","callee":"m.py:helper","line":3,"kind":"call","tag":"EXTRACTED","strategy":"star-import""#), "{json}");
+    assert_eq!(json.matches(r#""file":"a.py","line":1,"module":"m""#).count(), 1, "one import, not a bogus `:` one: {json}");
+}
