@@ -1,20 +1,38 @@
 //! The deep scan: a real parser behind the `parser` feature. The default build
 //! never compiles this module.
+//!
+//! ```text
+//! &[u8] -> lexer -> delimiter pass -> grammar on the parser runtime -> flat tree
+//!          tokens    pair[]             events, budgets                 16 B nodes
+//! ```
+//! Slice 1 is the runtime and JSON written by hand on it. Parts of the runtime API
+//! (precede, checkpoints, `nested`) are first used by the grammars of later slices
+//! and by the tests here.
+#![allow(dead_code)]
+
+pub mod budget;
+pub mod json;
+pub mod lexer;
+pub mod pairs;
+pub mod parser;
+pub mod syntax;
+pub mod tree;
+
+#[cfg(test)]
+mod tests;
+
+pub use budget::Budget;
+pub use parser::Workspace;
 
 /// Bumped whenever parser output changes. Part of the `facts.pack` key from
 /// Slice 4, so a new parser never reads facts cached by an old one.
 pub const PARSER_VERSION: u32 = 1;
 
-#[cfg(test)]
-mod tests {
-    rust_graph_deep::grammar! { Python {
-        func_def: "def" IDENT "(" [params] ")" ":" block,
-        call: IDENT "(" [args] ")",
-    } }
-
-    #[test]
-    fn the_macro_reads_the_grammar_shape() {
-        assert_eq!(Python::NAME, "Python");
-        assert_eq!(Python::RULES, ["func_def", "call"]);
+/// The language for a path, by extension. Slice 1 has JSON only.
+pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
+    let extension = path.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase())?;
+    match extension.as_str() {
+        "json" => Some(&json::JSON),
+        _ => None,
     }
 }
