@@ -35,13 +35,17 @@
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
 mod check;
+mod decide;
 mod emit;
 mod read;
 
 #[proc_macro]
 pub fn grammar(input: TokenStream) -> TokenStream {
     match read::grammar(convert(input)).and_then(check::check) {
-        Ok(checked) => emit::emit(&checked).parse().expect("grammar!: the generated code is valid Rust"),
+        Ok(checked) => match emit::emit(&checked) {
+            Ok(code) => code.parse().expect("grammar!: the generated code is valid Rust"),
+            Err(error) => error.into_stream(),
+        },
         Err(error) => error.into_stream(),
     }
 }
