@@ -299,3 +299,276 @@ rust_graph_deep::grammar! { HASKELL {
     list_type: "[" _type "]",
     tuple_type: "(" (_type %? ",") ")",
 } }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\x0c' | 0x0b => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\x0c' | 0x0b));
+            WHITESPACE
+        }
+        b'\r' => {
+            c.bump();
+            c.eat(b'\n');
+            NEWLINE
+        }
+        b'\n' => {
+            c.bump();
+            NEWLINE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'-' if c.peek_at(1) == b'-' && !operator_byte(c.peek_at(2)) => {
+            // `--` starts a comment unless it is part of a longer operator.
+            lex::line_comment(c);
+            COMMENT
+        }
+        b'{' if c.peek_at(1) == b'-' => {
+            // A nested block comment, and a `{-# ... #-}` pragma with it.
+            lex::block_comment(c, b"{-", b"-}", true);
+            COMMENT
+        }
+        b'"' => if string(c) { STRING } else { BAD_LITERAL },
+        b'\'' => character(c),
+        b'0'..=b'9' => {
+            lex::number(c);
+            NUMBER
+        }
+        b'`' => {
+            // An infix use of a name: ``a `div` b`` is one operator token.
+            c.bump();
+            while !c.at_end() && c.peek() != b'`' && !matches!(c.peek(), b'\n' | b'\r') {
+                c.bump_char();
+            }
+            if c.eat(b'`') { OP } else { BAD_LITERAL }
+        }
+        b'A'..=b'Z' => conid(c),
+        b'a'..=b'z' | b'_' if is_word_byte(c.peek()) => word(c),
+        b'_' if !is_word_byte(c.peek_at(1)) => {
+            c.bump();
+            UNDERSCORE
+        }
+        byte if byte == b'_' || byte >= 0x80 => word(c),
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'\'' || byte >= 0x80
+}
+
+/// A symbol byte: everything Haskell lets an operator be built from.
+#[inline]
+fn operator_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'*' | b'+' | b'.' | b'/' | b'<' | b'=' | b'>' | b'?' | b'@' | b'\\' | b'^' | b'|' | b'-' | b'~' | b':'
+    )
+}
+
+/// A lower-case name, primes included (`foldl'`).
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    keyword(&start[..length])
+}
+
+/// An upper-case name, or a qualified one: `Data.List.sort` is one token, so a
+/// use site does not read its dot as composition.
+fn conid(c: &mut Cursor) -> Kind {
+    c.eat_while(is_word_byte);
+    let mut qualified = false;
+    while c.peek() == b'.' && is_word_start(c.peek_at(1)) {
+        c.bump();
+        c.eat_while(is_word_byte);
+        qualified = true;
+    }
+    if qualified { QUALIFIED } else { CONID }
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"as" => KW_AS,
+        b"case" => KW_CASE,
+        b"class" => KW_CLASS,
+        b"data" => KW_DATA,
+        b"default" => KW_DEFAULT,
+        b"deriving" => KW_DERIVING,
+        b"div" => KW_DIV,
+        b"do" => KW_DO,
+        b"else" => KW_ELSE,
+        b"foreign" => KW_FOREIGN,
+        b"hiding" => KW_HIDING,
+        b"if" => KW_IF,
+        b"import" => KW_IMPORT,
+        b"in" => KW_IN,
+        b"infix" => KW_INFIX,
+        b"infixl" => KW_INFIXL,
+        b"infixr" => KW_INFIXR,
+        b"instance" => KW_INSTANCE,
+        b"let" => KW_LET,
+        b"mod" => KW_MOD,
+        b"module" => KW_MODULE,
+        b"newtype" => KW_NEWTYPE,
+        b"not" => KW_NOT,
+        b"of" => KW_OF,
+        b"qualified" => KW_QUALIFIED,
+        b"quot" => KW_QUOT,
+        b"rem" => KW_REM,
+        b"then" => KW_THEN,
+        b"type" => KW_TYPE,
+        b"where" => KW_WHERE,
+        b"True" => KW_TRUE,
+        b"False" => KW_FALSE,
+        _ => IDENT,
+    }
+}
+
+/// A character literal, or the bad-literal token for a lone quote.
+fn character(c: &mut Cursor) -> Kind {
+    if c.peek_at(1) == b'\\' {
+        c.bump_n(2);
+        while !c.at_end() {
+            match c.peek() {
+                b'\'' => {
+                    c.bump();
+                    return CHAR;
+                }
+                b'\n' | b'\r' => return BAD_LITERAL,
+                _ => c.bump_char(),
+            }
+        }
+        return BAD_LITERAL;
+    }
+    if c.peek_at(2) == b'\'' {
+        c.bump_n(3);
+        return CHAR;
+    }
+    c.bump();
+    BAD_LITERAL
+}
+
+/// A string with escapes and `\`-newline gaps, which may span lines.
+fn string(c: &mut Cursor) -> bool {
+    c.bump();
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        match c.peek() {
+            b'\\' => {
+                c.bump();
+                // A gap: `\` whitespace `\`.
+                if matches!(c.peek(), b' ' | b'\t' | b'\n' | b'\r') {
+                    c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'));
+                    c.eat(b'\\');
+                } else {
+                    c.bump_char();
+                }
+            }
+            b'"' => {
+                c.bump();
+                return true;
+            }
+            _ => c.bump_char(),
+        }
+    }
+}
+
+/// One operator token: the whole run of symbol bytes, named when the run is a
+/// spelling the grammar knows and `operator` otherwise.
+fn operator(c: &mut Cursor) -> Kind {
+    match c.peek() {
+        b'(' => {
+            c.bump();
+            LPAREN
+        }
+        b')' => {
+            c.bump();
+            RPAREN
+        }
+        b'[' => {
+            c.bump();
+            LBRACKET
+        }
+        b']' => {
+            c.bump();
+            RBRACKET
+        }
+        b'{' => {
+            c.bump();
+            LBRACE
+        }
+        b'}' => {
+            c.bump();
+            RBRACE
+        }
+        b',' => {
+            c.bump();
+            COMMA
+        }
+        b';' => {
+            c.bump();
+            SEMI
+        }
+        byte if operator_byte(byte) => {
+            let start = c.pos();
+            c.eat_while(operator_byte);
+            known_operator(c.since(start))
+        }
+        _ => {
+            c.bump_char();
+            UNKNOWN
+        }
+    }
+}
+
+/// The kind of a run of operator bytes: its own token when the grammar names
+/// that spelling, `operator` otherwise.
+fn known_operator(text: &[u8]) -> Kind {
+    match text {
+        b"->" => ARROW,
+        b"<-" => LARROW,
+        b"=>" => FATARROW,
+        b"::" => COLONCOLON,
+        b".." => DOTDOT,
+        b"||" => OROR,
+        b"&&" => ANDAND,
+        b"==" => EQUALS,
+        b"/=" => NOTEQUALS,
+        b"<=" => LE,
+        b">=" => GE,
+        b"++" => PLUSPLUS,
+        b"<>" => DIAMOND,
+        b">>" => SHR,
+        b"<<" => SHL,
+        b"=" => ASSIGN,
+        b"|" => PIPE,
+        b":" => COLON,
+        b"@" => AT,
+        b"~" => TILDE,
+        b"\\" => BACKSLASH,
+        b"." => DOT,
+        b"$" => DOLLAR,
+        b"+" => PLUS,
+        b"-" => MINUS,
+        b"*" => STAR,
+        b"/" => SLASH,
+        b"<" => LT,
+        b">" => GT,
+        b"^" => CARET,
+        b"!" => BANG,
+        b"%" => PERCENT,
+        b"&" => AMP,
+        _ => OP,
+    }
+}
