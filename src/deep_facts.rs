@@ -827,3 +827,167 @@ impl<'a> Walker<'a> {
         Some((targets, value))
     }
 
+    // -- imports ------------------------------------------------------------
+
+    fn import(&mut self, id: u32) {
+        let kind = self.kind(id);
+        match kind {
+            "import_statement" | "import_from_statement" => {
+                if self.is_js() {
+                    self.js_import(id);
+                } else {
+                    self.python_import(id);
+                }
+            }
+            "export_statement" => {
+                // `export ... from "x"` re-exports; a plain `export` holds a
+                // declaration, which the walk reaches on its own; `export
+                // default <expr>` is the expression.
+                if self.child_of_kind(id, "string").is_some() {
+                    self.js_import(id);
+                } else if !self.children(id).into_iter().any(|child| {
+                    matches!(
+                        self.kind(child),
+                        "function_declaration" | "class_declaration" | "lexical_declaration" | "variable_declaration"
+                            | "generator_function_declaration" | "type_alias_declaration" | "interface_declaration"
+                    )
+                }) {
+                    self.expression_statement(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn python_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let from = self.kind(id) == "import_from_statement";
+        let mut module = String::new();
+        let mut seen_from = false;
+        let mut index = 0;
+        while index < children.len() {
+            let child = children[index];
+            match self.kind(child) {
+                "import" => {
+                    if from {
+                        seen_from = false;
+                    }
+                }
+                "from" => seen_from = true,
+                "dotted_name" | "identifier" if module.is_empty() && (seen_from || !from) => {
+                    module = self.text_string(child);
+                    if !from {
+                        // `import a.b as c` covers the whole rest of the clause.
+                        let alias = children
+                            .get(index + 2)
+                            .filter(|_| children.get(index + 1).is_some_and(|&n| self.kind(n) == "as"))
+                            .map(|&n| self.text_string(n))
+                            .unwrap_or_else(|| module.clone());
+                        self.facts.imports.push(Import { line, module: module.clone(), alias, kind: IMPORT_MODULE, ..Import::default() });
+                        module.clear();
+                    }
+                }
+                "*" => {
+                    self.facts.imports.push(Import { line, module: module.clone(), kind: IMPORT_STAR, ..Import::default() });
+                }
+                "aliased_import" => {
+                    // `from m import a as b`
+                    let inner = self.children(child);
+                    let Some(&name_node) = inner.first() else {
+                        index += 1;
+                        continue;
+                    };
+                    let name = self.text_string(name_node);
+                    let alias = inner.last().filter(|&&last| last != name_node).map(|&last| self.text_string(last)).unwrap_or_else(|| name.clone());
+                    self.facts.imports.push(Import { line, module: module.clone(), name, alias, kind: IMPORT_MODULE });
+                }
+                "dotted_name" | "identifier" => {
+                    let name = self.text_string(child);
+                    let alias = children
+                        .get(index + 2)
+                        .filter(|_| children.get(index + 1).is_some_and(|&n| self.kind(n) == "as"))
+                        .map(|&n| self.text_string(n))
+                        .unwrap_or_else(|| name.clone());
+                    self.facts.imports.push(Import { line, module: module.clone(), name, alias, kind: IMPORT_MODULE });
+                }
+                "as" => {}
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+
+    fn js_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let module = children
+            .iter()
+            .find(|&&child| self.kind(child) == "string")
+            .map(|&child| self.string_value(child))
+            .unwrap_or_default();
+        if module.is_empty() {
+            return;
+        }
+        for child in children {
+            match self.kind(child) {
+                "import_clause" | "export_clause" => self.js_bindings(child, &module, line),
+                "import_specifier" => self.js_specifier(child, &module, line),
+                "string" | "import" | "export" | "from" | ";" => {}
+                _ => self.js_bindings(child, &module, line),
+            }
+        }
+    }
+
+    fn js_bindings(&mut self, id: u32, module: &str, line: u32) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "identifier" | "default" | "type" => {
+                    let alias = self.text_string(child);
+                    if alias != "type" {
+                        self.facts.imports.push(Import { line, module: module.into(), alias, kind: IMPORT_MODULE, ..Import::default() });
+                    }
+                }
+                "named_imports" | "named_exports" => {
+                    for specifier in self.children(child) {
+                        if self.kind(specifier) == "import_specifier" {
+                            self.js_specifier(specifier, module, line);
+                        }
+                    }
+                }
+                "import_specifier" => self.js_specifier(child, module, line),
+                "namespace_import" => {
+                    let alias = self.children(child).into_iter().rev().find_map(|node| {
+                        (self.kind(node) == "identifier").then(|| self.text_string(node))
+                    });
+                    self.facts.imports.push(Import {
+                        line,
+                        module: module.into(),
+                        alias: alias.unwrap_or_default(),
+                        kind: IMPORT_MODULE,
+                        ..Import::default()
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn js_specifier(&mut self, id: u32, module: &str, line: u32) {
+        let children = self.children(id);
+        let Some(&first) = children.first() else { return };
+        let name = self.text_string(first);
+        let alias = children
+            .iter()
+            .position(|&child| self.kind(child) == "as")
+            .and_then(|at| children.get(at + 1))
+            .map(|&node| self.text_string(node))
+            .unwrap_or_else(|| name.clone());
+        self.facts.imports.push(Import { line, module: module.into(), name, alias, kind: IMPORT_MODULE });
+    }
+
+    fn string_value(&self, id: u32) -> String {
+        let text = String::from_utf8_lossy(self.text(id));
+        text.trim_matches(|ch| matches!(ch, '"' | '\'' | '`')).to_string()
+    }
+
