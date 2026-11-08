@@ -346,3 +346,309 @@ rust_graph_deep::grammar! { NIM {
     tuple_type_reference: "tuple" bracket_arguments,
     bracket_arguments: "(" [(_type %? ",")] ")",
 } }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\x0c' | 0x0b => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\x0c' | 0x0b));
+            WHITESPACE
+        }
+        b'\r' => {
+            c.bump();
+            c.eat(b'\n');
+            NEWLINE
+        }
+        b'\n' => {
+            c.bump();
+            NEWLINE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'#' if c.peek_at(1) == b'[' => {
+            // A nesting doc/block comment: `#[ ... ]#`.
+            lex::block_comment(c, b"#[", b"]#", true);
+            COMMENT
+        }
+        b'#' => {
+            lex::line_comment(c);
+            COMMENT
+        }
+        b'{' if c.peek_at(1) == b'.' => pragma(c),
+        b'"' => {
+            // A triple-quoted string first, so the first two quotes are not
+            // read as an empty string.
+            if c.peek_at(1) == b'"' && c.peek_at(2) == b'"' {
+                if triple_string(c) { STRING } else { BAD_LITERAL }
+            } else if string(c) {
+                STRING
+            } else {
+                BAD_LITERAL
+            }
+        }
+        b'\'' => {
+            c.bump();
+            if lex::quoted(c, b'\'') { CHAR } else { BAD_LITERAL }
+        }
+        b'`' => backtick_ident(c),
+        b'0'..=b'9' => {
+            nim_number(c);
+            NUMBER
+        }
+        b'.' if c.peek_at(1).is_ascii_digit() => {
+            nim_number(c);
+            NUMBER
+        }
+        byte if is_word_start(byte) => word(c),
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+/// A word, or a raw string with the `r` prefix: `r"c:\temp"`.
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    let text = &start[..length];
+    if text == b"r" && c.peek() == b'"' {
+        return if raw_string(c) { STRING } else { BAD_LITERAL };
+    }
+    keyword(text)
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"addr" => KW_ADDR,
+        b"and" => KW_AND,
+        b"as" => KW_AS,
+        b"asm" => KW_ASM,
+        b"bind" => KW_BIND,
+        b"block" => KW_BLOCK,
+        b"break" => KW_BREAK,
+        b"case" => KW_CASE,
+        b"cast" => KW_CAST,
+        b"concept" => KW_CONCEPT,
+        b"const" => KW_CONST,
+        b"continue" => KW_CONTINUE,
+        b"converter" => KW_CONVERTER,
+        b"defer" => KW_DEFER,
+        b"discard" => KW_DISCARD,
+        b"distinct" => KW_DISTINCT,
+        b"div" => KW_DIV,
+        b"do" => KW_DO,
+        b"elif" => KW_ELIF,
+        b"else" => KW_ELSE,
+        b"end" => KW_END,
+        b"enum" => KW_ENUM,
+        b"except" => KW_EXCEPT,
+        b"export" => KW_EXPORT,
+        b"finally" => KW_FINALLY,
+        b"for" => KW_FOR,
+        b"from" => KW_FROM,
+        b"func" => KW_FUNC,
+        b"generic" => KW_GENERIC,
+        b"if" => KW_IF,
+        b"import" => KW_IMPORT,
+        b"in" => KW_IN,
+        b"include" => KW_INCLUDE,
+        b"interface" => KW_INTERFACE,
+        b"is" => KW_IS,
+        b"isnot" => KW_ISNOT,
+        b"iterator" => KW_ITERATOR,
+        b"let" => KW_LET,
+        b"macro" => KW_MACRO,
+        b"method" => KW_METHOD,
+        b"mixin" => KW_MIXIN,
+        b"mod" => KW_MOD,
+        b"nil" => KW_NIL,
+        b"not" => KW_NOT,
+        b"notin" => KW_NOTIN,
+        b"object" => KW_OBJECT,
+        b"of" => KW_OF,
+        b"or" => KW_OR,
+        b"out" => KW_OUT,
+        b"proc" => KW_PROC,
+        b"ptr" => KW_PTR,
+        b"raise" => KW_RAISE,
+        b"ref" => KW_REF,
+        b"return" => KW_RETURN,
+        b"shl" => KW_SHL,
+        b"shr" => KW_SHR,
+        b"static" => KW_STATIC,
+        b"template" => KW_TEMPLATE,
+        b"true" => KW_TRUE,
+        b"false" => KW_FALSE,
+        b"try" => KW_TRY,
+        b"tuple" => KW_TUPLE,
+        b"type" => KW_TYPE,
+        b"using" => KW_USING,
+        b"var" => KW_VAR,
+        b"when" => KW_WHEN,
+        b"while" => KW_WHILE,
+        b"with" => KW_WITH,
+        b"xor" => KW_XOR,
+        b"yield" => KW_YIELD,
+        _ => IDENT,
+    }
+}
+
+/// `{. ... .}`: one token, through the closing `.}`. Its contents are not
+/// parsed, which is what keeps `raises: []` from needing a grammar.
+fn pragma(c: &mut Cursor) -> Kind {
+    c.bump_n(2);
+    while !c.at_end() {
+        if c.starts_with(b".}") {
+            c.bump_n(2);
+            return PRAGMA;
+        }
+        c.bump_char();
+    }
+    BAD_LITERAL
+}
+
+/// A quoted string with escapes, on one line.
+fn string(c: &mut Cursor) -> bool {
+    c.bump();
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        match c.peek() {
+            b'\\' => c.bump_n(2),
+            b'"' => {
+                c.bump();
+                return true;
+            }
+            b'\n' | b'\r' => return false,
+            _ => c.bump_char(),
+        }
+    }
+}
+
+/// `"""..."""`: a string that spans lines, ending at three quotes.
+fn triple_string(c: &mut Cursor) -> bool {
+    c.bump_n(3);
+    while !c.at_end() {
+        if c.peek() == b'"' && c.peek_at(1) == b'"' && c.peek_at(2) == b'"' {
+            c.bump_n(3);
+            return true;
+        }
+        c.bump_char();
+    }
+    false
+}
+
+/// `r"..."`: a backslash is a plain byte.
+fn raw_string(c: &mut Cursor) -> bool {
+    c.bump();
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        match c.peek() {
+            b'"' => {
+                c.bump();
+                return true;
+            }
+            b'\n' | b'\r' => return false,
+            _ => c.bump_char(),
+        }
+    }
+}
+
+/// A backtick identifier: `` `+` `` or `` `[]=` ``.
+fn backtick_ident(c: &mut Cursor) -> Kind {
+    c.bump();
+    while !c.at_end() {
+        match c.peek() {
+            b'`' => {
+                c.bump();
+                return BACKTICK_IDENT;
+            }
+            b'\n' | b'\r' => return BAD_LITERAL,
+            _ => c.bump_char(),
+        }
+    }
+    BAD_LITERAL
+}
+
+/// A Nim number: decimal, `0x`/`0b`/`0o`, with `_`, a fraction, an exponent in
+/// `e` or `'` form (`1e10`, `1.5e-3`, `2'f32`) and a `'`-suffixed type.
+fn nim_number(c: &mut Cursor) {
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B' | b'o' | b'O') {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        return;
+    }
+    lex::number(c);
+    // `'i32`, `'f64`, `'u8`: a type suffix after the number.
+    if c.peek() == b'\'' && c.peek_at(1).is_ascii_alphabetic() {
+        c.bump();
+        c.eat_while(is_word_byte);
+    }
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'.', b'.', _) => (DOTDOT, 2),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'!', b'=', _) => (NE, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'>', b'=', _) => (GE, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b':', b'=', _) => (COLON_EQ, 2),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b'=', b'>', _) => (FATARROW, 2),
+        (b'(', ..) => (LPAREN, 1),
+        (b')', ..) => (RPAREN, 1),
+        (b'[', ..) => (LBRACKET, 1),
+        (b']', ..) => (RBRACKET, 1),
+        (b'{', ..) => (LBRACE, 1),
+        (b'}', ..) => (RBRACE, 1),
+        (b';', ..) => (SEMI, 1),
+        (b',', ..) => (COMMA, 1),
+        (b'.', ..) => (DOT, 1),
+        (b':', ..) => (COLON, 1),
+        (b'=', ..) => (ASSIGN, 1),
+        (b'<', ..) => (LT, 1),
+        (b'>', ..) => (GT, 1),
+        (b'+', ..) => (PLUS, 1),
+        (b'-', ..) => (MINUS, 1),
+        (b'*', ..) => (STAR, 1),
+        (b'/', ..) => (SLASH, 1),
+        (b'%', ..) => (PERCENT, 1),
+        (b'&', ..) => (AMP, 1),
+        (b'|', ..) => (PIPE, 1),
+        (b'^', ..) => (CARET, 1),
+        (b'~', ..) => (TILDE, 1),
+        (b'!', ..) => (BANG, 1),
+        (b'$', ..) => (DOLLAR, 1),
+        (b'@', ..) => (AT, 1),
+        (b'?', ..) => (QUESTION, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
