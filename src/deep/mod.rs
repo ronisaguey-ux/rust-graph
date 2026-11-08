@@ -18,6 +18,7 @@ pub mod lexer;
 pub mod pairs;
 pub mod parser;
 pub mod python;
+pub mod rust;
 pub mod syntax;
 pub mod tree;
 
@@ -31,12 +32,13 @@ pub use parser::Workspace;
 /// Slice 4, so a new parser never reads facts cached by an old one.
 pub const PARSER_VERSION: u32 = 1;
 
-/// The language for a path, by extension: JSON and Python so far.
+/// The language for a path, by extension: JSON, Python and Rust so far.
 pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
     let extension = path.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase())?;
     match extension.as_str() {
         "json" => Some(&json::JSON),
         "py" | "pyi" => Some(&python::PYTHON),
+        "rs" => Some(&rust::RUST),
         _ => None,
     }
 }
