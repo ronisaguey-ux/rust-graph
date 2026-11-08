@@ -338,7 +338,6 @@ pub fn lex_vb(c: &mut Cursor) -> Kind {
         }
         b'(' => { c.bump(); LPAREN }
         b')' => { c.bump(); RPAREN }
-        b'[' => { c.bump(); LBRACKET }
         b']' => { c.bump(); RBRACKET }
         b',' => { c.bump(); COMMA }
         b'.' => { c.bump(); DOT }

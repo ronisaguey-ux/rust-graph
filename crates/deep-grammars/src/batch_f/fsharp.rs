@@ -291,7 +291,6 @@ pub fn lex_fsharp(c: &mut Cursor) -> Kind {
         b'/' => { c.bump(); SLASH }
         b'%' => { c.bump(); PERCENT }
         b'^' => { c.bump(); CARET }
-        b'_' if !c.peek_at(1).is_ascii_alphanumeric() => { c.bump(); UNDERSCORE }
         _ => UNKNOWN,
     }
 }
