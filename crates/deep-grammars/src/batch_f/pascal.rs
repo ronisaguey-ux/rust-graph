@@ -218,3 +218,222 @@ pub fn lex_pascal(c: &mut Cursor) -> Kind {
     match byte {
         b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' => {
             c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\x0c'));
+            WHITESPACE
+        }
+        b'{' => {
+            c.eat_while(|byte| byte != b'}');
+            c.eat(b'}');
+            COMMENT
+        }
+        b'(' if c.peek_at(1) == b'*' => {
+            lex::block_comment(c, b"(*", b"*)", false);
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            lex::line_comment(c);
+            COMMENT
+        }
+        b'\'' => {
+            c.bump();
+            loop {
+                if c.at_end() || c.peek() == b'\n' {
+                    return BAD_STRING;
+                }
+                if c.peek() == b'\'' {
+                    c.bump();
+                    if c.peek() == b'\'' {
+                        c.bump();
+                        continue;
+                    }
+                    return STRING;
+                }
+                c.bump_char();
+            }
+        }
+        b'0'..=b'9' => {
+            c.eat_while(|byte| byte.is_ascii_digit());
+            if c.peek() == b'.' && c.peek_at(1) != b'.' {
+                c.bump();
+                c.eat_while(|byte| byte.is_ascii_digit());
+            }
+            if matches!(c.peek(), b'e' | b'E') {
+                let sign = usize::from(matches!(c.peek_at(1), b'+' | b'-'));
+                if c.peek_at(1 + sign).is_ascii_digit() {
+                    c.bump_n(1 + sign);
+                    c.eat_while(|byte| byte.is_ascii_digit());
+                }
+            }
+            NUMBER
+        }
+        b'#' => {
+            c.bump();
+            c.eat_while(|byte| byte.is_ascii_digit());
+            NUMBER
+        }
+        b'$' => {
+            c.bump();
+            c.eat_while(|byte| byte.is_ascii_hexdigit());
+            NUMBER
+        }
+        b'&' => {
+            c.bump();
+            c.eat_while(|byte| byte.is_ascii_digit());
+            NUMBER
+        }
+        b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+            let start = c.rest();
+            let length = c.eat_while(lex::is_word_byte);
+            keyword(&lex::upper(&start[..length]))
+        }
+        b'(' => { c.bump(); LPAREN }
+        b')' => { c.bump(); RPAREN }
+        b'[' => { c.bump(); LBRACKET }
+        b']' => { c.bump(); RBRACKET }
+        b',' => { c.bump(); COMMA }
+        b';' => { c.bump(); SEMI }
+        b':' if c.peek_at(1) == b'=' => { c.bump_n(2); ASSIGN }
+        b':' => { c.bump(); COLON }
+        b'.' if c.peek_at(1) == b'.' => { c.bump_n(2); DOTDOT }
+        b'.' => { c.bump(); DOT }
+        b'=' => { c.bump(); EQ }
+        b'<' if c.peek_at(1) == b'=' => { c.bump_n(2); LE }
+        b'<' if c.peek_at(1) == b'>' => { c.bump_n(2); NE }
+        b'<' => { c.bump(); LT }
+        b'>' if c.peek_at(1) == b'=' => { c.bump_n(2); GE }
+        b'>' => { c.bump(); GT }
+        b'+' => { c.bump(); PLUS }
+        b'-' => { c.bump(); MINUS }
+        b'*' => { c.bump(); STAR }
+        b'/' => { c.bump(); SLASH }
+        b'@' => { c.bump(); AT }
+        b'^' => { c.bump(); CARET }
+        _ => UNKNOWN,
+    }
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"PROGRAM" => KW_PROGRAM,
+        b"UNIT" => KW_UNIT,
+        b"INTERFACE" => KW_INTERFACE,
+        b"IMPLEMENTATION" => KW_IMPLEMENTATION,
+        b"INITIALIZATION" => KW_INITIALIZATION,
+        b"FINALIZATION" => KW_FINALIZATION,
+        b"USES" => KW_USES,
+        b"CONST" => KW_CONST,
+        b"TYPE" => KW_TYPE,
+        b"VAR" => KW_VAR,
+        b"BEGIN" => KW_BEGIN,
+        b"END" => KW_END,
+        b"IF" => KW_IF,
+        b"THEN" => KW_THEN,
+        b"ELSE" => KW_ELSE,
+        b"WHILE" => KW_WHILE,
+        b"DO" => KW_DO,
+        b"FOR" => KW_FOR,
+        b"TO" => KW_TO,
+        b"DOWNTO" => KW_DOWNTO,
+        b"REPEAT" => KW_REPEAT,
+        b"UNTIL" => KW_UNTIL,
+        b"CASE" => KW_CASE,
+        b"OF" => KW_OF,
+        b"WITH" => KW_WITH,
+        b"RECORD" => KW_RECORD,
+        b"ARRAY" => KW_ARRAY,
+        b"PROCEDURE" => KW_PROCEDURE,
+        b"FUNCTION" => KW_FUNCTION,
+        b"FORWARD" => KW_FORWARD,
+        b"IN" => KW_IN,
+        b"NIL" => KW_NIL,
+        b"AND" => KW_AND,
+        b"OR" => KW_OR,
+        b"NOT" => KW_NOT,
+        b"DIV" => KW_DIV,
+        b"MOD" => KW_MOD,
+        b"SHL" => KW_SHL,
+        b"SHR" => KW_SHR,
+        b"TRUE" => KW_TRUE,
+        b"FALSE" => KW_FALSE,
+        _ => IDENT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_f::harness;
+
+    const VALID: &[(&str, &[&str])] = &[
+        (
+            "program.pas",
+            &[
+                "program_header",
+                "uses_clause",
+                "const_section",
+                "var_section",
+                "routine_declaration",
+                "routine_declaration",
+                "block",
+            ],
+        ),
+        (
+            "shapes.pas",
+            &[
+                "program_header",
+                "uses_clause",
+                "type_section",
+                "var_section",
+                "routine_declaration",
+                "routine_declaration",
+                "block",
+            ],
+        ),
+        (
+            "unit.pas",
+            &[
+                "unit_header",
+                "section_marker",
+                "uses_clause",
+                "type_section",
+                "var_section",
+                "routine_declaration",
+                "unit_end",
+            ],
+        ),
+    ];
+
+    #[test]
+    fn valid_fixtures() {
+        harness::check_valid("pascal", &PASCAL, VALID);
+    }
+
+    #[test]
+    fn malformed_keeps_the_root() {
+        harness::check_malformed(
+            "malformed",
+            "pascal_broken.pas",
+            &PASCAL,
+            &["program_header", "var_section", "block"],
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_top_level_kinds() {
+        harness::dump("pascal", &PASCAL);
+        harness::dump("malformed", &PASCAL);
+    }
+
+    #[test]
+    fn lexes_a_case_insensitive_keyword_and_a_string() {
+        use crate::deep::lexer::{lex, Tokens};
+        let src = b"BeGiN s := 'it''s'; EnD";
+        let mut tokens = Tokens::default();
+        lex(src, &PASCAL, &mut tokens);
+        let kinds: Vec<&str> = (0..tokens.len())
+            .map(|i| PASCAL.name(tokens.kind[i]))
+            .filter(|kind| *kind != "whitespace")
+            .collect();
+        assert_eq!(kinds, ["begin", "identifier", ":=", "string", ";", "end"]);
+    }
+}
