@@ -328,3 +328,289 @@ rust_graph_deep::grammar! { CPP {
     catch_parameter: "(" [_parameter] ")",
     throw_statement: "throw" [_expression] ";",
     expression_statement: _expression ";",
+
+    // ---- expressions ----
+
+    _expression: precedence _primary {
+        assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" => assignment_expression,
+        cond: postfix "?" _expression@assign ":" _expression@assign => conditional_expression,
+        lor: left "||" => binary_expression,
+        land: left "&&" => binary_expression,
+        bor: left "|" => binary_expression,
+        bxor: left "^" => binary_expression,
+        band: left "&" => binary_expression,
+        eq: left "==" | "!=" => binary_expression,
+        rel: left "<" | ">" | "<=" | ">=" => binary_expression,
+        shift: left "<<" | GT_JOINED ">" => binary_expression,
+        add: left "+" | "-" => binary_expression,
+        mul: left "*" | "/" | "%" => binary_expression,
+        unary: prefix "!" | "~" | "-" | "+" | "*" | "&" => unary_expression,
+        prefix "++" | "--" => update_expression,
+        postfix "++" | "--" => update_expression,
+        postfix arguments => call_expression,
+        postfix &(template_arguments arguments) template_arguments arguments => call_expression,
+        postfix subscript => subscript_expression,
+        postfix "." _member => field_expression,
+        postfix "->" _member => field_expression,
+        postfix "::" _member => qualified_expression,
+    },
+
+    _primary:
+        &(cast_type) cast_expression
+        | named_cast
+        | sizeof_expression
+        | new_expression
+        | delete_expression
+        | lambda_expression
+        | parenthesized_expression
+        | string
+        | "this"
+        | "true"
+        | "false"
+        | "nullptr"
+        | _name
+        | NUMBER
+        | CHAR_LITERAL,
+
+    _name: IDENT,
+    _member: IDENT,
+    string: STR+,
+    cast_expression: cast_type _expression@unary,
+    cast_type: "(" (_type_prefixed | _scoped_type_id) ")",
+    sizeof_expression: "sizeof" sizeof_operand,
+    sizeof_operand: &(cast_type) cast_type | _expression@unary,
+    named_cast: named_cast_head parenthesized_expression,
+    named_cast_head: ("static_cast" | "dynamic_cast" | "reinterpret_cast" | "const_cast") "<" _type_id _gt,
+    new_expression: "new" [new_placement] _type_id [arguments] [array_suffix],
+    new_placement: "(" (_argument %? ",") ")",
+    delete_expression: "delete" [empty_brackets] _expression@unary,
+    empty_brackets: "[" "]",
+    lambda_expression: lambda_capture [parameter_list] compound_statement,
+    lambda_capture: "[" (_capture_item %? ",") "]",
+    _capture_item: "=" IDENT | "&" IDENT | "=" | "&" | "this" | IDENT,
+    arguments: "(" (_argument %? ",") ")",
+    _argument: _expression@assign,
+    subscript: "[" _expression "]",
+} }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    if let Some(kind) = trivia(c) {
+        return kind;
+    }
+    if directive(c) {
+        return DIRECTIVE;
+    }
+    match c.peek() {
+        b'"' => {
+            c.bump();
+            if quoted(c, b'"') { STR } else { BAD_LITERAL }
+        }
+        b'\'' => {
+            c.bump();
+            if quoted(c, b'\'') { CHAR_LITERAL } else { BAD_LITERAL }
+        }
+        b'0'..=b'9' => {
+            number(c, true);
+            NUMBER
+        }
+        b'.' if c.peek_at(1).is_ascii_digit() => {
+            number(c, true);
+            NUMBER
+        }
+        byte if is_word_start(byte) => word(c),
+        _ => operator(c),
+    }
+}
+
+/// A word; a literal prefix (`L"..."`, `u8R"(...)"`) starts a literal.
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    let text = &start[..length];
+    match c.peek() {
+        b'"' if raw_prefix(text) => {
+            c.bump();
+            if raw_string(c) { STR } else { BAD_LITERAL }
+        }
+        b'"' | b'\'' if string_prefix(text) => {
+            let quote = c.peek();
+            c.bump();
+            match (quoted(c, quote), quote) {
+                (false, _) => BAD_LITERAL,
+                (true, b'"') => STR,
+                (true, _) => CHAR_LITERAL,
+            }
+        }
+        _ => keyword(text),
+    }
+}
+
+/// `R`, `LR`, `uR`, `UR`, `u8R`: a raw string follows.
+fn raw_prefix(word: &[u8]) -> bool {
+    matches!(word, b"R" | b"LR" | b"uR" | b"UR" | b"u8R")
+}
+
+/// `L`, `u`, `U`, `u8`, and the raw forms' non-`R` prefixes.
+fn string_prefix(word: &[u8]) -> bool {
+    matches!(word, b"L" | b"u" | b"U" | b"u8" | b"R" | b"LR" | b"uR" | b"UR" | b"u8R")
+}
+
+/// A raw string body after its opening quote: `delim( ... )delim"`. True if it
+/// closed; an unclosed one runs to the end of the file.
+fn raw_string(c: &mut Cursor) -> bool {
+    let start = c.pos();
+    let mut open = 0usize;
+    while !c.at_end() && c.peek() != b'(' && open < 16 {
+        if c.peek() == b')' || c.peek() == b'\\' || c.peek() == b'"' {
+            return false;
+        }
+        c.bump();
+        open += 1;
+    }
+    if c.peek() != b'(' {
+        return false;
+    }
+    let delimiter: Vec<u8> = c.since(start).to_vec();
+    c.bump();
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        if c.peek() == b')' && c.rest().get(1..).is_some_and(|rest| rest.starts_with(&delimiter)) {
+            c.bump_n(delimiter.len() + 1);
+            return c.eat(b'"');
+        }
+        c.bump();
+    }
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"auto" => KW_AUTO,
+        b"break" => KW_BREAK,
+        b"case" => KW_CASE,
+        b"catch" => KW_CATCH,
+        b"char" => KW_CHAR,
+        b"class" => KW_CLASS,
+        b"const" => KW_CONST,
+        b"constexpr" => KW_CONSTEXPR,
+        b"continue" => KW_CONTINUE,
+        b"decltype" => KW_DECLTYPE,
+        b"default" => KW_DEFAULT,
+        b"delete" => KW_DELETE,
+        b"do" => KW_DO,
+        b"double" => KW_DOUBLE,
+        b"else" => KW_ELSE,
+        b"enum" => KW_ENUM,
+        b"explicit" => KW_EXPLICIT,
+        b"extern" => KW_EXTERN,
+        b"false" => KW_FALSE,
+        b"final" => KW_FINAL,
+        b"float" => KW_FLOAT,
+        b"for" => KW_FOR,
+        b"friend" => KW_FRIEND,
+        b"goto" => KW_GOTO,
+        b"if" => KW_IF,
+        b"inline" => KW_INLINE,
+        b"int" => KW_INT,
+        b"long" => KW_LONG,
+        b"mutable" => KW_MUTABLE,
+        b"namespace" => KW_NAMESPACE,
+        b"new" => KW_NEW,
+        b"noexcept" => KW_NOEXCEPT,
+        b"nullptr" => KW_NULLPTR,
+        b"operator" => KW_OPERATOR,
+        b"override" => KW_OVERRIDE,
+        b"private" => KW_PRIVATE,
+        b"protected" => KW_PROTECTED,
+        b"public" => KW_PUBLIC,
+        b"register" => KW_REGISTER,
+        b"return" => KW_RETURN,
+        b"short" => KW_SHORT,
+        b"signed" => KW_SIGNED,
+        b"sizeof" => KW_SIZEOF,
+        b"static" => KW_STATIC,
+        b"static_assert" => KW_STATIC_ASSERT,
+        b"static_cast" => KW_STATIC_CAST,
+        b"dynamic_cast" => KW_DYNAMIC_CAST,
+        b"reinterpret_cast" => KW_REINTERPRET_CAST,
+        b"const_cast" => KW_CONST_CAST,
+        b"struct" => KW_STRUCT,
+        b"switch" => KW_SWITCH,
+        b"template" => KW_TEMPLATE,
+        b"this" => KW_THIS,
+        b"throw" => KW_THROW,
+        b"true" => KW_TRUE,
+        b"try" => KW_TRY,
+        b"typedef" => KW_TYPEDEF,
+        b"typename" => KW_TYPENAME,
+        b"union" => KW_UNION,
+        b"unsigned" => KW_UNSIGNED,
+        b"using" => KW_USING,
+        b"virtual" => KW_VIRTUAL,
+        b"void" => KW_VOID,
+        b"volatile" => KW_VOLATILE,
+        b"while" => KW_WHILE,
+        b"bool" => KW_BOOL,
+        _ => IDENT,
+    }
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        (b':', b':', _) => (SCOPE, 2),
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'<', _, _) => (LT, 1),
+        (b'>', b'>', _) => (GT_JOINED, 1),
+        (b'>', b'=', _) => (GE, 2),
+        (b'>', _, _) => (GT, 1),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'=', _, _) => (ASSIGN, 1),
+        (b'!', b'=', _) => (NE, 2),
+        (b'!', _, _) => (BANG, 1),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'&', _, _) => (AMP, 1),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'|', _, _) => (PIPE, 1),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'^', _, _) => (CARET, 1),
+        (b'+', b'+', _) => (INCREMENT, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'+', _, _) => (PLUS, 1),
+        (b'-', b'-', _) => (DECREMENT, 2),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'-', _, _) => (MINUS, 1),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'*', _, _) => (STAR, 1),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'/', _, _) => (SLASH, 1),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'%', _, _) => (PERCENT, 1),
+        (b'~', _, _) => (TILDE, 1),
+        (b'(', _, _) => (LPAREN, 1),
+        (b')', _, _) => (RPAREN, 1),
+        (b'[', _, _) => (LBRACKET, 1),
+        (b']', _, _) => (RBRACKET, 1),
+        (b'{', _, _) => (LBRACE, 1),
+        (b'}', _, _) => (RBRACE, 1),
+        (b',', _, _) => (COMMA, 1),
+        (b';', _, _) => (SEMI, 1),
+        (b':', _, _) => (COLON, 1),
+        (b'?', _, _) => (QUESTION, 1),
+        (b'.', _, _) => (DOT, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
