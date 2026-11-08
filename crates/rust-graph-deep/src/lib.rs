@@ -31,6 +31,25 @@
 //! `PAIR`), the kind table, `pub static JSON: Language`, and `parse_<rule>`
 //! functions on the runtime. What it checks and how recovery is derived are in
 //! `check.rs` and `emit.rs`.
+//!
+//! # Two code paths
+//!
+//! `mode` selects how a grammar is compiled; it defaults to `auto`:
+//!
+//! - `mode = tables;` — the DSL is lowered to a production list and compiled to
+//!   LALR(1) tables (`tables.rs`). The macro emits a `deep_abi::Grammar` static,
+//!   the symbol-name and hidden-symbol tables, and one `u16` constant per
+//!   visible kind, numbered with the grammar's symbols. A conflict is a build
+//!   failure that names the state, the terminal and both actions. Predicates,
+//!   `precedence` tables and `layout` are refused by name.
+//! - `mode = recursive;` — the hand-written parser functions of `emit.rs`, with
+//!   recovery derived from the grammar. This is the path the Python, JavaScript
+//!   and TypeScript grammars still use.
+//! - `mode = auto;` (the default) — tables when the grammar names a runtime
+//!   that drives tables (`runtime = deep_rt;`) and `tables::unsupported` says
+//!   the grammar is expressible; the recursive path otherwise, which is what
+//!   keeps the grammars that name no runtime compiling unchanged. A grammar
+//!   that reaches the generator never falls back: a conflict fails the build.
 
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
@@ -38,16 +57,40 @@ mod check;
 mod decide;
 mod emit;
 mod read;
+mod tables;
 
 #[proc_macro]
 pub fn grammar(input: TokenStream) -> TokenStream {
-    match read::grammar(convert(input)).and_then(check::check) {
-        Ok(checked) => match emit::emit(&checked) {
-            Ok(code) => code.parse().expect("grammar!: the generated code is valid Rust"),
-            Err(error) => error.into_stream(),
-        },
-        Err(error) => error.into_stream(),
+    let code = match read::grammar(convert(input)).and_then(compile) {
+        Ok(code) => code,
+        Err(error) => return error.into_stream(),
+    };
+    code.parse().expect("grammar!: the generated code is valid Rust")
+}
+
+/// Compile a read grammar with the code path its `mode` selects.
+fn compile(grammar: read::Grammar) -> Result<String, Error> {
+    match grammar.mode {
+        read::Mode::Recursive => recursive(grammar),
+        read::Mode::Tables => tables::emit(&grammar),
+        // A table needs a runtime that drives it: the built-in default runtime
+        // runs parser functions and reads no tables, so a grammar that names it
+        // (or names nothing) stays on the recursive path, and so does one the
+        // generator cannot express. A conflict in a grammar that reaches the
+        // generator is still a hard error.
+        read::Mode::Auto => {
+            if tables::runtime_reads_tables(&grammar) && tables::unsupported(&grammar).is_none() {
+                tables::emit(&grammar)
+            } else {
+                recursive(grammar)
+            }
+        }
     }
+}
+
+/// The recursive-descent path: `check` resolves and validates, `emit` writes.
+fn recursive(grammar: read::Grammar) -> Result<String, Error> {
+    emit::emit(&check::check(grammar)?)
 }
 
 /// Where an error points. `None` in unit tests, which run outside the compiler.
