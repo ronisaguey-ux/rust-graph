@@ -27,6 +27,10 @@ pub struct Parser<'a> {
     depth: u32,
     deepest: u32,
     skipped: u32,
+    /// Errors recorded so far, so a predicate can tell whether a trial parse failed.
+    errors: u32,
+    /// A cache for [`Parser::line_end`]: the first `newline` at or after `.0` is at `.1`.
+    line_end: (u32, u32),
 }
 
 /// An open node. Close it with [`Parser::close`] or drop it with [`Parser::abandon`].
@@ -43,6 +47,7 @@ pub struct Checkpoint {
     events: u32,
     links: u32,
     pos: u32,
+    errors: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -118,6 +123,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn missing(&mut self) {
+        self.errors += 1;
         let marker = self.open();
         self.events.push(Event::Flag(MISSING));
         self.close(marker, ERROR);
@@ -131,6 +137,7 @@ impl<'a> Parser<'a> {
         if self.at_end() {
             return;
         }
+        self.errors += 1;
         let marker = self.open();
         loop {
             self.bump_balanced();
@@ -162,11 +169,69 @@ impl<'a> Parser<'a> {
         true
     }
 
+    /// [`Parser::separator`], where a trailing `sep` is allowed (Python's
+    /// `[1, 2,]`). `x %? sep` in `grammar!`.
+    pub fn separator_trailing(&mut self, sep: Kind) -> bool {
+        if self.at_end() {
+            return false;
+        }
+        if !self.at(sep) {
+            self.error_until(&[sep]);
+            if self.at_end() {
+                return false;
+            }
+        }
+        self.bump();
+        !self.at_end()
+    }
+
+    /// Errors recorded so far. A predicate compares it before and after a trial.
+    pub fn errors(&self) -> u32 {
+        self.errors
+    }
+
+    /// Where the next node would start in the events: remember it before an
+    /// operand, and [`Parser::wrap`] the operand once an operator follows.
+    pub fn event_count(&self) -> u32 {
+        self.events.len() as u32
+    }
+
+    /// Opens a node around everything recorded since `start`, an
+    /// [`Parser::event_count`] taken before one complete operand: how a Pratt
+    /// loop turns `a` into `(a + b)`. A node there is preceded in O(1). A leaf
+    /// (a token, or a few, as in `"a" "b"`) gets a start inserted before it,
+    /// which moves only the operand's own events.
+    pub fn wrap(&mut self, start: u32) -> Marker {
+        let at = start as usize;
+        if let Some(&Event::Start { kind, mut forward_parent }) = self.events.get(at) {
+            if kind != TOMBSTONE {
+                // Wrapped before (`f(x)[0]`): the outermost wrapper is the operand now.
+                let mut outer = start;
+                while forward_parent != 0 {
+                    outer += forward_parent;
+                    let Event::Start { forward_parent: next, .. } = self.events[outer as usize] else { unreachable!("a forward parent is a start") };
+                    forward_parent = next;
+                }
+                return self.precede(Closed(outer));
+            }
+        }
+        // Nothing past `start` is linked to anything before it: a Pratt loop
+        // only ever wraps its own last operand.
+        self.events.insert(at, Event::Start { kind: TOMBSTONE, forward_parent: 0 });
+        for link in self.links.iter_mut() {
+            if *link >= start {
+                *link += 1;
+            }
+        }
+        Marker(start)
+    }
+
     /// The current token alone as an `ERROR`.
     pub fn error_one(&mut self) {
         if self.at_end() {
             return;
         }
+        self.errors += 1;
         let marker = self.open();
         self.bump_balanced();
         self.close(marker, ERROR);
@@ -229,7 +294,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn checkpoint(&self) -> Checkpoint {
-        Checkpoint { events: self.events.len() as u32, links: self.links.len() as u32, pos: self.pos }
+        Checkpoint { events: self.events.len() as u32, links: self.links.len() as u32, pos: self.pos, errors: self.errors }
     }
 
     /// Forgets everything since `checkpoint`. Only valid within the group the
@@ -245,6 +310,7 @@ impl<'a> Parser<'a> {
         }
         self.events.truncate(checkpoint.events as usize);
         self.pos = checkpoint.pos;
+        self.errors = checkpoint.errors;
     }
 
     /// Parses the balanced group at the current opener as a `kind` node, with `body`
@@ -270,6 +336,10 @@ impl<'a> Parser<'a> {
         let outer = self.limit;
         if close != NONE {
             self.limit = close;
+        } else if let Some(layout) = self.language.layout {
+            // Unclosed in a layout language: the lexer ended the bracket at a
+            // line end, so the group ends there too.
+            self.limit = self.line_end(layout.newline).min(outer);
         }
         self.depth += 1;
         self.deepest = self.deepest.max(self.depth);
@@ -319,6 +389,7 @@ impl<'a> Parser<'a> {
         if self.pos >= self.limit {
             return;
         }
+        self.errors += 1;
         if self.exhausted() {
             let last = self.last_significant_before(self.limit);
             self.events.push(Event::Span { kind: ERROR, first: self.pos, last });
@@ -330,6 +401,23 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         self.close(marker, ERROR);
+    }
+
+    /// The first `newline` token at or after the current one, or the token count.
+    /// Unclosed openers on one line ask for the same answer, so it is cached and
+    /// the total cost stays linear.
+    fn line_end(&mut self, newline: Kind) -> u32 {
+        let (from, found) = self.line_end;
+        if self.pos >= from && self.pos <= found && found != NONE {
+            return found;
+        }
+        let mut at = self.pos;
+        let count = self.kinds.len() as u32;
+        while at < count && self.kinds[at as usize] != newline {
+            at += 1;
+        }
+        self.line_end = (self.pos, at);
+        at
     }
 
     #[inline]
@@ -391,6 +479,8 @@ impl Workspace {
             depth: 0,
             deepest: 0,
             skipped: 0,
+            errors: 0,
+            line_end: (NONE, NONE),
         };
         parser.pos = parser.skip_trivia(0);
         let root = parser.open();

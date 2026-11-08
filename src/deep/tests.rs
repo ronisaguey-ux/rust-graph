@@ -41,9 +41,12 @@ pub(super) fn check(workspace: &Workspace, src: &[u8], language: &Language) {
     let nodes = &workspace.tree.nodes;
 
     // Lossless: tokens tile the input, so their texts concatenate back to it.
+    // Only layout tokens are empty.
+    let layout = language.layout.map(|layout| [layout.newline, layout.indent, layout.dedent]);
     let mut joined = Vec::with_capacity(src.len());
     for index in 0..tokens.len() {
-        assert!(tokens.start(index) < tokens.end[index], "empty token {index}");
+        let zero_width_allowed = layout.is_some_and(|kinds| kinds.contains(&tokens.kind[index]));
+        assert!(tokens.start(index) < tokens.end[index] || zero_width_allowed, "empty token {index}");
         joined.extend_from_slice(tokens.text(src, index));
     }
     assert_eq!(joined, src, "tokens are not lossless");
@@ -76,22 +79,40 @@ pub(super) fn check(workspace: &Workspace, src: &[u8], language: &Language) {
         previous_end_in.push(node.start);
     }
 
-    // No token is lost: every significant token lies inside exactly one leaf.
+    // No token is lost: every significant token lies inside exactly one leaf, in
+    // order. A token leaf is its token; an ERROR or SKIPPED leaf takes the tokens
+    // in its range. A zero-width token on the end of such a range belongs to it
+    // unless a later token leaf at that spot is that token.
     let leaves: Vec<_> = nodes.iter().enumerate().filter(|(index, node)| node.is_leaf(*index as u32) && *index > 0).map(|(_, node)| node).collect();
-    let mut leaf = 0;
-    for index in 0..tokens.len() {
-        if language.is_trivia(tokens.kind[index]) {
+    let significant: Vec<usize> = (0..tokens.len()).filter(|&index| !language.is_trivia(tokens.kind[index])).collect();
+    let mut next = 0;
+    for (at, leaf) in leaves.iter().enumerate() {
+        if leaf.flags & TOKEN != 0 {
+            let index = *significant.get(next).unwrap_or_else(|| panic!("token leaf at {} has no token", leaf.start));
+            assert_eq!((tokens.start(index), tokens.end[index], tokens.kind[index]), (leaf.start, leaf.end, leaf.kind), "token {index} is not its leaf");
+            next += 1;
             continue;
         }
-        let (start, end) = (tokens.start(index), tokens.end[index]);
-        while leaf < leaves.len() && leaves[leaf].end <= start {
-            leaf += 1;
+        while let Some(&index) = significant.get(next) {
+            let (start, end) = (tokens.start(index), tokens.end[index]);
+            let same = |kind: Kind, from: u32, to: u32| (from, to, kind) == (start, end, tokens.kind[index]);
+            let at_end = start == leaf.end && leaf.start < leaf.end;
+            // Identical zero-width tokens here (an inner block's dedents, then
+            // the outer ones'): the leaves after this one take the last of them.
+            let claimed = at_end && {
+                let later = leaves[at + 1..].iter().take_while(|after| after.start <= start).filter(|after| after.flags & TOKEN != 0 && same(after.kind, after.start, after.end)).count();
+                let left = significant[next..].iter().take_while(|&&other| tokens.start(other) == start).filter(|&&other| same(tokens.kind[other], tokens.start(other), tokens.end[other])).count();
+                left <= later
+            };
+            let inside = leaf.start <= start && end <= leaf.end && (start < leaf.end || (at_end && !claimed));
+            if !inside {
+                break;
+            }
+            next += 1;
         }
-        assert!(leaf < leaves.len(), "token {index} at {start} is in no leaf");
-        assert!(leaves[leaf].start <= start && end <= leaves[leaf].end, "token {index} at {start} is in no leaf");
-        if leaves[leaf].flags & TOKEN != 0 {
-            assert_eq!(leaves[leaf].kind, tokens.kind[index]);
-        }
+    }
+    if let Some(&index) = significant.get(next) {
+        panic!("token {index} at {} is in no leaf", tokens.start(index));
     }
 
     // Error and skip flags say exactly what is below.
