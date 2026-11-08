@@ -1,0 +1,17 @@
+[package]
+name = "deep-bench"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "The harness behind the deep parser's 2x gate: corpus verification, alternate comparison, peak RSS."
+publish = false
+# src/main.rs is the rust-graph-deep-bench binary, declared in the root
+# Cargo.toml so it builds with the rest of rust-graph; this package is the
+# library the binary and its tests share.
+autobins = false
+
+[lib]
+name = "deep_bench"
+path = "src/lib.rs"
+
+[dependencies]
