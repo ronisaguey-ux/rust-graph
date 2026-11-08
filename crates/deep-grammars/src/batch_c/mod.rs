@@ -185,6 +185,41 @@ mod tests {
     use crate::deep::tree::{HAS_ERROR, TOKEN};
     use crate::deep::{Budget, Workspace};
 
+    /// `(file, top-level node kinds)` for every valid fixture, in order.
+    const C_VALID: &[(&str, &str)] = &[
+        ("control.c", "function_definition function_definition function_definition function_definition function_definition"),
+        ("expressions.c", "function_definition function_definition"),
+        ("functions.c", "declaration_statement function_definition function_definition function_definition function_definition"),
+        ("hello.c", "declaration_statement function_definition function_definition"),
+        ("initializers.c", "declaration_statement declaration_statement static_assert_statement declaration_statement declaration_statement declaration_statement function_definition"),
+        ("macros.c", "declaration_statement declaration_statement declaration_statement function_definition function_definition"),
+        ("pointers.c", "declaration_statement declaration_statement declaration_statement declaration_statement function_definition function_definition function_definition function_definition"),
+        ("structs.c", "declaration_statement declaration_statement declaration_statement declaration_statement declaration_statement function_definition function_definition function_definition"),
+    ];
+
+    const CPP_VALID: &[(&str, &str)] = &[
+        ("classes.cpp", "namespace_definition function_definition"),
+        ("containers.cpp", "namespace_definition function_definition function_definition"),
+        ("inheritance.cpp", "namespace_definition"),
+        ("objects.cpp", "declaration_statement function_definition function_definition function_definition"),
+        ("preprocessor.cpp", "namespace_definition function_definition"),
+        ("statements.cpp", "namespace_definition"),
+        ("strings.cpp", "function_definition function_definition function_definition function_definition function_definition"),
+        ("templates.cpp", "template_declaration template_declaration function_definition function_definition function_definition"),
+    ];
+
+    const OBJC_VALID: &[(&str, &str)] = &[
+        ("collections.m", "function_definition"),
+        ("exceptions.m", "function_definition function_definition function_definition objc_interface objc_implementation"),
+        ("expressions.m", "declaration_statement declaration_statement function_definition function_definition function_definition function_definition"),
+        ("functions.m", "declaration_statement function_definition function_definition function_definition function_definition function_definition"),
+        ("hello.m", "objc_implementation function_definition"),
+        ("loops.m", "function_definition function_definition function_definition function_definition function_definition"),
+        ("properties.m", "objc_protocol objc_interface objc_implementation"),
+        ("protocols.m", "objc_class_declaration objc_protocol objc_interface objc_implementation"),
+        ("strings.m", "declaration_statement user_function function_definition user_function"),
+    ];
+
     /// What one parse produced, as the tests compare it.
     struct Parsed {
         complete: bool,
@@ -211,7 +246,7 @@ mod tests {
             root: language.name(workspace.tree.root().kind),
             errors: (0..nodes.len()).filter(|&index| is_error(index)).count(),
             top,
-            nested: nodes.iter().filter(|node| node.kind == ERROR && node.flags & 0 == 0).count(),
+            nested: nodes.iter().filter(|node| node.kind == ERROR && node.flags & TOKEN == 0).count(),
         }
     }
 
@@ -219,7 +254,6 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
     }
 
-    /// The file names directly inside a fixture directory, sorted.
     fn names_in(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
             .unwrap_or_else(|error| panic!("{dir:?}: {error}"))
@@ -230,23 +264,34 @@ mod tests {
         names
     }
 
-    fn valid(folder: &str, language: &'static Language) {
-        let mut names = names_in(&fixtures().join(folder));
-        names.sort();
-        let mut count = 0;
-        for name in &names {
-            let path = fixtures().join(folder).join(name);
-            let src = fs::read(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
-            assert!(!src.is_empty(), "{name}: empty fixture");
-            let result = parse(language, &src);
-            assert!(result.complete, "{name}: the parse did not finish");
-            assert_eq!(result.root, language.name(language.root), "{name}: root");
-            assert_eq!(result.errors, 0, "{name}: {} error nodes:\n{}", result.errors, tree(&path, language));
-            count += 1;
-        }
-        assert!(count >= 8, "fixtures/{folder}: only {count} files");
+    fn tree(path: &Path, language: &'static Language) -> String {
+        let src = fs::read(path).unwrap();
+        let mut workspace = Workspace::default();
+        workspace.parse(&src, language, &Budget::default()).unwrap();
+        workspace.tree.sexp(language, true)
     }
 
+    /// Every valid fixture: the directory and the table agree, the parse
+    /// finishes, the root is the language's, there are no errors, and the
+    /// top-level kinds are exactly what the table says.
+    fn valid(folder: &str, language: &'static Language, table: &[(&str, &str)]) {
+        let on_disk = names_in(&fixtures().join(folder));
+        let listed: Vec<String> = table.iter().map(|(name, _)| (*name).to_string()).collect();
+        assert_eq!(on_disk, listed, "fixtures/{folder}: the table and the directory disagree");
+        for (name, top) in table {
+            let path = fixtures().join(folder).join(name);
+            let src = fs::read(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+            assert!(!src.is_empty(), "{name}: an empty fixture proves nothing");
+            let result = parse(language, &src);
+            assert!(result.complete, "{name}: the parse did not finish");
+            assert_eq!(result.root, language.name(language.root), "{name}: the root's kind changed");
+            assert_eq!(result.errors, 0, "{name}: {} error nodes in a valid file:\n{}", result.errors, tree(&path, language));
+            assert_eq!(result.top, top.split_whitespace().collect::<Vec<_>>(), "{name}: top-level kinds");
+        }
+        assert!(table.len() >= 8, "fixtures/{folder}: only {} valid files", table.len());
+    }
+
+    /// Every malformed fixture: the root survives and carries the error inside.
     fn malformed(folder: &str, language: &'static Language) {
         let names = names_in(&fixtures().join(folder).join("broken"));
         assert!(names.len() >= 3, "fixtures/{folder}/broken: only {} files", names.len());
@@ -255,98 +300,113 @@ mod tests {
             let src = fs::read(&path).unwrap();
             let result = parse(language, &src);
             assert!(result.complete, "{name}: a malformed file must still produce a tree");
-            assert_eq!(result.root, language.name(language.root), "{name}: root did not survive");
+            assert_eq!(result.root, language.name(language.root), "{name}: the root did not survive");
             assert!(result.nested > 0, "{name}: no ERROR node inside the root:\n{}", tree(&path, language));
         }
     }
 
-    fn tree(path: &Path, language: &'static Language) -> String {
-        let src = fs::read(path).unwrap();
-        let mut workspace = Workspace::default();
-        workspace.parse(&src, language, &Budget::default()).unwrap();
-        workspace.tree.sexp(language, true)
+    #[test]
+    fn c_fixtures_parse_cleanly() {
+        valid("c", &super::c::C, C_VALID);
     }
 
     #[test]
     fn cpp_fixtures_parse_cleanly() {
-        valid("cpp", &super::cpp::CPP);
+        valid("cpp", &super::cpp::CPP, CPP_VALID);
     }
 
     #[test]
-    fn cpp_malformed_keeps_the_root() {
-        malformed("cpp", &super::cpp::CPP);
+    fn objc_fixtures_parse_cleanly() {
+        valid("objc", &super::objc::OBJC, OBJC_VALID);
     }
 
     #[test]
-    fn c_fixtures_parse_cleanly() {
-        valid("c", &super::c::C);
-    }
-
-    #[test]
-    fn c_malformed_keeps_the_root() {
+    fn malformed_fixtures_keep_the_root_and_report_inside_it() {
         malformed("c", &super::c::C);
+        malformed("cpp", &super::cpp::CPP);
+        malformed("objc", &super::objc::OBJC);
     }
-
-    /// Not an assertion: prints what each C++ fixture's root holds.
-    #[test]
-    fn dump_cpp() {
-        dump("cpp", &super::cpp::CPP);
-    }
-
-    fn dump(folder: &str, language: &'static crate::deep::syntax::Language) {
-        for name in names_in(&fixtures().join(folder)) {
-            let src = fs::read(fixtures().join(folder).join(&name)).unwrap();
-            let result = parse(language, &src);
-            println!("{name}|{}|errors={}|{}", result.complete, result.errors, result.top.join(" "));
-        }
-        for name in names_in(&fixtures().join(folder).join("broken")) {
-            let src = fs::read(fixtures().join(folder).join("broken").join(&name)).unwrap();
-            let result = parse(language, &src);
-            println!("broken/{name}|{}|errors={}|{}", result.complete, result.errors, result.top.join(" "));
-        }
-    }
-
-    /// Not an assertion: prints what each C fixture's root holds, so the
-    /// expectation tables can be written from a real parse.
-    #[test]
-    fn dump_c() {
-        let names = names_in(&fixtures().join("c"));
-        for name in names {
-            let src = fs::read(fixtures().join("c").join(&name)).unwrap();
-            let result = parse(&super::c::C, &src);
-            println!("{name}|{}|errors={}|{}", result.complete, result.errors, result.top.join(" "));
-        }
-        let names = names_in(&fixtures().join("c/broken"));
-        for name in names {
-            let src = fs::read(fixtures().join("c/broken").join(&name)).unwrap();
-            let result = parse(&super::c::C, &src);
-            println!("broken/{name}|{}|errors={}|{}", result.complete, result.errors, result.top.join(" "));
-        }
-    }
-}
-
-#[cfg(test)]
-mod debug_trees {
-    use std::fs;
-    use std::path::Path;
-
-    use crate::deep::{Budget, Workspace};
 
     #[test]
-    fn first_error() {
-        let Ok(name) = std::env::var("FIXTURE") else { return };
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(&name);
-        let src = fs::read(&path).unwrap();
-        let language = if name.ends_with(".c") { "c" } else { "cpp" };
-        let language: &'static _ = match language {
-            "c" => &crate::batch_c::c::C,
-            _ => &crate::batch_c::cpp::CPP,
-        };
+    fn the_three_languages_name_their_roots() {
+        assert_eq!((super::c::C.name, super::c::C.name(super::c::C.root)), ("c", "translation_unit"));
+        assert_eq!((super::cpp::CPP.name, super::cpp::CPP.name(super::cpp::CPP.root)), ("cpp", "translation_unit"));
+        assert_eq!((super::objc::OBJC.name, super::objc::OBJC.name(super::objc::OBJC.root)), ("objc", "translation_unit"));
+    }
+
+    /// The significant kinds of the first file's first tokens, trivia dropped.
+    fn significant(language: &'static Language, src: &str) -> Vec<&'static str> {
         let mut workspace = Workspace::default();
-        workspace.parse(&src, language, &Budget::default()).unwrap();
-        let sexp = workspace.tree.sexp(language, false);
-        let at = sexp.find("(ERROR").unwrap_or(0);
-        let start = sexp[..at].rfind("(").unwrap_or(0).saturating_sub(300);
-        println!("{}", &sexp[start..sexp.len().min(at + 700)]);
+        workspace.parse(src.as_bytes(), language, &Budget::default()).unwrap();
+        (0..workspace.tokens.len())
+            .filter(|&at| !language.is_trivia(workspace.tokens.kind[at]))
+            .map(|at| language.name(workspace.tokens.kind[at]))
+            .collect()
+    }
+
+    fn directives(language: &'static Language, src: &str) -> usize {
+        let mut workspace = Workspace::default();
+        workspace.parse(src.as_bytes(), language, &Budget::default()).unwrap();
+        (0..workspace.tokens.len()).filter(|&at| language.name(workspace.tokens.kind[at]) == "preprocessor").count()
+    }
+
+    /// Hard problem 1: a file full of macros parses, and every directive is a
+    /// trivia token the grammar never sees, one per logical line.
+    #[test]
+    fn preprocessor_lines_are_trivia_and_the_file_still_parses() {
+        let path = fixtures().join("c/macros.c");
+        let src = fs::read(&path).unwrap();
+        assert!(directives(&super::c::C, std::str::from_utf8(&src).unwrap()) >= 8);
+        assert_eq!(parse(&super::c::C, &src).errors, 0, "the macro fixture has errors");
+        // A directive does not swallow the next line, and a continuation is one token.
+        let src = "#define A 1\n#define B(x) \\\n  (x) + A\nint main(void) { return B(2); }\n";
+        assert_eq!(directives(&super::c::C, src), 2);
+        assert_eq!(parse(&super::c::C, src.as_bytes()).errors, 0);
+        assert_eq!(
+            significant(&super::c::C, "#define X 1\nint x = X;\n"),
+            ["int", "identifier", "=", "identifier", ";"]
+        );
+        assert_eq!(directives(&super::cpp::CPP, "#if 1\n#endif\nint x;\n"), 2);
+    }
+
+    /// Hard problem 2: a `>` directly before another is emitted as two tokens,
+    /// so nested template lists close and a shift is the same pair.
+    #[test]
+    fn a_double_angle_is_two_tokens() {
+        assert_eq!(
+            significant(&super::cpp::CPP, "std::vector<std::vector<int>> grid;\n"),
+            ["identifier", "::", "identifier", "<", "identifier", "::", "identifier", "<", "int", ">joined", ">", "identifier", ";"]
+        );
+        assert_eq!(
+            significant(&super::cpp::CPP, "int f(int a, int b) { return a >> b; }\n").iter().filter(|kind| **kind == ">joined").count(),
+            1
+        );
+        // Both readings parse: the declaration needs two closers, the shift one.
+        for src in ["std::vector<std::vector<int>> grid;\n", "int f(int a, int b) { return a >> b; }\n"] {
+            assert_eq!(parse(&super::cpp::CPP, src.as_bytes()).errors, 0, "{src}");
+        }
+        // Three levels close with one joined pair and one plain `>`.
+        let kinds = significant(&super::cpp::CPP, "std::vector<std::vector<std::vector<int>>> deep;\n");
+        assert_eq!(kinds.iter().filter(|kind| **kind == ">joined").count(), 2);
+        assert_eq!(kinds.iter().filter(|kind| **kind == ">").count(), 1);
+        assert_eq!(parse(&super::cpp::CPP, "std::vector<std::vector<std::vector<int>>> deep;\n".as_bytes()).errors, 0);
+    }
+
+    /// Hard problem 3: `x * y;` is an expression statement, never a
+    /// declaration; the choice is one lookahead token, not a shift/reduce pair.
+    #[test]
+    fn a_pointer_like_statement_is_multiplication() {
+        let src = b"void f(void) {\n    x * y;\n}\n";
+        let mut workspace = Workspace::default();
+        workspace.parse(src, &super::c::C, &Budget::default()).unwrap();
+        let sexp = workspace.tree.sexp(&super::c::C, true);
+        assert!(sexp.contains("(expression_statement (binary_expression"), "{sexp}");
+        assert_eq!(parse(&super::c::C, src).errors, 0);
+        // `int *p;` is still a declaration: the first token decides.
+        let src = b"void f(void) {\n    int *p;\n}\n";
+        let mut workspace = Workspace::default();
+        workspace.parse(src, &super::c::C, &Budget::default()).unwrap();
+        assert!(workspace.tree.sexp(&super::c::C, true).contains("(declaration_statement"));
+        assert_eq!(parse(&super::c::C, src).errors, 0);
     }
 }
