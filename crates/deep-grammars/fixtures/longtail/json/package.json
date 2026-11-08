@@ -1,0 +1,14 @@
+{
+  "name": "deep-scan",
+  "version": "0.3.0",
+  "private": true,
+  "workspaces": ["crates/core", "crates/parser", "crates/cli"],
+  "thresholds": {
+    "maxDepth": 12,
+    "maxFiles": 50000,
+    "minScore": 0.15
+  },
+  "languages": ["python", "javascript", "typescript", "shell", "sql"],
+  "enabled": true,
+  "legacy": null
+}
