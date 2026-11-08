@@ -1,0 +1,300 @@
+//! Objective-C through `grammar!`: C's skeleton plus `@interface`,
+//! `@implementation`, `@protocol`, protocols, properties and message sends.
+//!
+//! `#import` is an ordinary preprocessor directive, so it is trivia. A message
+//! is one postfix row, `[receiver selector]`, which is also how `a[0]` reads:
+//! Objective-C has no separate subscript syntax, and the tree names it
+//! `message_expression` either way.
+//!
+//! Not modelled: blocks (`^{...}`), `@available`, generics on classes
+//! (`NSArray<NSString *> *`), NSString format-checking attributes, and
+//! property `getter=`/`setter=` selectors are read as plain identifiers.
+
+use crate::batch_c::{directive, is_word_byte, is_word_start, literal_prefix, number, quoted, trivia};
+use crate::deep::lexer::Cursor;
+use crate::deep::syntax::{Kind, UNKNOWN};
+
+rust_graph_deep::grammar! { OBJC {
+    name = "objc";
+    lex = lex;
+
+    tokens {
+        LPAREN = "(" open parens,
+        RPAREN = ")" close parens,
+        LBRACKET = "[" open brackets,
+        RBRACKET = "]" close brackets,
+        LBRACE = "{",
+        RBRACE = "}",
+
+        IDENT = "identifier",
+        NUMBER = "number",
+        STR = "string_literal",
+        CHAR_LITERAL = "char_literal",
+        BAD_LITERAL = "bad_literal" bad,
+        DIRECTIVE = "preprocessor" trivia,
+
+        KW_AUTO = "auto",
+        KW_BREAK = "break",
+        KW_CASE = "case",
+        KW_CHAR = "char",
+        KW_CONST = "const",
+        KW_CONTINUE = "continue",
+        KW_DEFAULT = "default",
+        KW_DO = "do",
+        KW_DOUBLE = "double",
+        KW_ELSE = "else",
+        KW_ENUM = "enum",
+        KW_EXTERN = "extern",
+        KW_FLOAT = "float",
+        KW_FOR = "for",
+        KW_GOTO = "goto",
+        KW_IF = "if",
+        KW_IN = "in",
+        KW_INLINE = "inline",
+        KW_INT = "int",
+        KW_LONG = "long",
+        KW_REGISTER = "register",
+        KW_RETURN = "return",
+        KW_SHORT = "short",
+        KW_SIGNED = "signed",
+        KW_SIZEOF = "sizeof",
+        KW_STATIC = "static",
+        KW_STRUCT = "struct",
+        KW_SWITCH = "switch",
+        KW_TYPEDEF = "typedef",
+        KW_UNION = "union",
+        KW_UNSIGNED = "unsigned",
+        KW_VOID = "void",
+        KW_VOLATILE = "volatile",
+        KW_WHILE = "while",
+        KW_BOOL = "BOOL",
+        KW_ID = "id",
+        KW_SEL = "SEL",
+        KW_CLASS = "Class",
+        KW_SELF = "self",
+        KW_SUPER = "super",
+        KW_NIL = "nil",
+        KW_YES = "YES",
+        KW_NO = "NO",
+
+        AT_INTERFACE = "@interface",
+        AT_IMPLEMENTATION = "@implementation",
+        AT_PROTOCOL = "@protocol",
+        AT_END = "@end",
+        AT_CLASS = "@class",
+        AT_PROPERTY = "@property",
+        AT_SYNTHESIZE = "@synthesize",
+        AT_DYNAMIC = "@dynamic",
+        AT_SELECTOR = "@selector",
+        AT_ENCODE = "@encode",
+        AT_OPTIONAL = "@optional",
+        AT_REQUIRED = "@required",
+        AT_TRY = "@try",
+        AT_CATCH = "@catch",
+        AT_FINALLY = "@finally",
+        AT_THROW = "@throw",
+        AT_AUTORELEASEPOOL = "@autoreleasepool",
+        AT_SYNCHRONIZED = "@synchronized",
+        AT_IMPORT = "@import",
+        AT_DEFS = "@defs",
+
+        COMMA = ",",
+        SEMI = ";",
+        DOT = ".",
+        ELLIPSIS = "...",
+        QUESTION = "?",
+        COLON = ":",
+        ARROW = "->",
+        ASSIGN = "=",
+        EQ = "==",
+        NE = "!=",
+        LT = "<",
+        LE = "<=",
+        GT = ">",
+        GE = ">=",
+        GT_JOINED = ">joined",
+        SHL = "<<",
+        PLUS = "+",
+        MINUS = "-",
+        STAR = "*",
+        SLASH = "/",
+        PERCENT = "%",
+        AMP = "&",
+        ANDAND = "&&",
+        PIPE = "|",
+        OROR = "||",
+        CARET = "^",
+        TILDE = "~",
+        BANG = "!",
+        INCREMENT = "++",
+        DECREMENT = "--",
+        PLUS_EQ = "+=",
+        MINUS_EQ = "-=",
+        STAR_EQ = "*=",
+        SLASH_EQ = "/=",
+        PERCENT_EQ = "%=",
+        AMP_EQ = "&=",
+        PIPE_EQ = "|=",
+        CARET_EQ = "^=",
+        SHL_EQ = "<<=",
+    }
+
+    translation_unit: _top_item*,
+
+    _top_item:
+        &(declaration_specifiers _declarator "{") function_definition
+        | &(plain_type_name _declarator "{") user_function
+        | objc_interface
+        | objc_implementation
+        | &("@protocol" IDENT (";" | ",")) objc_forward_declaration
+        | objc_protocol
+        | objc_class_declaration
+        | objc_import
+        | declaration_statement,
+
+    function_definition: declaration_specifiers _declarator compound_statement,
+    user_function: plain_type_name _declarator compound_statement,
+
+    declaration_statement: _user_type_declaration | &(declaration_specifiers plain_type_name _declarator) _qualified_user_declaration | _default_declaration,
+    _qualified_user_declaration: declaration_specifiers plain_type_name (_init_declarator % ",") ";",
+    _user_type_declaration: plain_type_name (_init_declarator % ",") ";",
+    _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
+    _init_declarator: _declarator ["=" _initializer],
+    _initializer: designated_field | &(array_suffix "=") designated_index | _expression@assign | initializer_list,
+    initializer_list: "{" (_initializer %? ",") "}",
+    designated_field: "." IDENT "=" _initializer,
+    designated_index: array_suffix "=" _initializer,
+
+
+    declaration_specifiers: _declaration_specifier+,
+    _declaration_specifier:
+        "typedef" | "extern" | "static" | "auto" | "register" | "inline" | "const" | "volatile"
+        | type_specifier,
+    type_specifier:
+        "void" | "char" | "short" | "int" | "long" | "float" | "double"
+        | "signed" | "unsigned" | "id" | "SEL" | "Class" | "BOOL"
+        | struct_or_union_specifier
+        | enum_specifier,
+    plain_type_name: IDENT,
+
+    struct_or_union_specifier: ("struct" | "union") [IDENT] [struct_body],
+    struct_body: "{" _struct_declaration* "}",
+    _struct_declaration: declaration_specifiers (_struct_declarator % ",") ";",
+    _struct_declarator: _declarator [":" _expression@assign],
+
+    enum_specifier: "enum" [IDENT] [enum_body],
+    enum_body: "{" (_enumerator %? ",") "}",
+    _enumerator: IDENT ["=" _expression@assign],
+
+    _declarator: pointer* direct_declarator,
+    pointer: "*" _pointer_qualifier*,
+    _pointer_qualifier: "const" | "volatile",
+    direct_declarator: _direct_base _declarator_suffix*,
+    _direct_base: IDENT | parenthesized_declarator,
+    parenthesized_declarator: "(" _declarator ")",
+    _declarator_suffix: array_suffix | parameter_list,
+    array_suffix: "[" [_expression] "]",
+    parameter_list: "(" (_parameter % ",") ")",
+    _parameter: _user_type_parameter | _default_parameter | "...",
+    _user_type_parameter: plain_type_name _declarator,
+    _default_parameter: declaration_specifiers [_declarator],
+
+    _abstract_declarator: pointer+ abstract_suffix*,
+    abstract_suffix: array_suffix | parameter_list,
+    type_name: _type_prefixed | _user_type_name,
+    _type_prefixed: declaration_specifiers [_abstract_declarator],
+    _user_type_name: plain_type_name [_abstract_declarator],
+
+    compound_statement: "{" _statement* "}",
+
+    _statement:
+        compound_statement
+        | if_statement
+        | switch_statement
+        | while_statement
+        | do_statement
+        | for_statement
+        | return_statement
+        | break_statement
+        | continue_statement
+        | goto_statement
+        | labeled_statement
+        | try_statement
+        | throw_statement
+        | synchronized_statement
+        | autoreleasepool_statement
+        | objc_synthesize
+        | objc_dynamic
+        | &(declaration_specifiers) declaration_statement
+        | &(plain_type_name _declarator) declaration_statement
+        | expression_statement,
+
+    if_statement: "if" parenthesized_expression _statement ["else" _statement],
+    switch_statement: "switch" parenthesized_expression switch_body,
+    switch_body: "{" _switch_item* "}",
+    _switch_item: case_statement | default_statement | _statement,
+    case_statement: "case" _expression@assign ":" _statement*,
+    default_statement: "default" ":" _statement*,
+    while_statement: "while" parenthesized_expression _statement,
+    do_statement: "do" _statement "while" parenthesized_expression ";",
+    for_statement: &("for" for_in_header) for_in_statement | classic_for_statement,
+    classic_for_statement: "for" for_header _statement,
+    for_header: "(" [_for_init] ";" [_expression] ";" [_expression] ")",
+    _for_init: &(declaration_specifiers) _for_declaration | _expression,
+    _for_declaration: declaration_specifiers (_init_declarator % ","),
+    for_in_statement: "for" for_in_header _statement,
+    for_in_header: "(" (declaration_specifiers [_declarator] | plain_type_name _declarator) "in" _expression ")",
+    parenthesized_expression: "(" _expression ")",
+    return_statement: "return" [_expression] ";",
+    break_statement: "break" ";",
+    continue_statement: "continue" ";",
+    goto_statement: "goto" (IDENT | "*" _expression) ";",
+    labeled_statement: IDENT ":" _statement,
+    try_statement: "@try" compound_statement catch_clause* [finally_clause],
+    catch_clause: "@catch" catch_parameter compound_statement,
+    catch_parameter: "(" [_parameter] ")",
+    finally_clause: "@finally" compound_statement,
+    throw_statement: "@throw" [_expression] ";",
+    synchronized_statement: "@synchronized" synchronized_arguments compound_statement,
+    synchronized_arguments: "(" _expression ")",
+    autoreleasepool_statement: "@autoreleasepool" compound_statement,
+    expression_statement: _expression ";",
+
+    // ---- @-declarations ----
+
+    objc_interface: "@interface" IDENT [":" IDENT] [protocol_list] [ivar_block] _interface_item* "@end",
+    protocol_list: "<" (protocol_name % ",") _gt,
+    protocol_name: IDENT,
+    _gt: ">" | GT_JOINED,
+    ivar_block: "{" ivar_declaration* "}",
+    ivar_declaration: (declaration_specifiers | plain_type_name) (_declarator % ",") ";",
+    _interface_item: objc_method_declaration | objc_property_declaration | declaration_statement | ";",
+
+    objc_implementation: "@implementation" IDENT [":" IDENT] _implementation_item* "@end",
+    _implementation_item: objc_method_definition | &(declaration_specifiers _declarator "{") function_definition | objc_synthesize | objc_dynamic | declaration_statement | ";",
+    objc_method_definition: ("-" | "+") [method_type] method_selector compound_statement,
+    objc_method_declaration: ("-" | "+") [method_type] method_selector ";",
+    method_type: "(" type_name ")",
+    method_selector: IDENT | _selector_keyword+,
+    _selector_keyword: IDENT ":" [method_type] [IDENT],
+
+    objc_protocol: "@protocol" IDENT [protocol_list] _protocol_item* "@end",
+    _protocol_item: objc_method_declaration | objc_property_declaration | optional_marker | required_marker | declaration_statement | ";",
+    optional_marker: "@optional",
+    required_marker: "@required",
+    objc_forward_declaration: "@protocol" IDENT ("," IDENT)* ";",
+    objc_class_declaration: "@class" (IDENT % ",") ";",
+
+    objc_property_declaration: "@property" [property_attributes] _property_type (_declarator % ",") ";",
+    _property_type: declaration_specifiers | plain_type_name,
+    property_attributes: "(" (_property_attribute % ",") ")",
+    _property_attribute: IDENT ["=" IDENT],
+
+    objc_synthesize: "@synthesize" (_synthesized_name % ",") ";",
+    _synthesized_name: IDENT ["=" IDENT],
+    objc_dynamic: "@dynamic" (IDENT % ",") ";",
+    objc_import: "@import" (IDENT % ",") ";",
+
+    // ---- expressions ----
+
+    _expression: precedence _primary {
