@@ -1,0 +1,169 @@
+# deep-lex differential corpus
+# A section starts with a marker line: the marker, a space, the path, a space,
+# and the exact byte length. The body is that many bytes.
+#name python/01_basic.py 22
+x = 1
+print(x)
+y += 2
+#name python/02_def.py 47
+def add(a, b=2, *rest, **kw):
+    return a + b
+#name python/03_class.py 81
+class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+#name python/04_indent.py 60
+if x:
+    if y:
+        z = 1
+    else:
+        z = 2
+w = 3
+#name python/05_comment.py 55
+# a leading comment
+
+x = 1  # trailing
+# another
+y = 2
+#name python/06_strings.py 88
+a = "plain"
+b = 'single'
+c = """triple
+line"""
+d = r"raw\n"
+e = f"fmt {x}"
+f = b"bytes"
+#name python/07_brackets.py 67
+total = sum(
+    a,
+    b,
+)
+value = 1 + \
+    2
+items = [1, 2, 3]
+#name python/08_ops.py 86
+p = a ** b
+q = a // b
+r = a @ b
+s = a <> b
+t = (n := 10)
+def f() -> int:
+    return n
+#name python/09_numbers.py 73
+a = 0xFF
+b = 0b1010
+c = 0o777
+d = 1_000_000
+e = 3.14
+f = 1e10
+g = 2.5e-3
+#name python/10_malformed.py 36
+x = "unterminated
+y = 1
+def broken(
+#name json/01_object.json 25
+{"name": "value", "n": 1}#name json/02_array.json 36
+[1, 2, 3, "four", true, false, null]#name json/03_nested.json 39
+{"a": {"b": [{"c": 1}, {"d": [2, 3]}]}}#name json/04_escapes.json 26
+{"s": "a\"b\\c\n\t\u00e9"}#name json/05_numbers.json 41
+{"i": -12, "f": 3.5, "e": 2.5e-3, "z": 0}#name json/06_literals.json 34
+{"t": true, "f": false, "n": null}#name json/07_whitespace.json 27
+{
+  "a" : 1 ,
+
+  "b" : 2
+}
+#name json/08_comments.json 42
+{"a": 1} // trailing
+/* block */
+{"b": 2}
+#name json/09_malformed.json 51
+{"single": 'x', "word": bare, "bad": "unterminated}#name json/10_empty.json 2
+[]#name javascript/01_basic.js 39
+let x = 1;
+const y = x + 2;
+var z = y;
+#name javascript/02_function.js 76
+function add(a, b = 2, ...rest) {
+  return a + b;
+}
+const f = (x) => x * 2;
+#name javascript/03_class.js 89
+class Point {
+  constructor(x, y) {
+    this.x = x;
+  }
+  get sum() { return this.x; }
+}
+#name javascript/04_regex.js 71
+const re = /ab+c/gi;
+if (re.test(s)) { x = a / b; }
+const div = 1 / 2;
+#name javascript/05_template.js 39
+const s = `a${b}c`;
+const t = `plain`;
+#name javascript/06_comments.js 59
+// line comment
+/* block
+   comment */
+let a = 1; // after
+#name javascript/07_strings.js 57
+let a = "double";
+let b = 'single';
+let c = "esc\"aped";
+#name javascript/08_numbers.js 74
+let a = 0xFF;
+let b = 0b11;
+let c = 0o17;
+let d = 1_000;
+let e = 3.14e-2;
+#name javascript/09_operators.js 75
+a **= 2;
+b &&= c;
+d ||= e;
+f ??= g;
+h = a ** b;
+i = a >> b;
+j = a?.b ?? c;
+#name javascript/10_malformed.js 42
+let a = "unterminated;
+let b = 1;
+/* open
+#name typescript/01_types.ts 63
+let x: number = 1;
+let y: string = "s";
+let z: boolean = true;
+#name typescript/02_interface.ts 70
+interface Point {
+  x: number;
+  y?: number;
+  readonly id: string;
+}
+#name typescript/03_generics.ts 101
+function id<T>(x: T): T { return x; }
+type Pair<A, B> = [A, B];
+const m = new Map<string, number>();
+#name typescript/04_enum.ts 36
+enum Color { Red, Green = 2, Blue }
+#name typescript/05_imports.ts 106
+import { readFile } from "node:fs";
+import type { Config } from "./config";
+export default class Thing {}
+#name typescript/06_decorators.ts 72
+@Component({ selector: "app" })
+class View {
+  @Input() name: string;
+}
+#name typescript/07_unions.ts 85
+type Result = string | number | null;
+const f = (x: string | undefined): void => {};
+#name typescript/08_regex.ts 41
+const re = /^[a-z]+$/m;
+const q = n / 2;
+#name typescript/09_template.ts 26
+const s = `row ${i + 1}`;
+#name typescript/10_malformed.ts 39
+interface Broken {
+  x:
+let y = `open;
