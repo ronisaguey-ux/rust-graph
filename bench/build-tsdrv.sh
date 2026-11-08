@@ -19,7 +19,8 @@ mkdir -p "$OUT/obj" "$SRC"
 # tree-sitter itself is the v0.27.2 release. Rows with no grammar are corpus
 # sources, named by the lists in bench/corpus as target/bench/src/NAME/...:
 # rust-analyzer is its 2026-11-02 release tag, tokio its tokio-1.54.1 tag,
-# webpack its v5.112.2 tag, vue-core v3.5.45 and excalidraw v0.18.1.
+# webpack its v5.112.2 tag, vue-core v3.5.45, excalidraw v0.18.1, hugo v0.169.0
+# and go go1.25.14.
 PINS='
 tree-sitter            tree-sitter/tree-sitter            3fb7be49145acfb07e33b61ed5689e2b6771b2e9 -
 tree-sitter-python     tree-sitter/tree-sitter-python     26855eabccb19c6abf499fbc5b8dc7cc9ab8bc64 .
@@ -39,6 +40,8 @@ tokio                  tokio-rs/tokio                     b53b2001ed2ccfd9b87e32
 webpack                webpack/webpack                    e95a7f2764281318c038e9384371797dfef0e48a -
 vue-core               vuejs/core                         8b479a89445868d474f17e2d837765e7c9ece5e4 -
 excalidraw             excalidraw/excalidraw              a2ec2889babf7d2295469c6d90ebe77fae57df84 -
+hugo                   gohugoio/hugo                      1da10fc44701c566b1669cdb2d12638f155138bd -
+go                     golang/go                          08118a942518cc18db507ec182acffe7364a92a3 -
 '
 
 fetch() { # name repository commit
