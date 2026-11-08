@@ -49,6 +49,11 @@
 //!   generics, tuples, dictionaries, arrays and function arrows are types;
 //!   `where` constraints are parsed as types too. Opaque `some P & Q` and
 //!   protocol compositions are not modelled.
+//! - **A binding's initialiser and a condition's are different rules.** A
+//!   `let` in a condition stops before the block (`if let x = foo {`), so its
+//!   initialiser enters the expression table above the trailing-closure row;
+//!   a stored property's initialiser takes the whole table, which is what lets
+//!   `let doubled = numbers.map { ... }` keep its closure.
 //! - **A decision sees three tokens.** Declarations sharing a modifier prefix
 //!   and a closure's `(x: Int) in` head both need more, so they use `&(...)`
 //!   predicates.

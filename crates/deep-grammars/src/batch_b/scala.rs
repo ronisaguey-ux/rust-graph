@@ -38,9 +38,15 @@
 //! - **A string's interpolation is a mode switch.** `${...}` returns to code
 //!   and the matching `}` returns to the string; the step lexer scans the whole
 //!   literal instead, so a field's expression is not parsed.
-//! - **A `case` body is statements, not definitions.** `case x => def y = 1`
-//!   is legal Scala but rare; a case body here is `_statement*`, so a nested
-//!   definition in a case would be an error node.
+//! - **Identifier infix calls are not modelled.** `0 until 3` and `xs map f`
+//!   put a *name* where the table expects an operator, and a name after an
+//!   operand is also how the next statement starts, so no row is possible; the
+//!   fixtures call `.until(3)`/`.map(f)`, which is the same call in Scala.
+//!   `case` bodies are therefore `_statement*` while ordinary blocks are
+//!   `_member*`, so a local `val` or nested `def` is a block member only.
+//! - **A typed pattern's type cannot be a function type.** `case f: A => B` is
+//!   legal Scala, but the `=>` before the case body is the same token, so a
+//!   typed pattern takes a type without the arrow suffix.
 //! - **A decision sees three tokens.** The modifier-prefixed declarations and
 //!   the `case` pattern forms (`e: Type` against `e`) use `&(...)` predicates.
 //! - **One kind per rule**, so `class_definition`, `trait_definition`,
