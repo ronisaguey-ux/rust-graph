@@ -102,9 +102,9 @@ const LUA_VALID: &[(&str, &str)] = &[
 /// `(file, language name, top-level kinds)` for every malformed fixture.
 const MALFORMED: &[(&str, &str, &str)] = &[
     ("css_broken.css", "css", "rule_set rule_set"),
-    ("lua_broken.lua", "lua", "local_function"),
     ("html_broken.html", "html", "element"),
     ("json_broken_array.json", "json", "object"),
+    ("lua_broken.lua", "lua", "local_function"),
     ("shell_broken_if.sh", "shell", "simple_command if_clause ERROR"),
     ("sql_broken_insert.sql", "sql", "select_statement insert_statement"),
     ("yaml_broken.yaml", "yaml", "key_entry"),
