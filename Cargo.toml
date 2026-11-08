@@ -7,7 +7,7 @@ description = "A code knowledge graph for 40+ languages. Rust std only, no parse
 
 [workspace]
 members = [
-    "crates/deep-abi", "crates/rust-graph-deep", "crates/deep-grammars"]
+    "crates/deep-abi", "crates/rust-graph-deep", "crates/deep-grammars", "crates/deep-lex"]
 
 [features]
 parser = ["dep:rust-graph-deep"]

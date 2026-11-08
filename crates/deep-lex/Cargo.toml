@@ -1,0 +1,9 @@
+[package]
+name = "deep-lex"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "A context-sensitive, zero-copy lexer for the deep parser: byte offsets, mode stacks, Python layout, bracket pairs and external scanners. std only."
+
+[dependencies]
+deep-abi = { path = "../deep-abi" }
