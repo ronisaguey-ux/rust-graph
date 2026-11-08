@@ -17,6 +17,8 @@
 //! definitions below never name a runtime path other than the default
 //! `crate::deep`, so moving them onto that crate later is a one-line change.
 
+pub mod batch_a;
+pub mod batch_b;
 pub mod batch_c;
 pub mod deep;
 pub mod javascript;
