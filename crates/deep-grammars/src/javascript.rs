@@ -738,3 +738,373 @@ fn word(c: &mut Cursor) -> Kind {
     let mut length = 0;
     loop {
         let taken = c.eat_while(is_word_byte);
+        length += taken;
+        // `abc`: an escape in a name.
+        if c.peek() == b'\\' && c.peek_at(1) == b'u' {
+            c.bump_n(2);
+            length += 2;
+        } else {
+            break;
+        }
+    }
+    keyword(&start[..length])
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"break" => KW_BREAK,
+        b"case" => KW_CASE,
+        b"catch" => KW_CATCH,
+        b"class" => KW_CLASS,
+        b"const" => KW_CONST,
+        b"continue" => KW_CONTINUE,
+        b"debugger" => KW_DEBUGGER,
+        b"default" => KW_DEFAULT,
+        b"delete" => KW_DELETE,
+        b"do" => KW_DO,
+        b"else" => KW_ELSE,
+        b"enum" => KW_ENUM,
+        b"export" => KW_EXPORT,
+        b"extends" => KW_EXTENDS,
+        b"false" => KW_FALSE,
+        b"finally" => KW_FINALLY,
+        b"for" => KW_FOR,
+        b"function" => KW_FUNCTION,
+        b"if" => KW_IF,
+        b"import" => KW_IMPORT,
+        b"in" => KW_IN,
+        b"instanceof" => KW_INSTANCEOF,
+        b"new" => KW_NEW,
+        b"null" => KW_NULL,
+        b"return" => KW_RETURN,
+        b"super" => KW_SUPER,
+        b"switch" => KW_SWITCH,
+        b"this" => KW_THIS,
+        b"throw" => KW_THROW,
+        b"true" => KW_TRUE,
+        b"try" => KW_TRY,
+        b"typeof" => KW_TYPEOF,
+        b"var" => KW_VAR,
+        b"void" => KW_VOID,
+        b"while" => KW_WHILE,
+        b"with" => KW_WITH,
+        b"let" => KW_LET,
+        b"yield" => KW_YIELD,
+        b"await" => KW_AWAIT,
+        b"async" => KW_ASYNC,
+        b"get" => KW_GET,
+        b"set" => KW_SET,
+        b"static" => KW_STATIC,
+        b"of" => KW_OF,
+        b"from" => KW_FROM,
+        b"as" => KW_AS,
+        b"type" => KW_TYPE,
+        b"interface" => KW_INTERFACE,
+        b"namespace" => KW_NAMESPACE,
+        b"module" => KW_MODULE,
+        b"declare" => KW_DECLARE,
+        b"abstract" => KW_ABSTRACT,
+        b"readonly" => KW_READONLY,
+        b"public" => KW_PUBLIC,
+        b"private" => KW_PRIVATE,
+        b"protected" => KW_PROTECTED,
+        b"implements" => KW_IMPLEMENTS,
+        b"keyof" => KW_KEYOF,
+        b"infer" => KW_INFER,
+        b"is" => KW_IS,
+        b"asserts" => KW_ASSERTS,
+        b"unique" => KW_UNIQUE,
+        b"satisfies" => KW_SATISFIES,
+        b"override" => KW_OVERRIDE,
+        b"accessor" => KW_ACCESSOR,
+        b"global" => KW_GLOBAL,
+        _ => IDENT,
+    }
+}
+
+/// Decimal, hex, octal and binary numbers, with `_` separators, fractions,
+/// exponents and the BigInt `n`.
+fn number(c: &mut Cursor) -> Kind {
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'o' | b'O' | b'b' | b'B') {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_hexdigit() || byte == b'_');
+        c.eat(b'n');
+        return NUMBER;
+    }
+    c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    if c.peek() == b'.' {
+        c.bump();
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    if matches!(c.peek(), b'e' | b'E') && (c.peek_at(1).is_ascii_digit() || (matches!(c.peek_at(1), b'+' | b'-') && c.peek_at(2).is_ascii_digit())) {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    c.eat(b'n');
+    NUMBER
+}
+
+/// A template literal from its backtick: false if it never closes.
+fn template(c: &mut Cursor) -> bool {
+    c.bump();
+    while !c.at_end() {
+        match c.peek() {
+            b'\\' => c.bump_n(2),
+            b'`' => {
+                c.bump();
+                return true;
+            }
+            b'$' if c.peek_at(1) == b'{' => {
+                c.bump();
+                if !code_in_braces(c) {
+                    return false;
+                }
+            }
+            _ => c.bump(),
+        }
+    }
+    false
+}
+
+/// Code from a `{` to its `}`, as in `${...}` and JSX's `{...}`, with strings,
+/// templates, comments and JSX inside skipped whole. False if it never closes.
+fn code_in_braces(c: &mut Cursor) -> bool {
+    c.bump();
+    let mut depth = 1u32;
+    // Whether the last significant byte can end an operand: then `/` divides
+    // and `<` compares, else they start a regular expression or JSX.
+    let mut operand = false;
+    while !c.at_end() {
+        let byte = c.peek();
+        match byte {
+            b'{' => {
+                depth += 1;
+                c.bump();
+                operand = false;
+            }
+            b'}' => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    return true;
+                }
+                operand = true;
+            }
+            b'"' | b'\'' => {
+                c.bump();
+                c.quoted(byte, true);
+                operand = true;
+            }
+            b'`' => {
+                template(c);
+                operand = true;
+            }
+            b'/' if c.peek_at(1) == b'/' => {
+                c.eat_while(|byte| byte != b'\n');
+            }
+            b'/' if c.peek_at(1) == b'*' => block_comment(c),
+            b'/' if !operand => {
+                regex(c);
+                operand = true;
+            }
+            b'<' if !operand && (is_word_start(c.peek_at(1)) || c.peek_at(1) == b'>') => {
+                jsx_element(c);
+                operand = true;
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => c.bump(),
+            _ if is_word_byte(byte) => {
+                let start = c.rest();
+                let length = c.eat_while(is_word_byte);
+                // After a keyword such as `return`, an operand starts.
+                operand = !matches!(&start[..length], b"return" | b"typeof" | b"case" | b"do" | b"else" | b"in" | b"of" | b"new" | b"delete" | b"void" | b"throw" | b"yield" | b"await");
+            }
+            b')' | b']' => {
+                c.bump();
+                operand = true;
+            }
+            _ => {
+                c.bump();
+                operand = false;
+            }
+        }
+    }
+    false
+}
+
+/// A regular expression from its `/`: false if the line ends first.
+fn regex(c: &mut Cursor) -> bool {
+    c.bump();
+    let mut class = false;
+    loop {
+        match c.peek() {
+            0 if c.at_end() => return false,
+            b'\n' | b'\r' => return false,
+            b'\\' => c.bump_n(2),
+            b'[' => {
+                class = true;
+                c.bump();
+            }
+            b']' => {
+                class = false;
+                c.bump();
+            }
+            b'/' if !class => {
+                c.bump();
+                c.eat_while(is_word_byte);
+                return true;
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// `<T,>(` or `<T extends U>(`: a generic arrow function in TSX, not a tag.
+fn generic_arrow(rest: &[u8]) -> bool {
+    let mut at = 1;
+    while at < rest.len() && is_word_byte(rest[at]) {
+        at += 1;
+    }
+    while at < rest.len() && rest[at] == b' ' {
+        at += 1;
+    }
+    rest.get(at) == Some(&b',') || rest[at.min(rest.len())..].starts_with(b"extends ")
+}
+
+/// A JSX element or fragment from its `<`, to the end of its closing tag:
+/// tags nest, attributes and children may hold `{...}` code. False if it
+/// never closes.
+fn jsx_element(c: &mut Cursor) -> bool {
+    let mut depth = 0u32;
+    loop {
+        // At a `<`: a tag.
+        c.bump();
+        let closing = c.eat(b'/');
+        // Type arguments after a tag's name, `<Select<T | false> ...>`, nest.
+        let mut angles = 0u32;
+        // The tag: name, attributes, up to `>` or `/>`.
+        loop {
+            match c.peek() {
+                0 if c.at_end() => return false,
+                b'<' => {
+                    angles += 1;
+                    c.bump();
+                }
+                b'>' if angles > 0 => {
+                    angles -= 1;
+                    c.bump();
+                }
+                b'"' | b'\'' => {
+                    let quote = c.peek();
+                    c.bump();
+                    c.quoted(quote, false);
+                }
+                b'{' => {
+                    if !code_in_braces(c) {
+                        return false;
+                    }
+                }
+                b'/' if c.peek_at(1) == b'>' => {
+                    c.bump_n(2);
+                    if depth == 0 {
+                        return true;
+                    }
+                    break;
+                }
+                b'>' => {
+                    c.bump();
+                    if closing {
+                        depth -= 1;
+                        if depth == 0 {
+                            return true;
+                        }
+                    } else {
+                        depth += 1;
+                    }
+                    break;
+                }
+                _ => c.bump(),
+            }
+        }
+        // Children: text and `{...}` up to the next tag.
+        loop {
+            match c.peek() {
+                0 if c.at_end() => return false,
+                b'{' => {
+                    if !code_in_braces(c) {
+                        return false;
+                    }
+                }
+                b'<' => break,
+                _ => c.bump(),
+            }
+        }
+    }
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'(', _, _) => (LPAREN, 1),
+        (b')', _, _) => (RPAREN, 1),
+        (b'[', _, _) => (LBRACKET, 1),
+        (b']', _, _) => (RBRACKET, 1),
+        (b'{', _, _) => (LBRACE, 1),
+        (b'}', _, _) => (RBRACE, 1),
+        (b';', _, _) => (SEMI, 1),
+        (b',', _, _) => (COMMA, 1),
+        (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        (b'.', _, _) => (DOT, 1),
+        (b'?', b'.', _) if !d.is_ascii_digit() => (OPTIONAL_CHAIN, 2),
+        (b'?', b'?', b'=') => (NULLISH_EQ, 3),
+        (b'?', b'?', _) => (NULLISH, 2),
+        (b'?', _, _) => (QUESTION, 1),
+        (b':', _, _) => (COLON, 1),
+        (b'@', _, _) => (AT, 1),
+        (b'=', b'>', _) => (ARROW, 2),
+        (b'=', b'=', b'=') => (STRICT_EQ, 3),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'=', _, _) => (ASSIGN, 1),
+        (b'!', b'=', b'=') => (STRICT_NE, 3),
+        (b'!', b'=', _) => (NE, 2),
+        (b'!', _, _) => (BANG, 1),
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'<', _, _) => (LT, 1),
+        (b'>', b'>', _) => (GT_JOINED, 1),
+        (b'>', b'=', _) => (GE, 2),
+        (b'>', _, _) => (GT, 1),
+        (b'~', _, _) => (TILDE, 1),
+        (b'+', b'+', _) => (INCREMENT, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'+', _, _) => (PLUS, 1),
+        (b'-', b'-', _) => (DECREMENT, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'-', _, _) => (MINUS, 1),
+        (b'*', b'*', b'=') => (STARSTAR_EQ, 3),
+        (b'*', b'*', _) => (STARSTAR, 2),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'*', _, _) => (STAR, 1),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'/', _, _) => (SLASH, 1),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'%', _, _) => (PERCENT, 1),
+        (b'&', b'&', b'=') => (ANDAND_EQ, 3),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'&', _, _) => (AMP, 1),
+        (b'|', b'|', b'=') => (OROR_EQ, 3),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'|', _, _) => (PIPE, 1),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'^', _, _) => (CARET, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
+
