@@ -7,7 +7,10 @@
 //! This module is not declared in `lib.rs` yet: the owner of that file adds
 //! `pub mod batch_e;` with the other fields' lines.
 
+pub mod crystal;
 pub mod d;
+pub mod haskell;
+pub mod nim;
 pub mod ocaml;
 
 #[cfg(test)]
