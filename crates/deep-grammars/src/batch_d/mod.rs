@@ -14,6 +14,7 @@ pub mod awk;
 pub mod clojure;
 pub mod css;
 pub mod elixir;
+pub mod erlang;
 pub mod html;
 pub mod julia;
 pub mod lua;

@@ -18,6 +18,7 @@ use deep_grammars::batch_d::sql::SQL;
 use deep_grammars::batch_d::yaml::YAML;
 use deep_grammars::batch_d::css::CSS;
 use deep_grammars::batch_d::elixir::ELIXIR;
+use deep_grammars::batch_d::erlang::ERLANG;
 use deep_grammars::batch_d::html::HTML;
 use deep_grammars::batch_d::lua::LUA;
 use deep_grammars::batch_d::perl::PERL;
@@ -44,6 +45,7 @@ fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str,
         ("awk", &AWK, AWK_VALID),
         ("perl", &PERL, PERL_VALID),
         ("elixir", &ELIXIR, ELIXIR_VALID),
+        ("erlang", &ERLANG, ERLANG_VALID),
     ]
 }
 
@@ -188,12 +190,22 @@ const ELIXIR_VALID: &[(&str, &str)] = &[
     ("scanner.ex", "module_definition"),
 ];
 
+const ERLANG_VALID: &[(&str, &str)] = &[
+    ("report.erl", "attribute attribute function_definition function_definition function_definition"),
+    ("rules.erl", "attribute attribute attribute attribute function_definition function_definition"),
+    (
+        "scanner.erl",
+        "attribute attribute attribute attribute attribute function_definition function_definition attribute function_definition",
+    ),
+];
+
 /// `(file, language name, top-level kinds)` for every malformed fixture.
 const MALFORMED: &[(&str, &str, &str)] = &[
     ("awk_broken.awk", "awk", "begin_block"),
     ("clojure_broken.clj", "clojure", "ns_form definition_form"),
     ("css_broken.css", "css", "rule_set rule_set"),
     ("elixir_broken.ex", "elixir", "module_definition"),
+    ("erlang_broken.erl", "erlang", "attribute attribute function_definition"),
     ("html_broken.html", "html", "element"),
     ("json_broken_array.json", "json", "object"),
     ("julia_broken.jl", "julia", "function_definition"),
