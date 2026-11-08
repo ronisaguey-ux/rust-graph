@@ -18,6 +18,7 @@
 //! `crate::deep`, so moving them onto that crate later is a one-line change.
 
 pub mod batch_a;
+pub mod batch_e;
 pub mod batch_b;
 pub mod batch_c;
 pub mod batch_d;
