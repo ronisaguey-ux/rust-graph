@@ -1,0 +1,9 @@
+[package]
+name = "deep-tables"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "LALR(1) table generation and compression for rust-graph's deep scan. Standard library only."
+
+[dependencies]
+deep-abi = { path = "../deep-abi" }
