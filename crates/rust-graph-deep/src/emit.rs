@@ -58,7 +58,7 @@ impl Emitter<'_> {
         let root = &grammar.rules[0].name;
         let _ = write!(
             out,
-            "pub static {}: {rt}::syntax::Language = {rt}::syntax::Language {{ name: {:?}, root: {}, kinds: {KINDS}, lex: {}, parse: {} }};",
+            "pub static {}: {rt}::syntax::Language = {rt}::syntax::Language::new({:?}, {}, {KINDS}, {}, {});",
             grammar.name,
             grammar.language,
             rule_constant(root),
@@ -284,7 +284,7 @@ mod tests {
         assert!(out.contains("pub const LIST: rt::syntax::Kind = rt::syntax::FIRST_LANGUAGE_KIND + 7;"), "{out}");
         assert!(!out.contains("pub const X"), "a hidden rule has no kind: {out}");
         assert!(out.contains(r#"rt::syntax::KindInfo { name: "(", class: rt::syntax::Class::Open(0) }"#), "{out}");
-        assert!(out.contains(r#"name: "g", root: TOP, kinds: KINDS, lex: lex, parse: parse_top"#), "{out}");
+        assert!(out.contains(r#"pub static G: rt::syntax::Language = rt::syntax::Language::new("g", TOP, KINDS, lex, parse_top);"#), "{out}");
     }
 
     #[test]

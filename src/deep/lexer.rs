@@ -4,13 +4,15 @@
 //! previous token's end and the token texts concatenate back to the input. Tokens
 //! are final before parsing starts: recovery can never move a token boundary.
 
-use super::syntax::{Kind, Language, UNKNOWN};
+use super::syntax::{Class, Kind, Language, Layout, UNKNOWN, WHITESPACE};
 
 /// Tokens as two parallel arrays. Start of token `i` is the end of token `i - 1`.
 #[derive(Default)]
 pub struct Tokens {
     pub kind: Vec<Kind>,
     pub end: Vec<u32>,
+    /// The layout pass's stack of indentation columns, kept between files.
+    levels: Vec<u32>,
 }
 
 impl Tokens {
@@ -43,6 +45,14 @@ impl Tokens {
     fn push(&mut self, kind: Kind, end: u32) {
         self.kind.push(kind);
         self.end.push(end);
+    }
+
+    /// A zero-width token at `index`, where the token before it ends. Only ever
+    /// moves the trivia after `index`, a few tokens.
+    fn insert_empty(&mut self, index: usize, kind: Kind) {
+        let at = self.start(index);
+        self.kind.insert(index, kind);
+        self.end.insert(index, at);
     }
 }
 
@@ -163,6 +173,9 @@ pub const MAX_INPUT: usize = u32::MAX as usize - 1;
 pub fn lex(src: &[u8], language: &Language, tokens: &mut Tokens) {
     assert!(src.len() <= MAX_INPUT, "input over 4 GiB reached the lexer");
     tokens.clear();
+    if let Some(layout) = language.layout {
+        return lex_layout(src, language, layout, tokens);
+    }
     let mut cursor = Cursor::new(src);
     while !cursor.at_end() {
         let start = cursor.pos;
@@ -179,4 +192,117 @@ pub fn lex(src: &[u8], language: &Language, tokens: &mut Tokens) {
             tokens.push(kind, end);
         }
     }
+}
+
+/// The width of an indentation, as Python counts it: a tab moves to the next
+/// multiple of 8, a form feed starts again at 0. Other bytes (a byte order mark)
+/// count nothing.
+fn indentation(bytes: &[u8]) -> u32 {
+    let mut column = 0u32;
+    for &byte in bytes {
+        match byte {
+            b' ' => column += 1,
+            b'\t' => column = (column / 8 + 1) * 8,
+            b'\x0c' => column = 0,
+            _ => {}
+        }
+    }
+    column
+}
+
+/// [`lex`] for a language with [`Layout`]: the same steps, plus the layout
+/// tokens. One pass; inserting a zero-width token moves only the trivia after
+/// the last real token.
+fn lex_layout(src: &[u8], language: &Language, layout: &Layout, tokens: &mut Tokens) {
+    let mut levels = std::mem::take(&mut tokens.levels);
+    levels.clear();
+    levels.push(0);
+    // Open brackets, not counting layout's own pair.
+    let mut depth = 0u32;
+    // A token of this logical line has been seen, so a line break ends it.
+    let mut in_line = false;
+    // Where the current physical line starts, and whether a token has been seen on it.
+    let mut line_start = 0usize;
+    let mut line_fresh = true;
+    // One past the last significant token: where a `newline` goes.
+    let mut after_last = 0usize;
+    // Where the `dedent`s for the next logical line go: just after its `newline`.
+    let mut after_newline = 0usize;
+    let mut cursor = Cursor::new(src);
+    while !cursor.at_end() {
+        let start = cursor.pos;
+        let mut kind = (language.lex)(&mut cursor);
+        if cursor.pos <= start {
+            cursor.pos = start;
+            cursor.bump_char();
+            kind = UNKNOWN;
+        }
+        let end = cursor.pos as u32;
+        if kind == layout.newline {
+            tokens.push(WHITESPACE, end);
+            line_start = cursor.pos;
+            line_fresh = true;
+            if depth == 0 && in_line {
+                tokens.insert_empty(after_last, layout.newline);
+                after_newline = after_last + 1;
+                in_line = false;
+            }
+            continue;
+        }
+        let class = language.class(kind);
+        if language.is_trivia(kind) {
+            tokens.push(kind, end);
+            continue;
+        }
+        if depth > 0 && line_fresh && layout.resets.contains(&kind) {
+            // `foo(` then a line starting with `def`: the bracket cannot go on.
+            depth = 0;
+            tokens.insert_empty(after_last, layout.newline);
+            after_newline = after_last + 1;
+            in_line = false;
+        }
+        line_fresh = false;
+        if !in_line {
+            let column = indentation(&src[line_start..start]);
+            if column > *levels.last().expect("level 0 stays") {
+                levels.push(column);
+                tokens.push(layout.indent, start as u32);
+            } else {
+                let mut dedents = 0;
+                while column < *levels.last().expect("level 0 stays") {
+                    levels.pop();
+                    dedents += 1;
+                }
+                for _ in 0..dedents {
+                    tokens.insert_empty(after_newline, layout.dedent);
+                }
+                if column > *levels.last().expect("level 0 stays") {
+                    // A dedent to a column no outer line used: an error the
+                    // grammar sees as an unexpected block.
+                    levels.push(column);
+                    tokens.push(layout.indent, start as u32);
+                }
+            }
+            in_line = true;
+        }
+        match class {
+            Class::Open(_) => depth += 1,
+            Class::Close(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if kind == UNKNOWN && tokens.kind.last() == Some(&UNKNOWN) {
+            *tokens.end.last_mut().expect("a last kind has a last end") = end;
+        } else {
+            tokens.push(kind, end);
+        }
+        after_last = tokens.len();
+    }
+    if in_line {
+        tokens.insert_empty(after_last, layout.newline);
+        after_newline = after_last + 1;
+    }
+    for _ in 1..levels.len() {
+        tokens.insert_empty(after_newline, layout.dedent);
+    }
+    tokens.levels = levels;
 }

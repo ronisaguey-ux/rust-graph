@@ -63,6 +63,29 @@ const RESERVED: [KindInfo; FIRST_LANGUAGE_KIND as usize] = {
     table
 };
 
+/// Indentation as syntax (Python, Nim). The runtime lexer turns line breaks into
+/// these tokens, so a grammar consumes layout like any other token, and an
+/// indented block pairs `indent` with `dedent` like brackets, firewall included.
+///
+/// - `newline`: what the language's step lexer returns for a line break. The
+///   runtime stores every line break as whitespace and inserts a zero-width
+///   `newline` right after the last token of each logical line instead, so a
+///   statement ends at its last token. Inside brackets and on blank or
+///   comment-only lines there is none.
+/// - `indent`, `dedent`: zero-width, an `Open`/`Close` pair of one family. An
+///   `indent` sits before the first token of a deeper line; `dedent`s sit right
+///   after the `newline` that ends the block, so a block ends at its last token.
+///   They always balance: the end of the file closes every open level.
+/// - `resets`: tokens that cannot continue a bracketed expression. One that
+///   starts a physical line inside brackets ends them there, so an unclosed `(`
+///   costs one line, not the rest of the file.
+pub struct Layout {
+    pub newline: Kind,
+    pub indent: Kind,
+    pub dedent: Kind,
+    pub resets: &'static [Kind],
+}
+
 /// A language as the runtime sees it: a kind table, a lexer step and a grammar.
 /// Slice 2's `grammar!` generates these; Slice 1 writes JSON's by hand.
 pub struct Language {
@@ -74,13 +97,22 @@ pub struct Language {
     /// Lexes one token at the cursor and returns its kind. It must advance the
     /// cursor; if it does not, the runtime takes one character as [`UNKNOWN`].
     pub lex: fn(&mut Cursor) -> Kind,
+    /// Indentation as tokens, for languages where it is syntax.
+    pub layout: Option<&'static Layout>,
     /// Parses the whole file into the root, which the runtime has already opened.
     pub parse: fn(&mut Parser),
 }
 
 impl Language {
+    /// A language with no layout.
     pub const fn new(name: &'static str, root: Kind, kinds: &'static [KindInfo], lex: fn(&mut Cursor) -> Kind, parse: fn(&mut Parser)) -> Self {
-        Language { name, root, kinds, lex, parse }
+        Language { name, root, kinds, lex, layout: None, parse }
+    }
+
+    /// The same language, with indentation as tokens.
+    pub const fn with_layout(mut self, layout: &'static Layout) -> Self {
+        self.layout = Some(layout);
+        self
     }
 
     #[inline]
