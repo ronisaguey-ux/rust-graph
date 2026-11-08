@@ -7,3 +7,6 @@ description = "LALR(1) table generation and compression for rust-graph's deep sc
 
 [dependencies]
 deep-abi = { path = "../deep-abi" }
+
+[dev-dependencies]
+deep-rt = { path = "../deep-rt" }
