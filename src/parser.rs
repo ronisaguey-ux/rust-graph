@@ -168,7 +168,8 @@ impl<'a> Parser<'a> {
             return;
         }
         if let Some(last) = self.stmt.last() {
-            let continues = last.kind == Kind::Op
+            let continues = self.lang.operator_continues
+                && last.kind == Kind::Op
                 && !matches!(self.raw(last), b")" | b"]" | b"}" | b":" | b"++" | b"--" | b"=" | b"!" | b"?");
             let trailing_equal = last.kind == Kind::Op && self.raw(last) == b"=" && self.lang.blocks != Blocks::Indent;
             if continues || trailing_equal {

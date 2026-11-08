@@ -293,7 +293,6 @@ fn a_class_first_met_near_the_depth_cap_stays_reachable() {
 }
 
 #[test]
-#[ignore = "fix held until the holdout sweep closes; un-ignore with the fix"]
 fn a_python_star_import_ends_at_its_line() {
     let tree = Tree::new("py-star", &[
         ("a.py", "from m import *\ndef f():\n    helper()\n"),

@@ -64,6 +64,9 @@ pub struct Language {
     pub case_insensitive: bool,
     /// A statement can only end at `;`, so a newline never terminates one.
     pub semicolons: bool,
+    /// A trailing operator carries the statement onto the next line. Python's
+    /// lines only continue inside brackets or after `\`, so `import *` ends.
+    pub operator_continues: bool,
     /// Calls may omit parentheses at the start of a statement (`system "ls"`).
     pub command_calls: bool,
     /// Calls are juxtaposition everywhere (`f x y`).
@@ -116,6 +119,7 @@ const BASE: Language = Language {
     regex_literals: false,
     case_insensitive: false,
     semicolons: true,
+    operator_continues: true,
     command_calls: false,
     apply_calls: false,
     global_names: false,
@@ -211,6 +215,7 @@ pub const LANGUAGES: &[Language] = &[
         triple_quotes: true,
         interp: Interp::PyFormat,
         semicolons: false,
+        operator_continues: false,
             defs: &["def"],
         classes: &["class"],
         imports: Imports::Python,
