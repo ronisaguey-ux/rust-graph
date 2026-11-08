@@ -18,6 +18,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "deep-fuzz"
+version = "0.1.0"
+dependencies = [
+ "deep-grammars",
+]
+
+[[package]]
 name = "deep-grammars"
 version = "0.1.0"
 dependencies = [
