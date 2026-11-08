@@ -18,7 +18,8 @@
 //!   misleading.
 //! - **Generics (`List(Of String)`)** are not modelled: `Of` is a keyword but
 //!   the bracketed type argument list is not a rule.
-//! - **Handles/WithEvents/Property` bodies** are not modelled.
+//! - **`Handles`/`WithEvents` clauses** are not modelled, and the `End` keyword
+//!   is not checked against the procedure's head.
 //! - **A `#date#` literal** is one token, so its separators are not checked.
 
 use crate::batch_d::lex;
