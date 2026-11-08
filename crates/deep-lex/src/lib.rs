@@ -40,7 +40,7 @@ mod scan;
 pub use brackets::{Brackets, NONE};
 pub use cursor::{Cursor, Span};
 pub use deep_abi::{Lexer, StateId, Token};
-pub use kind::{Kind, Language, SymbolMap, OPERATORS};
+pub use kind::{Kind, Language, SymbolMap, ALL_KINDS, OPERATORS};
 pub use mode::{IndentStack, Mode, ModeStack, INDENT_CAP, MODE_CAP};
 pub use profiles::{PairRule, Profile, ALL, JAVASCRIPT, JSON, PYTHON, TYPESCRIPT};
 pub use recovery::PairJump;
@@ -73,6 +73,9 @@ pub struct DeepLexer<'a, S = NativeScanner> {
     pending_dedents: u32,
     /// Whether a zero-width INDENT is owed.
     pending_indent: bool,
+    /// End of the last significant token: where a logical NEWLINE sits, as the
+    /// old lexer placed it (not after trailing whitespace).
+    last_token_end: u32,
     /// Where the pending INDENT/DEDENT tokens sit (byte offset, zero width).
     layout_pos: u32,
     /// Open-bracket nesting; layout is suppressed while this is non-zero.
@@ -122,6 +125,7 @@ impl<'a, S: ExternalScanner> DeepLexer<'a, S> {
             line_has_token: false,
             pending_dedents: 0,
             pending_indent: false,
+            last_token_end: 0,
             layout_pos: 0,
             suppress: 0,
             first_line: true,
@@ -232,6 +236,7 @@ impl<'a, S: ExternalScanner> DeepLexer<'a, S> {
             self.prev = kind;
             if !kind.is_trivia() {
                 self.line_has_token = true;
+                self.last_token_end = span.end;
             }
         }
         if self.modes.top() == Mode::Default {

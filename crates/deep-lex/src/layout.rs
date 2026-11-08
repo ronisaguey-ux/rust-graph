@@ -40,17 +40,18 @@ impl<'a, S: crate::ExternalScanner> DeepLexer<'a, S> {
                     self.cur.skip_while(is_ascii_space);
                 }
                 Some(b) if is_line_terminator(b) => {
-                    let at = self.cur.pos();
                     let layout = self.layout_on();
                     python::eat_terminator(&mut self.cur);
-                    self.line_has_token = false;
                     if layout {
                         // Only a token ends a logical line, so only then does
-                        // line-start bookkeeping begin. A suppressed break
+                        // line-start bookkeeping begin, and a suppressed break
                         // (inside brackets, non-layout language) is plain
-                        // whitespace and must not arm `begin_line`.
+                        // whitespace: it must not arm `begin_line` nor end the
+                        // logical line, or the file's last logical line would
+                        // be forgotten at EOF.
+                        self.line_has_token = false;
                         self.line_start = true;
-                        return Some(self.layout_token_at(Kind::Newline, at));
+                        return Some(self.layout_token_at(Kind::Newline, self.last_token_end));
                     }
                 }
                 Some(b'\\') => {
@@ -150,6 +151,10 @@ impl<'a, S: crate::ExternalScanner> DeepLexer<'a, S> {
                 self.indents.pop();
                 n += 1;
             }
+            // DEDENTs hang on the end of the line that opened the shallower
+            // level, as the old lexer placed them, not on this line's first
+            // byte; token spans then stay identical.
+            self.layout_pos = self.last_token_end;
             self.pending_dedents = n;
         }
 
@@ -170,15 +175,14 @@ impl<'a, S: crate::ExternalScanner> DeepLexer<'a, S> {
         if !self.lang.has_layout() || self.modes.top() != Mode::Default {
             return None;
         }
-        let at = self.cur.pos();
         if self.line_has_token && !self.eof_newline_done {
             self.eof_newline_done = true;
             self.line_has_token = false;
-            return Some(self.layout_token_at(Kind::Newline, at));
+            return Some(self.layout_token_at(Kind::Newline, self.last_token_end));
         }
         if self.indents.depth() > 1 && !self.eof_dedent_done {
             self.eof_dedent_done = true;
-            self.layout_pos = at;
+            self.layout_pos = self.last_token_end;
             self.pending_dedents = self.indents.pop_to_base();
         }
         None
