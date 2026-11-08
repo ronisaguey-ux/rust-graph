@@ -218,3 +218,218 @@ rust_graph_deep::grammar! { FSHARP {
 pub fn lex_fsharp(c: &mut Cursor) -> Kind {
     let byte = c.peek();
     match byte {
+        b' ' | b'\t' | b'\r' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\x0c'));
+            WHITESPACE
+        }
+        b'\n' => { c.bump(); NEWLINE }
+        b'/' if c.peek_at(1) == b'/' => {
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            COMMENT
+        }
+        b'(' if c.peek_at(1) == b'*' => {
+            crate::batch_d::lex::block_comment(c, b"(*", b"*)", true);
+            COMMENT
+        }
+        b'"' => {
+            if c.peek_at(1) == b'"' && c.peek_at(2) == b'"' {
+                c.bump_n(3);
+                loop {
+                    if c.at_end() {
+                        return BAD_STRING;
+                    }
+                    if c.starts_with(b"\"\"\"") {
+                        c.bump_n(3);
+                        return STRING;
+                    }
+                    c.bump_char();
+                }
+            }
+            c.bump();
+            if c.quoted(b'"', true) {
+                STRING
+            } else {
+                BAD_STRING
+            }
+        }
+        b'\'' => char_literal(c),
+        b'0'..=b'9' => { crate::batch_d::lex::number(c); NUMBER }
+        b'.' if c.peek_at(1).is_ascii_digit() => { c.bump(); crate::batch_d::lex::number(c); NUMBER }
+        b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+            let start = c.rest();
+            let length = c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'\'');
+            keyword(&start[..length])
+        }
+        b'(' => { c.bump(); LPAREN }
+        b')' => { c.bump(); RPAREN }
+        b'[' => { c.bump(); LBRACKET }
+        b']' => { c.bump(); RBRACKET }
+        b'{' => { c.bump(); LBRACE }
+        b'}' => { c.bump(); RBRACE }
+        b',' => { c.bump(); COMMA }
+        b';' => { c.bump(); SEMI }
+        b':' if c.peek_at(1) == b':' => { c.bump_n(2); COLON_COLON }
+        b':' => { c.bump(); COLON }
+        b'.' => { c.bump(); DOT }
+        b'|' if c.peek_at(1) == b'>' => { c.bump_n(2); PIPE_RIGHT }
+        b'|' if c.peek_at(1) == b'|' => { c.bump_n(2); BARBAR }
+        b'|' => { c.bump(); BAR }
+        b'&' if c.peek_at(1) == b'&' => { c.bump_n(2); AMPAMP }
+        b'&' => { c.bump(); AMP }
+        b'=' => { c.bump(); ASSIGN }
+        b'<' if c.peek_at(1) == b'=' => { c.bump_n(2); LE }
+        b'<' if c.peek_at(1) == b'>' => { c.bump_n(2); NE }
+        b'<' if c.peek_at(1) == b'-' => { c.bump_n(2); BACK_ARROW }
+        b'<' => { c.bump(); LT }
+        b'>' if c.peek_at(1) == b'=' => { c.bump_n(2); GE }
+        b'>' if c.peek_at(1) == b'>' => { c.bump_n(2); COMPOSE }
+        b'>' => { c.bump(); GT }
+        b'+' => { c.bump(); PLUS }
+        b'-' if c.peek_at(1) == b'>' => { c.bump_n(2); ARROW }
+        b'-' => { c.bump(); MINUS }
+        b'*' => { c.bump(); STAR }
+        b'/' => { c.bump(); SLASH }
+        b'%' => { c.bump(); PERCENT }
+        b'^' => { c.bump(); CARET }
+        b'_' if !c.peek_at(1).is_ascii_alphanumeric() => { c.bump(); UNDERSCORE }
+        _ => UNKNOWN,
+    }
+}
+
+/// `'a'` and `'\n'`; a lone `'` inside a name is part of the name and never
+/// reaches here.
+fn char_literal(c: &mut Cursor) -> Kind {
+    c.bump();
+    if c.at_end() {
+        return BAD_STRING;
+    }
+    if c.peek() == b'\\' {
+        c.bump_n(2);
+    } else {
+        c.bump_char();
+    }
+    if c.peek() == b'\'' {
+        c.bump();
+        CHAR
+    } else {
+        BAD_STRING
+    }
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"module" => KW_MODULE,
+        b"namespace" => KW_NAMESPACE,
+        b"open" => KW_OPEN,
+        b"let" => KW_LET,
+        b"rec" => KW_REC,
+        b"mutable" => KW_MUTABLE,
+        b"type" => KW_TYPE,
+        b"match" => KW_MATCH,
+        b"with" => KW_WITH,
+        b"if" => KW_IF,
+        b"then" => KW_THEN,
+        b"else" => KW_ELSE,
+        b"elif" => KW_ELIF,
+        b"for" => KW_FOR,
+        b"in" => KW_IN,
+        b"to" => KW_TO,
+        b"downto" => KW_DOWNTO,
+        b"do" => KW_DO,
+        b"done" => KW_DONE,
+        b"while" => KW_WHILE,
+        b"fun" => KW_FUN,
+        b"function" => KW_FUNCTION,
+        b"try" => KW_TRY,
+        b"finally" => KW_FINALLY,
+        b"of" => KW_OF,
+        b"as" => KW_AS,
+        b"when" => KW_WHEN,
+        b"and" => KW_AND,
+        b"or" => KW_OR,
+        b"not" => KW_NOT,
+        b"true" => KW_TRUE,
+        b"false" => KW_FALSE,
+        b"null" => KW_NULL,
+        b"yield" => KW_YIELD,
+        b"return" => KW_RETURN,
+        b"int" => KW_INT,
+        b"float" => KW_FLOAT,
+        b"string" => KW_STRING_TYPE,
+        b"bool" => KW_BOOL,
+        b"unit" => KW_UNIT,
+        _ => IDENT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_f::harness;
+
+    const VALID: &[(&str, &[&str])] = &[
+        (
+            "Program.fs",
+            &[
+                "module_declaration",
+                "open_declaration",
+                "let_binding",
+                "let_binding",
+                "let_binding",
+                "expression_statement",
+            ],
+        ),
+        (
+            "Types.fs",
+            &["module_declaration", "type_declaration", "type_declaration", "type_declaration", "let_binding"],
+        ),
+        (
+            "Pipeline.fs",
+            &[
+                "module_declaration",
+                "let_binding",
+                "let_binding",
+                "let_binding",
+                "expression_statement",
+                "expression_statement",
+                "let_binding",
+                "let_binding",
+            ],
+        ),
+    ];
+
+    #[test]
+    fn valid_fixtures() {
+        harness::check_valid("fsharp", &FSHARP, VALID);
+    }
+
+    #[test]
+    fn malformed_keeps_the_root() {
+        harness::check_malformed(
+            "malformed",
+            "fsharp_broken.fs",
+            &FSHARP,
+            &["module_declaration", "let_binding", "let_binding", "let_binding"],
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_top_level_kinds() {
+        harness::dump("fsharp", &FSHARP);
+        harness::dump("malformed", &FSHARP);
+    }
+
+    #[test]
+    fn lexes_a_char_a_string_and_a_comment() {
+        use crate::deep::lexer::{lex, Tokens};
+        let src = b"let c = 'a'\nlet s = \"hi\" // note\n";
+        let mut tokens = Tokens::default();
+        lex(src, &FSHARP, &mut tokens);
+        let kinds: Vec<&str> = (0..tokens.len())
+            .map(|i| FSHARP.name(tokens.kind[i]))
+            .filter(|kind| !matches!(*kind, "whitespace" | "newline" | "indent" | "dedent"))
+            .collect();
+        assert_eq!(kinds, ["let", "identifier", "=", "char", "let", "identifier", "=", "string_literal", "comment"]);
+    }
+}
