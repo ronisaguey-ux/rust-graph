@@ -12,6 +12,8 @@ members = [
 [features]
 deep = ["dep:deep-rt", "dep:deep-lex", "dep:deep-grammars"]
 parser = ["dep:rust-graph-deep"]
+# The bridge in src/deep_integration.rs, and nothing in the default build.
+deep = ["parser"]
 
 [[bin]]
 name = "rust-graph"
@@ -21,6 +23,12 @@ path = "src/main.rs"
 name = "rust-graph-deep-scan"
 path = "src/bin/rust-graph-deep-scan.rs"
 required-features = ["parser"]
+
+# The benchmark harness: corpus verification, the alternating 2x comparison and
+# peak RSS. Its code and tests live in crates/deep-bench.
+[[bin]]
+name = "rust-graph-deep-bench"
+path = "crates/deep-bench/src/main.rs"
 
 [[test]]
 name = "parser_gate"
