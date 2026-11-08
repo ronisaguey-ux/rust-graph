@@ -1,0 +1,17 @@
+@page {
+  size: A4;
+  margin: 18mm;
+}
+
+@media print {
+  header, footer, .sidebar {
+    display: none;
+  }
+  main {
+    width: 100%;
+  }
+  a[href^="http"]::after {
+    content: " (" attr(href) ")";
+    font-size: 90%;
+  }
+}
