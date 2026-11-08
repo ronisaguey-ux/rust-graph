@@ -141,6 +141,27 @@ impl<'a> Parser<'a> {
         self.close(marker, ERROR);
     }
 
+    /// After a list item: a `sep` and more to come, or the end. Anything else up to
+    /// the next `sep` becomes one `ERROR` (`[1, 2 3, 4]` makes `3` one), and so does
+    /// a trailing `sep`. False when the list is done. `x % sep` in `grammar!`.
+    pub fn separator(&mut self, sep: Kind) -> bool {
+        if self.at_end() {
+            return false;
+        }
+        if !self.at(sep) {
+            self.error_until(&[sep]);
+            if self.at_end() {
+                return false;
+            }
+        }
+        if self.nth(1) == EOF {
+            self.error_one();
+            return false;
+        }
+        self.bump();
+        true
+    }
+
     /// The current token alone as an `ERROR`.
     pub fn error_one(&mut self) {
         if self.at_end() {
