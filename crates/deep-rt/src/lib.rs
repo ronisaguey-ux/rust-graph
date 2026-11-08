@@ -52,6 +52,7 @@
 
 pub mod cst;
 pub mod driver;
+pub mod recovery;
 pub mod stack;
 pub mod table;
 pub mod version;
