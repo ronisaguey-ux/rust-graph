@@ -1,0 +1,7 @@
+import os
+from x import y
+let a = [1,2,{b:3}];
+fn main() { for (i in 0..10) print(i) }
+BEGIN
+  SELECT * FROM t WHERE x = 'y';
+END
