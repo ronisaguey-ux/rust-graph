@@ -7,6 +7,13 @@ name = "deep-abi"
 version = "0.1.0"
 
 [[package]]
+name = "deep-grammars"
+version = "0.1.0"
+dependencies = [
+ "rust-graph-deep",
+]
+
+[[package]]
 name = "rust-graph"
 version = "0.1.0"
 dependencies = [
