@@ -138,6 +138,18 @@ struct Walker<'a> {
     bound: Vec<(u32, String)>,
 }
 
+/// The deep language for a lexer tag (`langs::Language::tag`), or `None` when
+/// this path has no grammar for it. The pipeline uses this to pick the deep
+/// path for exactly the files whose facts it can produce.
+pub fn lang_for(tag: &str) -> Option<Lang> {
+    match tag {
+        "PY" => Some(Lang::Python),
+        "JS" => Some(Lang::JavaScript),
+        "TS" => Some(Lang::TypeScript),
+        _ => None,
+    }
+}
+
 /// Read a file's facts off its CST.
 pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     let mut walker = Walker::new(root, tree, lang);
