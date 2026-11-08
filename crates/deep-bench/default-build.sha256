@@ -1,0 +1,28 @@
+# The default-build hash check for Field 5.
+#
+# Adding the benchmark harness (crates/deep-bench) and the bridge
+# (src/deep_integration.rs) must leave rust-graph's own binary unchanged: the
+# bridge is behind `#[cfg(feature = "deep")]`, nothing in the default build
+# references it, and the harness ships as a separate binary. This file is the
+# measurement, and `cargo test` re-reads it (crates/deep-bench/src/lib.rs,
+# `the_default_build_is_byte_identical_to_the_one_before_this_field`).
+#
+# Commands, run from the repository root, with the musl target pinned by
+# .cargo/config.toml:
+#
+#   cargo build --release && sha256sum target/x86_64-unknown-linux-musl/release/rust-graph
+#   cargo build           && sha256sum target/x86_64-unknown-linux-musl/debug/rust-graph
+#
+# "pre" was measured on the tree as it arrived, before any Field 5 file
+# existed. "post" was measured after crates/deep-bench and src/deep_integration.rs
+# were in place and the root Cargo.toml had gained the member, the `deep`
+# feature and the [[bin]] entry. "fresh" is a third build of the same tree in an
+# empty target directory (--target-dir /tmp/rg-hash-target), to show the number
+# is a property of the source and not of a warm build directory.
+#
+# Columns: label profile sha256 bytes
+pre   release 60a554b0f2d3116042ca0be3360c8514a68a3386df67782658257bc10e820b7c 837496
+pre   debug   1a183a0b62570a9526af15c55cd14be207ac58ce866a62f8755e45edb63de57d 10848816
+post  release 60a554b0f2d3116042ca0be3360c8514a68a3386df67782658257bc10e820b7c 837496
+post  debug   1a183a0b62570a9526af15c55cd14be207ac58ce866a62f8755e45edb63de57d 10848816
+fresh release 60a554b0f2d3116042ca0be3360c8514a68a3386df67782658257bc10e820b7c 837496
