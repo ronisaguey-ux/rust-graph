@@ -144,7 +144,7 @@ fn python_nested_indentation_layout() {
             t!(Comma, 55, 56),
             t!(RBrace, 65, 66),  // closes the group
             t!(Newline, 66, 66), // the logical line ends here, not at 36
-            t!(Dedent, 86, 86),  // comment and blank lines emitted nothing
+            t!(Dedent, 66, 66), // on the block's last token, not the next line  // comment and blank lines emitted nothing
             t!(Ident, 86, 92),   // return
             t!(Ident, 93, 94),   // a
             t!(Plus, 105, 106),  // continuation line, no INDENT at 105
@@ -160,7 +160,7 @@ fn python_nested_indentation_layout() {
             t!(Comma, 144, 145),
             t!(RParen, 150, 151),
             t!(Newline, 151, 151),
-            t!(Dedent, 152, 152), // file end closes the last suite
+            t!(Dedent, 151, 151), // file end closes the last suite
         ]
     );
 }

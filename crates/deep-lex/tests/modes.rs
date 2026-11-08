@@ -127,7 +127,7 @@ fn blank_and_comment_only_lines_emit_nothing() {
             (Kind::Eq, 34, 35),
             (Kind::Number, 36, 37),
             (Kind::Newline, 37, 37),
-            (Kind::Dedent, 38, 38),
+            (Kind::Dedent, 37, 37), // on the last token of the block, as the old lexer placed it
         ]
     );
 }
