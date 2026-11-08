@@ -518,3 +518,97 @@ fn quoted_single(c: &mut Cursor) -> Kind {
     }
 }
 
+fn number(c: &mut Cursor) -> Kind {
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B') {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        return NUMBER;
+    }
+    let mut float = false;
+    c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    if c.peek() == b'.' && c.peek_at(1).is_ascii_digit() {
+        float = true;
+        c.bump();
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    if matches!(c.peek(), b'e' | b'E') && (c.peek_at(1).is_ascii_digit() || (matches!(c.peek_at(1), b'+' | b'-') && c.peek_at(2).is_ascii_digit())) {
+        float = true;
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    if float {
+        eat_suffix(c, b"fFdD");
+        FLOAT
+    } else {
+        eat_suffix(c, b"lL");
+        NUMBER
+    }
+}
+
+/// A numeric suffix such as `L`, `f` or `d`.
+fn eat_suffix(c: &mut Cursor, letters: &[u8]) {
+    if letters.contains(&c.peek()) {
+        c.bump();
+    }
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'<', b'-', _) => (LARROW, 2),
+        (b'=', b'>', _) => (ARROW, 2),
+        (b'<', b':', _) => (BOUND, 2),
+        (b'>', b':', _) => (LOWER_BOUND, 2),
+        (b':', b':', _) => (COLONCOLON, 2),
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'>', b'>', b'=') => (SHR_EQ, 3),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'!', b'=', _) => (NE, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'>', b'=', _) => (GE, 2),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'+', b'+', _) => (PLUSPLUS, 2),
+        (b'-', b'-', _) => (MINUSMINUS, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'>', b'>', _) => (GT_JOINED, 1),
+        (b'(', ..) => (LPAREN, 1),
+        (b')', ..) => (RPAREN, 1),
+        (b'[', ..) => (LBRACKET, 1),
+        (b']', ..) => (RBRACKET, 1),
+        (b'{', ..) => (LBRACE, 1),
+        (b'}', ..) => (RBRACE, 1),
+        (b';', ..) => (SEMI, 1),
+        (b',', ..) => (COMMA, 1),
+        (b'.', ..) => (DOT, 1),
+        (b':', ..) => (COLON, 1),
+        (b'@', ..) => (AT, 1),
+        (b'=', ..) => (ASSIGN, 1),
+        (b'+', ..) => (PLUS, 1),
+        (b'-', ..) => (MINUS, 1),
+        (b'*', ..) => (STAR, 1),
+        (b'/', ..) => (SLASH, 1),
+        (b'%', ..) => (PERCENT, 1),
+        (b'|', ..) => (PIPE, 1),
+        (b'&', ..) => (AMP, 1),
+        (b'^', ..) => (CARET, 1),
+        (b'~', ..) => (TILDE, 1),
+        (b'!', ..) => (BANG, 1),
+        (b'<', ..) => (LT, 1),
+        (b'>', ..) => (GT, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
