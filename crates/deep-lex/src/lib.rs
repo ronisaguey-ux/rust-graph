@@ -28,7 +28,9 @@ pub mod brackets;
 pub mod cursor;
 pub mod kind;
 pub mod mode;
+pub mod profiles;
 pub mod python;
+pub mod recovery;
 pub mod scanner;
 
 mod layout;
@@ -40,6 +42,8 @@ pub use cursor::{Cursor, Span};
 pub use deep_abi::{Lexer, StateId, Token};
 pub use kind::{Kind, Language, SymbolMap, OPERATORS};
 pub use mode::{IndentStack, Mode, ModeStack, INDENT_CAP, MODE_CAP};
+pub use profiles::{PairRule, Profile, ALL, JAVASCRIPT, JSON, PYTHON, TYPESCRIPT};
+pub use recovery::PairJump;
 pub use scanner::{ExternalScanner, NativeScanner, NoScanner, ScanCtx};
 
 const DEFAULT_TAB_WIDTH: u32 = python::TAB_WIDTH;
@@ -86,6 +90,13 @@ impl<'a> DeepLexer<'a, NativeScanner> {
     /// The shipped lexer: built-in external scanner for the language.
     pub fn new(src: &'a [u8], lang: Language) -> DeepLexer<'a, NativeScanner> {
         DeepLexer::with_scanner(src, lang, NativeScanner::new(lang))
+    }
+
+    /// The shipped lexer for one of the [`profiles`]: language, state modes and
+    /// bracket pairs from the same table, so the parser cannot pick a mode
+    /// table that disagrees with the lexer's rules.
+    pub fn for_profile(src: &'a [u8], profile: &'static Profile) -> DeepLexer<'a, NativeScanner> {
+        DeepLexer::new(src, profile.language).with_state_modes(profile.states)
     }
 }
 
@@ -157,6 +168,23 @@ impl<'a, S: ExternalScanner> DeepLexer<'a, S> {
     /// The bracket pairs computed in one pass at construction.
     pub fn brackets(&self) -> &Brackets {
         &self.brackets
+    }
+
+    /// The raw pair table: `2 * delimiters` `u32`s, offset then mate ordinal.
+    /// This is the slice the runtime's recovery wants; see [`PairJump`].
+    pub fn pair(&self) -> &[u32] {
+        self.brackets.pair()
+    }
+
+    /// The mate of the delimiter at `offset`, as a byte offset. O(log n).
+    pub fn jump(&self, offset: u32) -> Option<u32> {
+        self.brackets.jump(offset)
+    }
+
+    /// A borrowable jump table for a runtime that cannot borrow `self`, such as
+    /// a driver holding `&mut dyn Lexer`.
+    pub fn pair_jump(&self) -> PairJump<'_> {
+        PairJump::new(self.brackets.pair())
     }
 
     /// Current byte position of the cursor (where the next token would start).
@@ -234,6 +262,11 @@ impl<'a, S: ExternalScanner> DeepLexer<'a, S> {
 /// starts at the cursor, or `None` when the cursor is not on one.
 pub(crate) fn string_prefix(cur: &Cursor<'_>, lang: Language) -> Option<(usize, u8, bool, bool)> {
     let b0 = cur.peek()?;
+    if lang.is_json() {
+        // JSON has exactly one string delimiter and no prefixes: anything else
+        // is an ERROR token, which is what the old JSON lexer's UNKNOWN is.
+        return (b0 == b'"').then_some((0, b'"', false, false));
+    }
     if b0 == b'"' || b0 == b'\'' {
         let triple =
             lang == Language::Python && cur.peek_n(1) == Some(b0) && cur.peek_n(2) == Some(b0);

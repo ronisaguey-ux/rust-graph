@@ -50,6 +50,35 @@ impl Default for Brackets {
     }
 }
 
+/// Ordinal of the delimiter starting at `offset`, if any. Offsets are
+/// ascending, so this is a binary search: O(log n), no allocation.
+pub(crate) fn ordinal_in(pair: &[u32], offset: u32) -> Option<usize> {
+    let delimiters = pair.len() / 2;
+    let mut lo = 0usize;
+    let mut hi = delimiters;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        match pair[2 * mid] {
+            o if o == offset => return Some(mid),
+            o if o < offset => lo = mid + 1,
+            _ => hi = mid,
+        }
+    }
+    None
+}
+
+/// The recovery jump over a raw pair table: delimiter offset to its mate's
+/// offset. Shared by [`Brackets::jump`] and
+/// [`PairJump`](crate::recovery::PairJump) so the runtime and the lexer agree
+/// on one encoding.
+pub fn jump_in(pair: &[u32], offset: u32) -> Option<u32> {
+    let ordinal = ordinal_in(pair, offset)?;
+    match pair.get(2 * ordinal + 1).copied()? {
+        NONE => None,
+        mate => pair.get(2 * mate as usize).copied(),
+    }
+}
+
 impl Brackets {
     pub fn empty() -> Brackets {
         Brackets { pair: Vec::new() }
@@ -148,22 +177,12 @@ impl Brackets {
     /// Ordinal of the delimiter starting at `offset`, if any. Offsets are
     /// ascending, so this is a binary search: O(log n), no allocation.
     pub fn ordinal_at(&self, offset: u32) -> Option<usize> {
-        let mut lo = 0usize;
-        let mut hi = self.delimiters();
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            match self.offset(mid)? {
-                o if o == offset => return Some(mid),
-                o if o < offset => lo = mid + 1,
-                _ => hi = mid,
-            }
-        }
-        None
+        ordinal_in(&self.pair, offset)
     }
 
     /// The recovery jump: from a delimiter's byte offset to its mate's byte
     /// offset. `None` for unmatched or absent.
     pub fn jump(&self, offset: u32) -> Option<u32> {
-        self.mate_offset(self.ordinal_at(offset)?)
+        jump_in(&self.pair, offset)
     }
 }
