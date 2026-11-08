@@ -1385,3 +1385,41 @@ fn incremental_is_faster_per_edit() {
         results.push((case.label, full_time, incremental_time, speedup));
     }
 
+    for (label, full, incremental, speedup) in &results {
+        // The debug build's bookkeeping (bounds checks, no inlining) costs more
+        // than the parse it saves; the comparison only means something with
+        // optimisations on, so it is asserted there and printed here.
+        if !cfg!(debug_assertions) && *label != "small (1 line)" {
+            assert!(
+                incremental < full,
+                "{label}: incremental {incremental:?} should beat a full parse {full:?}"
+            );
+        }
+        eprintln!("{label}: {speedup:.2}x, {full:?} -> {incremental:?}");
+    }
+    // The floor: replacing the whole file cannot reuse anything.
+    let whole = Edit::replace(0, old_len, big.len() as u32);
+    let whole_start = Instant::now();
+    let (tree, report) = incremental::reparse(
+        &grammar,
+        &old,
+        old_len,
+        &whole,
+        &tokens,
+        &Config::new(),
+    )
+    .expect("a tree");
+    let whole_time = whole_start.elapsed();
+    assert_eq!(
+        shape(&tree.nodes, tree.root),
+        shape(&old.nodes, old.root),
+        "a whole-file edit is a full parse"
+    );
+    eprintln!(
+        "whole file ({:?}): reuse {:.1}%, splices {}, fell_back {}",
+        whole_time,
+        report.reuse_ratio() * 100.0,
+        report.splices,
+        report.fell_back
+    );
+}
