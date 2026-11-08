@@ -614,3 +614,101 @@ fn interpolation(c: &mut Cursor) {
     }
 }
 
+fn number(c: &mut Cursor) -> Kind {
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X') {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_hexdigit() || byte == b'_');
+        if c.peek() == b'.' {
+            c.bump();
+            c.eat_while(|byte| byte.is_ascii_hexdigit() || byte == b'_');
+        }
+        if matches!(c.peek(), b'p' | b'P') {
+            c.bump();
+            if matches!(c.peek(), b'+' | b'-') {
+                c.bump();
+            }
+            c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+        }
+        return if c.peek() == b'.' || false { FLOAT } else { NUMBER };
+    }
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'b' | b'B' | b'o' | b'O') {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        return NUMBER;
+    }
+    let mut float = false;
+    c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    if c.peek() == b'.' && c.peek_at(1).is_ascii_digit() {
+        float = true;
+        c.bump();
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    if matches!(c.peek(), b'e' | b'E') && (c.peek_at(1).is_ascii_digit() || (matches!(c.peek_at(1), b'+' | b'-') && c.peek_at(2).is_ascii_digit())) {
+        float = true;
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    if float { FLOAT } else { NUMBER }
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        (b'.', b'.', b'<') => (RANGE_OPEN, 3),
+        (b'.', b'.', _) => (DOTDOT, 2),
+        (b'=', b'=', b'=') => (STRICT_EQ, 3),
+        (b'!', b'=', b'=') => (STRICT_NE, 3),
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'>', b'>', b'=') => (SHR_EQ, 3),
+        (b'?', b'.', _) if !d.is_ascii_digit() => (OPTIONAL_CHAIN, 2),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'!', b'=', _) => (NE, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'>', b'=', _) => (GE, 2),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'?', b'?', _) => (NULLISH, 2),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'>', b'>', _) => (GT_JOINED, 1),
+        (b'(', ..) => (LPAREN, 1),
+        (b')', ..) => (RPAREN, 1),
+        (b'[', ..) => (LBRACKET, 1),
+        (b']', ..) => (RBRACKET, 1),
+        (b'{', ..) => (LBRACE, 1),
+        (b'}', ..) => (RBRACE, 1),
+        (b';', ..) => (SEMI, 1),
+        (b',', ..) => (COMMA, 1),
+        (b'.', ..) => (DOT, 1),
+        (b':', ..) => (COLON, 1),
+        (b'?', ..) => (QUESTION, 1),
+        (b'=', ..) => (ASSIGN, 1),
+        (b'+', ..) => (PLUS, 1),
+        (b'-', ..) => (MINUS, 1),
+        (b'*', ..) => (STAR, 1),
+        (b'/', ..) => (SLASH, 1),
+        (b'%', ..) => (PERCENT, 1),
+        (b'|', ..) => (PIPE, 1),
+        (b'&', ..) => (AMP, 1),
+        (b'^', ..) => (CARET, 1),
+        (b'~', ..) => (TILDE, 1),
+        (b'!', ..) => (BANG, 1),
+        (b'<', ..) => (LT, 1),
+        (b'>', ..) => (GT, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
