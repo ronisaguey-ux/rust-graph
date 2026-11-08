@@ -15,6 +15,9 @@ pub enum Language {
     Python,
     /// JavaScript/TypeScript: templates, regex-vs-division, `//` comments.
     JavaScript,
+    /// JSON: double-quoted strings only, signed numbers, comments are trivia
+    /// (as tree-sitter-json has them), no layout and no raw strings.
+    Json,
     /// C/C++/Rust-ish: `//` comments and `R"delim(...)delim"` raw strings.
     C,
 }
@@ -23,6 +26,12 @@ impl Language {
     /// Python is the only layout-sensitive language here.
     pub fn has_layout(self) -> bool {
         matches!(self, Language::Python)
+    }
+
+    /// JSON is the one language whose `'` is not a string delimiter and whose
+    /// `-` binds into a number literal.
+    pub fn is_json(self) -> bool {
+        matches!(self, Language::Json)
     }
 }
 

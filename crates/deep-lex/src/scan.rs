@@ -50,6 +50,15 @@ impl<'a, S: crate::ExternalScanner> DeepLexer<'a, S> {
             }
         }
 
+        // JSON's `-` is part of the number, not an operator: `-12` is one token.
+        if b == b'-'
+            && self.lang.is_json()
+            && self.cur.peek_n(1).map_or(false, |d| d.is_ascii_digit())
+        {
+            self.cur.bump();
+            return self.lex_number(start);
+        }
+
         if b.is_ascii_digit() || (b == b'.' && self.cur.peek_n(1).map_or(false, |d| d.is_ascii_digit()))
         {
             return self.lex_number(start);
