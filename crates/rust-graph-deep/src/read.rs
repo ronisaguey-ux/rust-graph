@@ -93,7 +93,7 @@ pub struct Table {
     pub rows: Vec<Row>,
 }
 
-/// `[label:] (prefix | postfix | left | right) ops => node`.
+/// `[label:] (prefix | postfix | once | left | right) ops => node`.
 #[derive(Clone, Debug)]
 pub struct Row {
     pub label: Option<String>,
@@ -109,6 +109,10 @@ pub struct Row {
 pub enum Fix {
     Prefix,
     Postfix,
+    /// A postfix operator taken at most once: after it, the loop takes only
+    /// operators of tighter rows. Go's `[]int{1}` in a header, whose body's `{`
+    /// must not read as a second literal.
+    Once,
     Left,
     Right,
 }
@@ -278,9 +282,10 @@ fn table(body: Vec<Tok>, spot: Spot) -> Result<Node, Error> {
         let fix = match row.get(at).map(|tok| &tok.tree) {
             Some(Tree::Ident(word)) if word == "prefix" => Fix::Prefix,
             Some(Tree::Ident(word)) if word == "postfix" => Fix::Postfix,
+            Some(Tree::Ident(word)) if word == "once" => Fix::Once,
             Some(Tree::Ident(word)) if word == "left" => Fix::Left,
             Some(Tree::Ident(word)) if word == "right" => Fix::Right,
-            _ => return Err(Error::at(row_spot, "a precedence row is `[label:] prefix | postfix | left | right OPERATOR => node`")),
+            _ => return Err(Error::at(row_spot, "a precedence row is `[label:] prefix | postfix | once | left | right OPERATOR => node`")),
         };
         let arrow = (at + 1..row.len().saturating_sub(1))
             .find(|&index| matches!(row[index].tree, Tree::Punct('=', true)) && matches!(row[index + 1].tree, Tree::Punct('>', _)));

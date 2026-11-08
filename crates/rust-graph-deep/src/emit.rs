@@ -411,9 +411,10 @@ impl<'c> Emitter<'c> {
                             _ => (&after_operand, String::new()),
                         };
                         let mut out = format!(
-                            "if {level} < min {{ break; }} let marker = p.wrap(start); {} {right} p.close(marker, {});",
+                            "if {level} < min {{ break; }} let marker = p.wrap(start); {} {right} p.close(marker, {});{}",
                             self.guarded(node, ops_after, matched)?,
-                            rule_constant(&row.node)
+                            rule_constant(&row.node),
+                            once(row.fix, level)
                         );
                         // An operator is taken on its whole leading run: `not` alone
                         // after an operand is not `not in`.
@@ -440,16 +441,18 @@ impl<'c> Emitter<'c> {
                 };
                 let predicate = self.predicate(inner)?;
                 body = format!(
-                    "if {} && {level} >= min && {predicate}(p) {{ let marker = p.wrap(start); {} {right} p.close(marker, {}); }} else {{ {body} }}",
+                    "if {} && {level} >= min && {predicate}(p) {{ let marker = p.wrap(start); {} {right} p.close(marker, {});{} }} else {{ {body} }}",
                     self.cond(&Guard::Set(checked.first(inner)), 0),
                     self.guarded(&rest, ops_after, 0)?,
-                    rule_constant(&row.node)
+                    rule_constant(&row.node),
+                    once(row.fix, level)
                 );
             }
             format!("loop {{ {body} }}")
         };
+        let min = if table.rows.iter().any(|row| row.fix == Fix::Once) { "mut min" } else { "min" };
         Ok(format!(
-            "pub fn {name}(p: &mut {parser}) {{ {at}(p, 0); }} pub fn {at}(p: &mut {parser}, min: u32) {{ let start = p.event_count(); {prefix} {tail} }}"
+            "pub fn {name}(p: &mut {parser}) {{ {at}(p, 0); }} pub fn {at}(p: &mut {parser}, {min}: u32) {{ let start = p.event_count(); {prefix} {tail} }}"
         ))
     }
 
@@ -531,6 +534,11 @@ pub fn parse_fn(rule: &str) -> String {
 
 fn group_fn(rule: &str) -> String {
     format!("group_{}", rule.trim_start_matches('_'))
+}
+
+/// After a [`Fix::Once`] row: only tighter rows may follow.
+fn once(fix: Fix, level: u32) -> String {
+    if fix == Fix::Once { format!(" min = min.max({});", level + 1) } else { String::new() }
 }
 
 #[cfg(test)]
@@ -617,6 +625,17 @@ mod tests {
         assert!(out.contains("p.close(marker, GENERIC_CALL); } else { match p.current() { MINUS => { if 1 < min { break; }"), "{out}");
         let error = try_emit("top: _e*, _e: precedence A { prefix &(B) B => neg, },").unwrap_err();
         assert!(error.contains("only start an alternative"), "{error}");
+    }
+
+    #[test]
+    fn a_once_row_applies_at_most_once() {
+        // `A args args`: the first `args` is a call, and the second is not taken.
+        let out = emitted("top: _e*, _e: precedence A { once args => call, postfix \"+\" => inc, }, args: \"(\" \")\",");
+        assert!(out.contains("pub fn parse_e_at(p: &mut rt::parser::Parser, mut min: u32)"), "{out}");
+        assert!(out.contains("LP => { if 1 < min { break; } let marker = p.wrap(start); parse_args(p);  p.close(marker, CALL); min = min.max(2); }"), "{out}");
+        assert!(out.contains("PLUS => { if 2 < min { break; }"), "a tighter row still follows: {out}");
+        let plain = emitted("top: _e*, _e: precedence A { postfix args => call, }, args: \"(\" \")\",");
+        assert!(plain.contains("parse_e_at(p: &mut rt::parser::Parser, min: u32)") && !plain.contains("min = min.max"), "{plain}");
     }
 
     #[test]

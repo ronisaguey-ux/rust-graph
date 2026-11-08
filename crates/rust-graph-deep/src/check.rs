@@ -285,7 +285,7 @@ fn desugar(rule: usize, table: &Table, spot: crate::Spot) -> Node {
         .rows
         .iter()
         .filter(|row| row.fix != Fix::Prefix)
-        .map(|row| if row.fix == Fix::Postfix { row.ops.clone() } else { node(Expr::Seq(vec![row.ops.clone(), node(Expr::Rule(rule))])) })
+        .map(|row| if matches!(row.fix, Fix::Postfix | Fix::Once) { row.ops.clone() } else { node(Expr::Seq(vec![row.ops.clone(), node(Expr::Rule(rule))])) })
         .collect();
     if !tails.is_empty() {
         items.push(node(Expr::Star(Box::new(choice(tails)))));
