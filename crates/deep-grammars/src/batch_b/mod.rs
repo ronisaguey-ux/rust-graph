@@ -13,6 +13,7 @@
 
 pub mod php;
 pub mod ruby;
+pub mod scala;
 pub mod swift;
 
 #[cfg(test)]
@@ -26,6 +27,7 @@ mod tests {
 
     use crate::batch_b::php::PHP;
     use crate::batch_b::ruby::RUBY;
+    use crate::batch_b::scala::SCALA;
     use crate::batch_b::swift::SWIFT;
 
     /// `(file, top-level node kinds)` for every valid fixture, in order.
@@ -119,6 +121,25 @@ mod tests {
         ("broken_string.swift", "property_declaration"),
         ("stray_brace.swift", "function_declaration ERROR"),
         ("unclosed_function.swift", "struct_declaration"),
+    ];
+
+    /// `(file, top-level node kinds)` for every valid Scala fixture.
+    const SCALA_VALID: &[(&str, &str)] = &[
+        ("collections.scala", "object_definition"),
+        ("control_flow.scala", "object_definition"),
+        ("functions.scala", "object_definition"),
+        ("models.scala", "package_clause import_declaration import_declaration trait_definition class_definition class_definition object_definition"),
+        ("pattern_match.scala", "object_definition"),
+        ("service.scala", "package_clause import_declaration import_declaration class_definition class_definition object_definition"),
+        ("strings.scala", "object_definition"),
+        ("traits.scala", "trait_definition class_definition class_definition object_definition"),
+    ];
+
+    /// `(file, top-level node kinds)` for every malformed Scala fixture.
+    const SCALA_MALFORMED: &[(&str, &str)] = &[
+        ("broken_string.scala", "object_definition"),
+        ("stray_brace.scala", "object_definition ERROR"),
+        ("unclosed_class.scala", "class_definition"),
     ];
 
 /// What one parse produced, as the tests compare it.
@@ -219,6 +240,7 @@ mod tests {
         dump("ruby", &RUBY);
         dump("php", &PHP);
         dump("swift", &SWIFT);
+        dump("scala", &SCALA);
     }
 
     fn dump(folder: &str, language: &'static Language) {
@@ -296,5 +318,22 @@ mod tests {
         assert_eq!((SWIFT.name, SWIFT.name(SWIFT.root)), ("swift", "program"));
         assert!(SWIFT.layout.is_none());
         assert!(SWIFT.kinds.len() > 100, "a grammar this size has hundreds of kinds, not {}", SWIFT.kinds.len());
+    }
+
+    #[test]
+    fn scala_fixtures_parse_cleanly() {
+        check_valid("scala", &SCALA, SCALA_VALID);
+    }
+
+    #[test]
+    fn scala_malformed_fixtures_keep_the_root() {
+        check_malformed("scala", &SCALA, SCALA_MALFORMED);
+    }
+
+    #[test]
+    fn scala_names_its_root() {
+        assert_eq!((SCALA.name, SCALA.name(SCALA.root)), ("scala", "program"));
+        assert!(SCALA.layout.is_none());
+        assert!(SCALA.kinds.len() > 100, "a grammar this size has hundreds of kinds, not {}", SCALA.kinds.len());
     }
 }
