@@ -13,7 +13,6 @@ members = [
 deep = ["dep:deep-rt", "dep:deep-lex", "dep:deep-grammars"]
 parser = ["dep:rust-graph-deep"]
 # The bridge in src/deep_integration.rs, and nothing in the default build.
-deep = ["parser"]
 
 [[bin]]
 name = "rust-graph"
@@ -37,6 +36,10 @@ required-features = ["parser"]
 
 [dependencies]
 rust-graph-deep = { path = "crates/rust-graph-deep", optional = true }
+deep-abi = { path = "crates/deep-abi" }
+deep-rt = { path = "crates/deep-rt", optional = true }
+deep-lex = { path = "crates/deep-lex", optional = true }
+deep-grammars = { path = "crates/deep-grammars", optional = true }
 
 [profile.release]
 opt-level = 3
@@ -45,6 +48,3 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-[[bin]]
-name = "rust-graph-deep-bench"
-path = "crates/deep-bench/src/main.rs"
