@@ -5,3 +5,8 @@ target = "x86_64-unknown-linux-musl"
 
 [target.x86_64-unknown-linux-musl]
 linker = "rust-lld"
+
+# Host (test/proc-macro) links need crt objects, which rust-lld alone lacks
+# on this box. cc-gnu is a cc-shaped wrapper that adds them only for executables.
+[target.x86_64-unknown-linux-gnu]
+linker = "/home/roni-saguey/.local/bin/cc-gnu"
