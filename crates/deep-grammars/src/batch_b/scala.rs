@@ -310,3 +310,211 @@ rust_graph_deep::grammar! { SCALA {
     type_arguments: "[" (_type %? ",") "]",
 } }
 
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            block_comment(c);
+            COMMENT
+        }
+        b'"' => string(c),
+        b'\'' => quoted_single(c),
+        b'`' => {
+            c.bump();
+            c.eat_while(|byte| byte != b'`' && byte != b'\n');
+            c.eat(b'`');
+            IDENT
+        }
+        b'0'..=b'9' => number(c),
+        b'.' if c.peek_at(1).is_ascii_digit() => number(c),
+        byte if is_word_start(byte) => word(c),
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    let text = &start[..length];
+    // `s"..."`, `f"..."` and `raw"..."` are interpolators, not names.
+    if matches!(text, b"s" | b"f" | b"raw") && c.peek() == b'"' {
+        return string(c);
+    }
+    keyword(text)
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"abstract" => KW_ABSTRACT,
+        b"case" => KW_CASE,
+        b"catch" => KW_CATCH,
+        b"class" => KW_CLASS,
+        b"def" => KW_DEF,
+        b"do" => KW_DO,
+        b"else" => KW_ELSE,
+        b"enum" => KW_ENUM,
+        b"extends" => KW_EXTENDS,
+        b"false" => KW_FALSE,
+        b"finally" => KW_FINALLY,
+        b"for" => KW_FOR,
+        b"if" => KW_IF,
+        b"import" => KW_IMPORT,
+        b"implicit" => KW_IMPLICIT,
+        b"lazy" => KW_LAZY,
+        b"match" => KW_MATCH,
+        b"new" => KW_NEW,
+        b"null" => KW_NULL,
+        b"object" => KW_OBJECT,
+        b"override" => KW_OVERRIDE,
+        b"package" => KW_PACKAGE,
+        b"private" => KW_PRIVATE,
+        b"protected" => KW_PROTECTED,
+        b"return" => KW_RETURN,
+        b"sealed" => KW_SEALED,
+        b"super" => KW_SUPER,
+        b"this" => KW_THIS,
+        b"throw" => KW_THROW,
+        b"trait" => KW_TRAIT,
+        b"true" => KW_TRUE,
+        b"try" => KW_TRY,
+        b"type" => KW_TYPE,
+        b"val" => KW_VAL,
+        b"var" => KW_VAR,
+        b"while" => KW_WHILE,
+        b"with" => KW_WITH,
+        b"final" => KW_FINAL,
+        b"open" => KW_OPEN,
+        b"inline" => KW_INLINE,
+        b"transparent" => KW_TRANSPARENT,
+        b"infix" => KW_INFIX,
+        b"given" => KW_GIVEN,
+        b"using" => KW_USING,
+        b"export" => KW_EXPORT,
+        b"yield" => KW_YIELD,
+        _ => IDENT,
+    }
+}
+
+/// `/* ... */`: Scala's block comments nest.
+fn block_comment(c: &mut Cursor) {
+    c.bump_n(2);
+    let mut depth = 1u32;
+    while !c.at_end() && depth > 0 {
+        if c.starts_with(b"/*") {
+            depth += 1;
+            c.bump_n(2);
+        } else if c.starts_with(b"*/") {
+            depth -= 1;
+            c.bump_n(2);
+        } else {
+            c.bump();
+        }
+    }
+}
+
+/// A string from its quote, or from the interpolator name just consumed: plain,
+/// triple-quoted, and with `${...}` and `$name` interpolations scanned whole.
+fn string(c: &mut Cursor) -> Kind {
+    if c.peek() != b'"' {
+        return BAD_LITERAL;
+    }
+    let triple = c.peek_at(1) == b'"' && c.peek_at(2) == b'"';
+    let open = if triple { 3 } else { 1 };
+    c.bump_n(open);
+    loop {
+        match c.peek() {
+            0 if c.at_end() => return BAD_LITERAL,
+            b'\\' => c.bump_n(2),
+            b'$' if c.peek_at(1) == b'{' => {
+                c.bump_n(2);
+                braces(c);
+            }
+            b'$' if is_word_start(c.peek_at(1)) => {
+                c.bump();
+                c.eat_while(is_word_byte);
+            }
+            b'"' if triple && c.peek_at(1) == b'"' && c.peek_at(2) == b'"' => {
+                c.bump_n(3);
+                return STRING;
+            }
+            b'"' if !triple => {
+                c.bump();
+                return STRING;
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// The code of a `${...}` field, up to its matching `}`, with strings and
+/// nested braces balanced.
+fn braces(c: &mut Cursor) {
+    let mut depth = 1u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'{' => {
+                depth += 1;
+                c.bump();
+            }
+            b'}' => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    return;
+                }
+            }
+            b'"' => {
+                string(c);
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// A character literal (`'a'`) or a symbol (`'name`).
+fn quoted_single(c: &mut Cursor) -> Kind {
+    c.bump();
+    if is_word_start(c.peek()) {
+        c.eat_while(is_word_byte);
+        if c.peek() == b'\'' {
+            c.bump();
+            return CHAR;
+        }
+        return SYMBOL;
+    }
+    loop {
+        match c.peek() {
+            0 if c.at_end() => return BAD_LITERAL,
+            b'\\' => c.bump_n(2),
+            b'\n' | b'\r' => return BAD_LITERAL,
+            b'\'' => {
+                c.bump();
+                return CHAR;
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
