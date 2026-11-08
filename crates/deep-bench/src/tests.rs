@@ -167,12 +167,15 @@ fn the_environment_lines_are_present() {
 
 /// The repository root, for the files this crate lives beside.
 fn repository_root() -> PathBuf {
+    // The tests run twice: from the rust-graph package (the binary target is
+    // declared there) and from this crate (`cargo test -p deep-bench`), so the
+    // root is whichever directory holds `crates/deep-bench`.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if manifest.join("src/main.rs").is_file() {
-        manifest
-    } else {
-        manifest.parent().expect("crates/deep-bench has a parent").to_path_buf()
-    }
+    manifest
+        .ancestors()
+        .find(|directory| directory.join("crates/deep-bench").is_dir())
+        .expect("the repository root holds crates/deep-bench")
+        .to_path_buf()
 }
 
 /// The hash check that says the default build did not change: `pre` was the tree
