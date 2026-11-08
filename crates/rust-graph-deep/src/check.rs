@@ -3,11 +3,17 @@
 //! which calls must go through the depth budget.
 //!
 //! Rejected, each with an error at the offending place: unknown names, left
-//! recursion (direct or indirect), alternatives that share a first token,
-//! repetition of something that can be empty, delimiters outside a group rule,
-//! unused rules, and names that would clash in the generated code.
+//! recursion (direct or indirect), repetition of something that can be empty,
+//! delimiters outside a group rule, unused rules, misplaced predicates, bad
+//! layout or precedence declarations, and names that would clash in the
+//! generated code. Alternatives that no run of up to three tokens tells apart
+//! are rejected when the emitter builds their decision (`decide.rs`).
+//!
+//! A precedence table is analysed as the grammar it accepts,
+//! `prefix* operand (infix self | postfix)*`, so FIRST, FOLLOW and decisions
+//! treat it like any other rule; only the emitter writes it as a Pratt loop.
 
-use crate::read::{Expr, Grammar, Node, TokenClass};
+use crate::read::{Expr, Fix, Grammar, Node, Table, TokenClass};
 use crate::{Error, Spot};
 
 /// Token indices, as a bit set.
@@ -73,6 +79,8 @@ pub enum Shape {
     Node,
     /// A name starting with `_`: no node of its own, like tree-sitter's.
     Hidden,
+    /// A hidden rule whose body is a precedence table: a Pratt loop.
+    Table,
 }
 
 pub struct Checked {
@@ -86,6 +94,13 @@ pub struct Checked {
     /// `nested[from][to]`: a call from rule `from` to rule `to` closes a cycle
     /// that passes through no group, so it must go through the depth budget.
     pub nested: Vec<Vec<bool>>,
+    /// Each rule's precedence table, resolved; its body holds the analysis form.
+    pub tables: Vec<Option<Table>>,
+    /// Node kinds made by precedence rows, in order of first use. They follow
+    /// the named rules in the kind table.
+    pub row_kinds: Vec<String>,
+    /// Layout tokens: newline, indent, dedent.
+    pub layout: Option<[usize; 3]>,
 }
 
 /// The constant naming a rule's node kind: `pair` -> `PAIR`.
@@ -102,13 +117,36 @@ pub const KINDS: &str = "KINDS";
 
 pub fn check(mut grammar: Grammar) -> Result<Checked, Error> {
     let families = check_tokens(&grammar)?;
+    let layout = check_layout(&grammar)?;
     check_rule_names(&grammar)?;
+    let labels = table_labels(&grammar)?;
+    let mut tables = Vec::new();
     for index in 0..grammar.rules.len() {
         let mut body = grammar.rules[index].body.clone();
-        resolve(&grammar, &mut body)?;
+        if let Expr::Table(table) = body.expr {
+            let mut table = *table;
+            if !is_hidden(&grammar.rules[index].name) {
+                return Err(Error::at(grammar.rules[index].spot, "a precedence rule has no node of its own (its rows make them): name it `_like_this`"));
+            }
+            resolve(&grammar, &labels, &mut table.operand)?;
+            for row in &mut table.rows {
+                resolve(&grammar, &labels, &mut row.ops)?;
+            }
+            body = desugar(index, &table, body.spot);
+            tables.push(Some(table));
+        } else {
+            resolve(&grammar, &labels, &mut body)?;
+            tables.push(None);
+        }
         grammar.rules[index].body = body;
     }
-    let shapes = shapes(&grammar)?;
+    let row_kinds = row_kinds(&grammar, &tables)?;
+    let mut shapes = shapes(&grammar)?;
+    for (shape, table) in shapes.iter_mut().zip(&tables) {
+        if table.is_some() {
+            *shape = Shape::Table;
+        }
+    }
     let edges: Vec<Vec<usize>> = grammar.rules.iter().map(|rule| references(&rule.body)).collect();
     check_reachable(&grammar, &edges)?;
     let size = grammar.tokens.len();
@@ -120,11 +158,25 @@ pub fn check(mut grammar: Grammar) -> Result<Checked, Error> {
         grammar,
         families,
         shapes,
+        tables,
+        row_kinds,
+        layout,
     };
     checked.solve_first();
     checked.check_left_recursion()?;
     for index in 0..checked.grammar.rules.len() {
-        checked.check_node(&checked.grammar.rules[index].body)?;
+        checked.check_node(&checked.grammar.rules[index].body, false)?;
+        if let Some(table) = &checked.tables[index] {
+            if checked.nullable(&table.operand) {
+                return Err(Error::at(table.operand.spot, "a precedence operand must not match nothing"));
+            }
+            for row in &table.rows {
+                checked.check_node(&row.ops, false)?;
+                if checked.nullable(&row.ops) {
+                    return Err(Error::at(row.spot, "an operator must not match nothing"));
+                }
+            }
+        }
     }
     checked.solve_follow();
     checked.nested = nested_calls(&checked.shapes, &edges);
@@ -178,6 +230,94 @@ fn check_tokens(grammar: &Grammar) -> Result<Vec<String>, Error> {
     Ok(families)
 }
 
+/// The layout tokens, as `[newline, indent, dedent]`: a plain token and an
+/// `open`/`close` pair of one family. `reset` tokens need a layout.
+fn check_layout(grammar: &Grammar) -> Result<Option<[usize; 3]>, Error> {
+    let find = |name: &str, spot| grammar.tokens.iter().position(|token| token.constant == name).ok_or_else(|| Error::at(spot, format!("`{name}` is not a token")));
+    let Some(layout) = &grammar.layout else {
+        if let Some(token) = grammar.tokens.iter().find(|token| token.reset) {
+            return Err(Error::at(token.spot, "`reset` only means something with `layout = ...;`"));
+        }
+        return Ok(None);
+    };
+    let newline = find(&layout.newline, layout.spot)?;
+    let indent = find(&layout.indent, layout.spot)?;
+    let dedent = find(&layout.dedent, layout.spot)?;
+    match (&grammar.tokens[newline].class, &grammar.tokens[indent].class, &grammar.tokens[dedent].class) {
+        (TokenClass::Token, TokenClass::Open(a), TokenClass::Close(b)) if a == b => Ok(Some([newline, indent, dedent])),
+        _ => Err(Error::at(layout.spot, "layout needs a plain newline token, then the `open` and `close` of one family")),
+    }
+}
+
+/// For each precedence rule, its row labels, in order.
+fn table_labels(grammar: &Grammar) -> Result<Vec<Option<Vec<Option<String>>>>, Error> {
+    let mut out = Vec::new();
+    for rule in &grammar.rules {
+        let Expr::Table(table) = &rule.body.expr else {
+            out.push(None);
+            continue;
+        };
+        let labels: Vec<Option<String>> = table.rows.iter().map(|row| row.label.clone()).collect();
+        for (at, row) in table.rows.iter().enumerate() {
+            if row.label.is_some() && labels[..at].contains(&row.label) {
+                return Err(Error::at(row.spot, format!("row label `{}` is used twice", row.label.as_deref().unwrap_or_default())));
+            }
+        }
+        out.push(Some(labels));
+    }
+    Ok(out)
+}
+
+/// What a table accepts, as an ordinary rule body:
+/// `(prefix ops)* operand ((infix ops) self | postfix ops)*`.
+fn desugar(rule: usize, table: &Table, spot: crate::Spot) -> Node {
+    let node = |expr| Node { expr, spot };
+    let choice = |mut items: Vec<Node>| if items.len() == 1 { items.pop().expect("one") } else { node(Expr::Choice(items)) };
+    let mut items = Vec::new();
+    let prefix: Vec<Node> = table.rows.iter().filter(|row| row.fix == Fix::Prefix).map(|row| row.ops.clone()).collect();
+    if !prefix.is_empty() {
+        items.push(node(Expr::Star(Box::new(choice(prefix)))));
+    }
+    items.push(table.operand.clone());
+    let tails: Vec<Node> = table
+        .rows
+        .iter()
+        .filter(|row| row.fix != Fix::Prefix)
+        .map(|row| if row.fix == Fix::Postfix { row.ops.clone() } else { node(Expr::Seq(vec![row.ops.clone(), node(Expr::Rule(rule))])) })
+        .collect();
+    if !tails.is_empty() {
+        items.push(node(Expr::Star(Box::new(choice(tails)))));
+    }
+    if items.len() == 1 {
+        items.pop().expect("one")
+    } else {
+        node(Expr::Seq(items))
+    }
+}
+
+/// Node kinds that precedence rows make, without repeats. A row may share its
+/// kind with other rows, but not with a rule or a token.
+fn row_kinds(grammar: &Grammar, tables: &[Option<Table>]) -> Result<Vec<String>, Error> {
+    let mut kinds: Vec<String> = Vec::new();
+    for row in tables.iter().flatten().flat_map(|table| &table.rows) {
+        if !is_rule_name(&row.node) || is_hidden(&row.node) {
+            return Err(Error::at(row.spot, format!("a row's node is a snake_case name: `{}`", row.node)));
+        }
+        let constant = rule_constant(&row.node);
+        if grammar.rules.iter().any(|rule| rule.name.trim_start_matches('_') == row.node)
+            || grammar.tokens.iter().any(|token| token.constant == constant)
+            || constant == KINDS
+            || constant == grammar.name
+        {
+            return Err(Error::at(row.spot, format!("row node `{}` would define `{constant}`, which is already taken", row.node)));
+        }
+        if !kinds.contains(&row.node) {
+            kinds.push(row.node.clone());
+        }
+    }
+    Ok(kinds)
+}
+
 fn is_constant(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_uppercase()) && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
@@ -207,9 +347,19 @@ fn check_rule_names(grammar: &Grammar) -> Result<(), Error> {
     Ok(())
 }
 
-fn resolve(grammar: &Grammar, node: &mut Node) -> Result<(), Error> {
+fn resolve(grammar: &Grammar, labels: &[Option<Vec<Option<String>>>], node: &mut Node) -> Result<(), Error> {
     let spot = node.spot;
     match &mut node.expr {
+        Expr::Level(name, label) => {
+            let rule = grammar.rules.iter().position(|rule| rule.name == *name).ok_or_else(|| Error::at(spot, format!("`{name}` is not a rule")))?;
+            let Some(rows) = &labels[rule] else {
+                return Err(Error::at(spot, format!("`{name}` is not a precedence rule, so it has no levels")));
+            };
+            let row = rows.iter().position(|row| row.as_deref() == Some(label.as_str())).ok_or_else(|| Error::at(spot, format!("`{name}` has no row labelled `{label}`")))?;
+            node.expr = Expr::RuleAt(rule, row as u32 + 1);
+        }
+        Expr::Pred(inner) => resolve(grammar, labels, inner)?,
+        Expr::Table(_) => return Err(Error::at(spot, "a precedence table must be a whole rule body")),
         Expr::Literal(text) => {
             let token = grammar.tokens.iter().position(|token| token.text == *text);
             node.expr = Expr::Token(token.ok_or_else(|| Error::at(spot, format!("no token has the text {text:?}: declare it in `tokens`")))?);
@@ -223,16 +373,16 @@ fn resolve(grammar: &Grammar, node: &mut Node) -> Result<(), Error> {
                 return Err(Error::at(spot, format!("`{name}` is neither a rule nor a token")));
             };
         }
-        Expr::Token(_) | Expr::Rule(_) => {}
+        Expr::Token(_) | Expr::Rule(_) | Expr::RuleAt(..) => {}
         Expr::Seq(items) | Expr::Choice(items) => {
             for item in items {
-                resolve(grammar, item)?;
+                resolve(grammar, labels, item)?;
             }
         }
-        Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) => resolve(grammar, inner)?,
-        Expr::Sep(inner, separator) => {
-            resolve(grammar, inner)?;
-            resolve(grammar, separator)?;
+        Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) => resolve(grammar, labels, inner)?,
+        Expr::Sep(inner, separator, _) => {
+            resolve(grammar, labels, inner)?;
+            resolve(grammar, labels, separator)?;
         }
     }
     if let Expr::Token(token) = node.expr {
@@ -265,8 +415,11 @@ fn shapes(grammar: &Grammar) -> Result<Vec<Shape>, Error> {
         } else {
             Shape::Node
         };
-        let rest = match &shape {
-            Shape::Group(inner) => inner.as_ref(),
+        let rest = match (&shape, &rule.body.expr) {
+            (Shape::Group(inner), _) => inner.as_ref(),
+            // A table's rows are checked as they are emitted: an operator there may
+            // not open a group either, but its operand rule and rows are rules.
+            (_, Expr::Table(_)) => None,
             _ => Some(&rule.body),
         };
         if let Some(spot) = rest.and_then(|node| find_delimiter(grammar, node)) {
@@ -300,8 +453,9 @@ fn find_delimiter(grammar: &Grammar, node: &Node) -> Option<Spot> {
     match &node.expr {
         Expr::Token(token) if is_delimiter(grammar, *token) => Some(node.spot),
         Expr::Seq(items) | Expr::Choice(items) => items.iter().find_map(|item| find_delimiter(grammar, item)),
-        Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) => find_delimiter(grammar, inner),
-        Expr::Sep(inner, separator) => find_delimiter(grammar, inner).or_else(|| find_delimiter(grammar, separator)),
+        Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) | Expr::Pred(inner) => find_delimiter(grammar, inner),
+        Expr::Sep(inner, separator, _) => find_delimiter(grammar, inner).or_else(|| find_delimiter(grammar, separator)),
+        Expr::Table(table) => find_delimiter(grammar, &table.operand).or_else(|| table.rows.iter().find_map(|row| find_delimiter(grammar, &row.ops))),
         _ => None,
     }
 }
@@ -310,10 +464,10 @@ fn find_delimiter(grammar: &Grammar, node: &Node) -> Option<Spot> {
 fn references(node: &Node) -> Vec<usize> {
     fn walk(node: &Node, out: &mut Vec<usize>) {
         match &node.expr {
-            Expr::Rule(rule) if !out.contains(rule) => out.push(*rule),
+            Expr::Rule(rule) | Expr::RuleAt(rule, _) if !out.contains(rule) => out.push(*rule),
             Expr::Seq(items) | Expr::Choice(items) => items.iter().for_each(|item| walk(item, out)),
-            Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) => walk(inner, out),
-            Expr::Sep(inner, separator) => {
+            Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) | Expr::Pred(inner) => walk(inner, out),
+            Expr::Sep(inner, separator, _) => {
                 walk(inner, out);
                 walk(separator, out);
             }
@@ -350,6 +504,7 @@ fn check_reachable(grammar: &Grammar, edges: &[Vec<usize>]) -> Result<(), Error>
 fn nested_calls(shapes: &[Shape], edges: &[Vec<usize>]) -> Vec<Vec<bool>> {
     let count = shapes.len();
     let unguarded = |rule: usize| -> &[usize] {
+        // A group's body is behind its opener, which the depth budget counts.
         if matches!(shapes[rule], Shape::Group(_)) {
             &[]
         } else {
@@ -382,12 +537,12 @@ impl Checked {
     pub fn nullable(&self, node: &Node) -> bool {
         match &node.expr {
             Expr::Token(_) => false,
-            Expr::Rule(rule) => self.nullable[*rule],
+            Expr::Rule(rule) | Expr::RuleAt(rule, _) => self.nullable[*rule],
             Expr::Seq(items) => items.iter().all(|item| self.nullable(item)),
             Expr::Choice(items) => items.iter().any(|item| self.nullable(item)),
-            Expr::Opt(_) | Expr::Star(_) | Expr::Sep(..) => true,
+            Expr::Opt(_) | Expr::Star(_) | Expr::Sep(..) | Expr::Pred(_) => true,
             Expr::Plus(inner) => self.nullable(inner),
-            Expr::Literal(_) | Expr::Name(_) => unreachable!("resolved"),
+            Expr::Literal(_) | Expr::Name(_) | Expr::Level(..) | Expr::Table(_) => unreachable!("resolved"),
         }
     }
 
@@ -395,9 +550,10 @@ impl Checked {
         let mut set = Set::new(self.size());
         match &node.expr {
             Expr::Token(token) => set.insert(*token),
-            Expr::Rule(rule) => {
+            Expr::Rule(rule) | Expr::RuleAt(rule, _) => {
                 set.union(&self.first[*rule]);
             }
+            Expr::Pred(_) => {}
             Expr::Seq(items) => {
                 for item in items {
                     set.union(&self.first(item));
@@ -409,10 +565,10 @@ impl Checked {
             Expr::Choice(items) => items.iter().for_each(|item| {
                 set.union(&self.first(item));
             }),
-            Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) | Expr::Sep(inner, _) => {
+            Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) | Expr::Sep(inner, ..) => {
                 set.union(&self.first(inner));
             }
-            Expr::Literal(_) | Expr::Name(_) => unreachable!("resolved"),
+            Expr::Literal(_) | Expr::Name(_) | Expr::Level(..) | Expr::Table(_) => unreachable!("resolved"),
         }
         set
     }
@@ -455,7 +611,7 @@ impl Checked {
     /// Rules that `node` can call before taking any token.
     fn left_calls(&self, node: &Node, out: &mut Vec<(usize, Spot)>) {
         match &node.expr {
-            Expr::Rule(rule) => out.push((*rule, node.spot)),
+            Expr::Rule(rule) | Expr::RuleAt(rule, _) => out.push((*rule, node.spot)),
             Expr::Seq(items) => {
                 for item in items {
                     self.left_calls(item, out);
@@ -465,7 +621,7 @@ impl Checked {
                 }
             }
             Expr::Choice(items) => items.iter().for_each(|item| self.left_calls(item, out)),
-            Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) | Expr::Sep(inner, _) => self.left_calls(inner, out),
+            Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) | Expr::Sep(inner, ..) | Expr::Pred(inner) => self.left_calls(inner, out),
             _ => {}
         }
     }
@@ -514,30 +670,42 @@ impl Checked {
         Ok(())
     }
 
-    fn check_node(&self, node: &Node) -> Result<(), Error> {
+    /// `alternative`: `node` is a whole alternative of a choice, where a
+    /// sequence may start with a predicate.
+    fn check_node(&self, node: &Node, alternative: bool) -> Result<(), Error> {
         match &node.expr {
-            Expr::Seq(items) => items.iter().try_for_each(|item| self.check_node(item)),
-            Expr::Choice(items) => {
-                let mut seen = Set::new(self.size());
-                for item in items {
-                    self.check_node(item)?;
-                    if self.nullable(item) {
-                        return Err(Error::at(item.spot, "an alternative can match nothing: make the whole choice optional instead"));
+            Expr::Seq(items) => {
+                for (at, item) in items.iter().enumerate() {
+                    if let Expr::Pred(inner) = &item.expr {
+                        if !(alternative && at == 0) {
+                            return Err(Error::at(item.spot, "a predicate `&x` may only start an alternative of a choice"));
+                        }
+                        self.check_node(inner, false)?;
+                        if self.nullable(inner) {
+                            return Err(Error::at(item.spot, "a predicate must not match nothing"));
+                        }
+                    } else {
+                        self.check_node(item, false)?;
                     }
-                    let first = self.first(item);
-                    if let Some(shared) = first.iter().find(|token| seen.contains(*token)) {
-                        return Err(Error::at(item.spot, format!("alternatives both start with `{}`: the choice must be decided by one token", self.grammar.tokens[shared].text)));
-                    }
-                    seen.union(&first);
                 }
                 Ok(())
             }
-            Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) | Expr::Sep(inner, _) => {
-                self.check_node(inner)?;
+            Expr::Pred(_) => Err(Error::at(node.spot, "a predicate `&x` starts an alternative and is followed by what it guards")),
+            Expr::Choice(items) => {
+                for item in items {
+                    self.check_node(item, true)?;
+                    if self.nullable(item) {
+                        return Err(Error::at(item.spot, "an alternative can match nothing: make the whole choice optional instead"));
+                    }
+                }
+                Ok(())
+            }
+            Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) | Expr::Sep(inner, ..) => {
+                self.check_node(inner, false)?;
                 if !matches!(node.expr, Expr::Opt(_)) && self.nullable(inner) {
                     return Err(Error::at(inner.spot, "repeating something that can match nothing would never end"));
                 }
-                if let Expr::Sep(_, separator) = &node.expr {
+                if let Expr::Sep(_, separator, _) = &node.expr {
                     if !matches!(separator.expr, Expr::Token(_)) {
                         return Err(Error::at(separator.spot, "a separator is one token"));
                     }
@@ -557,7 +725,7 @@ impl Checked {
                     Shape::Root => self.walk_follow(&self.grammar.rules[rule].body, &empty, &mut follow),
                     Shape::Group(Some(inner)) => self.walk_follow(inner, &empty, &mut follow),
                     Shape::Group(None) => {}
-                    Shape::Node | Shape::Hidden => self.walk_follow(&self.grammar.rules[rule].body, &self.follow[rule], &mut follow),
+                    Shape::Node | Shape::Hidden | Shape::Table => self.walk_follow(&self.grammar.rules[rule].body, &self.follow[rule], &mut follow),
                 }
             }
             if follow == self.follow {
@@ -569,9 +737,10 @@ impl Checked {
 
     fn walk_follow(&self, node: &Node, after: &Set, follow: &mut [Set]) {
         match &node.expr {
-            Expr::Rule(rule) => {
+            Expr::Rule(rule) | Expr::RuleAt(rule, _) => {
                 follow[*rule].union(after);
             }
+            Expr::Pred(inner) => self.walk_follow(inner, &Set::new(self.size()), follow),
             Expr::Seq(items) => {
                 for at in 0..items.len() {
                     self.walk_follow(&items[at], &self.first_of_rest(&items[at + 1..], after), follow);
@@ -580,7 +749,7 @@ impl Checked {
             Expr::Choice(items) => items.iter().for_each(|item| self.walk_follow(item, after, follow)),
             Expr::Opt(inner) => self.walk_follow(inner, after, follow),
             Expr::Star(inner) | Expr::Plus(inner) => self.walk_follow(inner, &self.repeat_after(inner, after), follow),
-            Expr::Sep(inner, separator) => self.walk_follow(inner, &self.separated_after(separator, after), follow),
+            Expr::Sep(inner, separator, _) => self.walk_follow(inner, &self.separated_after(separator, after), follow),
             _ => {}
         }
     }
@@ -603,7 +772,7 @@ impl Checked {
     /// its first item's guard when that item cannot be empty.
     pub fn guard(&self, node: &Node) -> Guard {
         match &node.expr {
-            Expr::Rule(rule) => self.rule_guard(*rule),
+            Expr::Rule(rule) | Expr::RuleAt(rule, _) => self.rule_guard(*rule),
             Expr::Seq(items) => {
                 let leading = self.leading_tokens(items);
                 if leading.len() >= 2 {
@@ -703,7 +872,13 @@ mod tests {
     fn bad_grammars_are_rejected_where_they_go_wrong() {
         rejects("top: x, x: x A,", "left recursion: x -> x");
         rejects("top: x, x: y A, y: [B] x,", "left recursion: x -> y -> x");
-        rejects("top: A | A B,", "both start with `a`");
+        rejects("top: _e, _e: precedence A { left B => bin, left C => bin, x: left C => cat, x: left B => dog, },", "row label `x` is used twice");
+        rejects("top: e, e: precedence A { left B => bin, },", "has no node of its own");
+        rejects("top: _e, _e: precedence A { left B => top, },", "already taken");
+        rejects("top: _e@nope, _e: precedence A { left B => bin, },", "no row labelled `nope`");
+        rejects("top: x@y, x: A,", "not a precedence rule");
+        rejects("top: A &(B) C,", "may only start an alternative");
+        rejects("top: _e, _e: precedence _a { left B => bin, }, _a: [A],", "must not match nothing");
         rejects("top: A | [B],", "can match nothing");
         rejects("top: [A]*,", "would never end");
         rejects("top: A % x, x: B C,", "a separator is one token");
@@ -734,5 +909,6 @@ mod tests {
         assert!(read(r#"A = "a", L = "(" open p,"#).contains("exactly one `open` and one `close`"));
         assert!(read(r#"A = "a", Low = "l","#).contains("UPPER_CASE"));
         assert!(read(r#"A = "a", KINDS = "k","#).contains("generated code uses"));
+        assert!(read(r#"A = "a" reset,"#).contains("only means something with `layout"));
     }
 }

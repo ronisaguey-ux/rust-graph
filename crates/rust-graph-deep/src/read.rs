@@ -14,6 +14,15 @@ pub struct Grammar {
     pub runtime: String,
     pub tokens: Vec<TokenDef>,
     pub rules: Vec<Rule>,
+    /// `layout = NEWLINE INDENT DEDENT;`: indentation as tokens.
+    pub layout: Option<LayoutDef>,
+}
+
+pub struct LayoutDef {
+    pub newline: String,
+    pub indent: String,
+    pub dedent: String,
+    pub spot: Spot,
 }
 
 pub struct TokenDef {
@@ -21,6 +30,8 @@ pub struct TokenDef {
     /// The kind's name in trees, and how rules may refer to it: `"{"`, `"string"`.
     pub text: String,
     pub class: TokenClass,
+    /// `reset`: starting a line inside brackets, this token ends them (layout only).
+    pub reset: bool,
     pub spot: Spot,
 }
 
@@ -59,8 +70,47 @@ pub enum Expr {
     Opt(Box<Node>),
     Star(Box<Node>),
     Plus(Box<Node>),
-    /// `x % sep`: one or more `x`, separated by `sep`, or none.
-    Sep(Box<Node>, Box<Node>),
+    /// `x % sep`: one or more `x`, separated by `sep`, or none. `x %? sep`
+    /// (the flag) also allows one `sep` after the last `x`.
+    Sep(Box<Node>, Box<Node>, bool),
+    /// `&x`: a syntactic predicate. It starts an alternative, which is taken only
+    /// if `x` parses here without an error; it consumes nothing.
+    Pred(Box<Node>),
+    /// `rule@label`: a precedence rule entered at the level of its row `label`.
+    Level(String, String),
+    /// Resolved [`Expr::Level`]: the rule, and the level (row index + 1).
+    RuleAt(usize, u32),
+    /// `precedence operand { rows }`, only ever a whole rule body.
+    Table(Box<Table>),
+}
+
+/// An operator precedence table, which becomes a Pratt loop.
+#[derive(Clone, Debug)]
+pub struct Table {
+    /// What an operator applies to, such as `_primary`.
+    pub operand: Node,
+    /// Weakest first.
+    pub rows: Vec<Row>,
+}
+
+/// `[label:] (prefix | postfix | left | right) ops => node`.
+#[derive(Clone, Debug)]
+pub struct Row {
+    pub label: Option<String>,
+    pub fix: Fix,
+    /// The operator: a token, or any expression such as `"not" "in"` or `"if" x "else"`.
+    pub ops: Node,
+    /// The node kind the row makes.
+    pub node: String,
+    pub spot: Spot,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fix {
+    Prefix,
+    Postfix,
+    Left,
+    Right,
 }
 
 pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
@@ -83,6 +133,7 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
         runtime: "crate::deep".into(),
         tokens: Vec::new(),
         rules: Vec::new(),
+        layout: None,
     };
     let mut lex_seen = false;
     let mut items = Stream::new(body);
@@ -107,7 +158,13 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
                         lex_seen = true;
                     }
                     "runtime" => grammar.runtime = path_value(&value, spot, "runtime")?,
-                    _ => return Err(Error::at(spot, format!("unknown setting `{word}`: the settings are `name`, `lex` and `runtime`"))),
+                    "layout" => match value.as_slice() {
+                        [Tok { tree: Tree::Ident(newline), .. }, Tok { tree: Tree::Ident(indent), .. }, Tok { tree: Tree::Ident(dedent), .. }] => {
+                            grammar.layout = Some(LayoutDef { newline: newline.clone(), indent: indent.clone(), dedent: dedent.clone(), spot });
+                        }
+                        _ => return Err(Error::at(spot, "`layout` takes three tokens: `layout = NEWLINE INDENT DEDENT;`")),
+                    },
+                    _ => return Err(Error::at(spot, format!("unknown setting `{word}`: the settings are `name`, `lex`, `runtime` and `layout`"))),
                 }
             }
             Some(Tree::Group(Delim::Brace, _)) if word == "tokens" => {
@@ -123,7 +180,10 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
                 if body.is_empty() {
                     return Err(Error::at(spot, format!("rule `{word}` has an empty body")));
                 }
-                let body = Expressions::new(body, spot).whole()?;
+                let body = match body.first() {
+                    Some(Tok { tree: Tree::Ident(keyword), .. }) if keyword == "precedence" => table(body, spot)?,
+                    _ => Expressions::new(body, spot).whole()?,
+                };
                 grammar.rules.push(Rule { name: word, body, spot });
             }
             _ => return Err(Error::at(spot, format!("expected `=`, `{{` or `:` after `{word}`"))),
@@ -164,7 +224,11 @@ fn tokens(body: Vec<Tok>) -> Result<Vec<TokenDef>, Error> {
             Some(Tok { tree: Tree::Literal(literal), spot }) => unquote(&literal).ok_or_else(|| Error::at(spot, "expected a string literal"))?,
             _ => return Err(Error::at(spot, format!("expected the text of `{constant}`, as in `{constant} = \"...\"`"))),
         };
-        let words: Vec<Tok> = row.collect();
+        let mut words: Vec<Tok> = row.collect();
+        let reset = matches!(words.last(), Some(Tok { tree: Tree::Ident(word), .. }) if word == "reset");
+        if reset {
+            words.pop();
+        }
         let class = match words.as_slice() {
             [] => TokenClass::Token,
             [Tok { tree: Tree::Ident(word), .. }] if word == "bad" => TokenClass::Bad,
@@ -172,12 +236,71 @@ fn tokens(body: Vec<Tok>) -> Result<Vec<TokenDef>, Error> {
             [Tok { tree: Tree::Ident(word), .. }, Tok { tree: Tree::Ident(family), .. }] if word == "open" => TokenClass::Open(family.clone()),
             [Tok { tree: Tree::Ident(word), .. }, Tok { tree: Tree::Ident(family), .. }] if word == "close" => TokenClass::Close(family.clone()),
             [first, ..] => {
-                return Err(Error::at(first.spot, format!("`{constant}`: expected nothing, `bad`, `trivia`, `open FAMILY` or `close FAMILY` after the text")))
+                return Err(Error::at(first.spot, format!("`{constant}`: expected nothing, `bad`, `trivia`, `open FAMILY`, `close FAMILY` or `reset` after the text")))
             }
         };
-        defs.push(TokenDef { constant, text, class, spot });
+        if reset && class != TokenClass::Token {
+            return Err(Error::at(spot, format!("`{constant}`: only a plain token can be `reset`")));
+        }
+        defs.push(TokenDef { constant, text, class, reset, spot });
     }
     Ok(defs)
+}
+
+/// `precedence operand { [label:] fix ops => node, ... }`
+fn table(body: Vec<Tok>, spot: Spot) -> Result<Node, Error> {
+    let mut body = body.into_iter();
+    body.next();
+    let operand = match body.next() {
+        Some(tok @ Tok { tree: Tree::Ident(_), .. }) => Expressions::new(vec![tok], spot).whole()?,
+        other => return Err(Error::at(other.and_then(|tok| tok.spot).or(spot), "expected the operand rule after `precedence`")),
+    };
+    let rows = match body.next() {
+        Some(Tok { tree: Tree::Group(Delim::Brace, rows), .. }) => rows,
+        other => return Err(Error::at(other.and_then(|tok| tok.spot).or(spot), "expected `{ rows }` after the operand")),
+    };
+    if let Some(extra) = body.next() {
+        return Err(Error::at(extra.spot, "unexpected tokens after the precedence rows"));
+    }
+    let mut stream = Stream::new(rows);
+    let mut out = Vec::new();
+    while stream.peek().is_some() {
+        let row = stream.until(',');
+        let row_spot = row.first().and_then(|tok| tok.spot).or(spot);
+        let mut at = 0;
+        let label = match (row.first().map(|tok| &tok.tree), row.get(1).map(|tok| &tok.tree)) {
+            (Some(Tree::Ident(label)), Some(Tree::Punct(':', false))) => {
+                at = 2;
+                Some(label.clone())
+            }
+            _ => None,
+        };
+        let fix = match row.get(at).map(|tok| &tok.tree) {
+            Some(Tree::Ident(word)) if word == "prefix" => Fix::Prefix,
+            Some(Tree::Ident(word)) if word == "postfix" => Fix::Postfix,
+            Some(Tree::Ident(word)) if word == "left" => Fix::Left,
+            Some(Tree::Ident(word)) if word == "right" => Fix::Right,
+            _ => return Err(Error::at(row_spot, "a precedence row is `[label:] prefix | postfix | left | right OPERATOR => node`")),
+        };
+        let arrow = (at + 1..row.len().saturating_sub(1))
+            .find(|&index| matches!(row[index].tree, Tree::Punct('=', true)) && matches!(row[index + 1].tree, Tree::Punct('>', _)));
+        let Some(arrow) = arrow else {
+            return Err(Error::at(row_spot, "a precedence row ends with `=> node`"));
+        };
+        let node = match row.get(arrow + 2..) {
+            Some([Tok { tree: Tree::Ident(node), .. }]) => node.clone(),
+            _ => return Err(Error::at(row_spot, "expected one node name after `=>`")),
+        };
+        if arrow == at + 1 {
+            return Err(Error::at(row_spot, "a precedence row needs an operator"));
+        }
+        let ops = Expressions::new(row[at + 1..arrow].to_vec(), row_spot).whole()?;
+        out.push(Row { label, fix, ops, node, spot: row_spot });
+    }
+    if out.is_empty() {
+        return Err(Error::at(spot, "a precedence table needs at least one row"));
+    }
+    Ok(Node { expr: Expr::Table(Box::new(Table { operand, rows: out })), spot })
 }
 
 fn string_value(value: &[Tok], spot: Spot, setting: &str) -> Result<String, Error> {
@@ -231,6 +354,17 @@ pub fn unquote(literal: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+impl Node {
+    /// The label of row `row`, if this is a table.
+    fn expr_label(&self, row: usize) -> Option<&str> {
+        match &self.expr {
+            Expr::Table(table) => table.rows[row].label.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 struct Stream {
@@ -335,9 +469,25 @@ impl Expressions {
                 Some('?') => Node { expr: Expr::Opt(Box::new(node)), spot },
                 Some('%') => {
                     self.at += 1;
+                    let trailing = self.peek_punct() == Some('?');
+                    if trailing {
+                        self.at += 1;
+                    }
                     let separator = self.atom()?;
-                    node = Node { expr: Expr::Sep(Box::new(node), Box::new(separator)), spot };
+                    node = Node { expr: Expr::Sep(Box::new(node), Box::new(separator), trailing), spot };
                     continue;
+                }
+                Some('@') => {
+                    self.at += 1;
+                    let Expr::Name(rule) = &node.expr else {
+                        return Err(Error::at(spot, "`@level` follows the name of a precedence rule"));
+                    };
+                    let label = match self.toks.get(self.at).map(|tok| &tok.tree) {
+                        Some(Tree::Ident(label)) => label.clone(),
+                        _ => return Err(Error::at(self.spot(), "expected a row label after `@`")),
+                    };
+                    // The label is taken below, like a postfix operator.
+                    Node { expr: Expr::Level(rule.clone(), label), spot: node.spot }
                 }
                 _ => return Ok(node),
             };
@@ -353,6 +503,11 @@ impl Expressions {
         let expr = match &tok.tree {
             Tree::Literal(literal) => Expr::Literal(unquote(literal).ok_or_else(|| Error::at(spot, "expected a string literal"))?),
             Tree::Ident(name) => Expr::Name(name.clone()),
+            Tree::Punct('&', _) => {
+                self.at += 1;
+                let inner = self.atom()?;
+                return Ok(Node { expr: Expr::Pred(Box::new(inner)), spot });
+            }
             Tree::Group(delim @ (Delim::Paren | Delim::Bracket), inner) => {
                 let inner = Expressions::new(inner.clone(), spot).whole()?;
                 self.at += 1;
@@ -386,7 +541,15 @@ mod tests {
             Expr::Opt(inner) => format!("(opt {})", show(inner)),
             Expr::Star(inner) => format!("(star {})", show(inner)),
             Expr::Plus(inner) => format!("(plus {})", show(inner)),
-            Expr::Sep(inner, separator) => format!("(sep {} {})", show(inner), show(separator)),
+            Expr::Sep(inner, separator, false) => format!("(sep {} {})", show(inner), show(separator)),
+            Expr::Sep(inner, separator, true) => format!("(sep? {} {})", show(inner), show(separator)),
+            Expr::Pred(inner) => format!("(pred {})", show(inner)),
+            Expr::Level(rule, label) => format!("{rule}@{label}"),
+            Expr::RuleAt(rule, level) => format!("r{rule}@{level}"),
+            Expr::Table(table) => {
+                let rows: Vec<String> = table.rows.iter().map(|row| format!("{:?} {} {}", row.fix, show(&row.ops), row.node)).collect();
+                format!("(table {} {})", show(&table.operand), rows.join("; "))
+            }
         }
     }
 
@@ -396,6 +559,24 @@ mod tests {
         assert_eq!(body("a b | c* d+ [e] f?"), "(alt (seq a b) (seq (star c) (plus d) (opt e) (opt f)))");
         assert_eq!(body(r#""def" IDENT "(" [params] ")" ":" block"#), r#"(seq "def" IDENT "(" (opt params) ")" ":" block)"#);
         assert_eq!(body("(a | b)*"), "(star (alt a b))");
+        assert_eq!(body(r#"&(A b) c | (x %? ",") y@low"#), r#"(alt (seq (pred (seq A b)) c) (seq (sep? x ",") y@low))"#);
+    }
+
+    #[test]
+    fn a_precedence_table_reads_its_rows() {
+        let grammar = read(
+            r#"G { lex = l; layout = NL IN DE; tokens { A = "a" reset, }
+               _e: precedence _atom { low: right "=" => assign, left "+" | "-" => bin, prefix "-" => neg, postfix "(" ")" => call, }, }"#,
+        )
+        .unwrap();
+        assert!(grammar.tokens[0].reset);
+        let layout = grammar.layout.as_ref().unwrap();
+        assert_eq!((layout.newline.as_str(), layout.indent.as_str(), layout.dedent.as_str()), ("NL", "IN", "DE"));
+        assert_eq!(
+            show(&grammar.rules[0].body),
+            r#"(table _atom Right "=" assign; Left (alt "+" "-") bin; Prefix "-" neg; Postfix (seq "(" ")") call)"#
+        );
+        assert_eq!(grammar.rules[0].body.expr_label(0), Some("low"));
     }
 
     #[test]
@@ -450,6 +631,12 @@ mod tests {
             (r#"G { lex = l; color = "red"; tokens { A = "a", } a: A, }"#, "unknown setting `color`"),
             (r#"G { lex = l; tokens { A = "a", } a: A %, }"#, "ends where an item was expected"),
             (r#"G { lex = "l"; tokens { A = "a", } a: A, }"#, "`lex` takes a path"),
+            (r#"G { lex = l; layout = A; tokens { A = "a", } a: A, }"#, "`layout` takes three tokens"),
+            (r#"G { lex = l; tokens { A = "a" bad reset, } a: A, }"#, "only a plain token can be `reset`"),
+            (r#"G { lex = l; tokens { A = "a", } a: precedence b { up "+" => x, }, }"#, "a precedence row is"),
+            (r#"G { lex = l; tokens { A = "a", } a: precedence b { left "+" x, }, }"#, "ends with `=> node`"),
+            (r#"G { lex = l; tokens { A = "a", } a: precedence b { left => x, }, }"#, "needs an operator"),
+            (r#"G { lex = l; tokens { A = "a", } a: "x"@y, }"#, "follows the name of a precedence rule"),
         ] {
             let error = read(src).err().unwrap_or_else(|| panic!("{src} was accepted"));
             assert!(error.contains(want), "{src}: {error}");

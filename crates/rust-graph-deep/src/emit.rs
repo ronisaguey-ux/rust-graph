@@ -93,6 +93,7 @@ impl Emitter<'_> {
                 };
                 format!("{signature} {{ p.group({}, {}); }} {body}", rule_constant(name), group_fn(name))
             }
+            Shape::Table => panic!("grammar!: precedence tables are emitted by the decision emitter, the next commit"),
             Shape::Node => format!(
                 "{signature} {{ let marker = p.open(); {} p.close(marker, {}); }}",
                 self.guarded(&definition.body, &checked.follow[rule]),
@@ -113,7 +114,7 @@ impl Emitter<'_> {
                 self.guarded(inner, &checked.repeat_after(inner, &empty)),
                 self.list(&checked.first(inner)),
             ),
-            Expr::Sep(inner, separator) => {
+            Expr::Sep(inner, separator, _) => {
                 let Expr::Token(token) = separator.expr else { unreachable!("checked: a separator is a token") };
                 let separator_kind = self.constant(token);
                 format!(
@@ -147,7 +148,7 @@ impl Emitter<'_> {
             Expr::Opt(inner) => format!("if {} {{ {} }}", self.cond(&checked.guard(inner), 0), self.guarded(inner, after)),
             Expr::Star(inner) => self.repeat(inner, after),
             Expr::Plus(inner) => format!("{}{}", self.guarded(inner, &checked.repeat_after(inner, after)), self.repeat(inner, after)),
-            Expr::Sep(inner, separator) => {
+            Expr::Sep(inner, separator, _) => {
                 let Expr::Token(token) = separator.expr else { unreachable!("checked: a separator is a token") };
                 let guard = checked.guard(inner);
                 let item = self.guarded(inner, &checked.separated_after(separator, after));
@@ -158,7 +159,8 @@ impl Emitter<'_> {
                     self.cond(&guard, 1)
                 )
             }
-            Expr::Literal(_) | Expr::Name(_) => unreachable!("resolved"),
+            Expr::Literal(_) | Expr::Name(_) | Expr::Level(..) | Expr::Table(_) => unreachable!("resolved"),
+            Expr::Pred(_) | Expr::RuleAt(..) => panic!("grammar!: predicates and precedence levels are emitted by the decision emitter, the next commit"),
         }
     }
 
