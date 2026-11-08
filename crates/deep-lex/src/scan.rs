@@ -75,6 +75,12 @@ impl<'a, S: crate::ExternalScanner> DeepLexer<'a, S> {
             }
         }
 
+        if !crate::kind::starts_multi(b, self.cur.peek_n(1)) {
+            if let Some(kind) = crate::kind::single(b) {
+                self.cur.bump();
+                return self.emit(kind, Span::new(start, self.cur.pos()));
+            }
+        }
         for &(bytes, kind) in crate::kind::extras(self.lang) {
             if self.cur.starts_with(bytes) {
                 self.cur.advance(bytes.len());

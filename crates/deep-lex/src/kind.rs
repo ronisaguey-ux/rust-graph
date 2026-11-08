@@ -259,7 +259,6 @@ pub const OPERATORS: &[(&[u8], Kind)] = &[
     (b".", Dot),
     (b"@", At),
     (b"#", Hash),
-    (b"$", Dollar),
     (b"\\", Backslash),
     (b"(", LParen),
     (b")", RParen),
@@ -301,6 +300,71 @@ pub fn extras(lang: Language) -> &'static [(&'static [u8], Kind)] {
         Language::JavaScript => JAVASCRIPT_OPERATORS,
         Language::Json | Language::C | Language::Generic => &[],
     }
+}
+
+/// The kind of a one-byte operator, or `None` when the byte is not one.
+///
+/// This is the fast path: most punctuation in real code (`{ } ( ) [ ] , ;`)
+/// starts no multi-byte operator, so the sixty-entry table is never scanned.
+#[inline]
+pub fn single(b: u8) -> Option<Kind> {
+    Some(match b {
+        b'(' => LParen,
+        b')' => RParen,
+        b'[' => LBracket,
+        b']' => RBracket,
+        b'{' => LBrace,
+        b'}' => RBrace,
+        b',' => Comma,
+        b';' => Semicolon,
+        b':' => Colon,
+        b'.' => Dot,
+        b'?' => Question,
+        b'@' => At,
+        b'#' => Hash,
+        b'\\' => Backslash,
+        b'+' => Plus,
+        b'-' => Minus,
+        b'*' => Star,
+        b'/' => Slash,
+        b'%' => Percent,
+        b'&' => Amp,
+        b'|' => Pipe,
+        b'^' => Caret,
+        b'~' => Tilde,
+        b'!' => Bang,
+        b'=' => Eq,
+        b'<' => Lt,
+        b'>' => Gt,
+        _ => return None,
+    })
+}
+
+/// Does any operator in any language start with this byte *and* continue with
+/// `next`? When it does not, [`single`] is the whole answer and the table scan
+/// is skipped. Almost every `:` `,` `{` `>` in real code takes this path.
+#[inline]
+pub fn starts_multi(b: u8, next: Option<u8>) -> bool {
+    let Some(next) = next else { return false };
+    matches!(
+        (b, next),
+        (b'>', b'>' | b'=')
+            | (b'=', b'=' | b'>')
+            | (b'!', b'=')
+            | (b'<', b'<' | b'=' | b'>')
+            | (b'&', b'&' | b'=')
+            | (b'|', b'|' | b'=')
+            | (b'?', b'?' | b'.')
+            | (b'+', b'+' | b'=')
+            | (b'-', b'-' | b'=' | b'>')
+            | (b'*', b'*' | b'=')
+            | (b'/', b'/' | b'=')
+            | (b'%', b'=')
+            | (b'^', b'=')
+            | (b'.', b'.')
+            | (b':', b':' | b'=')
+            | (b'@', b'=')
+    )
 }
 
 /// Fixed kind -> symbol mapping. Identity by default; a grammar overrides the
