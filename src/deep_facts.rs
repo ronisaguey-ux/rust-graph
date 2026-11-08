@@ -581,3 +581,249 @@ impl<'a> Walker<'a> {
         out
     }
 
+    // -- statements ---------------------------------------------------------
+
+    fn expression_statement(&mut self, id: u32) {
+        let Some(child) = self.expression_child(id) else { return };
+        if let Some(module) = self.require_module(child) {
+            let line = self.line(id);
+            self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
+            return;
+        }
+        match self.kind(child) {
+            "assignment" | "assignment_expression" => self.assignment(child, false),
+            "augmented_assignment" | "augmented_assignment_expression" => self.assignment(child, true),
+            _ => {
+                let value = self.form(child);
+                if value != "0" {
+                    let line = self.line(child);
+                    self.event(&format!("[\"x\",{line},{value}]"));
+                }
+            }
+        }
+    }
+
+    fn return_statement(&mut self, id: u32) {
+        let line = self.line(id);
+        let value = match self.expression_child(id) {
+            Some(child) => self.form(child),
+            None => "0".to_string(),
+        };
+        self.event(&format!("[\"r\",{line},{value}]"));
+    }
+
+    /// `const x = ...;` without an initializer is an expression, as the lexer
+    /// has it; with one it is an assignment.
+    /// `require('x')` is an import, not a call: the lexer path agrees, and a
+    /// resolver treats the module string, not a callee named `require`.
+    fn require_module(&self, call: u32) -> Option<String> {
+        if !matches!(self.kind(call), "call_expression" | "call") {
+            return None;
+        }
+        let children = self.children(call);
+        let callee = children.first()?;
+        if self.kind(*callee) != "identifier" || self.text_string(*callee) != "require" {
+            return None;
+        }
+        let args = children.iter().find(|&&child| self.kind(child) == "arguments")?;
+        let inner: Vec<u32> = self.children(*args).into_iter().filter(|&child| !self.is_layout(child)).collect();
+        if inner.len() != 1 {
+            return None;
+        }
+        (self.kind(inner[0]) == "string").then(|| self.string_value(inner[0]))
+    }
+
+    fn declarator(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(&name_node) = children.first() else { return };
+        let equal = children.iter().position(|&child| self.kind(child) == "=");
+        let Some(equal) = equal else {
+            let line = self.line(id);
+            let names = self.pattern_names(name_node);
+            if names.len() == 1 {
+                let mut text = format!("[\"x\",{line},[\"n\",");
+                push_string(&mut text, &names[0]);
+                text.push_str("]]");
+                self.event(&text);
+            }
+            return;
+        };
+        let Some(&value) = children.get(equal + 1) else { return };
+        if let Some(module) = self.require_module(value) {
+            // `const { a, b } = require('m')` takes named members; `const x =
+            // require('m')` binds the module itself, so it has no member name.
+            let destructured = matches!(self.kind(name_node), "object_pattern" | "array_pattern");
+            let names = self.pattern_names(name_node);
+            let line = self.line(id);
+            for name in names {
+                let (member, alias) = if destructured { (name.clone(), name) } else { (String::new(), name) };
+                self.facts
+                    .imports
+                    .push(Import { line, module: module.clone(), name: member, alias, kind: IMPORT_MODULE });
+            }
+            return;
+        }
+        // `const f = () => {}`: the binding is a definition, not a value, and
+        // the walk opens the symbol when it reaches the function node.
+        if self.kinds.definitions.iter().any(|def| def.kind == self.kind(value)) {
+            let names = self.pattern_names(name_node);
+            if let Some(name) = names.into_iter().next() {
+                self.bound.push((value, name));
+            }
+            return;
+        }
+        let line = self.line(id);
+        let targets = self.pattern_names(name_node);
+        self.assignment_parts(targets, value, line, false);
+    }
+
+    /// A class field: `#store = new Map()` writes on the enclosing symbol, the
+    /// way the lexer treats a statement in a class body.
+    fn field(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(&name_node) = children.first() else { return };
+        let Some(equal) = children.iter().position(|&child| self.kind(child) == "=") else { return };
+        let Some(&value) = children.get(equal + 1) else { return };
+        let targets = self.pattern_names(name_node);
+        self.assignment_parts(targets, value, self.line(id), false);
+    }
+
+    fn assignment(&mut self, id: u32, augmented: bool) {
+        let children = self.children(id);
+        let Some(&first) = children.first() else { return };
+        let Some(&last) = children.last() else { return };
+        if first == last {
+            return;
+        }
+        let line = self.line(id);
+        let targets = self.assignment_targets(first);
+        self.assignment_parts(targets, last, line, augmented);
+    }
+
+    fn assignment_targets(&self, id: u32) -> Vec<String> {
+        match self.kind(id) {
+            "pattern_list" | "tuple_pattern" | "array_pattern" | "list_pattern" | "tuple" | "list" => {
+                self.children(id).into_iter().filter_map(|child| self.value_path(child)).collect()
+            }
+            _ => self.value_path(id).into_iter().collect(),
+        }
+    }
+
+    fn assignment_event(&mut self, targets: Vec<String>, value: u32, line: u32, augmented: bool) {
+        self.assignment_parts(targets, value, line, augmented);
+    }
+
+    fn assignment_parts(&mut self, targets: Vec<String>, value: u32, line: u32, augmented: bool) {
+        let weak = augmented || targets.is_empty();
+        let expr = self.form(value);
+        if targets.is_empty() {
+            if expr != "0" {
+                self.event(&format!("[\"x\",{line},{expr}]"));
+            }
+            return;
+        }
+        let mut text = format!("[\"a\",{line},[");
+        for (index, name) in targets.iter().enumerate() {
+            if index > 0 {
+                text.push(',');
+            }
+            push_string(&mut text, name);
+        }
+        text.push_str(&format!("],{expr},{}]", u8::from(weak)));
+        self.event(&text);
+        if let Some(class) = self.constructed(value) {
+            for target in targets {
+                self.facts.vars.push((target, class.clone()));
+            }
+        }
+    }
+
+    /// The class a call constructs, by the same convention the lexer uses: a
+    /// capitalised callee, or anything after `new`.
+    fn constructed(&self, value: u32) -> Option<String> {
+        let kind = self.kind(value);
+        if kind == "new_expression" {
+            let path = self.children(value).into_iter().find_map(|child| {
+                matches!(self.kind(child), "identifier" | "member_expression" | "attribute").then(|| self.path_of(child))
+            })?;
+            let last = path.rsplit('.').next().unwrap_or(&path);
+            return last.starts_with(|ch: char| ch.is_uppercase()).then_some(last.to_string());
+        }
+        if kind == "call" || kind == "call_expression" {
+            let callee = self.children(value).into_iter().find(|&child| {
+                !matches!(self.kind(child), "argument_list" | "arguments" | "type_arguments")
+            })?;
+            let path = self.path_of(callee);
+            let last = path.rsplit('.').next().unwrap_or("").to_string();
+            return (last.starts_with(|ch: char| ch.is_uppercase()) && !last.contains('(')).then_some(last);
+        }
+        None
+    }
+
+    // -- control flow -------------------------------------------------------
+
+    fn condition_before(&mut self, id: u32) {
+        // `if x:` / `while x:` / `async with x:`: the first child that is not a
+        // keyword or punctuation is the test.
+        for child in self.children(id) {
+            if self.is_layout(child) {
+                continue;
+            }
+            if matches!(self.kind(child), "block" | "statement_block" | "else_clause" | "elif_clause" | "catch_clause" | "finally_clause") {
+                return;
+            }
+            let value = self.form(child);
+            if value != "0" {
+                let line = self.line(child);
+                self.event(&format!("[\"x\",{line},{value}]"));
+            }
+            return;
+        }
+    }
+
+    /// `for a, b in xs` / `for (const a of xs)` -> targets and iterable.
+    fn loop_binding(&mut self, id: u32) -> Option<(Vec<String>, u32)> {
+        let children = self.children(id);
+        let mut split = None;
+        for (index, &child) in children.iter().enumerate() {
+            if matches!(self.kind(child), "in" | "of" | "as") {
+                split = Some(index);
+                break;
+            }
+        }
+        // JS keeps the header inside `for_header`: `for (let x of y)`.
+        if split.is_none() {
+            let header = children.iter().copied().find(|&child| self.kind(child) == "for_header")?;
+            let inner = self.children(header);
+            let at = inner.iter().position(|&child| matches!(self.kind(child), "in" | "of"))?;
+            let targets = inner[..at]
+                .iter()
+                .filter(|&&child| !matches!(self.kind(child), "(" | "let" | "const" | "var" | ";" | ","))
+                .flat_map(|&child| {
+                    if self.kind(child) == "variable_declarator" {
+                        self.children(child).first().copied().map(|first| self.pattern_names(first)).unwrap_or_default()
+                    } else {
+                        self.pattern_names(child)
+                    }
+                })
+                .collect();
+            let value = *inner.get(at + 1)?;
+            return Some((targets, value));
+        }
+        let at = split?;
+        if self.kind(children[at]) == "as" {
+            // `with open(p) as handle`: the value is before `as`, the binding
+            // after it.
+            let value = *children[..at].iter().rev().find(|&&child| !self.is_layout(child))?;
+            let targets: Vec<String> = children.get(at + 1).map(|&child| self.pattern_names(child)).unwrap_or_default();
+            return Some((targets, value));
+        }
+        let targets = children[..at]
+            .iter()
+            .filter(|&&child| !matches!(self.kind(child), "for" | "(" | ")"))
+            .flat_map(|&child| self.pattern_names(child))
+            .collect();
+        let value = *children.get(at + 1)?;
+        Some((targets, value))
+    }
+
