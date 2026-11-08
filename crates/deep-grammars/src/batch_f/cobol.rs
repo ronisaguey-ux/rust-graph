@@ -238,3 +238,269 @@ pub fn lex_cobol(c: &mut Cursor) -> Kind {
                     return BAD_STRING;
                 }
                 if c.peek() == quote {
+                    c.bump();
+                    if c.peek() == quote {
+                        c.bump();
+                        continue;
+                    }
+                    return STRING;
+                }
+                c.bump_char();
+            }
+        }
+        b'0'..=b'9' => {
+            c.eat_while(|byte| byte.is_ascii_digit());
+            if c.peek() == b'.' && c.peek_at(1).is_ascii_digit() {
+                c.bump();
+                c.eat_while(|byte| byte.is_ascii_digit());
+            }
+            NUMBER
+        }
+        b'a'..=b'z' | b'A'..=b'Z' | b'_' => word(c),
+        b'.' => { c.bump(); PERIOD }
+        b',' => { c.bump(); COMMA }
+        b'(' => { c.bump(); LPAREN }
+        b')' => { c.bump(); RPAREN }
+        b'=' if c.peek_at(1) == b'=' => { c.bump_n(2); EQ }
+        b'=' => { c.bump(); ASSIGN }
+        b'!' if c.peek_at(1) == b'=' => { c.bump_n(2); NE }
+        b'<' if c.peek_at(1) == b'=' => { c.bump_n(2); LE }
+        b'<' => { c.bump(); LT }
+        b'>' if c.peek_at(1) == b'=' => { c.bump_n(2); GE }
+        b'>' => { c.bump(); GT }
+        b'+' => { c.bump(); PLUS }
+        b'-' => { c.bump(); MINUS }
+        b'*' => { c.bump(); STAR }
+        b'/' => { c.bump(); SLASH }
+        _ => UNKNOWN,
+    }
+}
+
+/// Columns 1-7 of a line: a comment, a continuation, or the statement end of the
+/// line before.
+fn line_prefix(c: &mut Cursor) -> Kind {
+    // Columns 1-6: the sequence number, ignored.
+    let mut column = 0;
+    while column < 6 {
+        match c.peek() {
+            b'\n' | b'\r' => {
+                c.bump();
+                return NEWLINE;
+            }
+            0 if c.at_end() => return NEWLINE,
+            _ => {
+                c.bump();
+                column += 1;
+            }
+        }
+    }
+    // Column 7: the indicator.
+    match c.peek() {
+        b'*' | b'/' => {
+            c.eat_while(|byte| byte != b'\n');
+            COMMENT
+        }
+        b'-' => {
+            c.bump();
+            WHITESPACE
+        }
+        b'\n' | b'\r' => {
+            c.bump();
+            NEWLINE
+        }
+        _ => NEWLINE,
+    }
+}
+
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+    let text = crate::batch_d::lex::upper(&start[..length]);
+    keyword(&text)
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"IDENTIFICATION" => KW_IDENTIFICATION,
+        b"PROGRAM-ID" => KW_PROGRAM_ID,
+        b"ENVIRONMENT" => KW_ENVIRONMENT,
+        b"DATA" => KW_DATA,
+        b"PROCEDURE" => KW_PROCEDURE,
+        b"DIVISION" => KW_DIVISION,
+        b"SECTION" => KW_SECTION,
+        b"WORKING-STORAGE" => KW_WORKING_STORAGE,
+        b"LINKAGE" => KW_LINKAGE,
+        b"FILE" => KW_FILE,
+        b"CONTAINS" => KW_CONTAINS,
+        b"CONFIGURATION" => KW_CONFIGURATION,
+        b"FILLER" => KW_FILLER,
+        b"IS" => KW_IS,
+        b"AUTHOR" => KW_AUTHOR,
+        b"DATE-WRITTEN" => KW_DATE_WRITTEN,
+        b"MOVE" => KW_MOVE,
+        b"TO" => KW_TO,
+        b"DISPLAY" => KW_DISPLAY,
+        b"PERFORM" => KW_PERFORM,
+        b"THRU" => KW_THRU,
+        b"THROUGH" => KW_THROUGH,
+        b"UNTIL" => KW_UNTIL,
+        b"TIMES" => KW_TIMES,
+        b"ACCEPT" => KW_ACCEPT,
+        b"CALL" => KW_CALL,
+        b"USING" => KW_USING,
+        b"RETURNING" => KW_RETURNING,
+        b"COMPUTE" => KW_COMPUTE,
+        b"ADD" => KW_ADD,
+        b"SUBTRACT" => KW_SUBTRACT,
+        b"MULTIPLY" => KW_MULTIPLY,
+        b"DIVIDE" => KW_DIVIDE,
+        b"GIVING" => KW_GIVING,
+        b"FROM" => KW_FROM,
+        b"BY" => KW_BY,
+        b"INTO" => KW_INTO,
+        b"IF" => KW_IF,
+        b"THEN" => KW_THEN,
+        b"ELSE" => KW_ELSE,
+        b"END-IF" => KW_END_IF,
+        b"END-PERFORM" => KW_END_PERFORM,
+        b"STOP" => KW_STOP,
+        b"RUN" => KW_RUN,
+        b"GOBACK" => KW_GOBACK,
+        b"EXIT" => KW_EXIT,
+        b"CONTINUE" => KW_CONTINUE,
+        b"OPEN" => KW_OPEN,
+        b"CLOSE" => KW_CLOSE,
+        b"READ" => KW_READ,
+        b"WRITE" => KW_WRITE,
+        b"SET" => KW_SET,
+        b"INITIALIZE" => KW_INITIALIZE,
+        b"PIC" => KW_PIC,
+        b"PICTURE" => KW_PICTURE,
+        b"VALUE" => KW_VALUE,
+        b"VALUES" => KW_VALUES,
+        b"ZERO" => KW_ZERO,
+        b"ZEROS" => KW_ZEROS,
+        b"SPACE" => KW_SPACE,
+        b"SPACES" => KW_SPACES,
+        b"NOT" => KW_NOT,
+        b"AND" => KW_AND,
+        b"OR" => KW_OR,
+        _ => IDENT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_f::harness;
+
+    const VALID: &[(&str, &[&str])] = &[
+        (
+            "hello.cob",
+            &[
+                "division_header",
+                "paragraph_header",
+                "paragraph_header",
+                "division_header",
+                "section_header",
+                "data_description",
+                "data_description",
+                "division_header",
+                "paragraph_header",
+                "display_statement",
+                "move_statement",
+                "compute_statement",
+                "if_statement",
+                "stop_statement",
+            ],
+        ),
+        (
+            "loop.cob",
+            &[
+                "division_header",
+                "paragraph_header",
+                "paragraph_header",
+                "division_header",
+                "section_header",
+                "data_description",
+                "data_description",
+                "division_header",
+                "paragraph_header",
+                "perform_statement",
+                "accept_statement",
+                "set_statement",
+                "if_statement",
+                "stop_statement",
+            ],
+        ),
+        (
+            "report.cob",
+            &[
+                "division_header",
+                "paragraph_header",
+                "paragraph_header",
+                "division_header",
+                "division_header",
+                "section_header",
+                "data_description",
+                "data_description",
+                "division_header",
+                "paragraph_header",
+                "move_statement",
+                "arithmetic_statement",
+                "arithmetic_statement",
+                "arithmetic_statement",
+                "perform_statement",
+                "paragraph_header",
+                "display_statement",
+                "goback_statement",
+            ],
+        ),
+    ];
+
+    #[test]
+    fn valid_fixtures() {
+        harness::check_valid("cobol", &COBOL, VALID);
+    }
+
+    #[test]
+    fn malformed_keeps_the_root() {
+        harness::check_malformed(
+            "malformed",
+            "cobol_broken.cob",
+            &COBOL,
+            &[
+                "division_header",
+                "paragraph_header",
+                "paragraph_header",
+                "division_header",
+                "paragraph_header",
+                "move_statement",
+                "ERROR",
+                "display_statement",
+                "stop_statement",
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_top_level_kinds() {
+        harness::dump("cobol", &COBOL);
+        harness::dump("malformed", &COBOL);
+    }
+
+    #[test]
+    fn a_star_in_column_seven_makes_a_comment_line() {
+        use crate::deep::lexer::{lex, Tokens};
+        let src = b"       IDENTIFICATION DIVISION.\n      * a comment\n";
+        let mut tokens = Tokens::default();
+        lex(src, &COBOL, &mut tokens);
+        let kinds: Vec<&str> = (0..tokens.len())
+            .map(|i| COBOL.name(tokens.kind[i]))
+            .filter(|kind| *kind != "whitespace")
+            .collect();
+        assert!(kinds.contains(&"comment"), "{kinds:?}");
+        assert!(kinds.contains(&"DIVISION"), "{kinds:?}");
+    }
+}
