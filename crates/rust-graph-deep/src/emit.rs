@@ -29,7 +29,7 @@ use std::fmt::Write;
 
 use crate::check::{is_hidden, rule_constant, Checked, Guard, Set, Shape, KINDS};
 use crate::decide::Decision;
-use crate::read::{Expr, Fix, Node, TokenClass};
+use crate::read::{Action, Expr, Fix, Node, TokenClass};
 use crate::Error;
 
 type Out = Result<String, Error>;
@@ -110,13 +110,14 @@ impl<'c> Emitter<'c> {
             }
         };
         let root = &grammar.rules[0].name;
+        let lexer = self.lexer_name();
         let _ = write!(
             out,
             "pub static {}: {rt}::syntax::Language = {rt}::syntax::Language::new({:?}, {}, {KINDS}, {}, {}){layout};",
             grammar.name,
             grammar.language,
             rule_constant(root),
-            grammar.lex,
+            lexer,
             parse_fn(root),
         );
         for rule in 0..grammar.rules.len() {
@@ -124,7 +125,75 @@ impl<'c> Emitter<'c> {
             out.push_str(&self.rule_fn(rule)?);
         }
         out.push_str(&self.extra.borrow());
+        out.push_str(&self.mode_wrapper());
         Ok(out)
+    }
+
+    /// The step function the `Language` static names: the grammar's `lex`, or a
+    /// wrapper around it when the grammar declares modes.
+    fn lexer_name(&self) -> String {
+        let grammar = &self.checked.grammar;
+        if grammar.modes.is_empty() && grammar.switches.is_empty() {
+            grammar.lex.clone()
+        } else {
+            format!("__deep_lex_{}", grammar.name)
+        }
+    }
+
+    /// The mode stack. The DSL cannot reach into a lexer that runs before the
+    /// parser (`Workspace::parse` lexes the whole file first), so the switch is
+    /// declared on the token that causes it and the macro generates the state:
+    /// a per-thread stack of mode numbers, cleared at byte 0 of every file,
+    /// dispatching to the mode's own step function. A heredoc is
+    /// `switch HEREDOC_START => HEREDOC; switch HEREDOC_BODY => pop;`, and an
+    /// f-string's field is `push` and `pop` around the expression.
+    fn mode_wrapper(&self) -> String {
+        let grammar = &self.checked.grammar;
+        if grammar.modes.is_empty() && grammar.switches.is_empty() {
+            return String::new();
+        }
+        let rt = self.rt;
+        let name = format!("__deep_lex_{}", grammar.name);
+        let mut out = String::new();
+        let _ = write!(out, "fn {name}(c: &mut {rt}::lexer::Cursor) -> {rt}::syntax::Kind {{");
+        let _ = write!(
+            out,
+            " std::thread_local! {{ static MODES: std::cell::RefCell<Vec<u32>> = const {{ std::cell::RefCell::new(Vec::new()) }}; }}"
+        );
+        let _ = write!(out, " if c.pos() == 0 {{ MODES.with(|stack| stack.borrow_mut().clear()); }}");
+        let _ = write!(out, " let mode = MODES.with(|stack| stack.borrow().last().copied().unwrap_or(0));");
+        let _ = write!(out, " let kind = match mode {{");
+        for (index, mode) in grammar.modes.iter().enumerate() {
+            let _ = write!(out, " {} => {}(c),", index + 1, mode.lex);
+        }
+        let _ = write!(out, " _ => {}(c), }};", grammar.lex);
+        let _ = write!(out, " match kind {{");
+        for switch in &grammar.switches {
+            let token = &switch.token;
+            match &switch.action {
+                Action::Set(mode) => {
+                    let level = self.mode_level(mode);
+                    let _ = write!(
+                        out,
+                        " {token} => MODES.with(|stack| {{ let mut stack = stack.borrow_mut(); match stack.last_mut() {{ Some(top) => *top = {level}, None => stack.push({level}), }} }}),"
+                    );
+                }
+                Action::Push(mode) => {
+                    let level = self.mode_level(mode);
+                    let _ = write!(out, " {token} => MODES.with(|stack| stack.borrow_mut().push({level})),");
+                }
+                Action::Pop => {
+                    let _ = write!(out, " {token} => MODES.with(|stack| {{ stack.borrow_mut().pop(); }}),");
+                }
+            }
+        }
+        let _ = write!(out, " _ => {{}} }} kind }}");
+        out
+    }
+
+    /// Mode 0 is the grammar's `lex`; the declared modes follow, in order.
+    fn mode_level(&self, mode: &str) -> usize {
+        self.checked.grammar.modes.iter().position(|def| def.name == mode).expect("checked: the mode exists") + 1
     }
 
     fn kind_row(&self, out: &mut String, kinds: &mut String, constant: &str, name: &str, class: &str, offset: usize) {
@@ -676,6 +745,31 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("pub const __DEEP_INDENT: rt::syntax::Kind"), "{out}");
+    }
+
+    #[test]
+    fn lexer_modes_become_a_stated_step_function() {
+        let out = emitted(
+            r#"modes { BODY = lex_body, }
+               switch A => BODY;
+               switch B => pop;
+               top: A B,"#,
+        );
+        // The Language names the wrapper, not the raw step function.
+        assert!(out.contains("Language::new(\"g\", TOP, KINDS, __deep_lex_G, parse_top)"), "{out}");
+        // The stack is cleared at byte 0 and dispatches on its top frame.
+        assert!(out.contains("if c.pos() == 0 { MODES.with(|stack| stack.borrow_mut().clear()); }"), "{out}");
+        assert!(out.contains("let mode = MODES.with(|stack| stack.borrow().last().copied().unwrap_or(0));"), "{out}");
+        assert!(out.contains("1 => lex_body(c),"), "{out}");
+        assert!(out.contains("_ => lex(c), };"), "{out}");
+        // `=> BODY` sets the top frame, pushing it when the stack is empty;
+        // `=> pop` leaves it.
+        assert!(out.contains("A => MODES.with(|stack| { let mut stack = stack.borrow_mut(); match stack.last_mut() { Some(top) => *top = 1, None => stack.push(1), } }),"), "{out}");
+        assert!(out.contains("B => MODES.with(|stack| { stack.borrow_mut().pop(); }),"), "{out}");
+        // A grammar without modes names its own lexer and gets no wrapper.
+        let plain = emitted("top: A,");
+        assert!(plain.contains("KINDS, lex, parse_top)"), "{plain}");
+        assert!(!plain.contains("MODES"), "{plain}");
     }
 
     #[test]
