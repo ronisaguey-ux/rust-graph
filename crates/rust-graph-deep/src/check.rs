@@ -13,7 +13,7 @@
 //! `prefix* operand (infix self | postfix)*`, so FIRST, FOLLOW and decisions
 //! treat it like any other rule; only the emitter writes it as a Pratt loop.
 
-use crate::read::{Expr, Fix, Grammar, Node, Table, TokenClass, TokenDef};
+use crate::read::{Action, Expr, Fix, Grammar, Node, Table, TokenClass, TokenDef};
 use crate::{Error, Spot};
 
 /// Token indices, as a bit set.
@@ -126,6 +126,7 @@ pub fn check(mut grammar: Grammar) -> Result<Checked, Error> {
     let families = check_tokens(&grammar)?;
     let layout = check_layout(&mut grammar)?;
     check_rule_names(&grammar)?;
+    check_modes(&grammar)?;
     let labels = table_labels(&grammar)?;
     let mut tables = Vec::new();
     for index in 0..grammar.rules.len() {
@@ -288,6 +289,33 @@ fn check_layout(grammar: &mut Grammar) -> Result<Option<[usize; 3]>, Error> {
         (TokenClass::Token, TokenClass::Open(a), TokenClass::Close(b)) if a == b => Ok(Some([newline, indent, dedent])),
         _ => Err(Error::at(spot, "layout needs a plain newline token, then the `open` and `close` of one family")),
     }
+}
+
+/// `modes` and `switch`: mode names are UPPER_CASE and unique, every switch
+/// names a declared token and a declared mode, and no token switches twice.
+fn check_modes(grammar: &Grammar) -> Result<(), Error> {
+    for (index, mode) in grammar.modes.iter().enumerate() {
+        if !is_constant(&mode.name) {
+            return Err(Error::at(mode.spot, format!("mode names are UPPER_CASE: `{}`", mode.name)));
+        }
+        if grammar.modes[..index].iter().any(|earlier| earlier.name == mode.name) {
+            return Err(Error::at(mode.spot, format!("mode `{}` is declared twice", mode.name)));
+        }
+    }
+    for (index, switch) in grammar.switches.iter().enumerate() {
+        if !grammar.tokens.iter().any(|token| token.constant == switch.token) {
+            return Err(Error::at(switch.spot, format!("`{}` is not a token", switch.token)));
+        }
+        if grammar.switches[..index].iter().any(|earlier| earlier.token == switch.token) {
+            return Err(Error::at(switch.spot, format!("`{}` switches twice: one switch per token, the rest belongs in the step function", switch.token)));
+        }
+        if let Action::Set(mode) | Action::Push(mode) = &switch.action {
+            if !grammar.modes.iter().any(|def| def.name == *mode) {
+                return Err(Error::at(switch.spot, format!("`{mode}` is not a mode: declare it in `modes {{ ... }}`")));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// For each precedence rule, its row labels, in order.
@@ -987,6 +1015,25 @@ mod tests {
                        top: A NL? | __DEEP_INDENT, }"#;
         let error = check(crate::read::grammar(toks(named)).unwrap()).err().expect("a rule naming a synthetic kind").message;
         assert!(error.contains("is trivia"), "{error}");
+    }
+
+    #[test]
+    fn modes_must_be_upper_case_and_switches_must_name_them() {
+        let check_src = |modes: &str, switches: &str| {
+            let src = format!(r#"G {{ lex = lex; {modes} {switches} tokens {{ A = "a", B = "b", }} top: A, }}"#);
+            check(crate::read::grammar(toks(&src)).unwrap()).err().map(|error| error.message)
+        };
+        assert!(check_src(r#"modes { lower = l, }"#, "").unwrap().contains("UPPER_CASE"));
+        let error = check_src(r#"modes { X = l, }"#, "switch A => Y;").unwrap();
+        assert!(error.contains("`Y` is not a mode"), "{error}");
+        let error = check_src(r#"modes { X = l, }"#, "switch NOPE => X;").unwrap();
+        assert!(error.contains("`NOPE` is not a token"), "{error}");
+        let error = check_src(r#"modes { X = l, }"#, "switch A => X; switch A => pop;").unwrap();
+        assert!(error.contains("switches twice"), "{error}");
+        // A mode no switch enters is unused but harmless: the step function may
+        // still be reached, and a later switch can be added without reordering.
+        assert!(check_src(r#"modes { X = l, }"#, "").is_none());
+        assert!(check_src(r#"modes { X = l, }"#, "switch A => X; switch B => pop;").is_none());
     }
 
     #[test]

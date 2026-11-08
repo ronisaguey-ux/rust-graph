@@ -18,6 +18,37 @@ pub struct Grammar {
     pub rules: Vec<Rule>,
     /// `layout = NEWLINE INDENT DEDENT;`: indentation as tokens.
     pub layout: Option<LayoutDef>,
+    /// `modes { HEREDOC = lex_heredoc, }`: lexer steps beyond the default one.
+    /// Mode 0 is always `lex`.
+    pub modes: Vec<ModeDef>,
+    /// `switch TOKEN => MODE;`: the mode changes the next token is lexed in.
+    pub switches: Vec<Switch>,
+}
+
+/// One lexer mode: a name the switches use, and the step function it runs.
+pub struct ModeDef {
+    pub name: String,
+    pub lex: String,
+    pub spot: Spot,
+}
+
+/// `switch TOKEN => MODE | push MODE | pop;`: what the lexer does after it
+/// produces `token`.
+pub struct Switch {
+    pub token: String,
+    pub action: Action,
+    pub spot: Spot,
+}
+
+#[derive(Clone, Debug)]
+pub enum Action {
+    /// Make `mode` the current one, pushing it if the stack is empty.
+    Set(String),
+    /// Enter `mode`, keeping the one below it: an f-string's field inside a
+    /// string.
+    Push(String),
+    /// Leave the current mode.
+    Pop,
 }
 
 /// How the macro compiles a grammar.
@@ -157,6 +188,8 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
         tokens: Vec::new(),
         rules: Vec::new(),
         layout: None,
+        modes: Vec::new(),
+        switches: Vec::new(),
     };
     let mut lex_seen = false;
     let mut items = Stream::new(body);
@@ -209,7 +242,12 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
                             ))
                         }
                     },
-                    _ => return Err(Error::at(spot, format!("unknown setting `{word}`: the settings are `name`, `lex`, `runtime`, `layout` and `mode`"))),
+                    _ => {
+                        return Err(Error::at(
+                            spot,
+                            format!("unknown setting `{word}`: the settings are `name`, `lex`, `modes`, `switch`, `runtime`, `layout` and `mode`"),
+                        ))
+                    }
                 }
             }
             Some(Tree::Group(Delim::Brace, _)) if word == "tokens" => {
@@ -218,6 +256,34 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
                     return Err(Error::at(spot, "only one `tokens { ... }` block is allowed"));
                 }
                 grammar.tokens = tokens(body)?;
+            }
+            Some(Tree::Group(Delim::Brace, _)) if word == "modes" => {
+                let Some(Tok { tree: Tree::Group(_, body), .. }) = items.next() else { unreachable!("peeked") };
+                if !grammar.modes.is_empty() {
+                    return Err(Error::at(spot, "only one `modes { ... }` block is allowed"));
+                }
+                grammar.modes = modes(body)?;
+            }
+            // `switch TOKEN => MODE;`, `switch TOKEN => push MODE;` or
+            // `switch TOKEN => pop;`: a mode change the step lexer declares.
+            _ if word == "switch" => {
+                let value = items.until(';');
+                let (token, rest) = match value.split_first() {
+                    Some((Tok { tree: Tree::Ident(token), .. }, rest)) => (token.clone(), rest),
+                    _ => return Err(Error::at(spot, "`switch` takes a token constant: `switch HEREDOC_START => HEREDOC;`")),
+                };
+                let arrow = rest.iter().position(|tok| matches!(tok.tree, Tree::Punct('=', true)))
+                    .filter(|at| matches!(rest.get(at + 1).map(|tok| &tok.tree), Some(Tree::Punct('>', _))));
+                let Some(arrow) = arrow else {
+                    return Err(Error::at(spot, "a switch is `switch TOKEN => MODE;`, `=> push MODE;` or `=> pop;`"));
+                };
+                let action = match &rest[arrow + 2..] {
+                    [Tok { tree: Tree::Ident(word), .. }] if word == "pop" => Action::Pop,
+                    [Tok { tree: Tree::Ident(word), .. }, Tok { tree: Tree::Ident(mode), .. }] if word == "push" => Action::Push(mode.clone()),
+                    [Tok { tree: Tree::Ident(mode), .. }] => Action::Set(mode.clone()),
+                    _ => return Err(Error::at(spot, "a switch is `switch TOKEN => MODE;`, `=> push MODE;` or `=> pop;`")),
+                };
+                grammar.switches.push(Switch { token, action, spot });
             }
             Some(Tree::Punct(':', false)) => {
                 items.next();
@@ -244,6 +310,36 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
         return Err(Error::at(spot, "a grammar needs at least one rule"));
     }
     Ok(grammar)
+}
+
+/// `modes { HEREDOC = lex_heredoc, ... }`: extra lexer steps, mode 1, 2, ...
+fn modes(body: Vec<Tok>) -> Result<Vec<ModeDef>, Error> {
+    let mut defs: Vec<ModeDef> = Vec::new();
+    let mut items = Stream::new(body);
+    while items.peek().is_some() {
+        // `///` comments on a row arrive as `#[doc = "..."]`; attributes are skipped.
+        while matches!(items.peek(), Some(Tok { tree: Tree::Punct('#', _), .. })) {
+            items.next();
+            items.next();
+        }
+        let row = items.until(',');
+        let row_spot = row.first().and_then(|tok| tok.spot);
+        let mut row = row.into_iter();
+        let (name, spot) = match row.next() {
+            Some(Tok { tree: Tree::Ident(name), spot }) => (name, spot),
+            Some(other) => return Err(Error::at(other.spot, format!("expected a mode name, found `{}`", other.tree.describe()))),
+            None => return Err(Error::at(row_spot, "an empty row in `modes`")),
+        };
+        if !matches!(row.next(), Some(Tok { tree: Tree::Punct('=', _), .. })) {
+            return Err(Error::at(spot, format!("expected `=` after mode `{name}`")));
+        }
+        let lex = path_value(&row.collect::<Vec<_>>(), spot, "modes")?;
+        if let Some(earlier) = defs.iter().find(|def| def.name == name) {
+            return Err(Error::at(spot, format!("mode `{}` is declared twice", earlier.name)));
+        }
+        defs.push(ModeDef { name, lex, spot });
+    }
+    Ok(defs)
 }
 
 /// `CONST = "text" [open family | close family | bad | trivia],`
@@ -633,6 +729,42 @@ mod tests {
         let grammar = read(r#"G { lex = l; layout = NL; tokens { NL = "newline", A = "a", } a: A, }"#).unwrap();
         let layout = grammar.layout.as_ref().unwrap();
         assert_eq!((layout.newline.as_str(), layout.indent.as_deref(), layout.dedent.as_deref()), ("NL", None, None));
+    }
+
+    #[test]
+    fn modes_and_switches_are_read() {
+        let grammar = read(
+            r#"G { lex = lex; modes { HEREDOC = super::heredoc, REGEX = lex_regex, }
+               switch HEREDOC_START => HEREDOC;
+               switch FIELD_OPEN => push STRING;
+               switch FIELD_CLOSE => pop;
+               tokens { A = "a", B = "b", } a: A, }"#,
+        )
+        .unwrap();
+        assert_eq!(grammar.modes.iter().map(|mode| (mode.name.as_str(), mode.lex.as_str())).collect::<Vec<_>>(), [
+            ("HEREDOC", "super::heredoc"),
+            ("REGEX", "lex_regex"),
+        ]);
+        let actions: Vec<String> = grammar
+            .switches
+            .iter()
+            .map(|switch| match &switch.action {
+                Action::Set(mode) => format!("{} => {mode}", switch.token),
+                Action::Push(mode) => format!("{} => push {mode}", switch.token),
+                Action::Pop => format!("{} => pop", switch.token),
+            })
+            .collect();
+        assert_eq!(actions, ["HEREDOC_START => HEREDOC", "FIELD_OPEN => push STRING", "FIELD_CLOSE => pop"]);
+        for (src, want) in [
+            (r#"G { lex = l; modes { X = l, X = l, } tokens { A = "a", } a: A, }"#, "declared twice"),
+            (r#"G { lex = l; switch A; tokens { A = "a", } a: A, }"#, "a switch is"),
+            (r#"G { lex = l; switch A => ; tokens { A = "a", } a: A, }"#, "a switch is"),
+            (r#"G { lex = l; modes { X = "l", } tokens { A = "a", } a: A, }"#, "`modes` takes a path"),
+            (r#"G { lex = l; modes { X = l, } modes { Y = l, } tokens { A = "a", } a: A, }"#, "only one `modes"),
+        ] {
+            let error = read(src).err().unwrap_or_else(|| panic!("{src} was accepted"));
+            assert!(error.contains(want), "{src}: {error}");
+        }
     }
 
     #[test]
