@@ -7,3 +7,8 @@ description = "A context-sensitive, zero-copy lexer for the deep parser: byte of
 
 [dependencies]
 deep-abi = { path = "../deep-abi" }
+
+# The runtime is a dev-dependency only: the lexer must not depend on the parser,
+# and this is how the end-to-end test proves `deep_abi::Lexer` is enough.
+[dev-dependencies]
+deep-rt = { path = "../deep-rt" }
