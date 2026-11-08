@@ -662,6 +662,23 @@ mod tests {
     }
 
     #[test]
+    fn a_newline_only_layout_emits_two_trivia_kinds() {
+        let src = r#"G { lex = lex; runtime = rt; layout = NL;
+               tokens { A = "a", NL = "newline", }
+               top: A NL?, }"#;
+        let out = emit(&crate::check::check(crate::read::grammar(toks(src)).unwrap()).unwrap()).unwrap();
+        // Line ends come from the runtime; the indentation pair is added as
+        // trivia, so it is a kind with a constant but is never a syntax token.
+        assert!(out.contains(r#"KindInfo { name: "indent", class: rt::syntax::Class::Trivia }"#), "{out}");
+        assert!(out.contains(r#"KindInfo { name: "dedent", class: rt::syntax::Class::Trivia }"#), "{out}");
+        assert!(
+            out.contains("with_layout(&rt::syntax::Layout { newline: NL, indent: __DEEP_INDENT, dedent: __DEEP_DEDENT, resets: &[] })"),
+            "{out}"
+        );
+        assert!(out.contains("pub const __DEEP_INDENT: rt::syntax::Kind"), "{out}");
+    }
+
+    #[test]
     fn recursion_outside_a_group_is_nested() {
         let out = emitted("top: x*, x: A x | B,");
         assert!(out.contains("A => { p.bump();if matches!(p.current(), A | B) { p.nested(parse_x); }"), "{out}");
