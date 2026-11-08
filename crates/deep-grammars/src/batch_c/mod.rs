@@ -40,9 +40,9 @@
 //!   postfix row, so `a[0]` and `[arr objectAtIndex:0]` both parse; so does a
 //!   nested `[[a b] c]`.
 
-pub(crate) mod c;
-pub(crate) mod cpp;
-pub(crate) mod objc;
+pub mod c;
+pub mod cpp;
+pub mod objc;
 
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, WHITESPACE};
