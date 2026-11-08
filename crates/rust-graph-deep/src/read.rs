@@ -6,6 +6,8 @@ use crate::{Delim, Error, Spot, Tok, Tree};
 pub struct Grammar {
     /// The `static` that holds the language, such as `JSON`.
     pub name: String,
+    /// Which code path compiles this grammar.
+    pub mode: Mode,
     /// The language's own name, such as `"json"`. Defaults to `name` in lower case.
     pub language: String,
     /// The lexer function, as a path.
@@ -16,6 +18,20 @@ pub struct Grammar {
     pub rules: Vec<Rule>,
     /// `layout = NEWLINE INDENT DEDENT;`: indentation as tokens.
     pub layout: Option<LayoutDef>,
+}
+
+/// How the macro compiles a grammar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// Tables when the generator can express the grammar, the recursive path
+    /// when it cannot: the default, so grammars that still need predicates or a
+    /// precedence table keep building.
+    Auto,
+    /// Tables, or a build failure: a grammar the generator refuses is an error,
+    /// never a silent fallback.
+    Tables,
+    /// The recursive-descent parser functions, unchanged.
+    Recursive,
 }
 
 pub struct LayoutDef {
@@ -133,6 +149,7 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
     let mut grammar = Grammar {
         language: name.to_ascii_lowercase(),
         name,
+        mode: Mode::Auto,
         lex: String::new(),
         runtime: "crate::deep".into(),
         tokens: Vec::new(),
@@ -162,13 +179,21 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
                         lex_seen = true;
                     }
                     "runtime" => grammar.runtime = path_value(&value, spot, "runtime")?,
+                    "mode" => {
+                        grammar.mode = match value.as_slice() {
+                            [Tok { tree: Tree::Ident(word), .. }] if word == "auto" => Mode::Auto,
+                            [Tok { tree: Tree::Ident(word), .. }] if word == "tables" => Mode::Tables,
+                            [Tok { tree: Tree::Ident(word), .. }] if word == "recursive" => Mode::Recursive,
+                            _ => return Err(Error::at(spot, "`mode` is `auto`, `tables` or `recursive`: `mode = tables;`")),
+                        };
+                    }
                     "layout" => match value.as_slice() {
                         [Tok { tree: Tree::Ident(newline), .. }, Tok { tree: Tree::Ident(indent), .. }, Tok { tree: Tree::Ident(dedent), .. }] => {
                             grammar.layout = Some(LayoutDef { newline: newline.clone(), indent: indent.clone(), dedent: dedent.clone(), spot });
                         }
                         _ => return Err(Error::at(spot, "`layout` takes three tokens: `layout = NEWLINE INDENT DEDENT;`")),
                     },
-                    _ => return Err(Error::at(spot, format!("unknown setting `{word}`: the settings are `name`, `lex`, `runtime` and `layout`"))),
+                    _ => return Err(Error::at(spot, format!("unknown setting `{word}`: the settings are `name`, `lex`, `runtime`, `layout` and `mode`"))),
                 }
             }
             Some(Tree::Group(Delim::Brace, _)) if word == "tokens" => {
