@@ -27,6 +27,30 @@
 //! `NAME` (a token), `rule`, `( ... )`, `[ ... ]` or `x?` (optional), `x*`, `x+`,
 //! and `x % sep` (any number of `x` separated by the token `sep`).
 //!
+//! Three settings reach beyond the token list:
+//!
+//! ```text
+//! layout = NEWLINE;                      // line ends as inferred tokens
+//! modes   { BODY = lex_body, }           // extra lexer steps, mode 1 onward
+//! switch  HEREDOC_START => BODY;         // also `=> push MODE;` and `=> pop;`
+//! ```
+//!
+//! `layout` names the token the lexer returns for a line break and the runtime
+//! then inserts one zero-width copy per logical line, so a rule can end at a
+//! line end (Elixir's `case`/`cond` clauses). With three names,
+//! `layout = NEWLINE INDENT DEDENT;`, indentation is syntax too. A lone closing
+//! delimiter may stand as an ordinary terminal (`case x in pat) ...`); an
+//! opening one still has to open a whole rule, because only then does the
+//! runtime establish the group firewall.
+//!
+//! `modes` and `switch` give the step lexer a mode stack: the macro generates a
+//! wrapper that dispatches on the current mode and applies the switch declared
+//! for the token it just produced. A heredoc is `switch HEREDOC_START => BODY;`
+//! and `switch HEREDOC_BODY => pop;`, an f-string's field `push`/`pop`. State
+//! that belongs to a mode (a heredoc's delimiter, a brace depth) still lives in
+//! that mode's step function: a `Cursor` sees the bytes from the cursor on, not
+//! the token before it.
+//!
 //! The macro emits a kind constant per token and per named rule (`pair` ->
 //! `PAIR`), the kind table, `pub static JSON: Language`, and `parse_<rule>`
 //! functions on the runtime. What it checks and how recovery is derived are in
