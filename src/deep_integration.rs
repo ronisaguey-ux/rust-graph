@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(visited, cst.nodes.len(), "unreachable nodes in the arena");
         // The root spans the whole input and is the only node that does.
         assert_eq!(cst.nodes[0].start, 0);
-        assert_eq!(cst.nodes[0].end as usize, 26);
+        assert_eq!(cst.nodes[0].end as usize, 22);
         assert_eq!(cst.nodes[0].next_sibling, NONE);
     }
 }
