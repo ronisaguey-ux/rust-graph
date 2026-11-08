@@ -381,3 +381,236 @@ rust_graph_deep::grammar! { SWIFT {
     type_arguments: "<" (_type %? ",") _gt,
 } }
 
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            block_comment(c);
+            COMMENT
+        }
+        b'#' if c.peek_at(1) == b'"' || c.peek_at(1) == b'#' => string(c),
+        b'"' => string(c),
+        b'`' => {
+            c.bump();
+            c.eat_while(|byte| byte != b'`' && byte != b'\n');
+            c.eat(b'`');
+            IDENT
+        }
+        b'#' if is_word_start(c.peek_at(1)) => {
+            c.bump();
+            c.eat_while(is_word_byte);
+            IDENT
+        }
+        b'0'..=b'9' => number(c),
+        b'.' if c.peek_at(1).is_ascii_digit() && !c.starts_with(b"..") => number(c),
+        b'@' => {
+            c.bump();
+            AT
+        }
+        byte if is_word_start(byte) => word(c),
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    keyword(&start[..length])
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"actor" => KW_ACTOR,
+        b"any" => KW_ANY,
+        b"as" => KW_AS,
+        b"async" => KW_ASYNC,
+        b"await" => KW_AWAIT,
+        b"break" => KW_BREAK,
+        b"case" => KW_CASE,
+        b"catch" => KW_CATCH,
+        b"class" => KW_CLASS,
+        b"continue" => KW_CONTINUE,
+        b"default" => KW_DEFAULT,
+        b"defer" => KW_DEFER,
+        b"deinit" => KW_DEINIT,
+        b"do" => KW_DO,
+        b"else" => KW_ELSE,
+        b"enum" => KW_ENUM,
+        b"extension" => KW_EXTENSION,
+        b"false" => KW_FALSE,
+        b"for" => KW_FOR,
+        b"func" => KW_FUNC,
+        b"guard" => KW_GUARD,
+        b"if" => KW_IF,
+        b"import" => KW_IMPORT,
+        b"in" => KW_IN,
+        b"init" => KW_INIT,
+        b"inout" => KW_INOUT,
+        b"is" => KW_IS,
+        b"let" => KW_LET,
+        b"nil" => KW_NIL,
+        b"protocol" => KW_PROTOCOL,
+        b"repeat" => KW_REPEAT,
+        b"rethrows" => KW_RETHROWS,
+        b"return" => KW_RETURN,
+        b"self" => KW_SELF,
+        b"some" => KW_SOME,
+        b"struct" => KW_STRUCT,
+        b"subscript" => KW_SUBSCRIPT,
+        b"super" => KW_SUPER,
+        b"switch" => KW_SWITCH,
+        b"throw" => KW_THROW,
+        b"throws" => KW_THROWS,
+        b"true" => KW_TRUE,
+        b"try" => KW_TRY,
+        b"typealias" => KW_TYPEALIAS,
+        b"var" => KW_VAR,
+        b"where" => KW_WHERE,
+        b"while" => KW_WHILE,
+        b"public" => KW_PUBLIC,
+        b"private" => KW_PRIVATE,
+        b"fileprivate" => KW_FILEPRIVATE,
+        b"internal" => KW_INTERNAL,
+        b"open" => KW_OPEN,
+        b"final" => KW_FINAL,
+        b"static" => KW_STATIC,
+        b"override" => KW_OVERRIDE,
+        b"mutating" => KW_MUTATING,
+        b"nonmutating" => KW_NONMUTATING,
+        b"lazy" => KW_LAZY,
+        b"weak" => KW_WEAK,
+        b"unowned" => KW_UNOWNED,
+        b"required" => KW_REQUIRED,
+        b"convenience" => KW_CONVENIENCE,
+        b"dynamic" => KW_DYNAMIC,
+        b"indirect" => KW_INDIRECT,
+        _ => IDENT,
+    }
+}
+
+/// `/* ... */`: Swift's block comments nest.
+fn block_comment(c: &mut Cursor) {
+    c.bump_n(2);
+    let mut depth = 1u32;
+    while !c.at_end() && depth > 0 {
+        if c.starts_with(b"/*") {
+            depth += 1;
+            c.bump_n(2);
+        } else if c.starts_with(b"*/") {
+            depth -= 1;
+            c.bump_n(2);
+        } else {
+            c.bump();
+        }
+    }
+}
+
+/// A string from its first byte: plain, multi-line (`"""`) or raw (`#"`).
+fn string(c: &mut Cursor) -> Kind {
+    let mut hashes = 0usize;
+    while c.peek() == b'#' {
+        hashes += 1;
+        c.bump();
+    }
+    if c.peek() != b'"' {
+        return BAD_LITERAL;
+    }
+    let triple = c.peek_at(1) == b'"' && c.peek_at(2) == b'"';
+    let open = if triple { 3 } else { 1 };
+    c.bump_n(open);
+    loop {
+        match c.peek() {
+            0 if c.at_end() => return BAD_LITERAL,
+            b'\\' if hashes == 0 => {
+                if c.peek_at(1) == b'(' {
+                    c.bump_n(2);
+                    interpolation(c);
+                } else {
+                    c.bump_n(2);
+                }
+            }
+            b'\\' if c.peek_at(1) == b'#' => {
+                let mut at = 1;
+                while at <= hashes && c.peek_at(at) == b'#' {
+                    at += 1;
+                }
+                if at == hashes + 1 && c.peek_at(at) == b'(' {
+                    c.bump_n(at + 1);
+                    interpolation(c);
+                } else {
+                    c.bump_n(at);
+                }
+            }
+            b'"' if triple && c.peek_at(1) == b'"' && c.peek_at(2) == b'"' => {
+                c.bump_n(3);
+                return closing_hashes(c, hashes);
+            }
+            b'"' if !triple => {
+                c.bump();
+                return closing_hashes(c, hashes);
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// The `#`s after a closing quote of a raw string, which must be there.
+fn closing_hashes(c: &mut Cursor, hashes: usize) -> Kind {
+    let mut seen = 0usize;
+    while seen < hashes && c.peek() == b'#' {
+        c.bump();
+        seen += 1;
+    }
+    if seen == hashes { STRING } else { BAD_LITERAL }
+}
+
+/// The code of a `\(...)` field, up to its matching `)`, with strings and
+/// nested parentheses balanced.
+fn interpolation(c: &mut Cursor) {
+    let mut depth = 1u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'(' => {
+                depth += 1;
+                c.bump();
+            }
+            b')' => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    return;
+                }
+            }
+            b'"' => {
+                string(c);
+            }
+            b'#' if c.peek_at(1) == b'"' => {
+                string(c);
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
