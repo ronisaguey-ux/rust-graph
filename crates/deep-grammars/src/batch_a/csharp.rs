@@ -318,3 +318,323 @@ rust_graph_deep::grammar! { CSHARP {
     property_body: "{" accessor_declaration* "}",
     accessor_declaration: [attributes] [modifiers] ("get" | "set" | "init" | "add" | "remove") (block | ";"),
     indexer_declaration: [attributes] [modifiers] _type "this" indexer_parameters property_body [property_tail],
+    indexer_parameters: "[" (parameter %? ",") "]",
+    event_declaration: [attributes] [modifiers] "event" _type _name event_tail,
+    event_tail: event_accessors | ";" | "=" _expression ";",
+    event_accessors: "{" accessor_declaration* "}",
+    operator_declaration: [attributes] [modifiers] ["implicit" | "explicit"] _type "operator" _operator_token formal_parameters (block | "=>" _expression ";"),
+    _operator_token: PLUS | MINUS | STAR | SLASH | PERCENT | AMP | PIPE | CARET | BANG | TILDE | EQ | NE | LT | GT | LE | GE | INCREMENT | DECREMENT | "true" | "false",
+    field_declaration: [attributes] [modifiers] _type _variable_declarator ("," _variable_declarator)* ";",
+    _variable_declarator: _name ["=" _expression@assign],
+
+    // ---- types ----
+
+    _type: precedence _type_head {
+        prefix "*" => pointer_type,
+        postfix "?" => nullable_type,
+        postfix type_arguments => generic_type,
+        postfix "." _type_name => qualified_type,
+        postfix "::" _type_name => alias_qualified_type,
+        postfix dimensions => array_type,
+    },
+    _type_head: _type_name | _predefined_type | tuple_type,
+    _predefined_type:
+        "bool" | "byte" | "sbyte" | "short" | "ushort" | "int" | "uint" | "long" | "ulong"
+        | "char" | "float" | "double" | "decimal" | "object" | "string" | "void",
+    tuple_type: "(" _tuple_element "," _tuple_element ("," _tuple_element)* ")",
+    _tuple_element: _type _name,
+    dimensions: "[" ("," | _expression)* "]",
+    type_arguments: "<" (_type %? ",") _gt,
+    _gt: ">" | GT_JOINED,
+    formal_parameters: "(" (parameter %? ",") ")",
+    parameter: [attributes] ["this" | "ref" | "out" | "in" | "params" | "scoped"] _type ["?"] _name ["=" _expression@assign],
+    arguments: "(" (_argument %? ",") ")",
+    _argument: &(("ref" | "out" | "in") _type _name) out_declaration | ("ref" | "out" | "in") _expression | _expression,
+    out_declaration: ("ref" | "out" | "in") _type _name,
+
+    // ---- statements ----
+
+    block: "{" _statement* "}",
+    _statement:
+        &(_local_modifiers _type _name ["="]) local_variable_declaration
+        | &("using" _local_modifiers _type _name "=") using_declaration
+        | &([attributes] [modifiers] "class" _name) class_declaration
+        | &([attributes] [modifiers] "struct" _name) struct_declaration
+        | &([attributes] [modifiers] "interface" _name) interface_declaration
+        | &([attributes] [modifiers] "record" _name) record_declaration
+        | &(_name ":") labeled_statement
+        | block
+        | ";"
+        | if_statement
+        | while_statement
+        | do_statement
+        | for_statement
+        | foreach_statement
+        | switch_statement
+        | try_statement
+        | using_statement
+        | lock_statement
+        | return_statement
+        | throw_statement
+        | break_statement
+        | continue_statement
+        | goto_statement
+        | yield_statement
+        | checked_statement
+        | unsafe_statement
+        | fixed_statement
+        | expression_statement,
+
+    local_variable_declaration: _local_modifiers _type _variable_declarator ("," _variable_declarator)* ";",
+    using_declaration: "using" _local_modifiers _type _name "=" _expression ";",
+    labeled_statement: _name ":" _statement,
+    if_statement: "if" parenthesized_expression _statement ["else" _statement],
+    while_statement: "while" parenthesized_expression _statement,
+    do_statement: "do" _statement "while" parenthesized_expression ";",
+    for_statement: "for" for_header _statement,
+    for_header: "(" [_for_init] ";" [_expression] ";" [_expression ("," _expression)*] ")",
+    _for_init:
+        &(_local_modifiers _type _name "=") _local_modifiers _type _variable_declarator ("," _variable_declarator)*
+        | _expression ("," _expression)*,
+    foreach_statement: "foreach" foreach_header _statement,
+    foreach_header: "(" _local_modifiers _type _name "in" _expression ")",
+    switch_statement: "switch" parenthesized_expression switch_body,
+    switch_body: "{" switch_section* "}",
+    switch_section: (switch_label ":" | "default" ":") _statement*,
+    switch_label: "case" _expression ["when" _expression],
+    try_statement: "try" block catch_clause* [finally_clause],
+    catch_clause: "catch" [catch_declaration] ["when" parenthesized_expression] block,
+    catch_declaration: "(" [_local_modifiers] _type _name ")",
+    finally_clause: "finally" block,
+    using_statement: "using" using_header _statement,
+    using_header: "(" [_local_modifiers] _type _name "=" _expression ")",
+    lock_statement: "lock" parenthesized_expression _statement,
+    checked_statement: ("checked" | "unchecked") block,
+    unsafe_statement: "unsafe" block,
+    fixed_statement: "fixed" fixed_header _statement,
+    fixed_header: "(" [_local_modifiers] _type _name "=" _expression ")",
+    return_statement: "return" [_expression] ";",
+    throw_statement: "throw" [_expression] ";",
+    break_statement: "break" ";",
+    continue_statement: "continue" ";",
+    goto_statement: "goto" ("case" _expression | "default" | _name) ";",
+    yield_statement: "yield" ("return" _expression | "break") ";",
+    expression_statement: _expression ";",
+    parenthesized_expression: "(" _expression ")",
+
+    // ---- expressions ----
+
+    _expression: precedence _primary {
+        postfix "=>" _lambda_body => lambda_expression,
+        assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" | GT_JOINED GT_JOINED ">=" | "??=" => assignment_expression,
+        cond: postfix "?" _expression ":" _expression@cond => conditional_expression,
+        nullish: left "??" => binary_expression,
+        left "||" => binary_expression,
+        left "&&" => binary_expression,
+        bor: left "|" => binary_expression,
+        xor: left "^" => binary_expression,
+        band: left "&" => binary_expression,
+        eq: left "==" | "!=" => binary_expression,
+        rel: left "<" | ">" | "<=" | ">=" | "is" | "as" => binary_expression,
+        shift: left "<<" | GT_JOINED ">" | GT_JOINED GT_JOINED ">" => binary_expression,
+        add: left "+" | "-" => binary_expression,
+        mul: left "*" | "/" | "%" => binary_expression,
+        unary: prefix "+" | "-" | "!" | "~" | "++" | "--" | "await" | "&" | "*" => unary_expression,
+        postfix "++" | "--" => postfix_expression,
+        postfix arguments => invocation_expression,
+        postfix "?." _name => conditional_member_access,
+        postfix "?." arguments => conditional_invocation,
+        postfix "." _name => member_access,
+        postfix "." type_arguments _name => member_access,
+        postfix subscript => element_access,
+        postfix "!" => null_forgiving,
+        with_expr: postfix "with" object_initializer => with_expression,
+        postfix &(type_arguments arguments) type_arguments arguments => generic_invocation,
+    },
+
+    _primary:
+        &(lambda_parameters "=>") lambda_parameters
+        | &("@" _name) _name
+        | &(cast_type _cast_operand) cast_expression
+        | parenthesized_expression
+        | _literal
+        | _name
+        | "this"
+        | "base"
+        | &("new" array_specifier) implicit_array_creation
+        | &("new" arguments) implicit_creation
+        | &("new" anonymous_body) anonymous_object
+        | object_creation
+        | typeof_expression
+        | sizeof_expression
+        | nameof_expression
+        | checked_expression
+        | _predefined_type
+        | stackalloc_expression,
+    _literal:
+        INTEGER | FLOAT | CHAR | STRING | VERBATIM_STRING | INTERPOLATED_STRING | RAW_STRING
+        | "true" | "false" | "null",
+    lambda_parameters: "(" (lambda_parameter %? ",") ")",
+    lambda_parameter: [attributes] [_local_modifiers] _type _name | _name,
+    cast_type: "(" _type ")",
+    cast_expression: cast_type _expression@unary,
+    _cast_operand: _literal | _name | "this" | "base" | "new" | "typeof" | "sizeof" | "!" | "~",
+    _lambda_body: block | _expression,
+    object_creation: "new" _type [arguments] [object_initializer],
+    implicit_creation: "new" arguments [object_initializer],
+    implicit_array_creation: "new" array_specifier+ [array_initializer],
+    array_specifier: array_size_specifier | array_rank_specifier,
+    array_size_specifier: "[" [_expression] "]",
+    array_rank_specifier: "[" ","+ "]",
+    anonymous_object: "new" anonymous_body,
+    anonymous_body: "{" (_anonymous_member %? ",") "}",
+    _anonymous_member: _name "=" _expression,
+    object_initializer: "{" (_initializer_item %? ",") "}",
+    _initializer_item: &(_name "=") _name "=" _expression | _expression,
+    array_initializer: "{" (_initializer_item %? ",") "}",
+    subscript: "[" _expression ("," _expression)* "]",
+    typeof_expression: "typeof" parenthesized_type,
+    sizeof_expression: "sizeof" parenthesized_type,
+    nameof_expression: "nameof" nameof_arguments,
+    nameof_arguments: "(" _expression ")",
+    parenthesized_type: "(" _type ")",
+    checked_expression: ("checked" | "unchecked") checked_arguments,
+    checked_arguments: "(" _expression ")",
+    stackalloc_expression: "stackalloc" _type [array_initializer],
+
+    _name:
+        IDENT | "async" | "record" | "partial" | "where" | "get" | "set" | "init" | "add"
+        | "remove" | "value" | "when" | "required" | "global" | "dynamic" | "scoped"
+        | "yield" | "alias",
+    _type_name: _name | KW_VAR,
+} }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            c.eat_while(|byte| byte != b'\n');
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            c.bump_n(2);
+            while !c.at_end() && !c.starts_with(b"*/") {
+                c.bump();
+            }
+            c.bump_n(2);
+            COMMENT
+        }
+        b'#' => {
+            // A preprocessor directive, and (at the start) a shebang.
+            c.eat_while(|byte| byte != b'\n');
+            COMMENT
+        }
+        b'@' if c.peek_at(1) == b'"' => {
+            c.bump_n(2);
+            if verbatim_string(c) { VERBATIM_STRING } else { BAD_LITERAL }
+        }
+        b'@' if c.peek_at(1) == b'$' && c.peek_at(2) == b'"' => {
+            c.bump_n(3);
+            if interpolated_string(c, true) { INTERPOLATED_STRING } else { BAD_LITERAL }
+        }
+        b'@' if is_word_start(c.peek_at(1)) => {
+            // A verbatim identifier: `@class` is the name `class`.
+            c.bump();
+            c.eat_while(is_word_byte);
+            IDENT
+        }
+        b'$' if c.peek_at(1) == b'"' => {
+            c.bump_n(2);
+            if interpolated_string(c, false) { INTERPOLATED_STRING } else { BAD_LITERAL }
+        }
+        b'$' if c.peek_at(1) == b'@' && c.peek_at(2) == b'"' => {
+            c.bump_n(3);
+            if interpolated_string(c, true) { INTERPOLATED_STRING } else { BAD_LITERAL }
+        }
+        b'"' if c.starts_with(b"\"\"\"") => {
+            if raw_string(c) { RAW_STRING } else { BAD_LITERAL }
+        }
+        b'"' => {
+            c.bump();
+            if c.quoted(b'"', true) { STRING } else { BAD_LITERAL }
+        }
+        b'\'' => {
+            c.bump();
+            if c.quoted(b'\'', true) { CHAR } else { BAD_LITERAL }
+        }
+        b'0'..=b'9' => number(c),
+        b'.' if c.peek_at(1).is_ascii_digit() => number(c),
+        byte if is_word_start(byte) => {
+            let start = c.pos();
+            c.eat_while(is_word_byte);
+            keyword(c.since(start))
+        }
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+/// The rest of a verbatim string after its `@"`: `""` is one quote, a line
+/// break is allowed. True if it closed.
+fn verbatim_string(c: &mut Cursor) -> bool {
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        if c.peek() == b'"' {
+            if c.peek_at(1) == b'"' {
+                c.bump_n(2);
+                continue;
+            }
+            c.bump();
+            return true;
+        }
+        c.bump();
+    }
+}
+
+/// The rest of an interpolated string after its opening `$"` (or `$@"`). Holes
+/// are scanned with balanced braces and quoted strings inside them skipped,
+/// and stay opaque. `{{` and `}}` are literal braces. True if it closed.
+fn interpolated_string(c: &mut Cursor, verbatim: bool) -> bool {
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        match c.peek() {
+            b'"' if verbatim && c.peek_at(1) == b'"' => c.bump_n(2),
+            b'"' => {
+                c.bump();
+                return true;
+            }
+            b'\n' | b'\r' if !verbatim => return false,
+            b'\\' if !verbatim => c.bump_n(2),
+            b'{' if c.peek_at(1) == b'{' => c.bump_n(2),
+            b'}' if c.peek_at(1) == b'}' => c.bump_n(2),
+            b'{' => {
+                c.bump();
+                if !interpolation_hole(c) {
+                    return false;
+                }
+            }
+            _ => c.bump(),
+        }
+    }
+}
