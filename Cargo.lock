@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "deep-abi"
+version = "0.1.0"
+
+[[package]]
 name = "rust-graph"
 version = "0.1.0"
 dependencies = [

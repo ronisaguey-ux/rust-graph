@@ -6,7 +6,8 @@ license = "AGPL-3.0-only"
 description = "A code knowledge graph for 40+ languages. Rust std only, no parser libraries."
 
 [workspace]
-members = ["crates/rust-graph-deep"]
+members = [
+    "crates/deep-abi", "crates/rust-graph-deep"]
 
 [features]
 parser = ["dep:rust-graph-deep"]
