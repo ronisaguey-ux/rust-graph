@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "fileSources": [],
+  "sources": {
+    "src/main.rs": {
+      "checksum": "9f2c1e",
+      "lineCount": 214,
+      "symbols": [
+        {"name": "main", "kind": "function", "line": 12},
+        {"name": "Parser", "kind": "struct", "line": 48, "exported": true}
+      ],
+      "metrics": {"cyclomatic": 7, "tokens": 1834}
+    },
+    "src/lib.rs": {
+      "checksum": "aa10b7",
+      "lineCount": 32,
+      "symbols": [],
+      "metrics": {"cyclomatic": 1, "tokens": 190}
+    }
+  },
+  "empty": {},
+  "emptyList": [],
+  "unicode": "parser \u2014 deep scan",
+  "bigNumber": -1.5e-9
+}
