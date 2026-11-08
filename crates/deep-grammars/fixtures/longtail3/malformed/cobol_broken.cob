@@ -1,0 +1,7 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. BROKEN.
+       PROCEDURE DIVISION.
+       START-PARA.
+           MOVE 1 TO
+           DISPLAY 'AFTER'.
+           STOP RUN.
