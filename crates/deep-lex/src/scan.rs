@@ -75,6 +75,12 @@ impl<'a, S: crate::ExternalScanner> DeepLexer<'a, S> {
             }
         }
 
+        for &(bytes, kind) in crate::kind::extras(self.lang) {
+            if self.cur.starts_with(bytes) {
+                self.cur.advance(bytes.len());
+                return self.emit(kind, Span::new(start, self.cur.pos()));
+            }
+        }
         for &(bytes, kind) in OPERATORS {
             if self.cur.starts_with(bytes) {
                 self.cur.advance(bytes.len());

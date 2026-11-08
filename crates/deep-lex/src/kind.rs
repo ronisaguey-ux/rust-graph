@@ -123,6 +123,23 @@ pub enum Kind {
     GtGtGt,
     GtGtEq,
     GtGtGtEq,
+    /// Python `**` (exponent) and JavaScript `**` (same).
+    StarStar,
+    StarStarEq,
+    /// Python `//` floor division. In C-like languages `//` is a comment and
+    /// never reaches the operator table.
+    SlashSlash,
+    SlashSlashEq,
+    /// Python's `:=`.
+    Walrus,
+    /// Python 2's `<>`.
+    LtGt,
+    /// Python's `@=` (matrix multiply, assign).
+    AtEq,
+    AndAndEq,
+    OrOrEq,
+    /// `??=`, JavaScript's nullish assignment.
+    NullishEq,
 }
 
 impl Kind {
@@ -182,7 +199,8 @@ pub const ALL_KINDS: &[Kind] = &[
     QuestionQuestion, QuestionDot, At, Hash, Dollar, Backslash, Plus, PlusPlus, PlusEq, Minus,
     MinusMinus, MinusEq, Star, StarEq, Slash, SlashEq, Percent, PercentEq, Amp, AmpAmp, AmpEq, Pipe,
     PipePipe, PipeEq, Caret, CaretEq, Tilde, Bang, BangEq, BangEqEq, Eq, EqEq, EqEqEq, Lt, LtEq, LtLt,
-    LtLtEq, Gt, GtEq, GtGt, GtGtGt, GtGtEq, GtGtGtEq,
+    LtLtEq, Gt, GtEq, GtGt, GtGtGt, GtGtEq, GtGtGtEq, StarStar, StarStarEq, SlashSlash, SlashSlashEq,
+    Walrus, LtGt, AtEq, AndAndEq, OrOrEq, NullishEq,
 ];
 
 use Kind::*;
@@ -250,6 +268,40 @@ pub const OPERATORS: &[(&[u8], Kind)] = &[
     (b"{", LBrace),
     (b"}", RBrace),
 ];
+
+/// Operators only some languages have, in longest-first order. Checked before
+/// [`OPERATORS`], so `**=` beats `*=` and `//=` beats `/=`.
+///
+/// Keeping them out of the shared table is what stops `a <> b` in JavaScript
+/// from becoming one token: a form a language does not have must not change
+/// the boundaries of the tokens it does have.
+pub const PYTHON_OPERATORS: &[(&[u8], Kind)] = &[
+    (b"**=", StarStarEq),
+    (b"//=", SlashSlashEq),
+    (b"@=", AtEq),
+    (b"<>", LtGt),
+    (b"**", StarStar),
+    (b"//", SlashSlash),
+    (b":=", Walrus),
+];
+
+/// JavaScript and TypeScript's extra operators.
+pub const JAVASCRIPT_OPERATORS: &[(&[u8], Kind)] = &[
+    (b"**=", StarStarEq),
+    (b"&&=", AndAndEq),
+    (b"||=", OrOrEq),
+    (b"??=", NullishEq),
+    (b"**", StarStar),
+];
+
+/// The extras `lang` claims before the shared table.
+pub fn extras(lang: Language) -> &'static [(&'static [u8], Kind)] {
+    match lang {
+        Language::Python => PYTHON_OPERATORS,
+        Language::JavaScript => JAVASCRIPT_OPERATORS,
+        Language::Json | Language::C | Language::Generic => &[],
+    }
+}
 
 /// Fixed kind -> symbol mapping. Identity by default; a grammar overrides the
 /// entries it cares about with `set`.
