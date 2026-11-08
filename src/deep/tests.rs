@@ -14,18 +14,7 @@ use super::parser::{Parser, Workspace};
 use super::syntax::{Class, Kind, KindInfo, Language, ERROR, FIRST_LANGUAGE_KIND, SKIPPED, UNKNOWN, WHITESPACE};
 use super::tree::{Event, Tree, HAS_ERROR, HAS_SKIP, MISSING, TOKEN, UNCLOSED};
 
-rust_graph_deep::grammar! { Python {
-    func_def: "def" IDENT "(" [params] ")" ":" block,
-    call: IDENT "(" [args] ")",
-} }
-
-#[test]
-fn the_macro_reads_the_grammar_shape() {
-    assert_eq!(Python::NAME, "Python");
-    assert_eq!(Python::RULES, ["func_def", "call"]);
-}
-
-fn parse_with(src: &[u8], budget: &Budget) -> (Workspace, Outcome) {
+pub(super) fn parse_with(src: &[u8], budget: &Budget) -> (Workspace, Outcome) {
     let mut workspace = Workspace::default();
     let outcome = workspace.parse(src, &JSON, budget).unwrap();
     check(&workspace, src, &JSON);
@@ -42,12 +31,12 @@ fn named(src: &str) -> String {
 
 /// Deep inputs need more stack than a test thread has in a debug build. Release
 /// stack use is measured by the deep-scan binary's `stack` probe, not here.
-fn on_big_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+pub(super) fn on_big_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new().stack_size(256 << 20).spawn(work).unwrap().join().unwrap()
 }
 
 /// The invariants every parse must keep, whatever the input.
-fn check(workspace: &Workspace, src: &[u8], language: &Language) {
+pub(super) fn check(workspace: &Workspace, src: &[u8], language: &Language) {
     let tokens = &workspace.tokens;
     let nodes = &workspace.tree.nodes;
 
@@ -129,7 +118,7 @@ fn check(workspace: &Workspace, src: &[u8], language: &Language) {
 /// Tree-sitter at HEAD and v0.26.13 makes `root=ERROR` of n1, n2 and n5 (measured in
 /// Phase 1 with target/ts-baseline/tsdrv). These are the v0.26.12 trees, which kept
 /// the root, minus `string_content` and field names.
-const FIXTURES_5910: &[(&str, &str)] = &[
+pub(super) const FIXTURES_5910: &[(&str, &str)] = &[
     (r#"{"a":{"b" "c"}}"#, "(document (object (pair string (object (ERROR string string)))))"),
     (r#"{"one":{"bar" "baz"},"two":"bar"}"#, "(document (object (pair string (object (ERROR string string))) (pair string string)))"),
     (r#"{"b" "c"}"#, "(document (object (ERROR string string)))"),
@@ -253,7 +242,7 @@ fn trivia_and_unknown_bytes_are_kept() {
 
 // ---- The depth gate -------------------------------------------------------------
 
-const MILLION: usize = 1_000_000;
+pub(super) const MILLION: usize = 1_000_000;
 
 #[test]
 fn a_million_deep_array_survives_and_is_skipped_past_the_depth_budget() {
@@ -339,7 +328,7 @@ fn every_tree_walk_handles_a_million_deep_tree() {
 
 // ---- Budgets --------------------------------------------------------------------
 
-fn big_document(objects: usize) -> String {
+pub(super) fn big_document(objects: usize) -> String {
     let mut src = String::from("[\n");
     for index in 0..objects {
         if index > 0 {
@@ -405,17 +394,17 @@ fn a_reused_workspace_does_not_allocate_again() {
 // ---- Fuzz invariants ------------------------------------------------------------
 
 /// xorshift64*: deterministic, std only.
-struct Rng(u64);
+pub(super) struct Rng(pub(super) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
         self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
 
-    fn below(&mut self, bound: usize) -> usize {
+    pub(super) fn below(&mut self, bound: usize) -> usize {
         (self.next() % bound.max(1) as u64) as usize
     }
 
@@ -424,11 +413,11 @@ impl Rng {
     }
 }
 
-const ANY_JSON_BYTE: &[u8] = b"{}[]:,\"\\0123456789 \n\t-+.eEtrufalsn/*x@\xc3\xa9\xff";
+pub(super) const ANY_JSON_BYTE: &[u8] = b"{}[]:,\"\\0123456789 \n\t-+.eEtrufalsn/*x@\xc3\xa9\xff";
 
 /// One random edit within `from..to`. Bytes in `keep` are never deleted or
 /// overwritten, so an edit can be made delimiter-neutral.
-fn mutate(rng: &mut Rng, src: &mut Vec<u8>, alphabet: &[u8], keep: &[u8], from: usize, to: usize) {
+pub(super) fn mutate(rng: &mut Rng, src: &mut Vec<u8>, alphabet: &[u8], keep: &[u8], from: usize, to: usize) {
     let span = to - from;
     match rng.below(4) {
         0 => {
@@ -883,4 +872,84 @@ fn flags_name_what_happened() {
     let (workspace, _) = parse("[");
     assert_ne!(workspace.tree.nodes[1].flags & UNCLOSED, 0);
     assert_ne!(workspace.tree.nodes[1].flags & HAS_ERROR, 0, "an unclosed group is an error");
+}
+
+// ---- grammar! end to end --------------------------------------------------------
+
+/// A small language through `grammar!`. Prefix `-` recurses outside any group, so
+/// the macro sends that call through the depth budget.
+mod prefix {
+    use super::*;
+
+    rust_graph_deep::grammar! { PREFIX {
+        lex = lex;
+        tokens {
+            MINUS = "-",
+            NUM = "num",
+            COMMA = ",",
+            LP = "(" open parens,
+            RP = ")" close parens,
+        }
+        items: _item*,
+        _item: neg | NUM | tuple,
+        neg: "-" _item,
+        tuple: "(" (_item % ",") ")",
+    } }
+
+    fn lex(cursor: &mut Cursor) -> Kind {
+        let kind = match cursor.peek() {
+            b'0'..=b'9' => {
+                cursor.eat_while(|byte| byte.is_ascii_digit());
+                return NUM;
+            }
+            b'-' => MINUS,
+            b',' => COMMA,
+            b'(' => LP,
+            b')' => RP,
+            b' ' => WHITESPACE,
+            _ => return UNKNOWN,
+        };
+        cursor.bump();
+        kind
+    }
+}
+
+fn prefix(src: &str) -> (Workspace, Outcome) {
+    let mut workspace = Workspace::default();
+    let outcome = workspace.parse(src.as_bytes(), &prefix::PREFIX, &Budget::default()).unwrap();
+    check(&workspace, src.as_bytes(), &prefix::PREFIX);
+    (workspace, outcome)
+}
+
+#[test]
+fn a_macro_grammar_defines_its_kinds_in_order() {
+    use prefix::*;
+    assert_eq!((PREFIX.name, PREFIX.root), ("prefix", ITEMS));
+    assert_eq!([MINUS, NUM, COMMA, LP, RP, ITEMS, NEG, TUPLE], [16, 17, 18, 19, 20, 21, 22, 23]);
+    let rows: Vec<(&str, Class)> = PREFIX.kinds.iter().map(|info| (info.name, info.class)).collect();
+    assert_eq!(rows[3..], [("(", Class::Open(0)), (")", Class::Close(0)), ("items", Class::Node), ("neg", Class::Node), ("tuple", Class::Node)]);
+}
+
+#[test]
+fn a_macro_grammar_parses_and_recovers() {
+    let sexp = |src: &str| prefix(src).0.tree.sexp(&prefix::PREFIX, true);
+    assert_eq!(sexp("-1 (2, -(3)) 4"), "(items (neg num) (tuple num (neg (tuple num))) num)");
+    // A required item that is absent is MISSING; an extra item is an ERROR.
+    assert_eq!(sexp("-"), "(items (neg (ERROR MISSING)))");
+    assert_eq!(sexp("(1 2, 3)"), "(items (tuple num (ERROR num) num))");
+    // The firewall holds for generated groups too.
+    assert_eq!(sexp("(1, (2 -), 3) 4"), "(items (tuple num (tuple num (ERROR)) num) num)");
+    assert_eq!(sexp("(1, (2, -), 3) 4"), "(items (tuple num (tuple num (neg (ERROR MISSING))) num) num)");
+}
+
+#[test]
+fn macro_recursion_outside_a_group_is_cut_by_the_depth_budget() {
+    let (outcome, sexp_head) = on_big_stack(|| {
+        let src = format!("{}1", "-".repeat(MILLION));
+        let (workspace, outcome) = prefix(&src);
+        (outcome, workspace.tree.sexp(&prefix::PREFIX, true)[..21].to_string())
+    });
+    assert_eq!(outcome.deepest, Budget::default().max_depth);
+    assert_eq!(outcome.skipped_groups, 1);
+    assert_eq!(sexp_head, "(items (neg (neg (neg");
 }
