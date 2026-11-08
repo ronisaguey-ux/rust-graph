@@ -11,6 +11,7 @@
 //! files sit with its valid ones and cannot collide with the three other
 //! languages' files in the shared `fixtures/malformed/` folder.
 
+pub mod php;
 pub mod ruby;
 
 #[cfg(test)]
@@ -22,6 +23,7 @@ mod tests {
     use crate::deep::tree::{HAS_ERROR, TOKEN};
     use crate::deep::{Budget, Workspace};
 
+    use crate::batch_b::php::PHP;
     use crate::batch_b::ruby::RUBY;
 
     /// `(file, top-level node kinds)` for every valid fixture, in order.
@@ -55,7 +57,38 @@ mod tests {
         ("unclosed_method.rb", "class_definition"),
     ];
 
-    /// What one parse produced, as the tests compare it.
+        /// `(file, top-level node kinds)` for every valid PHP fixture.
+    const PHP_VALID: &[(&str, &str)] = &[
+        (
+            "arrays.php",
+            "expression_statement expression_statement expression_statement expression_statement foreach_statement expression_statement expression_statement expression_statement unset_statement expression_statement expression_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement",
+        ),
+        ("classes.php", "namespace_declaration trait_declaration enum_declaration class_declaration"),
+        (
+            "control_flow.php",
+            "expression_statement if_statement expression_statement while_statement do_statement for_statement switch_statement while_statement",
+        ),
+        ("functions.php", "require_statement require_statement function_declaration function_declaration expression_statement echo_statement echo_statement"),
+        (
+            "operators.php",
+            "expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement",
+        ),
+        ("service.php", "namespace_declaration use_declaration use_declaration class_declaration"),
+        ("shapes.php", "namespace_declaration use_declaration interface_declaration class_declaration class_declaration"),
+        (
+            "strings.php",
+            "expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement echo_statement echo_statement echo_statement echo_statement echo_statement",
+        ),
+    ];
+
+    /// `(file, top-level node kinds)` for every malformed PHP fixture.
+    const PHP_MALFORMED: &[(&str, &str)] = &[
+        ("broken_string.php", "class_declaration"),
+        ("missing_semicolon.php", "function_declaration"),
+        ("unclosed_class.php", "class_declaration"),
+    ];
+
+/// What one parse produced, as the tests compare it.
     struct Parsed {
         complete: bool,
         root: &'static str,
@@ -145,6 +178,40 @@ mod tests {
         workspace.tree.sexp(language, true)
     }
 
+    /// A debugging aid: the tree and the top-level kinds of every fixture, for
+    /// retuning a grammar. `cargo test -p deep-grammars -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_trees() {
+        dump("ruby", &RUBY);
+        dump("php", &PHP);
+    }
+
+    fn dump(folder: &str, language: &'static Language) {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for inner in [folder.to_string(), format!("{folder}/malformed")] {
+            for entry in fs::read_dir(fixtures().join(inner)).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    paths.push(path);
+                }
+            }
+        }
+        paths.sort();
+        for path in paths {
+            let src = fs::read(&path).unwrap();
+            let mut workspace = Workspace::default();
+            let outcome = workspace.parse(&src, language, &Budget::default());
+            let nodes = &workspace.tree.nodes;
+            let errors = (0..nodes.len()).filter(|&i| nodes[i].kind == ERROR || nodes[i].flags & HAS_ERROR != 0 && nodes[i].flags & TOKEN != 0).count();
+            let top: Vec<&str> = workspace.tree.children(0).map(|c| &nodes[c as usize]).filter(|n| n.flags & TOKEN == 0).map(|n| language.name(n.kind)).collect();
+            println!("=== {:?} complete={:?} errors={errors} top={top:?}", path.file_name().unwrap(), outcome.map(|o| o.complete()));
+            if errors > 0 {
+                println!("{}", workspace.tree.sexp(language, true));
+            }
+        }
+    }
+
     #[test]
     fn ruby_fixtures_parse_cleanly() {
         check_valid("ruby", &RUBY, RUBY_VALID);
@@ -160,5 +227,23 @@ mod tests {
         assert_eq!((RUBY.name, RUBY.name(RUBY.root)), ("ruby", "program"));
         assert!(RUBY.layout.is_none());
         assert!(RUBY.kinds.len() > 60, "a grammar this size has dozens of kinds, not {}", RUBY.kinds.len());
+    }
+
+    #[test]
+    fn php_fixtures_parse_cleanly() {
+        check_valid("php", &PHP, PHP_VALID);
+    }
+
+    #[test]
+    fn php_malformed_fixtures_keep_the_root() {
+        check_malformed("php", &PHP, PHP_MALFORMED);
+    }
+
+    #[test]
+    fn php_names_its_root() {
+        assert_eq!((PHP.name, PHP.name(PHP.root)), ("php", "program"));
+        assert!(PHP.layout.is_none());
+        assert!(PHP.kinds.len() > 100, "a grammar this size has hundreds of kinds, not {}", PHP.kinds.len());
+        assert!(PHP.kinds.iter().any(|kind| kind.name == "<?php"), "the opening tag is a token, trivia though it is");
     }
 }
