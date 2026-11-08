@@ -158,7 +158,12 @@ impl NativeScanner {
 impl ExternalScanner for NativeScanner {
     fn start(&mut self, cur: &Cursor<'_>, ctx: ScanCtx) -> bool {
         if ctx.mode == Mode::Regex {
-            return true;
+            // A state can only *request* a regex; a parser that asks at the
+            // wrong byte must still get the ordinary rules. Otherwise the
+            // scanner would swallow `=` and everything after it.
+            return cur.peek() == Some(b'/')
+                && !cur.starts_with(b"//")
+                && !cur.starts_with(b"/*");
         }
         match self.lang {
             Language::C => {
@@ -167,13 +172,15 @@ impl ExternalScanner for NativeScanner {
             }
             Language::JavaScript => ctx.mode == Mode::Default && Self::regex_here(cur, ctx),
             Language::Python => ctx.mode == Mode::RawString && cur.peek() == Some(b'R'),
+            Language::Json => false,
             Language::Generic => ctx.mode == Mode::RawString,
         }
     }
 
     fn scan(&mut self, cur: &mut Cursor<'_>, ctx: ScanCtx) -> Option<(Kind, Span)> {
-        if ctx.mode == Mode::Regex || (self.lang == Language::JavaScript && Self::regex_here(cur, ctx))
-        {
+        let regex = ctx.mode == Mode::Regex
+            || (self.lang == Language::JavaScript && Self::regex_here(cur, ctx));
+        if regex && cur.peek() == Some(b'/') {
             return Some((Kind::Regex, Self::scan_regex(cur)));
         }
         if cur.peek() == Some(b'R') && matches!(self.lang, Language::C | Language::Python) {
