@@ -143,7 +143,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const COUNT: usize = Kind::GtGtGtEq as usize + 1;
+    pub const COUNT: usize = Kind::NullishEq as usize + 1;
 
     /// Is this a token after which `/` means division, not a regex?
     pub fn closes_expression(self) -> bool {
