@@ -228,3 +228,275 @@ rust_graph_deep::grammar! { GROOVY {
         left "<<" | ">>" => shift,
         left "+" | "-" => additive,
         left "*" | "/" | "%" => multiplicative,
+        right "**" => power,
+        prefix "!" | "-" | "+" | "~" => unary,
+        postfix "++" | "--" => update,
+        prefix "++" | "--" => update,
+        postfix argument_list => call,
+        postfix "." _name => member_access,
+        postfix index_expression => index,
+        prefix "new" => constructor_call,
+    },
+
+    argument_list: "(" [_argument %? ","] ")",
+    _argument: &(IDENT ":") named_argument | _expression,
+    named_argument: _name ":" _expression,
+
+    _primary:
+        _name
+        | NUMBER
+        | STRING
+        | "true"
+        | "false"
+        | "null"
+        | "this"
+        | "super"
+        | parenthesized_expression
+        | list_literal
+        | closure,
+
+    parenthesized_expression: "(" _expression ")",
+    index_expression: "[" _expression "]",
+    list_literal: "[" [_expression %? ","] "]",
+    closure: "{" [closure_parameters] _statement* "}",
+    closure_parameters: closure_parameter ("," closure_parameter)* "->",
+    closure_parameter: _name ["=" _expression],
+} }
+
+pub fn lex_groovy(c: &mut Cursor) -> Kind {
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\x0c'));
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            lex::line_comment(c);
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            lex::block_comment(c, b"/*", b"*/", false);
+            COMMENT
+        }
+        b'\'' | b'"' => string(c),
+        b'0'..=b'9' => { number(c); NUMBER }
+        b'.' if c.peek_at(1).is_ascii_digit() => { number(c); NUMBER }
+        b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => {
+            let start = c.rest();
+            let length = c.eat_while(lex::is_word_byte);
+            keyword(&start[..length])
+        }
+        b'(' => { c.bump(); LPAREN }
+        b')' => { c.bump(); RPAREN }
+        b'[' => { c.bump(); LBRACKET }
+        b']' => { c.bump(); RBRACKET }
+        b'{' => { c.bump(); LBRACE }
+        b'}' => { c.bump(); RBRACE }
+        b',' => { c.bump(); COMMA }
+        b';' => { c.bump(); SEMI }
+        b':' => { c.bump(); COLON }
+        b'.' if c.peek_at(1) == b'.' && c.peek_at(2) == b'<' => { c.bump_n(3); SPREAD_DOT }
+        b'.' if c.peek_at(1) == b'.' => { c.bump_n(2); SPREAD }
+        b'.' => { c.bump(); DOT }
+        b'-' if c.peek_at(1) == b'>' => { c.bump_n(2); ARROW }
+        b'-' if c.peek_at(1) == b'=' => { c.bump_n(2); MINUS_ASSIGN }
+        b'-' if c.peek_at(1) == b'-' => { c.bump_n(2); DECR }
+        b'-' => { c.bump(); MINUS }
+        b'=' if c.peek_at(1) == b'=' => { c.bump_n(2); EQ }
+        b'=' => { c.bump(); ASSIGN }
+        b'!' if c.peek_at(1) == b'=' => { c.bump_n(2); NE }
+        b'!' => { c.bump(); BANG }
+        b'<' if c.peek_at(1) == b'=' => { c.bump_n(2); LE }
+        b'<' if c.peek_at(1) == b'<' => { c.bump_n(2); SHL }
+        b'<' => { c.bump(); LT }
+        b'>' if c.peek_at(1) == b'=' => { c.bump_n(2); GE }
+        b'>' if c.peek_at(1) == b'>' => { c.bump_n(2); SHR }
+        b'>' => { c.bump(); GT }
+        b'+' if c.peek_at(1) == b'=' => { c.bump_n(2); PLUS_ASSIGN }
+        b'+' if c.peek_at(1) == b'+' => { c.bump_n(2); INCR }
+        b'+' => { c.bump(); PLUS }
+        b'*' if c.peek_at(1) == b'=' => { c.bump_n(2); STAR_ASSIGN }
+        b'*' if c.peek_at(1) == b'*' => { c.bump_n(2); STARSTAR }
+        b'*' => { c.bump(); STAR }
+        b'/' if c.peek_at(1) == b'=' => { c.bump_n(2); SLASH_ASSIGN }
+        b'/' => { c.bump(); SLASH }
+        b'%' => { c.bump(); PERCENT }
+        b'&' if c.peek_at(1) == b'&' => { c.bump_n(2); AND }
+        b'&' => { c.bump(); AMP }
+        b'|' if c.peek_at(1) == b'|' => { c.bump_n(2); OR }
+        b'|' => { c.bump(); PIPE }
+        b'^' => { c.bump(); CARET }
+        b'~' => { c.bump(); TILDE }
+        b'?' => { c.bump(); QUESTION }
+        b'@' => { c.bump(); AT }
+        _ => UNKNOWN,
+    }
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"package" => KW_PACKAGE,
+        b"import" => KW_IMPORT,
+        b"as" => KW_AS,
+        b"def" => KW_DEF,
+        b"class" => KW_CLASS,
+        b"interface" => KW_INTERFACE,
+        b"enum" => KW_ENUM,
+        b"extends" => KW_EXTENDS,
+        b"implements" => KW_IMPLEMENTS,
+        b"static" => KW_STATIC,
+        b"final" => KW_FINAL,
+        b"private" => KW_PRIVATE,
+        b"public" => KW_PUBLIC,
+        b"protected" => KW_PROTECTED,
+        b"return" => KW_RETURN,
+        b"if" => KW_IF,
+        b"else" => KW_ELSE,
+        b"for" => KW_FOR,
+        b"in" => KW_IN,
+        b"while" => KW_WHILE,
+        b"do" => KW_DO,
+        b"switch" => KW_SWITCH,
+        b"case" => KW_CASE,
+        b"default" => KW_DEFAULT,
+        b"break" => KW_BREAK,
+        b"continue" => KW_CONTINUE,
+        b"try" => KW_TRY,
+        b"catch" => KW_CATCH,
+        b"finally" => KW_FINALLY,
+        b"throw" => KW_THROW,
+        b"new" => KW_NEW,
+        b"this" => KW_THIS,
+        b"super" => KW_SUPER,
+        b"true" => KW_TRUE,
+        b"false" => KW_FALSE,
+        b"null" => KW_NULL,
+        b"void" => KW_VOID,
+        b"int" => KW_INT,
+        b"long" => KW_LONG,
+        b"double" => KW_DOUBLE,
+        b"boolean" => KW_BOOLEAN,
+        b"String" => KW_STRING,
+        _ => IDENT,
+    }
+}
+
+/// A string: one line, or triple-quoted across lines. Both quote styles accept
+/// the other quote inside, and `$` interpolation stays inside the token.
+fn string(c: &mut Cursor) -> Kind {
+    let quote = c.peek();
+    let triple = c.peek_at(1) == quote && c.peek_at(2) == quote;
+    if triple {
+        c.bump_n(3);
+        loop {
+            if c.at_end() {
+                return BAD_STRING;
+            }
+            if c.peek() == b'\\' {
+                c.bump_n(2);
+            } else if c.peek() == quote && c.peek_at(1) == quote && c.peek_at(2) == quote {
+                c.bump_n(3);
+                return STRING;
+            } else {
+                c.bump_char();
+            }
+        }
+    }
+    c.bump();
+    if c.quoted(quote, true) {
+        STRING
+    } else {
+        BAD_STRING
+    }
+}
+
+fn number(c: &mut Cursor) {
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B') {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        return;
+    }
+    c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    if c.peek() == b'.' && c.peek_at(1).is_ascii_digit() {
+        c.bump();
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    c.eat_while(|byte| matches!(byte, b'f' | b'F' | b'd' | b'D' | b'g' | b'G' | b'l' | b'L' | b'i' | b'I'));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_f::harness;
+
+    const VALID: &[(&str, &[&str])] = &[
+        (
+            "Build.groovy",
+            &[
+                "package_declaration",
+                "import_declaration",
+                "import_declaration",
+                "class_declaration",
+                "definition",
+                "expression_statement",
+                "definition",
+                "expression_statement",
+                "if_statement",
+            ],
+        ),
+        (
+            "Report.groovy",
+            &[
+                "package_declaration",
+                "import_declaration",
+                "definition",
+                "definition",
+                "definition",
+                "for_statement",
+                "for_statement",
+                "while_statement",
+                "expression_statement",
+                "expression_statement",
+            ],
+        ),
+        (
+            "Pipeline.groovy",
+            &["package_declaration", "import_declaration", "annotation", "class_declaration"],
+        ),
+    ];
+
+    #[test]
+    fn valid_fixtures() {
+        harness::check_valid("groovy", &GROOVY, VALID);
+    }
+
+    #[test]
+    fn malformed_keeps_the_root() {
+        harness::check_malformed(
+            "malformed",
+            "groovy_broken.groovy",
+            &GROOVY,
+            &["package_declaration", "class_declaration"],
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_top_level_kinds() {
+        harness::dump("groovy", &GROOVY);
+        harness::dump("malformed", &GROOVY);
+    }
+
+    #[test]
+    fn lexes_a_gstring_and_a_closure() {
+        use crate::deep::lexer::{lex, Tokens};
+        let src = b"def x = \"hi ${name}\"\ndef f = { it -> it }";
+        let mut tokens = Tokens::default();
+        lex(src, &GROOVY, &mut tokens);
+        let kinds: Vec<&str> = (0..tokens.len())
+            .map(|i| GROOVY.name(tokens.kind[i]))
+            .filter(|kind| *kind != "whitespace")
+            .collect();
+        assert_eq!(kinds, ["def", "identifier", "=", "string", "def", "identifier", "=", "{", "identifier", "->", "identifier", "}"]);
+    }
+}
