@@ -46,6 +46,8 @@ name = "deep-tables"
 version = "0.1.0"
 dependencies = [
  "deep-abi",
+ "deep-rt",
+ "rust-graph-deep",
 ]
 
 [[package]]
@@ -62,3 +64,6 @@ dependencies = [
 [[package]]
 name = "rust-graph-deep"
 version = "0.1.0"
+dependencies = [
+ "deep-tables",
+]

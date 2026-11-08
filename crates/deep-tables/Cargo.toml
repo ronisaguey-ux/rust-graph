@@ -10,3 +10,4 @@ deep-abi = { path = "../deep-abi" }
 
 [dev-dependencies]
 deep-rt = { path = "../deep-rt" }
+rust-graph-deep = { path = "../rust-graph-deep" }
