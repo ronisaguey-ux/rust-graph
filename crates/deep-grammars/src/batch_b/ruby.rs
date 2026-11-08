@@ -303,3 +303,355 @@ rust_graph_deep::grammar! { RUBY {
         | "return" | "yield" | "def" | "module" | "require" | "super",
 } }
 
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'#' => {
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            COMMENT
+        }
+        b'=' if c.pos() == 0 || c.behind(1) == b'\n' => {
+            if c.starts_with(b"=begin") {
+                block_comment(c);
+                COMMENT
+            } else {
+                operator(c)
+            }
+        }
+        b'"' | b'\'' | b'`' => string(c),
+        b'%' if !ends_operand(c.previous()) && percent_delimiter(c.peek_at(1)) => percent_literal(c),
+        b'<' if c.peek_at(1) == b'<' && !ends_operand(c.previous()) && heredoc_start(c) => heredoc(c),
+        b'/' if c.peek_at(1) != b'=' && !ends_operand(c.previous()) => {
+            if regex(c) {
+                REGEX
+            } else {
+                operator(c)
+            }
+        }
+        b':' if c.peek_at(1) != b':' && is_symbol_start(c.peek_at(1)) && !ends_operand(c.previous()) => symbol(c),
+        b'@' if is_word_start(c.peek_at(1)) => variable(c),
+        b'@' if c.peek_at(1) == b'@' && is_word_start(c.peek_at(2)) => variable(c),
+        b'$' if is_word_start(c.peek_at(1)) || c.peek_at(1).is_ascii_digit() => variable(c),
+        b'0'..=b'9' => number(c),
+        b'.' if c.peek_at(1).is_ascii_digit() && !ends_operand(c.previous()) => number(c),
+        byte if is_word_start(byte) => word(c),
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+/// `@name`, `@@name` or `$name`: one variable token.
+fn variable(c: &mut Cursor) -> Kind {
+    let sigil = c.peek();
+    c.bump();
+    if sigil == b'@' && c.peek() == b'@' {
+        c.bump();
+        c.eat_while(is_word_byte);
+        return CLASS_VAR;
+    }
+    c.eat_while(is_word_byte);
+    if sigil == b'@' { INSTANCE_VAR } else { GLOBAL_VAR }
+}
+
+/// A method name may end with `?` or `!`, as `empty?` and `save!` do. The
+/// suffix only joins when nothing that could continue an expression follows,
+/// so `x? 1 : 2` is still a conditional.
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    let suffix = matches!(c.peek(), b'?' | b'!') && c.peek_at(1) != b'=' && !is_word_byte(c.peek_at(1));
+    if suffix {
+        c.bump();
+        return IDENT;
+    }
+    keyword(&start[..length])
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"begin" => KW_BEGIN,
+        b"break" => KW_BREAK,
+        b"case" => KW_CASE,
+        b"class" => KW_CLASS,
+        b"def" => KW_DEF,
+        b"do" => KW_DO,
+        b"else" => KW_ELSE,
+        b"elsif" => KW_ELSIF,
+        b"end" => KW_END,
+        b"ensure" => KW_ENSURE,
+        b"false" => KW_FALSE,
+        b"for" => KW_FOR,
+        b"if" => KW_IF,
+        b"in" => KW_IN,
+        b"module" => KW_MODULE,
+        b"next" => KW_NEXT,
+        b"nil" => KW_NIL,
+        b"rescue" => KW_RESCUE,
+        b"return" => KW_RETURN,
+        b"self" => KW_SELF,
+        b"super" => KW_SUPER,
+        b"then" => KW_THEN,
+        b"true" => KW_TRUE,
+        b"unless" => KW_UNLESS,
+        b"until" => KW_UNTIL,
+        b"when" => KW_WHEN,
+        b"while" => KW_WHILE,
+        b"yield" => KW_YIELD,
+        b"and" => KW_AND,
+        b"or" => KW_OR,
+        b"not" => KW_NOT,
+        b"require" => KW_REQUIRE,
+        b"require_relative" => KW_REQUIRE_RELATIVE,
+        b"load" => KW_LOAD,
+        b"include" => KW_INCLUDE,
+        b"extend" => KW_EXTEND,
+        b"prepend" => KW_PREPEND,
+        _ => IDENT,
+    }
+}
+
+/// Whether a token of this kind can end an operand, so that `/` divides, `<<`
+/// shifts, `%` is a modulo and `:x` cannot start a symbol.
+fn ends_operand(kind: Kind) -> bool {
+    matches!(kind, IDENT | NUMBER | STRING | SYMBOL | REGEX | RPAREN | RBRACKET | RBRACE | KW_SELF | KW_NIL | KW_TRUE | KW_FALSE | KW_END)
+}
+
+/// `=begin ... =end` at the start of a line.
+fn block_comment(c: &mut Cursor) {
+    while !c.at_end() {
+        if c.starts_with(b"=end") {
+            c.bump_n(4);
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            return;
+        }
+        c.eat_while(|byte| byte != b'\n');
+        c.eat(b'\n');
+    }
+}
+
+/// A string from its quote, with `#{...}` scanned whole in a double-quoted one.
+fn string(c: &mut Cursor) -> Kind {
+    let quote = c.peek();
+    c.bump();
+    loop {
+        match c.peek() {
+            0 if c.at_end() => return BAD_LITERAL,
+            b'\\' => c.bump_n(2),
+            b'\n' | b'\r' if quote == b'\'' || quote == b'`' => return BAD_LITERAL,
+            b'#' if quote == b'"' && c.peek_at(1) == b'{' => {
+                c.bump_n(2);
+                braces(c);
+            }
+            byte if byte == quote => {
+                c.bump();
+                return STRING;
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// The code of a `#{...}` field, up to its matching `}`, with strings and
+/// nested braces balanced. Never fails: an unclosed field runs to the end.
+fn braces(c: &mut Cursor) {
+    let mut depth = 1u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'{' => {
+                depth += 1;
+                c.bump();
+            }
+            b'}' => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    return;
+                }
+            }
+            b'"' | b'\'' | b'`' => {
+                string(c);
+            }
+            b'#' if c.peek_at(1) == b'{' => {
+                c.bump_n(2);
+                braces(c);
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+fn percent_delimiter(byte: u8) -> bool {
+    matches!(byte, b'q' | b'Q' | b'w' | b'W' | b'i' | b'I' | b'r' | b's' | b'x')
+}
+
+/// `%q(...)`, `%Q{...}`, `%w[...]` and `%r{...}`: the opening delimiter pairs
+/// with its close, and bracket delimiters nest.
+fn percent_literal(c: &mut Cursor) -> Kind {
+    c.bump();
+    let letter = c.peek().to_ascii_lowercase();
+    c.bump();
+    let open = c.peek();
+    let close = match open {
+        b'(' => b')',
+        b'[' => b']',
+        b'{' => b'}',
+        b'<' => b'>',
+        other => other,
+    };
+    if !open.is_ascii() || open.is_ascii_alphanumeric() || open == b' ' || open == b'\n' {
+        return BAD_LITERAL;
+    }
+    c.bump();
+    let nested = matches!(open, b'(' | b'[' | b'{' | b'<');
+    let mut depth = 1u32;
+    loop {
+        match c.peek() {
+            0 if c.at_end() => return BAD_LITERAL,
+            b'\\' => c.bump_n(2),
+            byte if byte == open && nested => {
+                depth += 1;
+                c.bump();
+            }
+            byte if byte == close => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    if letter == b'r' {
+                        c.eat_while(|byte| byte.is_ascii_alphabetic());
+                    }
+                    return STRING;
+                }
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// Whether `<<` starts a heredoc: `<<EOS`, `<<~EOS`, `<<-EOS` or a quoted
+/// delimiter, never `<< b`.
+fn heredoc_start(c: &Cursor) -> bool {
+    let mut at = 2;
+    if matches!(c.peek_at(at), b'~' | b'-') {
+        at += 1;
+    }
+    is_word_start(c.peek_at(at)) || matches!(c.peek_at(at), b'"' | b'\'')
+}
+
+/// A heredoc from `<<` to its terminator line. `~` and `-` allow the
+/// terminator to be indented; a plain one must start the line.
+fn heredoc(c: &mut Cursor) -> Kind {
+    c.bump_n(2);
+    let indented = matches!(c.peek(), b'~' | b'-');
+    if indented {
+        c.bump();
+    }
+    let quote = c.peek();
+    let quoted = matches!(quote, b'"' | b'\'');
+    if quoted {
+        c.bump();
+    }
+    let start = c.pos();
+    let rest = c.rest();
+    let delimiters = c.eat_while(is_word_byte);
+    let delimiter = &rest[..delimiters];
+    if quoted {
+        c.eat(quote);
+    }
+    if delimiter.is_empty() {
+        return BAD_LITERAL;
+    }
+    // The rest of the opening line, then the lines of the body.
+    c.eat_while(|byte| byte != b'\n');
+    if c.at_end() {
+        return BAD_LITERAL;
+    }
+    c.eat(b'\n');
+    while !c.at_end() {
+        let line_start = c.pos();
+        c.eat_while(|byte| byte != b'\n');
+        let mut line = c.since(line_start);
+        if indented {
+            line = trim_start(line);
+        }
+        let line = trim_end(line);
+        let closed = line == delimiter;
+        if c.at_end() {
+            return if closed { STRING } else { BAD_LITERAL };
+        }
+        c.eat(b'\n');
+        if closed {
+            return STRING;
+        }
+    }
+    BAD_LITERAL
+}
+
+fn trim_start(mut bytes: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = bytes {
+        if matches!(first, b' ' | b'\t') {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
+fn trim_end(mut bytes: &[u8]) -> &[u8] {
+    while let [rest @ .., last] = bytes {
+        if matches!(last, b' ' | b'\t' | b'\r') {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
+/// Whether a `:` starts a symbol: a name right after it, or one of the operator
+/// symbols Ruby allows (`:+`, `:[]`, `:<=>`).
+fn is_symbol_start(byte: u8) -> bool {
+    is_word_start(byte) || matches!(byte, b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'=' | b'!' | b'~' | b'&' | b'|' | b'^' | b'[')
+}
+
+fn symbol(c: &mut Cursor) -> Kind {
+    c.bump();
+    if is_word_start(c.peek()) {
+        c.eat_while(is_word_byte);
+        if matches!(c.peek(), b'?' | b'!' | b'=') && c.peek_at(1) != b'=' && !is_word_byte(c.peek_at(1)) {
+            c.bump();
+        }
+        return SYMBOL;
+    }
+    // A one- or two-character operator symbol.
+    c.bump_n(operator_width(c));
+    SYMBOL
+}
+
+fn operator_width(c: &Cursor) -> usize {
+    let (b, d) = (c.peek_at(1), c.peek_at(2));
+    match (c.peek(), b, d) {
+        (b'<', b'=', b'>') => 3,
+        (b'=', b'=', b'=') => 3,
+        (b'=', b'=', _) | (b'!', b'=', _) | (b'<', b'=', _) | (b'>', b'=', _) | (b'<', b'<', _) | (b'>', b'>', _) => 2,
+        _ => 1,
+    }
+}
+
