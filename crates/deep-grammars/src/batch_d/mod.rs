@@ -13,6 +13,7 @@ pub mod tcl;
 pub mod awk;
 pub mod clojure;
 pub mod css;
+pub mod elixir;
 pub mod html;
 pub mod julia;
 pub mod lua;
