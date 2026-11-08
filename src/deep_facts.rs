@@ -1238,11 +1238,23 @@ impl<'a> Walker<'a> {
                 };
                 (path, receiver)
             }
-            "call" | "call_expression" => {
-                // `f()(...)`: no name to call, so the path is the callee's and
-                // the receiver is unknown.
-                let (path, _) = self.call_target(callee);
-                (path, "0".to_string())
+            "call" | "call_expression" | "new_expression" => {
+                // `f()(...)`: the callee is an inner call, and the name is the
+                // inner call's own callee. It has to be looked for *inside*
+                // `callee`: a call node reaches this arm as its own callee when
+                // the grammar recovers a call with no operand, and recursing on
+                // the same index is an infinite descent that takes the process
+                // stack out (a four kilobyte fuzz file is enough).
+                let inner = self.children(callee).into_iter().find(|&child| {
+                    !matches!(self.kind(child), "(" | ")" | "argument_list" | "arguments" | "type_arguments" | "new")
+                });
+                match inner {
+                    Some(inner) => {
+                        let (path, _) = self.call_target(inner);
+                        (path, "0".to_string())
+                    }
+                    None => (String::new(), "0".to_string()),
+                }
             }
             _ => {
                 let path = self.path_of(callee);
