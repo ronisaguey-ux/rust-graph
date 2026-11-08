@@ -31,6 +31,22 @@ pub struct Parser<'a> {
     errors: u32,
     /// A cache for [`Parser::line_end`]: the first `newline` at or after `.0` is at `.1`.
     line_end: (u32, u32),
+    /// The last [`Parser::wrap`]: the operand start it wrapped, and the outermost
+    /// wrapper made. The next wrap of the same start walks on from there, so a
+    /// chain `a + b + c + ...` costs O(1) per operator, not O(length).
+    wrapped: (u32, u32),
+    /// In a [`Parser::trial`]: the error count it started with, else `NONE`.
+    /// A trial's first error ends its input, so a failed predicate costs what it
+    /// read up to the error, never a recovery that scans the rest of the group.
+    trial_errors: u32,
+}
+
+/// A predicate's trial parse, ended by [`Parser::end_trial`].
+#[must_use]
+pub struct Trial {
+    checkpoint: Checkpoint,
+    limit: u32,
+    outer: u32,
 }
 
 /// An open node. Close it with [`Parser::close`] or drop it with [`Parser::abandon`].
@@ -127,6 +143,32 @@ impl<'a> Parser<'a> {
         let marker = self.open();
         self.events.push(Event::Flag(MISSING));
         self.close(marker, ERROR);
+        self.stop_failed_trial();
+    }
+
+    /// In a trial that has failed, every token from here reads as `EOF`.
+    #[inline]
+    fn stop_failed_trial(&mut self) {
+        if self.trial_errors != NONE && self.errors > self.trial_errors {
+            self.limit = self.pos;
+        }
+    }
+
+    /// Starts a trial parse for a predicate: run the rule, then
+    /// [`Parser::end_trial`] says whether it parsed with no error and rewinds.
+    pub fn trial(&mut self) -> Trial {
+        let trial = Trial { checkpoint: self.checkpoint(), limit: self.limit, outer: self.trial_errors };
+        self.trial_errors = self.errors;
+        trial
+    }
+
+    /// Ends `trial`: true if nothing failed since it started. The input is as before.
+    pub fn end_trial(&mut self, trial: Trial) -> bool {
+        let parsed = self.errors == trial.checkpoint.errors;
+        self.rewind(trial.checkpoint);
+        self.limit = trial.limit;
+        self.trial_errors = trial.outer;
+        parsed
     }
 
     /// Wraps tokens in one `ERROR` until a token in `stop` or the end of the group.
@@ -138,6 +180,10 @@ impl<'a> Parser<'a> {
             return;
         }
         self.errors += 1;
+        if self.trial_errors != NONE {
+            self.limit = self.pos;
+            return;
+        }
         let marker = self.open();
         loop {
             self.bump_balanced();
@@ -207,17 +253,29 @@ impl<'a> Parser<'a> {
             if kind != TOMBSTONE {
                 // Wrapped before (`f(x)[0]`): the outermost wrapper is the operand now.
                 let mut outer = start;
+                if self.wrapped.0 == start {
+                    outer = self.wrapped.1;
+                    let Event::Start { forward_parent: next, .. } = self.events[outer as usize] else { unreachable!("the cached wrapper is a start") };
+                    forward_parent = next;
+                }
                 while forward_parent != 0 {
                     outer += forward_parent;
                     let Event::Start { forward_parent: next, .. } = self.events[outer as usize] else { unreachable!("a forward parent is a start") };
                     forward_parent = next;
                 }
-                return self.precede(Closed(outer));
+                let marker = self.precede(Closed(outer));
+                self.wrapped = (start, marker.0);
+                return marker;
             }
         }
         // Nothing past `start` is linked to anything before it: a Pratt loop
         // only ever wraps its own last operand.
         self.events.insert(at, Event::Start { kind: TOMBSTONE, forward_parent: 0 });
+        if self.wrapped.0 != NONE && self.wrapped.0 >= start {
+            self.wrapped = (NONE, NONE);
+        } else if self.wrapped.1 != NONE && self.wrapped.1 >= start {
+            self.wrapped.1 += 1;
+        }
         for link in self.links.iter_mut() {
             if *link >= start {
                 *link += 1;
@@ -232,6 +290,10 @@ impl<'a> Parser<'a> {
             return;
         }
         self.errors += 1;
+        if self.trial_errors != NONE {
+            self.limit = self.pos;
+            return;
+        }
         let marker = self.open();
         self.bump_balanced();
         self.close(marker, ERROR);
@@ -309,6 +371,9 @@ impl<'a> Parser<'a> {
             }
         }
         self.events.truncate(checkpoint.events as usize);
+        if self.wrapped.1 != NONE && self.wrapped.1 >= checkpoint.events {
+            self.wrapped = (NONE, NONE);
+        }
         self.pos = checkpoint.pos;
         self.errors = checkpoint.errors;
     }
@@ -346,6 +411,11 @@ impl<'a> Parser<'a> {
         body(self);
         self.depth -= 1;
         self.take_rest();
+        if self.trial_errors != NONE && self.errors > self.trial_errors {
+            // A failed trial stops inside the group: the outer rules see `EOF` too.
+            self.limit = self.pos;
+            return Some(self.close(marker, kind));
+        }
         self.limit = outer;
         if close == NONE {
             // The closer is missing, as a token would be: an error the walkers see.
@@ -390,6 +460,10 @@ impl<'a> Parser<'a> {
             return;
         }
         self.errors += 1;
+        if self.trial_errors != NONE {
+            self.limit = self.pos;
+            return;
+        }
         if self.exhausted() {
             let last = self.last_significant_before(self.limit);
             self.events.push(Event::Span { kind: ERROR, first: self.pos, last });
@@ -481,6 +555,8 @@ impl Workspace {
             skipped: 0,
             errors: 0,
             line_end: (NONE, NONE),
+            wrapped: (NONE, NONE),
+            trial_errors: NONE,
         };
         parser.pos = parser.skip_trivia(0);
         let root = parser.open();

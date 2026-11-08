@@ -324,7 +324,8 @@ impl<'c> Emitter<'c> {
     }
 
     /// A function that tries `inner` and reports whether it parsed with no
-    /// error, then rewinds: the input is untouched either way.
+    /// error, then rewinds: the input is untouched either way. The trial stops
+    /// at its first error, so a failed predicate never runs error recovery.
     fn predicate(&self, inner: &Node) -> Out {
         let mut extra = self.extra.borrow_mut();
         let name = format!("predicate_{}", extra.matches("fn predicate_").count());
@@ -335,7 +336,7 @@ impl<'c> Emitter<'c> {
         extra = self.extra.borrow_mut();
         let _ = write!(
             extra,
-            "fn {name}(p: &mut {}) -> bool {{ let checkpoint = p.checkpoint(); let errors = p.errors(); {body} let parsed = p.errors() == errors; p.rewind(checkpoint); parsed }}",
+            "fn {name}(p: &mut {}) -> bool {{ let trial = p.trial(); {body} p.end_trial(trial) }}",
             self.parser()
         );
         Ok(name)
@@ -578,7 +579,7 @@ mod tests {
     fn a_predicate_tries_its_alternative_first() {
         let out = emitted("top: s*, s: &(A B) m | A C, m: A B D,");
         assert!(out.contains("if p.at(A) && predicate_0(p) { parse_m(p); } else { match p.current() { A => { p.bump();p.expect(C); } _ => { p.error_one(); } } }"), "{out}");
-        assert!(out.contains("fn predicate_0(p: &mut rt::parser::Parser) -> bool { let checkpoint = p.checkpoint(); let errors = p.errors(); if p.at(A) { p.bump();p.expect(B); }"), "{out}");
+        assert!(out.contains("fn predicate_0(p: &mut rt::parser::Parser) -> bool { let trial = p.trial(); if p.at(A) { p.bump();p.expect(B); }"), "{out}");
         assert!(try_emit("top: s*, s: A &(B) C,").unwrap_err().contains("only start an alternative"));
     }
 

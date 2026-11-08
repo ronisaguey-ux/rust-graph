@@ -88,6 +88,13 @@ impl<'s> Cursor<'s> {
         self.src.get(self.pos + ahead).copied().unwrap_or(0)
     }
 
+    /// The byte `back` places before the cursor, or 0 before the start. Lets a
+    /// step lexer see what it just passed, such as the `.` before a tuple index.
+    #[inline]
+    pub fn behind(&self, back: usize) -> u8 {
+        self.pos.checked_sub(back).and_then(|at| self.src.get(at)).copied().unwrap_or(0)
+    }
+
     #[inline]
     pub fn rest(&self) -> &'s [u8] {
         &self.src[self.pos.min(self.src.len())..]
