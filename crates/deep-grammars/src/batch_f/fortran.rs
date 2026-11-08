@@ -248,3 +248,303 @@ rust_graph_deep::grammar! { FORTRAN {
 } }
 
 /// True where a physical line starts: the first byte of the file or one after
+/// a line break.
+fn at_line_start(c: &Cursor) -> bool {
+    c.pos() == 0 || c.behind(1) == b'\n'
+}
+
+/// Column 1 of a line: `C`, `c`, `*` or `!` makes it a comment line.
+fn comment_line(c: &Cursor) -> bool {
+    matches!(c.peek(), b'c' | b'C' | b'*' | b'!')
+}
+
+pub fn lex_fortran(c: &mut Cursor) -> Kind {
+    if at_line_start(c) {
+        return line_prefix(c);
+    }
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\r' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\x0c'));
+            WHITESPACE
+        }
+        b'\n' => {
+            c.bump();
+            // A line break is reported at the start of the next line, where the
+            // continuation column is known.
+            WHITESPACE
+        }
+        b'!' => {
+            c.eat_while(|byte| byte != b'\n');
+            COMMENT
+        }
+        b'"' | b'\'' => {
+            let quote = c.peek();
+            c.bump();
+            if c.quoted(quote, true) {
+                STRING
+            } else {
+                BAD_STRING
+            }
+        }
+        b'0'..=b'9' => { crate::batch_d::lex::number(c); NUMBER }
+        b'.' if c.peek_at(1).is_ascii_alphabetic() => dotted_word(c),
+        b'.' if c.peek_at(1).is_ascii_digit() => { c.bump(); crate::batch_d::lex::number(c); NUMBER }
+        b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+            let start = c.rest();
+            let length = c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+            keyword(&crate::batch_d::lex::upper(&start[..length]))
+        }
+        b'(' => { c.bump(); LPAREN }
+        b')' => { c.bump(); RPAREN }
+        b'[' => { c.bump(); LBRACKET }
+        b']' => { c.bump(); RBRACKET }
+        b',' => { c.bump(); COMMA }
+        b':' if c.peek_at(1) == b':' => { c.bump_n(2); DOUBLE_COLON }
+        b':' => { c.bump(); COLON }
+        b'=' if c.peek_at(1) == b'=' => { c.bump_n(2); EQ }
+        b'=' => { c.bump(); ASSIGN }
+        b'/' if c.peek_at(1) == b'/' => { c.bump_n(2); SLASHSLASH }
+        b'/' if c.peek_at(1) == b'=' => { c.bump_n(2); NE }
+        b'/' => { c.bump(); SLASH }
+        b'<' if c.peek_at(1) == b'=' => { c.bump_n(2); LE }
+        b'<' => { c.bump(); LT }
+        b'>' if c.peek_at(1) == b'=' => { c.bump_n(2); GE }
+        b'>' => { c.bump(); GT }
+        b'*' if c.peek_at(1) == b'*' => { c.bump_n(2); STARSTAR }
+        b'*' => { c.bump(); STAR }
+        b'+' => { c.bump(); PLUS }
+        b'-' => { c.bump(); MINUS }
+        b'%' => { c.bump(); PERCENT }
+        b'&' => { c.bump(); AMP }
+        _ => UNKNOWN,
+    }
+}
+
+/// The fixed-form prefix at a line start: a comment, a continuation, or a
+/// `NEWLINE` for the statement the previous line held.
+fn line_prefix(c: &mut Cursor) -> Kind {
+    if comment_line(c) {
+        c.eat_while(|byte| byte != b'\n');
+        return COMMENT;
+    }
+    // Columns 1-6, stopping at a line that ends inside the prefix.
+    let mut column = 0;
+    let mut continuation = false;
+    while column < 6 {
+        match c.peek() {
+            // A line shorter than the prefix field: its line break is this
+            // token's text, so the step advances.
+            b'\n' | b'\r' => {
+                c.bump();
+                c.eat(b'\n');
+                return NEWLINE;
+            }
+            byte => {
+                if column == 5 {
+                    continuation = byte != b' ' && byte != b'0' && byte != b'\t';
+                }
+                c.bump();
+                column += 1;
+            }
+        }
+    }
+    if continuation {
+        // The statement goes on: no `NEWLINE` and the prefix is whitespace.
+        WHITESPACE
+    } else {
+        NEWLINE
+    }
+}
+
+/// `.and.`, `.true.` and the rest: a dot, letters, a dot.
+fn dotted_word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    c.bump();
+    let length = 1 + c.eat_while(|byte| byte.is_ascii_alphabetic());
+    if c.peek() == b'.' {
+        c.bump();
+    }
+    let text: Vec<u8> = start[..length + 1].iter().map(u8::to_ascii_lowercase).collect();
+    match &text[..] {
+        b".and." => DOT_AND,
+        b".or." => DOT_OR,
+        b".not." => DOT_NOT,
+        b".eq." => DOT_EQ,
+        b".ne." => DOT_NE,
+        b".lt." => DOT_LT,
+        b".gt." => DOT_GT,
+        b".le." => DOT_LE,
+        b".ge." => DOT_GE,
+        b".true." => KW_TRUE,
+        b".false." => KW_FALSE,
+        _ => UNKNOWN,
+    }
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"PROGRAM" => KW_PROGRAM,
+        b"MODULE" => KW_MODULE,
+        b"SUBROUTINE" => KW_SUBROUTINE,
+        b"FUNCTION" => KW_FUNCTION,
+        b"END" => KW_END,
+        b"USE" => KW_USE,
+        b"ONLY" => KW_ONLY,
+        b"IMPLICIT" => KW_IMPLICIT,
+        b"NONE" => KW_NONE,
+        b"INTEGER" => KW_INTEGER,
+        b"REAL" => KW_REAL,
+        b"DOUBLE" => KW_DOUBLE,
+        b"PRECISION" => KW_PRECISION,
+        b"CHARACTER" => KW_CHARACTER,
+        b"LOGICAL" => KW_LOGICAL,
+        b"COMPLEX" => KW_COMPLEX,
+        b"DIMENSION" => KW_DIMENSION,
+        b"PARAMETER" => KW_PARAMETER,
+        b"INTENT" => KW_INTENT,
+        b"IN" => KW_IN,
+        b"OUT" => KW_OUT,
+        b"INOUT" => KW_INOUT,
+        b"ALLOCATABLE" => KW_ALLOCATABLE,
+        b"SAVE" => KW_SAVE,
+        b"TYPE" => KW_TYPE,
+        b"CALL" => KW_CALL,
+        b"PRINT" => KW_PRINT,
+        b"WRITE" => KW_WRITE,
+        b"READ" => KW_READ,
+        b"IF" => KW_IF,
+        b"THEN" => KW_THEN,
+        b"ELSE" => KW_ELSE,
+        b"ELSEIF" => KW_ELSEIF,
+        b"DO" => KW_DO,
+        b"WHILE" => KW_WHILE,
+        b"SELECT" => KW_SELECT,
+        b"CASE" => KW_CASE,
+        b"DEFAULT" => KW_DEFAULT,
+        b"RETURN" => KW_RETURN,
+        b"STOP" => KW_STOP,
+        b"CONTINUE" => KW_CONTINUE,
+        b"CONTAINS" => KW_CONTAINS,
+        b"RESULT" => KW_RESULT,
+        b"EXTERNAL" => KW_EXTERNAL,
+        b"GO" => KW_GO,
+        b"TO" => KW_TO,
+        b"CYCLE" => KW_CYCLE,
+        b"EXIT" => KW_EXIT,
+        b"ALLOCATE" => KW_ALLOCATE,
+        b"DEALLOCATE" => KW_DEALLOCATE,
+        _ => IDENT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_f::harness;
+
+    const VALID: &[(&str, &[&str])] = &[
+        (
+            "main.f",
+            &[
+                "program_statement",
+                "implicit_statement",
+                "declaration",
+                "declaration",
+                "assignment_statement",
+                "assignment_statement",
+                "do_statement",
+                "if_statement",
+                "call_statement",
+                "stop_statement",
+                "end_statement",
+                "subroutine_statement",
+                "implicit_statement",
+                "declaration",
+                "io_statement",
+                "return_statement",
+                "end_statement",
+            ],
+        ),
+        (
+            "geometry.f",
+            &[
+                "module_statement",
+                "implicit_statement",
+                "declaration",
+                "contains_statement",
+                "function_statement",
+                "implicit_statement",
+                "declaration",
+                "assignment_statement",
+                "return_statement",
+                "end_statement",
+                "end_statement",
+                "program_statement",
+                "use_statement",
+                "implicit_statement",
+                "declaration",
+                "assignment_statement",
+                "assignment_statement",
+                "io_statement",
+                "end_statement",
+            ],
+        ),
+        (
+            "counter.f",
+            &[
+                "program_statement",
+                "implicit_statement",
+                "declaration",
+                "declaration",
+                "assignment_statement",
+                "assignment_statement",
+                "do_statement",
+                "io_statement",
+                "end_statement",
+                "assignment_statement",
+            ],
+        ),
+    ];
+
+    #[test]
+    fn valid_fixtures() {
+        harness::check_valid("fortran", &FORTRAN, VALID);
+    }
+
+    #[test]
+    fn malformed_keeps_the_root() {
+        harness::check_malformed(
+            "malformed",
+            "fortran_broken.f",
+            &FORTRAN,
+            &[
+                "program_statement",
+                "implicit_statement",
+                "declaration",
+                "assignment_statement",
+                "if_statement",
+            ],
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_top_level_kinds() {
+        harness::dump("fortran", &FORTRAN);
+        harness::dump("malformed", &FORTRAN);
+    }
+
+    #[test]
+    fn drops_the_fixed_form_prefix_and_joins_a_continuation() {
+        use crate::deep::lexer::{lex, Tokens};
+        let src = b"C comment line\n      PRINT *\n     1 'HI'\n";
+        let mut tokens = Tokens::default();
+        lex(src, &FORTRAN, &mut tokens);
+        let kinds: Vec<&str> = (0..tokens.len())
+            .map(|i| FORTRAN.name(tokens.kind[i]))
+            .filter(|kind| !matches!(*kind, "whitespace"))
+            .collect();
+        assert_eq!(kinds, ["comment", "newline", "print", "*", "string"]);
+    }
+}
