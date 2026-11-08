@@ -566,3 +566,279 @@ fn prepare_at(
     })
 }
 
+/// The smallest node whose span contains the edit.
+///
+/// Descends through the first child that holds the whole range, so an insert at
+/// a node boundary stops at the parent of both sides — which is exactly the
+/// region whose parse the boundary can change.
+fn covering(nodes: &[Node], root: NodeId, edit: &Edit) -> NodeId {
+    let start = edit.start;
+    let end = edit.old_end();
+    let mut window = root;
+    'descend: loop {
+        let mut child = nodes[window as usize].first_child;
+        while child != NONE {
+            let node = nodes[child as usize];
+            if node.flags & FLAG_ERROR == 0 && node.start <= start && end <= node.end {
+                window = child;
+                continue 'descend;
+            }
+            child = node.next_sibling;
+        }
+        return window;
+    }
+}
+
+/// The incremental parse itself. `None` means "this state did not line up, do it
+/// the slow way".
+fn run(
+    grammar: &Grammar<'_>,
+    old: &Cst,
+    edit: &Edit,
+    tokens: &[Token],
+    new_len: Offset,
+    prepared: &Prepared,
+    report: &mut Report,
+) -> Option<Cst> {
+    // Every failure here means "this window did not line up": the caller widens
+    // the window or falls back to a full parse.
+    macro_rules! bail {
+        ($($t:tt)*) => {{
+            return None;
+        }};
+    }
+    let nodes = &old.nodes;
+    let delta = edit.delta();
+    let window = nodes[prepared.window as usize];
+    report.window_start = window.start;
+    report.window_end = window.end;
+
+    let mut arena = Arena::with_capacity(256);
+    // Copy the stack the old parse had at the window start. Those nodes end at
+    // or before `window.start`, so no offset shifts.
+    let mut states: Vec<StateId> = Vec::with_capacity(prepared.prefix_states.len() + 8);
+    states.extend_from_slice(&prepared.prefix_states);
+    let mut entries: Vec<NodeId> = Vec::with_capacity(prepared.prefix_nodes.len() + 8);
+    entries.push(NONE);
+    for &old_id in prepared.prefix_nodes.iter().skip(1) {
+        let copy = copy_subtree(&mut arena, nodes, old_id, 0, report);
+        entries.push(copy);
+    }
+    if states.len() != entries.len() {
+        bail!("prefix mismatch");
+    }
+
+    // The tokens before the window are byte-for-byte the old ones, so the byte
+    // offset is the only reliable index into the new stream: an edit inside the
+    // window can add or remove layout tokens at the window's own start.
+    let mut ti = 0usize;
+    while ti < tokens.len() && tokens[ti].start < window.start {
+        ti += 1;
+    }
+    ti += prepared.empty_before as usize;
+    if ti > tokens.len() {
+        bail!("window token {ti} past {}", tokens.len());
+    }
+
+    let mut children: Vec<NodeId> = Vec::with_capacity(8);
+
+    let mut work: Vec<(NodeId, NodeId)> = Vec::with_capacity(16);
+    let mut splices = 0u32;
+
+    loop {
+        // One splice attempt per token boundary.
+        if ti < tokens.len() {
+            if let Some((old_id, _end)) = splice(
+                grammar,
+                nodes,
+                prepared,
+                &states,
+                tokens,
+                ti,
+                tokens[ti].start,
+                edit,
+                new_len,
+            ) {
+                let copy = copy_subtree_with(&mut arena, nodes, old_id, delta, &mut work, report);
+                let kind = nodes[old_id as usize].kind;
+                let Some(top) = states.last().copied() else { bail!("splice on empty stack") };
+                let Some(target) = table::goto(grammar, top, kind) else {
+                    bail!("splice: no goto for kind {kind} from {top} (state_before {})", prepared.state_before[old_id as usize])
+                };
+                entries.push(copy);
+                states.push(target);
+                let span = nodes[old_id as usize].end - nodes[old_id as usize].start;
+                report.reused_bytes += span as u64;
+                splices += 1;
+                // The subtree holds exactly this many tokens, zero-width
+                // `DEDENT`s included. Count, do not jump: the edit may have
+                // inserted tokens before this subtree.
+                let count = (prepared.leaf_end[old_id as usize]
+                    - prepared.leaf_start[old_id as usize]) as usize;
+                if ti + count > tokens.len() {
+                    bail!("splice token range {count} past {ti}");
+                }
+                ti += count;
+                continue;
+            }
+        }
+
+        let token = match tokens.get(ti) {
+            Some(token) => *token,
+            None => Token {
+                symbol: EOF_SYMBOL,
+                start: new_len,
+                end: new_len,
+            },
+        };
+
+        // Shift or reduce until the next token can be shifted.
+        let mut guard = 0u32;
+        loop {
+            guard += 1;
+            if guard > 1_000_000 {
+                bail!("guard");
+            }
+            let Some(top) = states.last().copied() else { bail!("empty stack") };
+            match table::action(grammar, top, token.symbol) {
+                Action::Shift(target) => {
+                    let node = arena.token(token.symbol, token.start, token.end);
+                    states.push(target);
+                    entries.push(node);
+                    report.rebuilt_nodes += 1;
+                    ti += 1;
+                    break;
+                }
+                Action::Reduce(production) => {
+                    let len = table::production_len(grammar, production) as usize;
+                    if len + 1 > states.len() {
+                        bail!("reduce underflow");
+                    }
+                    let kind = table::lhs(grammar, top, production);
+                    children.clear();
+                    children.extend_from_slice(&entries[entries.len() - len..]);
+                    let (node, _, _) = arena.reduce(kind, &children, 0, token.start);
+                    report.rebuilt_nodes += 1;
+                    let keep = states.len() - len;
+                    states.truncate(keep);
+                    entries.truncate(keep);
+                    let Some(below) = states.last().copied() else { bail!("empty stack after reduce") };
+                    match table::goto(grammar, below, kind) {
+                        Some(target) => {
+                            states.push(target);
+                            entries.push(node);
+                        }
+                        None => return None,
+                    }
+                }
+                Action::Accept => {
+                    let Some(root) = entries.last().copied() else { bail!("empty entries") };
+                    if root == NONE || ti < tokens.len() {
+                        bail!("accept leftover ti {ti}/{}", tokens.len());
+                    }
+                    let errors = arena.finish();
+                    let total = arena.nodes.len() as u32;
+                    report.splices = splices;
+                    report.total_nodes = total;
+                    return Some(Cst {
+                        nodes: arena.nodes,
+                        root,
+                        errors,
+                    });
+                }
+                Action::None => bail!("no action"),
+            }
+        }
+    }
+}
+
+/// If an old node starts exactly at the new token position and the parse state
+/// there equals the state the old parse had, return `(node, new_end)`.
+fn splice(
+    grammar: &Grammar<'_>,
+    nodes: &[Node],
+    prepared: &Prepared,
+    states: &[StateId],
+    tokens: &[Token],
+    ti: usize,
+    new_start: Offset,
+    edit: &Edit,
+    new_len: Offset,
+) -> Option<(NodeId, Offset)> {
+    let top = *states.last()?;
+    let height = states.len() as u32;
+    // Only bytes past the edit can be reused, and only their shifted position.
+    let new_edit_end = edit.new_end();
+    if new_start < new_edit_end {
+        return None;
+    }
+    let old_start = (new_start as i64 - edit.delta()) as Offset;
+    // Binary search the first candidate with this old start.
+    let mut lo = 0usize;
+    let mut hi = prepared.suffix.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if prepared.suffix[mid].0 < old_start {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let mut at = lo;
+    while at < prepared.suffix.len() && prepared.suffix[at].0 == old_start {
+        let id = prepared.suffix[at].1;
+        let node = nodes[id as usize];
+        let new_end = node.end as i64 + edit.delta();
+        if new_end > new_len as i64 {
+            at += 1;
+            continue;
+        }
+        let lines_up = prepared.state_before[id as usize] == top
+            && prepared.height_before[id as usize] == height;
+        if !lines_up || table::goto(grammar, top, node.kind).is_none() {
+            at += 1;
+            continue;
+        }
+        // The bytes may be untouched while the *tokens* are not: inserting a
+        // space at the start of a line moves every `INDENT`/`DEDENT` after it,
+        // and an indentation-sensitive lexer then hands the same bytes back as
+        // a different token sequence. Only splice when the tokens match too.
+        let count = (prepared.leaf_end[id as usize] - prepared.leaf_start[id as usize]) as usize;
+        let first = prepared.leaf_start[id as usize] as usize;
+        if ti + count > tokens.len() {
+            at += 1;
+            continue;
+        }
+        let delta = edit.delta();
+        let mut same = true;
+        for k in 0..count {
+            let old = prepared.leaves[first + k];
+            let now = tokens[ti + k];
+            if old.0 != now.symbol
+                || old.1 as i64 + delta != now.start as i64
+                || old.2 as i64 + delta != now.end as i64
+            {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return Some((id, new_end as Offset));
+        }
+        at += 1;
+    }
+    None
+}
+
+/// Copy an old subtree into the arena with `shift` added to every offset.
+fn copy_subtree(
+    arena: &mut Arena,
+    old: &[Node],
+    src: NodeId,
+    shift: i64,
+    report: &mut Report,
+) -> NodeId {
+    let mut work: Vec<(NodeId, NodeId)> = Vec::new();
+    copy_subtree_with(arena, old, src, shift, &mut work, report)
+}
+
