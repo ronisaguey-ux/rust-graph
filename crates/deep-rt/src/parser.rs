@@ -463,3 +463,203 @@ impl<'a> Parser<'a> {
         self.depth -= 1;
         Some(result)
     }
+
+    pub fn exhausted(&self) -> bool {
+        self.meter.exhausted.is_some()
+    }
+
+    /// Tokens a body left before its limit. After a budget runs out they become one
+    /// `ERROR` leaf in O(1). Otherwise the grammar stopped early, and they are
+    /// wrapped in an `ERROR` token by token.
+    fn take_rest(&mut self) {
+        if self.pos >= self.limit {
+            return;
+        }
+        self.errors += 1;
+        if self.trial_errors != NONE {
+            self.limit = self.pos;
+            return;
+        }
+        if self.exhausted() {
+            let last = self.last_significant_before(self.limit);
+            self.events.push(Event::Span { kind: ERROR, first: self.pos, last });
+            self.pos = self.limit;
+            return;
+        }
+        let marker = self.open();
+        while self.pos < self.limit {
+            self.bump();
+        }
+        self.close(marker, ERROR);
+    }
+
+    /// The first `newline` token at or after the current one, or the token count.
+    /// Unclosed openers on one line ask for the same answer, so it is cached and
+    /// the total cost stays linear.
+    fn line_end(&mut self, newline: Kind) -> u32 {
+        let (from, found) = self.line_end;
+        if self.pos >= from && self.pos <= found && found != NONE {
+            return found;
+        }
+        let mut at = self.pos;
+        let count = self.kinds.len() as u32;
+        while at < count && self.kinds[at as usize] != newline {
+            at += 1;
+        }
+        self.line_end = (self.pos, at);
+        at
+    }
+
+    #[inline]
+    fn skip_trivia(&self, mut at: u32) -> u32 {
+        let end = self.kinds.len() as u32;
+        while at < end && self.language.is_trivia(self.kinds[at as usize]) {
+            at += 1;
+        }
+        // Never past `limit`: the token at a group's limit is its closer, which is
+        // not trivia, and the top-level limit is the token count.
+        at
+    }
+
+    /// The last non-trivia token before `limit`; `pos` itself is one, and is before it.
+    fn last_significant_before(&self, limit: u32) -> u32 {
+        let mut at = limit - 1;
+        while at > self.pos && self.language.is_trivia(self.kinds[at as usize]) {
+            at -= 1;
+        }
+        at
+    }
+}
+
+/// Why a parse produced no tree at all. A tree with error nodes is a success.
+///
+/// The table engine's reasons are [`deep_abi::Fatal`]'s; the descent engine's
+/// only fatal is a file the `u32` offsets cannot address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseError {
+    /// The input does not fit `u32` offsets.
+    InputTooLarge,
+    /// A language with tables but no grammar.
+    NoTable,
+    /// A shift target past the grammar's state count.
+    StateOverflow,
+    /// No version survived and there is no root.
+    StackExhausted,
+}
+
+impl From<deep_abi::Fatal> for ParseError {
+    fn from(fatal: deep_abi::Fatal) -> ParseError {
+        match fatal {
+            deep_abi::Fatal::NoTable => ParseError::NoTable,
+            deep_abi::Fatal::StateOverflow => ParseError::StateOverflow,
+            deep_abi::Fatal::StackExhausted | deep_abi::Fatal::OutOfMemory => ParseError::StackExhausted,
+        }
+    }
+}
+
+/// Everything one parse allocates, kept between files so the steady state
+/// allocates nothing.
+#[derive(Default)]
+pub struct Workspace {
+    pub tokens: Tokens,
+    pub pairs: Pairs,
+    pub events: Vec<Event>,
+    pub tree: Tree,
+    links: Vec<Link>,
+}
+
+impl Workspace {
+    /// Lex, pair and parse a file with `language`.
+    ///
+    /// One entry point for both engines, chosen by the language:
+    ///
+    /// * a language with [`Language::tables`] parses on the GLR driver in
+    ///   [`crate::language_tables`], the same one `deep_abi::Grammar` tables drive;
+    /// * a language without them is a `grammar!` grammar and parses on the
+    ///   recursive descent driver in this module.
+    ///
+    /// Either way the tokens in [`Workspace::tokens`], the pairs in
+    /// [`Workspace::pairs`] and the tree in [`Workspace::tree`] are the same
+    /// shapes, so a caller does not know which engine ran. The returned
+    /// [`Outcome`] says what the parse cost; for the table engine `steps`,
+    /// `exhausted` and `skipped_groups` are counted from the driver's own work
+    /// units (see [`crate::language_tables`]).
+    pub fn parse(&mut self, src: &[u8], language: &Language, budget: &Budget) -> Result<Outcome, ParseError> {
+        if src.len() > MAX_INPUT {
+            return Err(ParseError::InputTooLarge);
+        }
+        lex(src, language, &mut self.tokens);
+        self.pairs.build(&self.tokens, language);
+        match language.tables {
+            Some(tables) => self.parse_tables(src, language, tables, budget),
+            None => self.parse_descent(src, language, budget),
+        }
+    }
+
+    /// The recursive descent engine: the one `grammar!` code runs on.
+    pub fn parse_descent(&mut self, src: &[u8], language: &Language, budget: &Budget) -> Result<Outcome, ParseError> {
+        self.events.clear();
+        self.links.clear();
+        let count = self.tokens.len() as u32;
+        let mut parser = Parser {
+            language,
+            kinds: &self.tokens.kind,
+            pair: &self.pairs.pair,
+            events: &mut self.events,
+            links: &mut self.links,
+            meter: Meter::new(budget, self.tokens.len()),
+            max_depth: budget.max_depth,
+            pos: 0,
+            limit: count,
+            depth: 0,
+            deepest: 0,
+            skipped: 0,
+            errors: 0,
+            line_end: (NONE, NONE),
+            wrapped: (NONE, NONE),
+            trial_errors: NONE,
+        };
+        parser.pos = parser.skip_trivia(0);
+        let root = parser.open();
+        (language.parse)(&mut parser);
+        parser.take_rest();
+        parser.close(root, language.root);
+        let outcome = Outcome {
+            tokens: count,
+            steps: parser.meter.steps(),
+            deepest: parser.deepest,
+            skipped_groups: parser.skipped,
+            exhausted: parser.meter.exhausted,
+            unclosed: self.pairs.unclosed,
+            stray: self.pairs.stray,
+        };
+        self.tree.build(&mut self.events, &self.tokens, language, src.len() as u32);
+        Ok(outcome)
+    }
+
+    /// The GLR engine: tables from a foreign generator, parsed by the driver in
+    /// [`crate::driver`] and flattened into the same [`Tree`].
+    pub fn parse_tables(
+        &mut self,
+        src: &[u8],
+        language: &Language,
+        tables: &'static crate::language_tables::TableGrammar,
+        budget: &Budget,
+    ) -> Result<Outcome, ParseError> {
+        crate::language_tables::parse(src, &self.tokens, language, tables, budget, &self.pairs, &mut self.tree)
+    }
+}
+
+impl Outcome {
+    pub fn describe(&self) -> String {
+        let exhausted = match self.exhausted {
+            None => "none",
+            Some(Exhausted::Steps) => "steps",
+            Some(Exhausted::Time) => "time",
+        };
+        format!(
+            "tokens={} steps={} deepest={} skipped_groups={} exhausted={} unclosed={} stray={}",
+            self.tokens, self.steps, self.deepest, self.skipped_groups, exhausted, self.unclosed, self.stray
+        )
+    }
+}
