@@ -11,6 +11,7 @@ pub mod shell;
 pub mod sql;
 pub mod css;
 pub mod html;
+pub mod julia;
 pub mod lua;
 pub mod r;
 pub mod yaml;

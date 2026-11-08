@@ -20,6 +20,7 @@ use deep_grammars::batch_d::css::CSS;
 use deep_grammars::batch_d::html::HTML;
 use deep_grammars::batch_d::lua::LUA;
 use deep_grammars::batch_d::r::R;
+use deep_grammars::batch_d::julia::JULIA;
 
 /// `(language name, static, valid fixtures)`.
 fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str, &'static str)])> {
@@ -32,6 +33,7 @@ fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str,
         ("css", &CSS, CSS_VALID),
         ("lua", &LUA, LUA_VALID),
         ("r", &R, R_VALID),
+        ("julia", &JULIA, JULIA_VALID),
     ]
 }
 
@@ -116,6 +118,18 @@ const R_VALID: &[(&str, &str)] = &[
     ),
 ];
 
+const JULIA_VALID: &[(&str, &str)] = &[
+    (
+        "pipeline.jl",
+        "using_statement using_statement function_definition function_definition expression_statement",
+    ),
+    (
+        "rules.jl",
+        "const_declaration abstract_type struct_definition struct_definition function_definition function_definition function_definition const_declaration expression_statement",
+    ),
+    ("scanner.jl", "module_definition"),
+];
+
 /// `(file, language name, top-level kinds)` for every malformed fixture.
 const MALFORMED: &[(&str, &str, &str)] = &[
     ("css_broken.css", "css", "rule_set rule_set"),
@@ -123,6 +137,7 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     ("json_broken_array.json", "json", "object"),
     ("lua_broken.lua", "lua", "local_function"),
     ("r_broken.R", "r", "expression_statement"),
+    ("julia_broken.jl", "julia", "function_definition"),
     ("shell_broken_if.sh", "shell", "simple_command if_clause ERROR"),
     ("sql_broken_insert.sql", "sql", "select_statement insert_statement"),
     ("yaml_broken.yaml", "yaml", "key_entry"),
