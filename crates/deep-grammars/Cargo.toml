@@ -1,0 +1,9 @@
+[package]
+name = "deep-grammars"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Python, JavaScript and TypeScript grammars for rust-graph's deep scan, in the grammar! DSL."
+
+[dependencies]
+rust-graph-deep = { path = "../rust-graph-deep" }
