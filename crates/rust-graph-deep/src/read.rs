@@ -36,8 +36,10 @@ pub enum Mode {
 
 pub struct LayoutDef {
     pub newline: String,
-    pub indent: String,
-    pub dedent: String,
+    /// The `open` of the indentation family, if the language has blocks.
+    /// `layout = NEWLINE;` leaves both out: only line ends become tokens.
+    pub indent: Option<String>,
+    pub dedent: Option<String>,
     pub spot: Spot,
 }
 
@@ -188,10 +190,24 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
                         };
                     }
                     "layout" => match value.as_slice() {
-                        [Tok { tree: Tree::Ident(newline), .. }, Tok { tree: Tree::Ident(indent), .. }, Tok { tree: Tree::Ident(dedent), .. }] => {
-                            grammar.layout = Some(LayoutDef { newline: newline.clone(), indent: indent.clone(), dedent: dedent.clone(), spot });
+                        // `layout = NEWLINE;`: line ends only, no indentation.
+                        [Tok { tree: Tree::Ident(newline), .. }] => {
+                            grammar.layout = Some(LayoutDef { newline: newline.clone(), indent: None, dedent: None, spot });
                         }
-                        _ => return Err(Error::at(spot, "`layout` takes three tokens: `layout = NEWLINE INDENT DEDENT;`")),
+                        [Tok { tree: Tree::Ident(newline), .. }, Tok { tree: Tree::Ident(indent), .. }, Tok { tree: Tree::Ident(dedent), .. }] => {
+                            grammar.layout = Some(LayoutDef {
+                                newline: newline.clone(),
+                                indent: Some(indent.clone()),
+                                dedent: Some(dedent.clone()),
+                                spot,
+                            });
+                        }
+                        _ => {
+                            return Err(Error::at(
+                                spot,
+                                "`layout` takes one token, the line break, or three: `layout = NEWLINE;`, `layout = NEWLINE INDENT DEDENT;`",
+                            ))
+                        }
                     },
                     _ => return Err(Error::at(spot, format!("unknown setting `{word}`: the settings are `name`, `lex`, `runtime`, `layout` and `mode`"))),
                 }
@@ -601,12 +617,22 @@ mod tests {
         .unwrap();
         assert!(grammar.tokens[0].reset);
         let layout = grammar.layout.as_ref().unwrap();
-        assert_eq!((layout.newline.as_str(), layout.indent.as_str(), layout.dedent.as_str()), ("NL", "IN", "DE"));
+        assert_eq!(
+            (layout.newline.as_str(), layout.indent.as_deref(), layout.dedent.as_deref()),
+            ("NL", Some("IN"), Some("DE"))
+        );
         assert_eq!(
             show(&grammar.rules[0].body),
             r#"(table _atom Right "=" assign; Left (alt "+" "-") bin; Prefix "-" neg; Postfix (seq "(" ")") call)"#
         );
         assert_eq!(grammar.rules[0].body.expr_label(0), Some("low"));
+    }
+
+    #[test]
+    fn a_newline_only_layout_names_one_token() {
+        let grammar = read(r#"G { lex = l; layout = NL; tokens { NL = "newline", A = "a", } a: A, }"#).unwrap();
+        let layout = grammar.layout.as_ref().unwrap();
+        assert_eq!((layout.newline.as_str(), layout.indent.as_deref(), layout.dedent.as_deref()), ("NL", None, None));
     }
 
     #[test]
@@ -661,7 +687,7 @@ mod tests {
             (r#"G { lex = l; color = "red"; tokens { A = "a", } a: A, }"#, "unknown setting `color`"),
             (r#"G { lex = l; tokens { A = "a", } a: A %, }"#, "ends where an item was expected"),
             (r#"G { lex = "l"; tokens { A = "a", } a: A, }"#, "`lex` takes a path"),
-            (r#"G { lex = l; layout = A; tokens { A = "a", } a: A, }"#, "`layout` takes three tokens"),
+            (r#"G { lex = l; layout = A B; tokens { A = "a", } a: A, }"#, "`layout` takes one token"),
             (r#"G { lex = l; tokens { A = "a" bad reset, } a: A, }"#, "only a plain token can be `reset`"),
             (r#"G { lex = l; tokens { A = "a", } a: precedence b { up "+" => x, }, }"#, "a precedence row is"),
             (r#"G { lex = l; tokens { A = "a", } a: precedence b { left "+" x, }, }"#, "ends with `=> node`"),

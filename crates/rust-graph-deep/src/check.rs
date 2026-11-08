@@ -13,7 +13,7 @@
 //! `prefix* operand (infix self | postfix)*`, so FIRST, FOLLOW and decisions
 //! treat it like any other rule; only the emitter writes it as a Pratt loop.
 
-use crate::read::{Expr, Fix, Grammar, Node, Table, TokenClass};
+use crate::read::{Expr, Fix, Grammar, Node, Table, TokenClass, TokenDef};
 use crate::{Error, Spot};
 
 /// Token indices, as a bit set.
@@ -124,7 +124,7 @@ pub const KINDS: &str = "KINDS";
 
 pub fn check(mut grammar: Grammar) -> Result<Checked, Error> {
     let families = check_tokens(&grammar)?;
-    let layout = check_layout(&grammar)?;
+    let layout = check_layout(&mut grammar)?;
     check_rule_names(&grammar)?;
     let labels = table_labels(&grammar)?;
     let mut tables = Vec::new();
@@ -239,22 +239,54 @@ fn check_tokens(grammar: &Grammar) -> Result<Vec<String>, Error> {
     Ok(families)
 }
 
-/// The layout tokens, as `[newline, indent, dedent]`: a plain token and an
-/// `open`/`close` pair of one family. `reset` tokens need a layout.
-fn check_layout(grammar: &Grammar) -> Result<Option<[usize; 3]>, Error> {
-    let find = |name: &str, spot| grammar.tokens.iter().position(|token| token.constant == name).ok_or_else(|| Error::at(spot, format!("`{name}` is not a token")));
-    let Some(layout) = &grammar.layout else {
+/// The layout tokens, as `[newline, indent, dedent]`.
+///
+/// `layout = NEWLINE INDENT DEDENT;` names a plain token and an `open`/`close`
+/// pair of one family. `layout = NEWLINE;` names only the line break: the
+/// runtime still infers a zero-width `newline` after the last token of each
+/// logical line (and none inside brackets or on blank lines), but there is no
+/// block structure, so two *trivia* kinds are added to the token table to stand
+/// in for the indentation pair. They are never emitted by the grammar's lexer
+/// and the parser never sees them, because trivia is skipped: the language gets
+/// line ends as syntax without indentation. A rule can therefore end at a line
+/// end, which is what Elixir's `case`/`cond` clauses need to be told apart.
+fn check_layout(grammar: &mut Grammar) -> Result<Option<[usize; 3]>, Error> {
+    let find = |name: &str, spot| {
+        grammar.tokens.iter().position(|token| token.constant == name).ok_or_else(|| Error::at(spot, format!("`{name}` is not a token")))
+    };
+    if grammar.layout.is_none() {
         if let Some(token) = grammar.tokens.iter().find(|token| token.reset) {
             return Err(Error::at(token.spot, "`reset` only means something with `layout = ...;`"));
         }
         return Ok(None);
+    }
+    let layout = grammar.layout.as_ref().expect("checked");
+    let (newline, indent, dedent, spot) = (layout.newline.clone(), layout.indent.clone(), layout.dedent.clone(), layout.spot);
+    let newline = find(&newline, spot)?;
+    let (Some(indent), Some(dedent)) = (indent, dedent) else {
+        // Line ends only. The two synthetic kinds follow the grammar's tokens,
+        // so they get kind numbers of their own and every rule still refers to
+        // the same tokens as before.
+        if grammar.tokens[newline].class != TokenClass::Token {
+            return Err(Error::at(spot, "`layout = NEWLINE;` names one plain token, the line break"));
+        }
+        let indent = grammar.tokens.len();
+        let synthetic = |constant: &str, text: &str| TokenDef {
+            constant: constant.into(),
+            text: text.into(),
+            class: TokenClass::Trivia,
+            reset: false,
+            spot,
+        };
+        grammar.tokens.push(synthetic("__DEEP_INDENT", "indent"));
+        grammar.tokens.push(synthetic("__DEEP_DEDENT", "dedent"));
+        return Ok(Some([newline, indent, indent + 1]));
     };
-    let newline = find(&layout.newline, layout.spot)?;
-    let indent = find(&layout.indent, layout.spot)?;
-    let dedent = find(&layout.dedent, layout.spot)?;
+    let indent = find(&indent, spot)?;
+    let dedent = find(&dedent, spot)?;
     match (&grammar.tokens[newline].class, &grammar.tokens[indent].class, &grammar.tokens[dedent].class) {
         (TokenClass::Token, TokenClass::Open(a), TokenClass::Close(b)) if a == b => Ok(Some([newline, indent, dedent])),
-        _ => Err(Error::at(layout.spot, "layout needs a plain newline token, then the `open` and `close` of one family")),
+        _ => Err(Error::at(spot, "layout needs a plain newline token, then the `open` and `close` of one family")),
     }
 }
 
@@ -936,6 +968,25 @@ mod tests {
         rejects("top: lp, lp: A,", "would define `LP`");
         rejects("top: Bad,", "neither a rule nor a token");
         rejects("Top: A,", "snake_case");
+    }
+
+    #[test]
+    fn a_newline_only_layout_adds_trivia_indentation_kinds() {
+        let src = r#"G { lex = l; layout = NL;
+                       tokens { NL = "newline", A = "a", }
+                       top: A NL?, }"#;
+        let g = check(crate::read::grammar(toks(src)).unwrap()).unwrap();
+        let [newline, indent, dedent] = g.layout.expect("a layout");
+        assert_eq!((newline, indent, dedent), (0, 2, 3), "the synthetic kinds follow the declared tokens");
+        assert_eq!(g.grammar.tokens[indent].class, TokenClass::Trivia);
+        assert_eq!(g.grammar.tokens[dedent].class, TokenClass::Trivia);
+        assert_eq!(g.grammar.tokens[indent].constant, "__DEEP_INDENT");
+        // A rule cannot name them, because trivia never reaches the parser.
+        let named = r#"G { lex = l; layout = NL;
+                       tokens { NL = "newline", A = "a", }
+                       top: A NL? | __DEEP_INDENT, }"#;
+        let error = check(crate::read::grammar(toks(named)).unwrap()).err().expect("a rule naming a synthetic kind").message;
+        assert!(error.contains("is trivia"), "{error}");
     }
 
     #[test]
