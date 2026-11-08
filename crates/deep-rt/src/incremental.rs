@@ -876,3 +876,16 @@ fn copy_subtree_with(
     root
 }
 
+#[inline]
+fn push_shifted(arena: &mut Arena, node: &Node, shift: i64) -> NodeId {
+    let id = arena.nodes.len() as NodeId;
+    arena.nodes.push(Node {
+        kind: node.kind,
+        flags: node.flags,
+        start: (node.start as i64 + shift) as Offset,
+        end: (node.end as i64 + shift) as Offset,
+        first_child: NONE,
+        next_sibling: NONE,
+    });
+    id
+}
