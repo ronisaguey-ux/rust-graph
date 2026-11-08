@@ -17,7 +17,7 @@ pub struct Parser<'a> {
     pair: &'a [u32],
     events: &'a mut Vec<Event>,
     /// Events whose `forward_parent` is set, so a rewind can unset the ones it cuts.
-    links: &'a mut Vec<u32>,
+    links: &'a mut Vec<Link>,
     meter: Meter,
     max_depth: u32,
     /// The next significant token, never past `limit`.
@@ -56,6 +56,15 @@ pub struct Marker(u32);
 /// A finished node, which [`Parser::precede`] can wrap.
 #[derive(Clone, Copy)]
 pub struct Closed(u32);
+
+/// A forward-parent link: the start at `at` was preceded when the events were
+/// `made_at` long. `made_at` only grows along the list, since a rewind drops
+/// the links made after its checkpoint.
+#[derive(Clone, Copy)]
+struct Link {
+    at: u32,
+    made_at: u32,
+}
 
 /// A point to rewind to. Rewinding is O(1) plus the precede links it cuts.
 #[derive(Clone, Copy)]
@@ -276,9 +285,16 @@ impl<'a> Parser<'a> {
         } else if self.wrapped.1 != NONE && self.wrapped.1 >= start {
             self.wrapped.1 += 1;
         }
-        for link in self.links.iter_mut() {
-            if *link >= start {
-                *link += 1;
+        // Only links made since `start` was taken can point past it, and those
+        // are the tail of the list: the scan stops at the first older one, so
+        // wrapping stays O(operand) however long the file.
+        for link in self.links.iter_mut().rev() {
+            if link.made_at <= start {
+                break;
+            }
+            link.made_at += 1;
+            if link.at >= start {
+                link.at += 1;
             }
         }
         Marker(start)
@@ -350,7 +366,7 @@ impl<'a> Parser<'a> {
         let marker = self.open();
         if let Event::Start { kind, .. } = self.events[closed.0 as usize] {
             self.events[closed.0 as usize] = Event::Start { kind, forward_parent: marker.0 - closed.0 };
-            self.links.push(closed.0);
+            self.links.push(Link { at: closed.0, made_at: self.events.len() as u32 });
         }
         marker
     }
@@ -363,7 +379,7 @@ impl<'a> Parser<'a> {
     /// checkpoint was taken in.
     pub fn rewind(&mut self, checkpoint: Checkpoint) {
         while self.links.len() as u32 > checkpoint.links {
-            let at = self.links.pop().expect("length checked") as usize;
+            let at = self.links.pop().expect("length checked").at as usize;
             if at < checkpoint.events as usize {
                 if let Event::Start { kind, .. } = self.events[at] {
                     self.events[at] = Event::Start { kind, forward_parent: 0 };
@@ -527,7 +543,7 @@ pub struct Workspace {
     pub pairs: Pairs,
     pub events: Vec<Event>,
     pub tree: Tree,
-    links: Vec<u32>,
+    links: Vec<Link>,
 }
 
 impl Workspace {
