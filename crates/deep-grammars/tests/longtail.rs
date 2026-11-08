@@ -20,7 +20,10 @@ use deep_grammars::batch_d::css::CSS;
 use deep_grammars::batch_d::html::HTML;
 use deep_grammars::batch_d::lua::LUA;
 use deep_grammars::batch_d::r::R;
+use deep_grammars::batch_d::awk::AWK;
+use deep_grammars::batch_d::clojure::CLOJURE;
 use deep_grammars::batch_d::julia::JULIA;
+use deep_grammars::batch_d::tcl::TCL;
 
 /// `(language name, static, valid fixtures)`.
 fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str, &'static str)])> {
@@ -34,6 +37,9 @@ fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str,
         ("lua", &LUA, LUA_VALID),
         ("r", &R, R_VALID),
         ("julia", &JULIA, JULIA_VALID),
+        ("clojure", &CLOJURE, CLOJURE_VALID),
+        ("tcl", &TCL, TCL_VALID),
+        ("awk", &AWK, AWK_VALID),
     ]
 }
 
@@ -130,8 +136,37 @@ const JULIA_VALID: &[(&str, &str)] = &[
     ("scanner.jl", "module_definition"),
 ];
 
+const CLOJURE_VALID: &[(&str, &str)] = &[
+    (
+        "core.clj",
+        "ns_form definition_form definition_form definition_form definition_form definition_form list",
+    ),
+    ("report.clj", "ns_form definition_form definition_form definition_form"),
+    ("rules.clj", "ns_form definition_form definition_form definition_form definition_form definition_form"),
+];
+
+const TCL_VALID: &[(&str, &str)] = &[
+    (
+        "build.tcl",
+        "call_command call_command call_command proc_command call_command call_command call_command",
+    ),
+    (
+        "deploy.tcl",
+        "call_command call_command proc_command proc_command proc_command call_command call_command call_command call_command",
+    ),
+    ("report.tcl", "call_command proc_command proc_command call_command call_command call_command"),
+];
+
+const AWK_VALID: &[(&str, &str)] = &[
+    ("parse.awk", "function_definition function_definition pattern_rule pattern_rule end_block"),
+    ("report.awk", "begin_block pattern_rule end_block"),
+    ("summary.awk", "begin_block pattern_rule end_block function_definition"),
+];
+
 /// `(file, language name, top-level kinds)` for every malformed fixture.
 const MALFORMED: &[(&str, &str, &str)] = &[
+    ("awk_broken.awk", "awk", "begin_block"),
+    ("clojure_broken.clj", "clojure", "ns_form definition_form"),
     ("css_broken.css", "css", "rule_set rule_set"),
     ("html_broken.html", "html", "element"),
     ("json_broken_array.json", "json", "object"),
@@ -140,6 +175,7 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     ("r_broken.R", "r", "expression_statement"),
     ("shell_broken_if.sh", "shell", "simple_command if_clause ERROR"),
     ("sql_broken_insert.sql", "sql", "select_statement insert_statement"),
+    ("tcl_broken.tcl", "tcl", "proc_command"),
     ("yaml_broken.yaml", "yaml", "key_entry"),
 ];
 
