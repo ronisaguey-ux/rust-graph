@@ -314,7 +314,7 @@ rust_graph_deep::grammar! { SWIFT {
         and: left "&&" => binary,
         eq: left "==" | "!=" | "===" | "!==" => binary,
         cmp: left "<" | ">" | "<=" | ">=" => binary,
-        cast: left "is" _type | "as" ["?" | "!"] _type => cast,
+        cast: left "is" | "as" ["?" | "!"] => cast,
         range: left "..." | "..<" => range,
         bor: left "|" => binary,
         xor: left "^" => binary,

@@ -567,7 +567,6 @@ fn heredoc(c: &mut Cursor) -> Kind {
     if quoted {
         c.bump();
     }
-    let start = c.pos();
     let rest = c.rest();
     let delimiters = c.eat_while(is_word_byte);
     let delimiter = &rest[..delimiters];
