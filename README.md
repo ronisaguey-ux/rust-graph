@@ -248,8 +248,46 @@ disk while the walk runs and the JSON is streamed out, so the graph is never hel
 in memory whole. A reader that loads that JSON pays for it again, and a JSON
 parser in a scripting language can need several times the file size.
 
-These are the only numbers here. No other tool was benchmarked, so this table
-says nothing about how rust-graph compares with anything.
+This table compares rust-graph with nothing. The one comparison with another
+tool is the parser gate below.
+
+### Reproducing the parser gate
+
+The deep scan (`--features parser`, the `rust-graph-deep-scan` binary) has a
+real parser per language. Each language ships only if it parses real code at
+least **2× faster than Tree-sitter** on the corpora in `bench/corpus`. The gate
+is a test, `tests/parser_gate.rs`, and it fails when any corpus drops below 2×
+or below the clean-file count its list states. To run it:
+
+```bash
+sh bench/build-tsdrv.sh      # once: fetches pinned Tree-sitter sources, builds target/bench/tsdrv
+cargo test --release --features parser --test parser_gate -- --nocapture
+```
+
+The first command needs git, a C compiler and the network. It fetches
+Tree-sitter v0.27.2 and each grammar at the commit pinned in the script, and
+builds `bench/tsdrv.c` against them at `-O3`. The test then takes about
+40 seconds for Python. Each list in `bench/corpus` names its files by absolute
+path with their size and SHA-256. The test checks every file before timing and
+fails if one is missing or changed. The Python lists name files that Ubuntu
+26.04 installs. Elsewhere, put a copy of those files under a directory and set
+`RG_CORPUS_ROOT=DIR`.
+
+Each round runs both parsers on the whole corpus. Every file is parsed 5 times
+and the fastest time counts. The two parsers alternate going first. The test
+takes the median of 7 rounds and pins both to one CPU with `taskset` when it is
+installed. `RG_GATE_CPU=N` chooses the CPU, `RG_GATE_ROUNDS=N` sets the number
+of rounds, and `RG_GATE_ONLY=python-a` runs only the lists you name. You should
+see one summary line per corpus, ending in `ok`. These are the 2026-11-08
+numbers on the development machine (8 cores, pinned to CPU 7):
+
+| Corpus | Files | Bytes | Deep scan | Tree-sitter | Speed-up | Clean files (deep / Tree-sitter) |
+|:--|--:|--:|--:|--:|--:|--:|
+| python-a (CPython 3.14 stdlib) | 200 | 3,423,925 | 36.7 ms | 318.0 ms | 8.7× | 200 / 200 |
+| python-b (Ubuntu dist-packages) | 400 | 5,528,880 | 71.2 ms | 611.1 ms | 8.6× | 400 / 400 |
+
+The ratio matters, not the milliseconds. On another machine, expect different
+times and a similar ratio.
 
 ## Limits
 

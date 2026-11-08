@@ -20,6 +20,11 @@ name = "rust-graph-deep-scan"
 path = "src/bin/rust-graph-deep-scan.rs"
 required-features = ["parser"]
 
+[[test]]
+name = "parser_gate"
+path = "tests/parser_gate.rs"
+required-features = ["parser"]
+
 [dependencies]
 rust-graph-deep = { path = "crates/rust-graph-deep", optional = true }
 
