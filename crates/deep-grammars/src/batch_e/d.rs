@@ -396,3 +396,291 @@ rust_graph_deep::grammar! { D {
     arguments: "(" (_argument %? ",") ")",
     _argument: _expression@assign,
     subscript: "[" (_expression %? ",") "]",
+    array_literal: "[" (_array_entry %? ",") "]",
+    _array_entry: _expression@assign [":" _expression@assign],
+    function_literal: ("function" | "delegate") [_type] parameters block,
+} }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' | 0x0b => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' | 0x0b));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            lex::line_comment(c);
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            lex::block_comment(c, b"/*", b"*/", false);
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'+' => {
+            // D's nesting comment.
+            lex::block_comment(c, b"/+", b"+/", true);
+            COMMENT
+        }
+        b'"' => if string(c, b'"', false) { STRING } else { BAD_LITERAL },
+        b'\'' => {
+            c.bump();
+            if lex::quoted(c, b'\'') { CHAR_LITERAL } else { BAD_LITERAL }
+        }
+        b'`' => if string(c, b'`', true) { STRING } else { BAD_LITERAL },
+        b'0'..=b'9' => {
+            lex::number(c);
+            NUMBER
+        }
+        b'.' if c.peek_at(1).is_ascii_digit() => {
+            lex::number(c);
+            NUMBER
+        }
+        byte if is_word_start(byte) => word(c),
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+/// A word, or one of D's literal prefixes: `r"..."`, `x"0A"`, `q{ ... }`,
+/// `q"(...)"`.
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    let text = &start[..length];
+    match (text, c.peek()) {
+        (b"r" | b"x", b'"') => {
+            let quote = c.peek();
+            return if string(c, quote, true) { STRING } else { BAD_LITERAL };
+        }
+        (b"q", b'{') => {
+            // A token string: balanced braces, no escapes.
+            c.bump();
+            let mut depth = 1u32;
+            while !c.at_end() {
+                match c.peek() {
+                    b'{' => {
+                        depth += 1;
+                        c.bump();
+                    }
+                    b'}' => {
+                        c.bump();
+                        depth -= 1;
+                        if depth == 0 {
+                            return STRING;
+                        }
+                    }
+                    _ => c.bump_char(),
+                }
+            }
+            return BAD_LITERAL;
+        }
+        (b"q", b'"') => {
+            // `q"DELIM ... DELIM"`: the text between the quotes is scanned to
+            // the closing `"`, since the delimiter never contains one.
+            return if string(c, b'"', false) { STRING } else { BAD_LITERAL };
+        }
+        _ => {}
+    }
+    keyword(text)
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"abstract" => KW_ABSTRACT,
+        b"alias" => KW_ALIAS,
+        b"align" => KW_ALIGN,
+        b"asm" => KW_ASM,
+        b"assert" => KW_ASSERT,
+        b"auto" => KW_AUTO,
+        b"body" => KW_BODY,
+        b"bool" => KW_BOOL,
+        b"break" => KW_BREAK,
+        b"byte" => KW_BYTE,
+        b"case" => KW_CASE,
+        b"cast" => KW_CAST,
+        b"catch" => KW_CATCH,
+        b"cdouble" => KW_CDOUBLE,
+        b"cfloat" => KW_CFLOAT,
+        b"char" => KW_CHAR,
+        b"class" => KW_CLASS,
+        b"const" => KW_CONST,
+        b"continue" => KW_CONTINUE,
+        b"creal" => KW_CREAL,
+        b"dchar" => KW_DCHAR,
+        b"debug" => KW_DEBUG,
+        b"default" => KW_DEFAULT,
+        b"delegate" => KW_DELEGATE,
+        b"delete" => KW_DELETE,
+        b"do" => KW_DO,
+        b"double" => KW_DOUBLE,
+        b"else" => KW_ELSE,
+        b"enum" => KW_ENUM,
+        b"export" => KW_EXPORT,
+        b"extern" => KW_EXTERN,
+        b"false" => KW_FALSE,
+        b"final" => KW_FINAL,
+        b"finally" => KW_FINALLY,
+        b"float" => KW_FLOAT,
+        b"for" => KW_FOR,
+        b"foreach" => KW_FOREACH,
+        b"foreach_reverse" => KW_FOREACH_REVERSE,
+        b"function" => KW_FUNCTION,
+        b"goto" => KW_GOTO,
+        b"idouble" => KW_IDOUBLE,
+        b"if" => KW_IF,
+        b"ifloat" => KW_IFLOAT,
+        b"immutable" => KW_IMMUTABLE,
+        b"import" => KW_IMPORT,
+        b"in" => KW_IN,
+        b"inout" => KW_INOUT,
+        b"int" => KW_INT,
+        b"interface" => KW_INTERFACE,
+        b"invariant" => KW_INVARIANT,
+        b"ireal" => KW_IREAL,
+        b"is" => KW_IS,
+        b"lazy" => KW_LAZY,
+        b"long" => KW_LONG,
+        b"mixin" => KW_MIXIN,
+        b"module" => KW_MODULE,
+        b"new" => KW_NEW,
+        b"nothrow" => KW_NOTHROW,
+        b"null" => KW_NULL,
+        b"out" => KW_OUT,
+        b"override" => KW_OVERRIDE,
+        b"package" => KW_PACKAGE,
+        b"pragma" => KW_PRAGMA,
+        b"private" => KW_PRIVATE,
+        b"protected" => KW_PROTECTED,
+        b"public" => KW_PUBLIC,
+        b"pure" => KW_PURE,
+        b"real" => KW_REAL,
+        b"ref" => KW_REF,
+        b"return" => KW_RETURN,
+        b"scope" => KW_SCOPE,
+        b"shared" => KW_SHARED,
+        b"short" => KW_SHORT,
+        b"static" => KW_STATIC,
+        b"struct" => KW_STRUCT,
+        b"super" => KW_SUPER,
+        b"switch" => KW_SWITCH,
+        b"synchronized" => KW_SYNCHRONIZED,
+        b"template" => KW_TEMPLATE,
+        b"this" => KW_THIS,
+        b"throw" => KW_THROW,
+        b"true" => KW_TRUE,
+        b"try" => KW_TRY,
+        b"typeid" => KW_TYPEID,
+        b"typeof" => KW_TYPEOF,
+        b"ubyte" => KW_UBYTE,
+        b"ucent" => KW_UCENT,
+        b"uint" => KW_UINT,
+        b"ulong" => KW_ULONG,
+        b"union" => KW_UNION,
+        b"unittest" => KW_UNITTEST,
+        b"ushort" => KW_USHORT,
+        b"version" => KW_VERSION,
+        b"void" => KW_VOID,
+        b"wchar" => KW_WCHAR,
+        b"while" => KW_WHILE,
+        b"with" => KW_WITH,
+        _ => IDENT,
+    }
+}
+
+/// A string from its opening quote. `raw` drops the meaning of a backslash, so
+/// `r"c:\temp"` and a backtick string both end at the first quote.
+fn string(c: &mut Cursor, quote: u8, raw: bool) -> bool {
+    c.bump();
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        match c.peek() {
+            b'\\' if !raw => c.bump_n(2),
+            byte if byte == quote => {
+                c.bump();
+                return true;
+            }
+            b'\n' | b'\r' if quote == b'"' && !raw => return false,
+            _ => c.bump_char(),
+        }
+    }
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d, e) = (c.peek(), c.peek_at(1), c.peek_at(2), c.peek_at(3));
+    let (kind, width) = match (a, b, d, e) {
+        (b'>', b'>', b'>', b'=') => (USHR_EQ, 4),
+        (b'>', b'>', b'>', _) => (USHR, 3),
+        (b'<', b'<', b'=', _) => (SHL_EQ, 3),
+        (b'>', b'>', b'=', _) => (SHR_EQ, 3),
+        (b'.', b'.', b'.', _) => (ELLIPSIS, 3),
+        (b'.', b'.', _, _) => (DOTDOT, 2),
+        (b'&', b'&', b'=', _) => (ANDAND_EQ, 3),
+        (b'|', b'|', b'=', _) => (OROR_EQ, 3),
+        (b'&', b'&', _, _) => (ANDAND, 2),
+        (b'|', b'|', _, _) => (OROR, 2),
+        (b'<', b'<', _, _) => (SHL, 2),
+        (b'>', b'>', _, _) => (SHR, 2),
+        (b'<', b'=', _, _) => (LE, 2),
+        (b'>', b'=', _, _) => (GE, 2),
+        (b'=', b'=', _, _) => (EQ, 2),
+        (b'!', b'=', _, _) => (NE, 2),
+        (b'+', b'=', _, _) => (PLUS_EQ, 2),
+        (b'-', b'=', _, _) => (MINUS_EQ, 2),
+        (b'*', b'=', _, _) => (STAR_EQ, 2),
+        (b'/', b'=', _, _) => (SLASH_EQ, 2),
+        (b'%', b'=', _, _) => (PERCENT_EQ, 2),
+        (b'&', b'=', _, _) => (AMP_EQ, 2),
+        (b'|', b'=', _, _) => (PIPE_EQ, 2),
+        (b'^', b'=', _, _) => (CARET_EQ, 2),
+        (b'~', b'=', _, _) => (TILDE_EQ, 2),
+        (b'+', b'+', _, _) => (INCREMENT, 2),
+        (b'-', b'-', _, _) => (DECREMENT, 2),
+        (b'(', ..) => (LPAREN, 1),
+        (b')', ..) => (RPAREN, 1),
+        (b'[', ..) => (LBRACKET, 1),
+        (b']', ..) => (RBRACKET, 1),
+        (b'{', ..) => (LBRACE, 1),
+        (b'}', ..) => (RBRACE, 1),
+        (b',', ..) => (COMMA, 1),
+        (b';', ..) => (SEMI, 1),
+        (b'.', ..) => (DOT, 1),
+        (b':', ..) => (COLON, 1),
+        (b'?', ..) => (QUESTION, 1),
+        (b'=', ..) => (ASSIGN, 1),
+        (b'<', ..) => (LT, 1),
+        (b'>', ..) => (GT, 1),
+        (b'+', ..) => (PLUS, 1),
+        (b'-', ..) => (MINUS, 1),
+        (b'*', ..) => (STAR, 1),
+        (b'/', ..) => (SLASH, 1),
+        (b'%', ..) => (PERCENT, 1),
+        (b'&', ..) => (AMP, 1),
+        (b'|', ..) => (PIPE, 1),
+        (b'^', ..) => (CARET, 1),
+        (b'~', ..) => (TILDE, 1),
+        (b'!', ..) => (BANG, 1),
+        (b'@', ..) => (AT, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
