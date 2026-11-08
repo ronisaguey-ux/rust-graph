@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 pub mod budget;
+pub mod go;
 pub mod javascript;
 pub mod json;
 pub mod json_grammar;
@@ -34,7 +35,7 @@ pub use parser::Workspace;
 pub const PARSER_VERSION: u32 = 1;
 
 /// The language for a path, by extension: JSON, Python, Rust, JavaScript,
-/// TypeScript and TSX so far.
+/// TypeScript, TSX and Go so far.
 pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
     let extension = path.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase())?;
     match extension.as_str() {
@@ -44,6 +45,7 @@ pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
         "js" | "mjs" | "cjs" | "jsx" => Some(&javascript::JAVASCRIPT),
         "ts" | "mts" | "cts" => Some(&javascript::TYPESCRIPT),
         "tsx" => Some(&javascript::TSX),
+        "go" => Some(&go::GO),
         _ => None,
     }
 }

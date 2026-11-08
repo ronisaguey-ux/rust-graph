@@ -106,6 +106,12 @@ impl<'s> Cursor<'s> {
         self.pos.checked_sub(back).and_then(|at| self.src.get(at)).copied().unwrap_or(0)
     }
 
+    /// The input from `start` to the cursor: the text of the token so far.
+    #[inline]
+    pub fn since(&self, start: usize) -> &'s [u8] {
+        &self.src[start.min(self.pos)..self.pos.min(self.src.len())]
+    }
+
     #[inline]
     pub fn rest(&self) -> &'s [u8] {
         &self.src[self.pos.min(self.src.len())..]
