@@ -1,0 +1,9 @@
+[package]
+name = "deep-rt"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "The LR/GLR driver, the flat CST arena and error recovery for the deep scan. std only."
+
+[dependencies]
+deep-abi = { path = "../deep-abi" }
