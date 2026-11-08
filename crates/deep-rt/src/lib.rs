@@ -1,7 +1,42 @@
-//! The runtime half of the deep scan: an LR driver with GLR forks, a flat CST
-//! arena, and recovery that keeps the root alive.
+//! The runtime of the deep scan — one crate, two engines, one tree.
 //!
-//! Built against [`deep_abi`], which is frozen: the node is 16 bytes, arena
+//! The deep parser had two runtimes: a hand-written one in `rust-graph`'s
+//! `src/deep` and this crate. They are now one crate. Everything a grammar can
+//! name lives here:
+//!
+//! | module | what it is | who calls it |
+//! |---|---|---|
+//! | [`syntax`] | kinds, the per-language kind table, [`Layout`] | the `grammar!` output, every language |
+//! | [`lexer`] | [`Cursor`], [`Tokens`], layout inference | every `lex` function |
+//! | [`pairs`] | the delimiter pass: openers paired with closers | [`Workspace::parse`] |
+//! | [`parser`] | the descent driver, and [`Workspace`] | the `grammar!` output |
+//! | [`tree`] | the flat CST: one preorder `Vec<Node>` | every consumer |
+//! | [`budget`] | steps, depth, clock, [`Outcome`] | [`Workspace::parse`] |
+//! | [`json`] | JSON written by hand, no tables needed | a caller with no generator |
+//! | [`cst`], [`driver`], [`language_tables`] | the GLR engine for generated tables | [`Workspace::parse`] |
+//!
+//! # Two engines, one entry point
+//!
+//! [`Workspace::parse`] takes a byte slice, a [`Language`] and a [`Budget`], and
+//! returns an [`Outcome`] while the tree lands in [`Workspace::tree`]. Which engine
+//! runs is a property of the language:
+//!
+//! * a `grammar!` language has no tables and parses on the descent driver — the
+//!   one whose API the macro generates calls to ([`Parser`]);
+//! * a language built by a table generator carries a [`TableGrammar`] and parses
+//!   on the GLR driver in [`driver`], whose arena is flattened into the same
+//!   [`Tree`].
+//!
+//! Either way the caller reads the same tokens, the same [`Tree`] node layout
+//! (`kind`, `flags`, `start..end`, `subtree_end`) and the same [`Outcome`] fields.
+//! `UNIFICATION.md` says why the split is not a merging of the two algorithms: a
+//! `grammar!` grammar is a choice of recursive descent functions, not a grammar
+//! from which LR tables can be derived, so the tables cannot be generated from it
+//! without a second generator.
+//!
+//! # The GLR engine
+//!
+//! Built against [`deep_abi`], which is frozen: the node is 20 bytes, arena
 //! indices are `u32`, states are `u16`, and the grammar is flat parallel arrays.
 //! Nothing here links an external crate, nothing recurses on input depth, and
 //! the parse stack is a `Vec` of `(state, node)` entries — a
@@ -50,17 +85,31 @@
 //! capped at six live plus four overflow versions; past that the highest-cost
 //! branch is dropped and [`driver::Stats::version_drops`] counts it.
 
+pub mod budget;
 pub mod cst;
 pub mod driver;
+pub mod json;
+pub mod language_tables;
+pub mod lexer;
+pub mod pairs;
+pub mod parser;
 pub mod recovery;
 pub mod stack;
+pub mod syntax;
 pub mod table;
+pub mod tree;
 pub mod version;
 
+pub use budget::{Budget, Exhausted, Outcome};
 pub use cst::{depth, preorder, Arena};
 pub use driver::{parse, Config, Stats};
+pub use language_tables::TableGrammar;
+pub use lexer::{lex, Cursor, Tokens};
+pub use parser::{ParseError, Parser, Workspace};
 pub use stack::{Base, Entry, Gss, GssId, MAX_BRANCHES};
+pub use syntax::{Class, Kind, KindInfo, Language, Layout};
 pub use table::{action, goto, lhs, production_len, reduce_cell, shift_cell, Action, Expected, Step};
+pub use tree::{Event, Tree};
 pub use version::{Lane, Version, MAX_LIVE, MAX_OVERFLOW, MAX_VERSIONS};
 
 pub use deep_abi::{
