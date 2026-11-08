@@ -372,3 +372,275 @@ rust_graph_deep::grammar! { PHP {
     _type_name: [BACKSLASH] (_name | "array" | "self" | "parent" | "static") (BACKSLASH _name)*,
 } }
 
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'<' if c.starts_with(b"<?php") => {
+            c.bump_n(5);
+            OPEN_TAG
+        }
+        b'<' if c.starts_with(b"<?=") => {
+            c.bump_n(3);
+            OPEN_TAG
+        }
+        b'?' if c.peek_at(1) == b'>' => {
+            c.bump_n(2);
+            CLOSE_TAG
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            COMMENT
+        }
+        b'#' => {
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            block_comment(c);
+            COMMENT
+        }
+        b'\'' | b'"' | b'`' => string(c),
+        b'<' if c.starts_with(b"<<<") => heredoc(c),
+        b'$' if is_word_start(c.peek_at(1)) => {
+            c.bump();
+            c.eat_while(is_word_byte);
+            VARIABLE
+        }
+        b'0'..=b'9' => number(c),
+        b'.' if c.peek_at(1).is_ascii_digit() => number(c),
+        byte if is_word_start(byte) => word(c),
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    keyword(&start[..length])
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"abstract" => KW_ABSTRACT,
+        b"and" => KW_AND,
+        b"array" => KW_ARRAY,
+        b"as" => KW_AS,
+        b"break" => KW_BREAK,
+        b"case" => KW_CASE,
+        b"catch" => KW_CATCH,
+        b"class" => KW_CLASS,
+        b"clone" => KW_CLONE,
+        b"const" => KW_CONST,
+        b"continue" => KW_CONTINUE,
+        b"default" => KW_DEFAULT,
+        b"do" => KW_DO,
+        b"echo" => KW_ECHO,
+        b"else" => KW_ELSE,
+        b"elseif" => KW_ELSEIF,
+        b"empty" => KW_EMPTY,
+        b"enum" => KW_ENUM,
+        b"extends" => KW_EXTENDS,
+        b"false" => KW_FALSE,
+        b"final" => KW_FINAL,
+        b"finally" => KW_FINALLY,
+        b"fn" => KW_FN,
+        b"for" => KW_FOR,
+        b"foreach" => KW_FOREACH,
+        b"function" => KW_FUNCTION,
+        b"global" => KW_GLOBAL,
+        b"if" => KW_IF,
+        b"implements" => KW_IMPLEMENTS,
+        b"include" => KW_INCLUDE,
+        b"include_once" => KW_INCLUDE_ONCE,
+        b"instanceof" => KW_INSTANCEOF,
+        b"interface" => KW_INTERFACE,
+        b"isset" => KW_ISSET,
+        b"list" => KW_LIST,
+        b"match" => KW_MATCH,
+        b"namespace" => KW_NAMESPACE,
+        b"new" => KW_NEW,
+        b"null" => KW_NULL,
+        b"or" => KW_OR,
+        b"parent" => KW_PARENT,
+        b"print" => KW_PRINT,
+        b"private" => KW_PRIVATE,
+        b"protected" => KW_PROTECTED,
+        b"public" => KW_PUBLIC,
+        b"readonly" => KW_READONLY,
+        b"require" => KW_REQUIRE,
+        b"require_once" => KW_REQUIRE_ONCE,
+        b"return" => KW_RETURN,
+        b"self" => KW_SELF,
+        b"static" => KW_STATIC,
+        b"switch" => KW_SWITCH,
+        b"throw" => KW_THROW,
+        b"trait" => KW_TRAIT,
+        b"true" => KW_TRUE,
+        b"try" => KW_TRY,
+        b"unset" => KW_UNSET,
+        b"use" => KW_USE,
+        b"var" => KW_VAR,
+        b"while" => KW_WHILE,
+        b"xor" => KW_XOR,
+        b"yield" => KW_YIELD,
+        _ => IDENT,
+    }
+}
+
+/// `/* ... */`. An unclosed one runs to the end of the file.
+fn block_comment(c: &mut Cursor) {
+    c.bump_n(2);
+    while !c.at_end() && !c.starts_with(b"*/") {
+        c.bump();
+    }
+    c.bump_n(2);
+}
+
+/// A single- or double-quoted string, or a backtick shell string, from its
+/// quote. The interpolations of a double-quoted one stay opaque.
+fn string(c: &mut Cursor) -> Kind {
+    let quote = c.peek();
+    c.bump();
+    loop {
+        match c.peek() {
+            0 if c.at_end() => return BAD_LITERAL,
+            b'\\' => c.bump_n(2),
+            b'\n' | b'\r' if quote != b'"' && quote != b'`' => return BAD_LITERAL,
+            b'{' if quote == b'"' && c.peek_at(1) == b'$' => {
+                c.bump_n(2);
+                braces(c);
+            }
+            byte if byte == quote => {
+                c.bump();
+                return STRING;
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// The code of a `{$...}` interpolation, up to its matching `}`.
+fn braces(c: &mut Cursor) {
+    let mut depth = 1u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'{' => {
+                depth += 1;
+                c.bump();
+            }
+            b'}' => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    return;
+                }
+            }
+            b'"' | b'\'' => {
+                string(c);
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// A heredoc or nowdoc from `<<<` to the line holding its terminator. The
+/// terminator may be indented (PHP 7.3), and the `;` that ends the statement
+/// stays outside the token: scanning stops at the marker's last byte.
+fn heredoc(c: &mut Cursor) -> Kind {
+    let rest = c.rest();
+    let mut at = 3;
+    while at < rest.len() && matches!(rest[at], b' ' | b'\t') {
+        at += 1;
+    }
+    let quote = rest.get(at).copied().unwrap_or(0);
+    let quoted = matches!(quote, b'\'' | b'"');
+    if quoted {
+        at += 1;
+    }
+    let mark_start = at;
+    while at < rest.len() && is_word_byte(rest[at]) {
+        at += 1;
+    }
+    let marker = &rest[mark_start..at];
+    if marker.is_empty() {
+        c.bump_n(3);
+        return BAD_LITERAL;
+    }
+    let marker_len = marker.len();
+    if quoted && rest.get(at) == Some(&quote) {
+        at += 1;
+    }
+    while at < rest.len() && rest[at] != b'\n' {
+        at += 1;
+    }
+    if at >= rest.len() {
+        c.bump_n(rest.len());
+        return BAD_LITERAL;
+    }
+    at += 1;
+    loop {
+        if at >= rest.len() {
+            c.bump_n(rest.len());
+            return BAD_LITERAL;
+        }
+        let line_start = at;
+        let mut line_end = at;
+        while line_end < rest.len() && rest[line_end] != b'\n' {
+            line_end += 1;
+        }
+        let line = &rest[line_start..line_end];
+        let lead = line.iter().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
+        let body = &line[lead..];
+        let body = body.strip_suffix(b";").unwrap_or(body);
+        if trim_end(body) == marker {
+            c.bump_n(line_start + lead + marker_len);
+            return STRING;
+        }
+        if line_end >= rest.len() {
+            c.bump_n(rest.len());
+            return BAD_LITERAL;
+        }
+        at = line_end + 1;
+    }
+}
+
+fn trim_start(mut bytes: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = bytes {
+        if matches!(first, b' ' | b'\t') {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
+fn trim_end(mut bytes: &[u8]) -> &[u8] {
+    while let [rest @ .., last] = bytes {
+        if matches!(last, b' ' | b'\t' | b'\r') {
+            bytes = rest;
+        } else {
+            break;
+        }
+    }
+    bytes
+}
+
