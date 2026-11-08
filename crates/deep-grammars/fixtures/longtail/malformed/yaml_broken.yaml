@@ -1,0 +1,6 @@
+service:
+  name: broken
+  ports: [8080, 8081
+  env:
+    - name: X
+      value: y
