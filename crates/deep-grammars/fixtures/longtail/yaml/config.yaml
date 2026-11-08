@@ -1,0 +1,18 @@
+# Build settings, with anchors and flow collections.
+defaults: &defaults
+  retries: 3
+  timeout: 30
+  strict: true
+
+scanner:
+  <<: *defaults
+  root: /srv/repos
+  languages: [rust, python, javascript]
+  limits:
+    files: 50000
+    depth: 12
+    skip: {vendor: true, node_modules: true}
+  cache:
+    dir: /var/cache/scanner
+    enabled: false
+  name: "deep scan"
