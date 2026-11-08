@@ -7,3 +7,9 @@ description = "The LR/GLR driver, the flat CST arena and error recovery for the 
 
 [dependencies]
 deep-abi = { path = "../deep-abi" }
+
+[dev-dependencies]
+# The parity test compiles the shipped grammars against this runtime and compares
+# the result with the runtime they were written on, which must be byte-identical.
+deep-grammars = { path = "../deep-grammars" }
+rust-graph-deep = { path = "../rust-graph-deep" }

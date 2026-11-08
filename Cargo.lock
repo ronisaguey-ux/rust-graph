@@ -29,6 +29,8 @@ name = "deep-rt"
 version = "0.1.0"
 dependencies = [
  "deep-abi",
+ "deep-grammars",
+ "rust-graph-deep",
 ]
 
 [[package]]
