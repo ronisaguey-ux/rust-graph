@@ -21,3 +21,4 @@ pub mod lua;
 pub mod perl;
 pub mod r;
 pub mod yaml;
+pub mod zig;

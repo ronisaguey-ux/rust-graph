@@ -16,6 +16,7 @@ use deep_grammars::batch_d::json::JSON;
 use deep_grammars::batch_d::shell::SHELL;
 use deep_grammars::batch_d::sql::SQL;
 use deep_grammars::batch_d::yaml::YAML;
+use deep_grammars::batch_d::zig::ZIG;
 use deep_grammars::batch_d::css::CSS;
 use deep_grammars::batch_d::elixir::ELIXIR;
 use deep_grammars::batch_d::erlang::ERLANG;
@@ -46,6 +47,7 @@ fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str,
         ("perl", &PERL, PERL_VALID),
         ("elixir", &ELIXIR, ELIXIR_VALID),
         ("erlang", &ERLANG, ERLANG_VALID),
+        ("zig", &ZIG, ZIG_VALID),
     ]
 }
 
@@ -199,6 +201,12 @@ const ERLANG_VALID: &[(&str, &str)] = &[
     ),
 ];
 
+const ZIG_VALID: &[(&str, &str)] = &[
+    ("build.zig", "var_declaration fn_declaration"),
+    ("graph.zig", "var_declaration var_declaration var_declaration"),
+    ("main.zig", "var_declaration var_declaration fn_declaration fn_declaration"),
+];
+
 /// `(file, language name, top-level kinds)` for every malformed fixture.
 const MALFORMED: &[(&str, &str, &str)] = &[
     ("awk_broken.awk", "awk", "begin_block"),
@@ -216,6 +224,7 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     ("sql_broken_insert.sql", "sql", "select_statement insert_statement"),
     ("tcl_broken.tcl", "tcl", "proc_command"),
     ("yaml_broken.yaml", "yaml", "key_entry"),
+    ("zig_broken.zig", "zig", "var_declaration fn_declaration"),
 ];
 
 fn fixtures() -> PathBuf {
