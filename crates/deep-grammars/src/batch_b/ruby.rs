@@ -655,3 +655,119 @@ fn operator_width(c: &Cursor) -> usize {
     }
 }
 
+/// A regular expression from its `/`, to its closing `/` plus flags. False if
+/// the line ends first, so a division is not swallowed.
+fn regex(c: &mut Cursor) -> bool {
+    c.bump();
+    let mut class = false;
+    loop {
+        match c.peek() {
+            0 if c.at_end() => return false,
+            b'\n' | b'\r' => return false,
+            b'\\' => c.bump_n(2),
+            b'[' => {
+                class = true;
+                c.bump();
+            }
+            b']' => {
+                class = false;
+                c.bump();
+            }
+            b'/' if !class => {
+                c.bump();
+                c.eat_while(|byte| byte.is_ascii_alphabetic());
+                return true;
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+fn number(c: &mut Cursor) -> Kind {
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B' | b'o' | b'O') {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        return NUMBER;
+    }
+    c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    if c.peek() == b'.' && c.peek_at(1).is_ascii_digit() {
+        c.bump();
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    if matches!(c.peek(), b'e' | b'E') && (c.peek_at(1).is_ascii_digit() || (matches!(c.peek_at(1), b'+' | b'-') && c.peek_at(2).is_ascii_digit())) {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    if matches!(c.peek(), b'r' | b'i') {
+        c.bump();
+    }
+    NUMBER
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'&', b'&', b'=') => (ANDAND_EQ, 3),
+        (b'|', b'|', b'=') => (OROR_EQ, 3),
+        (b'*', b'*', b'=') => (STARSTAR_EQ, 3),
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'>', b'>', b'=') => (SHR_EQ, 3),
+        (b'<', b'=', b'>') => (CMP, 3),
+        (b'=', b'=', b'=') => (TEQ, 3),
+        (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'*', b'*', _) => (STARSTAR, 2),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'>', b'>', _) => (SHR, 2),
+        (b'&', b'.', _) => (SAFE_DOT, 2),
+        (b'=', b'~', _) => (MATCH, 2),
+        (b'!', b'~', _) => (NMATCH, 2),
+        (b'=', b'>', _) => (FATARROW, 2),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b':', b':', _) => (COLONCOLON, 2),
+        (b'.', b'.', _) => (DOTDOT, 2),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'!', b'=', _) => (NE, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'>', b'=', _) => (GE, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'(', ..) => (LPAREN, 1),
+        (b')', ..) => (RPAREN, 1),
+        (b'[', ..) => (LBRACKET, 1),
+        (b']', ..) => (RBRACKET, 1),
+        (b'{', ..) => (LBRACE, 1),
+        (b'}', ..) => (RBRACE, 1),
+        (b';', ..) => (SEMI, 1),
+        (b',', ..) => (COMMA, 1),
+        (b'.', ..) => (DOT, 1),
+        (b':', ..) => (COLON, 1),
+        (b'?', ..) => (QUESTION, 1),
+        (b'=', ..) => (ASSIGN, 1),
+        (b'+', ..) => (PLUS, 1),
+        (b'-', ..) => (MINUS, 1),
+        (b'*', ..) => (STAR, 1),
+        (b'/', ..) => (SLASH, 1),
+        (b'%', ..) => (PERCENT, 1),
+        (b'|', ..) => (PIPE, 1),
+        (b'&', ..) => (AMP, 1),
+        (b'^', ..) => (CARET, 1),
+        (b'~', ..) => (TILDE, 1),
+        (b'!', ..) => (BANG, 1),
+        (b'<', ..) => (LT, 1),
+        (b'>', ..) => (GT, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
