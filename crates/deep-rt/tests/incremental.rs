@@ -870,3 +870,296 @@ fn edits_for(source: &str) -> Vec<(String, Edit, String)> {
         ));
     }
 
+    // Indentation change that is purely local: indent a whole line further.
+    for (n, window) in starts.windows(2).enumerate().skip(9).step_by(17) {
+        let (at, next) = (window[0], window[1]);
+        if !bytes[at..].starts_with(b"    ") || next == at {
+            continue;
+        }
+        // Only where the line above ends in a colon: indenting a line further
+        // is valid python exactly when it becomes a block.
+        let above = &source[..at];
+        let above = above.trim_end();
+        if !above.ends_with(':') {
+            continue;
+        }
+        edits.push((
+            format!("indent-line-{n}-into-a-block"),
+            Edit::insert(at as u32, 4),
+            "    ".to_string(),
+        ));
+    }
+
+    // Blank-line edits: boundary between two statements, no tokens change.
+    if let Some(at) = source.find("\n\n") {
+        edits.push((
+            "join-two-blank-separated-statements".to_string(),
+            Edit::delete((at + 1) as u32, 1),
+            String::new(),
+        ));
+    }
+
+    // Replace a whole top-level function: the largest local change.
+    if let Some(at) = source.find("\ndef ") {
+        let from = at + 1;
+        let rest = &source[from..];
+        if let Some(offset) = rest[1..].find("\ndef ").or_else(|| rest[1..].find("\nclass ")) {
+            let to = from + 1 + offset + 1;
+            let body = "# replaced\n";
+            edits.push((
+                "replace-a-whole-function".to_string(),
+                Edit::replace(from as u32, (to - from) as u32, body.len() as u32),
+                body.to_string(),
+            ));
+        }
+    }
+
+    // Append a whole function at the end of the file.
+    let text = "\ndef appended(a, b):\n    return a + b\n".to_string();
+    edits.push((
+        "append-a-whole-function".to_string(),
+        Edit::insert(source.len() as u32, text.len() as u32),
+        text,
+    ));
+
+    edits
+}
+
+// ---------------------------------------------------------------------------
+// The differential test
+// ---------------------------------------------------------------------------
+
+
+#[test]
+fn incremental_matches_full_parse_on_python_fixtures() {
+    let tables = build_tables();
+    let grammar = tables.grammar();
+    let mut cases = 0usize;
+    let mut splices = 0usize;
+    let mut unparseable = 0usize;
+
+    for (name, source) in fixtures() {
+        let tokens = lex_py(&source);
+        let old = full_parse(&grammar, &tokens);
+        assert_eq!(
+            old.errors, 0,
+            "fixture {name} must parse cleanly for reuse to be meaningful"
+        );
+
+        let mut covered = vec![false; source.len()];
+        let mut stack = vec![old.root];
+        while let Some(id) = stack.pop() {
+            let node = old.nodes[id as usize];
+            if node.flags & deep_rt::FLAG_ERROR != 0 {
+                continue;
+            }
+            for at in node.start as usize..node.end as usize {
+                covered[at] = true;
+            }
+            let mut child = node.first_child;
+            while child != NONE {
+                stack.push(child);
+                child = old.nodes[child as usize].next_sibling;
+            }
+        }
+        if !source.trim().is_empty() {
+            assert!(
+                covered.iter().all(|&x| x),
+                "fixture {name}: the tree covers every byte"
+            );
+        }
+
+        for (label, edit, text) in edits_for(&source) {
+            assert_eq!(text.len() as u32, edit.new_len);
+            let new_source = edit.apply(source.as_bytes(), text.as_bytes());
+            let new_source = String::from_utf8(new_source).expect("utf8 eof");
+            let new_tokens = lex_py(&new_source);
+            let incremental_result = incremental::reparse(
+                &grammar,
+                &old,
+                source.len() as u32,
+                &edit,
+                &new_tokens,
+                &Config::new(),
+            );
+            let full = match try_full_parse(&grammar, &new_tokens) {
+                Ok(full) => full,
+                Err(fatal) => {
+                    // An edit can make the source unparseable at all (an
+                    // unterminated string, say). Then the incremental pass has
+                    // nothing to be identical to; it must fail the same way.
+                    assert_eq!(
+                        incremental_result.err(),
+                        Some(fatal),
+                        "fixture {name}, edit {label}: both parses must agree on failure"
+                    );
+                    unparseable += 1;
+                    continue;
+                }
+            };
+            let (incremental_tree, report) = incremental_result.expect("a tree");
+
+            let want = shape(&full.nodes, full.root);
+            let got = shape(&incremental_tree.nodes, incremental_tree.root);
+            assert_eq!(
+                want, got,
+                "fixture {name}, edit {label}: incremental tree differs from a full parse"
+            );
+            assert_eq!(
+                full.errors, incremental_tree.errors,
+                "fixture {name}, edit {label}: error count differs"
+            );
+            assert_eq!(
+                incremental_tree.nodes.len() as u32,
+                report.total_nodes,
+                "fixture {name}, edit {label}: node count bookkeeping"
+            );
+            if full.errors == 0 {
+                assert!(
+                    !report.fell_back,
+                    "fixture {name}, edit {label}: a clean source must stay incremental"
+                );
+                splices += report.splices as usize;
+                cases += 1;
+            }
+        }
+    }
+
+    assert!(
+        cases >= 30,
+        "only {cases} edits exercised the incremental path"
+    );
+    // A splice is refused whenever the edit moved a layout token inside the
+    // candidate's bytes, which is exactly the case indentation edits create.
+    assert!(splices >= 20, "only {splices} splices over all edits");
+    eprintln!(
+        "{cases} edits compared, {splices} splices, {unparseable} edits made the source unparseable"
+    );
+}
+
+#[test]
+fn incremental_keeps_most_of_a_clean_edit() {
+    let tables = build_tables();
+    let grammar = tables.grammar();
+    let source = std::fs::read_to_string(fixture_dir().join("models.py")).unwrap();
+    let tokens = lex_py(&source);
+    let old = full_parse(&grammar, &tokens);
+
+    // One line changed in the middle: the smallest covering node is small, and
+    // everything after it is spliced back.
+    let at = source.find("self.amount + other.amount").unwrap();
+    let text = "self.amount + other.amount * 2";
+    let edit = Edit::replace(
+        at as u32,
+        "self.amount + other.amount".len() as u32,
+        text.len() as u32,
+    );
+    let new_source = edit.apply(source.as_bytes(), text.as_bytes());
+    let new_source = String::from_utf8(new_source).unwrap();
+    let new_tokens = lex_py(&new_source);
+    let full = full_parse(&grammar, &new_tokens);
+    let (tree, report) = incremental::reparse(
+        &grammar,
+        &old,
+        source.len() as u32,
+        &edit,
+        &new_tokens,
+        &Config::new(),
+    )
+    .expect("a tree");
+
+    assert!(!report.fell_back, "a clean edit must not fall back");
+    assert_eq!(
+        shape(&full.nodes, full.root),
+        shape(&tree.nodes, tree.root),
+        "same tree"
+    );
+    assert!(
+        report.reuse_ratio() > 0.90,
+        "a one-line edit should keep nearly the whole tree, kept {:.3}",
+        report.reuse_ratio()
+    );
+    assert!(report.splices >= 1, "the tail must be spliced");
+}
+
+// ---------------------------------------------------------------------------
+// Structural edits: what cannot be reused, and how much still is
+// ---------------------------------------------------------------------------
+
+/// Start offset of every statement at column zero.
+fn top_level_starts(source: &str) -> Vec<usize> {
+    line_spans(source)
+        .into_iter()
+        .filter(|&(at, _)| {
+            let line = &source[at..];
+            line.starts_with("def ") || line.starts_with("class ") || line.starts_with("@")
+        })
+        .map(|(at, _)| at)
+        .collect()
+}
+
+#[test]
+fn incremental_reuses_the_rest_of_a_structural_edit() {
+    let tables = build_tables();
+    let grammar = tables.grammar();
+    let source = std::fs::read_to_string(fixture_dir().join("models.py")).unwrap();
+    let tokens = lex_py(&source);
+    let old = full_parse(&grammar, &tokens);
+
+    // Swapping two adjacent top-level blocks moves both: a node's identity
+    // includes where it sits, so neither can be reused. Everything before and
+    // after the pair still lines up and is spliced.
+    let tops = top_level_starts(&source);
+    assert!(tops.len() >= 3, "models.py has several top-level blocks");
+    let first = tops[0];
+    let second = tops[1];
+    let third = tops.get(2).copied().unwrap_or(source.len());
+    let a = &source[first..second];
+    let b = &source[second..third];
+    let swapped = format!("{b}{a}");
+    let edit = Edit::replace(first as u32, (third - first) as u32, swapped.len() as u32);
+    let new_source = edit.apply(source.as_bytes(), swapped.as_bytes());
+    let new_source = String::from_utf8(new_source).unwrap();
+    let new_tokens = lex_py(&new_source);
+    let full = full_parse(&grammar, &new_tokens);
+    let (tree, report) = incremental::reparse(
+        &grammar,
+        &old,
+        source.len() as u32,
+        &edit,
+        &new_tokens,
+        &Config::new(),
+    )
+    .expect("a tree");
+
+    assert_eq!(
+        shape(&full.nodes, full.root),
+        shape(&tree.nodes, tree.root),
+        "swapping two blocks: same tree"
+    );
+    assert_eq!(full.errors, 0, "the swapped file is still valid python");
+    assert!(!report.fell_back, "a moved block is still a spliceable tree");
+    assert!(
+        report.splices >= 1,
+        "the file after the moved blocks is still spliced"
+    );
+    assert!(
+        report.reuse_ratio() < 0.95,
+        "the two moved blocks cannot be reused: {:.3}",
+        report.reuse_ratio()
+    );
+    assert!(
+        report.rebuilt_nodes > 5,
+        "the moved blocks were rebuilt, rebuilt {}",
+        report.rebuilt_nodes
+    );
+    eprintln!(
+        "structural edit (two blocks swapped): {} nodes, reused {} ({:.1}%), rebuilt {}, splices {}",
+        report.total_nodes,
+        report.reused_nodes,
+        report.reuse_ratio() * 100.0,
+        report.rebuilt_nodes,
+        report.splices
+    );
+}
+
