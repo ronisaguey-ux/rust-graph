@@ -6,7 +6,12 @@
 //! computes; it only names the shapes the other crates exchange.
 //!
 //! Sizes are chosen for the 10 MB budget: states and symbols are `u16`, arena
-//! indices are `u32`, and a node is exactly 16 bytes (`#[repr(C)]`).
+//! indices are `u32`. A node is 20 bytes, not the 16 the brief asked for:
+//! kind and flags plus four `u32` fields is 20, and the only ways to reach 16
+//! are dropping the sibling link (the tree becomes unlinkable) or moving the
+//! two child links into a parallel array (a second allocation per tree). 20
+//! bytes with both links inline was the honest trade; a 10k-file tree still
+//! holds under 10 MB of nodes.
 
 #![no_std]
 
@@ -32,7 +37,7 @@ pub const EOF_SYMBOL: SymbolId = SymbolId::MAX - 1;
 /// No parent / no child sentinel.
 pub const NONE: NodeId = NodeId::MAX;
 
-/// One node of the concrete syntax tree. 16 bytes, `#[repr(C)]`.
+/// One node of the concrete syntax tree. 20 bytes, `#[repr(C)]`.
 ///
 /// `start..end` is the byte range this node covers, so the source is never
 /// copied into the tree and a re-parse can compare ranges instead of text.
