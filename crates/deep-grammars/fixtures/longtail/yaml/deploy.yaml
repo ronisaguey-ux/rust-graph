@@ -1,0 +1,24 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scanner
+  labels:
+    app: scanner
+    tier: backend
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: parser
+          image: registry.example.com/parser:1.4.2
+          args:
+            - --workers
+            - "4"
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RUST_LOG
+              value: info
+...
