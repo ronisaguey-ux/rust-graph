@@ -13,18 +13,26 @@ fn main() {
 
     let mut total_raw = 0usize;
     let mut total_packed = 0usize;
+    let mut total_runtime = 0usize;
     let mut total_states = 0usize;
     for (label, builder) in grammars {
         match builder.build() {
             Ok(compiled) => {
                 let report = compiled.report();
                 print!("{report}");
+                let runtime = compiled.runtime_tables();
                 println!(
-                    "  bytes      {:>8} raw, {:>8} packed",
-                    report.raw_bytes, report.packed_bytes
+                    "  bytes      {:>8} raw, {:>8} packed, {:>8} as the runtime reads them",
+                    report.raw_bytes,
+                    report.packed_bytes,
+                    runtime.bytes()
                 );
+                if !runtime.ambiguous_states.is_empty() {
+                    println!("  warning    {:?} reduce by more than one non-terminal", runtime.ambiguous_states);
+                }
                 total_raw += report.raw_bytes;
                 total_packed += report.packed_bytes;
+                total_runtime += runtime.bytes();
                 total_states += report.states;
             }
             Err(e) => println!("{label}: build failed: {e}"),
@@ -35,6 +43,7 @@ fn main() {
     println!("totals: {total_states} states");
     println!("  raw    {total_raw:>8} bytes");
     println!("  packed {total_packed:>8} bytes");
+    println!("  runtime{total_runtime:>8} bytes");
     if total_packed > 0 {
         println!("  ratio  {:.2}x", total_raw as f64 / total_packed as f64);
     }

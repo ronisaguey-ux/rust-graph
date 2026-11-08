@@ -29,6 +29,7 @@ let flat = grammar.as_grammar(); // deep_abi::Grammar<'_>
 | `lalr.rs` | LALR(1) lookaheads |
 | `table.rs` | actions, gotos, precedence resolution, default reductions |
 | `compress.rs` | row displacement, u16/u8 narrowing, the flat ABI tables |
+| `abi.rs` | the same tables in the layout `deep-rt` reads (see below) |
 | `report.rs` | byte-level size accounting |
 | `grammars.rs` | the JSON, Python-subset and expression grammars used in tests |
 
@@ -93,6 +94,39 @@ creates — are kept in the row so the default cannot paper over them.
 `Packed::decode()` rebuilds the canonical tables, and the tests assert the packed
 form answers every `(state, symbol)` exactly like the uncompressed reference.
 
+## The runtime's layout
+
+`compress.rs` writes a tagged encoding, and no runtime reads it yet: the driver
+in `deep-rt` reads an untagged one, documented in `deep-rt/src/table.rs` and
+reproduced in `abi.rs`. The macro emits that one, so the two must not drift.
+
+```text
+action_index: 2 x i32 per state = (row, default)
+    row >= 0   -> action_table[row + symbol] is the cell; the end-of-input
+                  column is `symbols`, one past the last symbol
+    row <  0   -> no row: only the default applies
+    default < 0 -> reduce by production (-default - 1) when the cell is 0
+action_table cell: 0 none, 1..=states shift, 0x4000_0000 accept,
+                   0x8000_0000 | production reduce
+goto_index:  2 x i32 per state = (row, reserved)
+goto_table[row + nonterminal] = state + 1, or 0
+default_reduce[state]         = the nonterminal a state reduces by
+```
+
+There is no tag, so a row cannot tell its own cell from a neighbour's: every
+row's whole `symbols + 1` window must be free before it is placed. Rows
+therefore cost exactly `states x (symbols + 1)` cells and the layout does not
+compress — 3,252 bytes for the JSON grammar against 346 packed. That is a
+property of the runtime's reader, not of the generator: with a tag (or a check
+array) the same `Tables` are 5.9x smaller. `tests/runtime.rs` decodes every
+`(state, symbol)` through `deep-rt` itself, so the encoder and the reader cannot
+drift apart.
+
+`default_reduce` names one nonterminal per state, because the ABI carries no
+per-production left-hand side. A state that reduces by productions of two
+different non-terminals is reported in `RuntimeTables::ambiguous_states`; none
+of the representative grammars has one.
+
 ## Size report
 
 `cargo run --release -p deep-tables --bin size-report` compiles the three
@@ -122,8 +156,9 @@ size is roughly 750 KB of tables, well inside the 10 MB budget.
   error, never a fork. Recovery belongs to the runtime.
 * No canonical LR(1) mode and no IEOC/`%prec` overrides; precedence comes only
   from the rightmost terminal of a rule.
-* No emitter that writes tables as Rust source — the crate produces the flat
-  slices, and embedding them in a `static` is the caller's packaging step.
+* No emitter that writes tables as Rust source — the crate produces the slices;
+  `rust-graph-deep`'s `grammar!` is the emitter, and it writes them into a
+  `deep_abi::Grammar` static.
 * FOLLOW is computed and exposed for diagnostics; LALR lookaheads do not use it.
 * No grammar validation beyond duplicate/undefined names: unreachable
   non-terminals and useless productions are not reported.
