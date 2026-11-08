@@ -18,6 +18,7 @@ use deep_grammars::batch_d::sql::SQL;
 use deep_grammars::batch_d::yaml::YAML;
 use deep_grammars::batch_d::css::CSS;
 use deep_grammars::batch_d::html::HTML;
+use deep_grammars::batch_d::lua::LUA;
 
 /// `(language name, static, valid fixtures)`.
 fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str, &'static str)])> {
@@ -28,6 +29,7 @@ fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str,
         ("yaml", &YAML, YAML_VALID),
         ("html", &HTML, HTML_VALID),
         ("css", &CSS, CSS_VALID),
+        ("lua", &LUA, LUA_VALID),
     ]
 }
 
@@ -82,9 +84,25 @@ const CSS_VALID: &[(&str, &str)] = &[
     ("tokens.css", "rule_set rule_set rule_set rule_set rule_set"),
 ];
 
+const LUA_VALID: &[(&str, &str)] = &[
+    (
+        "config.lua",
+        "local_declaration local_declaration local_function local_function return_statement",
+    ),
+    (
+        "init.lua",
+        "local_declaration local_declaration local_declaration local_declaration function_declaration function_declaration function_declaration return_statement",
+    ),
+    (
+        "parser.lua",
+        "local_declaration local_declaration expression_statement local_function function_declaration function_declaration function_declaration function_declaration return_statement",
+    ),
+];
+
 /// `(file, language name, top-level kinds)` for every malformed fixture.
 const MALFORMED: &[(&str, &str, &str)] = &[
     ("css_broken.css", "css", "rule_set rule_set"),
+    ("lua_broken.lua", "lua", "local_function"),
     ("html_broken.html", "html", "element"),
     ("json_broken_array.json", "json", "object"),
     ("shell_broken_if.sh", "shell", "simple_command if_clause ERROR"),
