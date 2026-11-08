@@ -289,3 +289,303 @@ fn build_tables() -> PyTables {
     let mut goto_table = vec![0u32; states.len() * SYMBOLS as usize];
     let mut default_reduce = vec![0 as SymbolId; states.len()];
 
+    for &(from, symbol, to) in &transitions {
+        if is_terminal(symbol) {
+            let cell = &mut action_table[from * action_width + symbol as usize];
+            let wanted = shift_cell(to as StateId);
+            panic_on_conflict(cell, wanted, &states, from, symbol);
+            *cell = wanted;
+        } else {
+            goto_table[from * SYMBOLS as usize + symbol as usize] = to as u32 + 1;
+        }
+    }
+
+    for (id, items) in states.iter().enumerate() {
+        for &(production, dot, lookahead) in items {
+            let (lhs, rhs) = PRODUCTIONS[production as usize];
+            if (dot as usize) < rhs.len() {
+                continue;
+            }
+            if production == 0 {
+                let cell = &mut action_table[id * action_width + SYMBOLS as usize];
+                panic_on_conflict(cell, table::ACTION_ACCEPT, &states, id, EOF_SYMBOL);
+                *cell = table::ACTION_ACCEPT;
+                continue;
+            }
+            if default_reduce[id] == 0 {
+                default_reduce[id] = lhs;
+            } else {
+                assert_eq!(
+                    default_reduce[id], lhs,
+                    "state {id} reduces two different symbols"
+                );
+            }
+            let mut bit = 0u32;
+            while bit < 32 {
+                if lookahead & (1u32 << bit) != 0 {
+                    let column = if bit == 0 {
+                        SYMBOLS as usize
+                    } else {
+                        bit as usize
+                    };
+                    let cell = &mut action_table[id * action_width + column];
+                    let wanted = reduce_cell(production as u32);
+                    panic_on_conflict(cell, wanted, &states, id, column as SymbolId);
+                    *cell = wanted;
+                }
+                bit += 1;
+            }
+        }
+    }
+
+    let mut action_index = vec![0i32; states.len() * 2];
+    let mut goto_index = vec![0i32; states.len() * 2];
+    for state in 0..states.len() {
+        action_index[state * 2] = (state * action_width) as i32;
+        goto_index[state * 2] = (state * SYMBOLS as usize) as i32;
+    }
+
+    PyTables {
+        states: states.len() as u32,
+        action_index,
+        action_table,
+        goto_index,
+        goto_table,
+        default_reduce,
+        production_len: PRODUCTIONS.iter().map(|(_, rhs)| rhs.len() as u8).collect(),
+    }
+}
+
+fn panic_on_conflict(
+    cell: &u32,
+    wanted: u32,
+    states: &[Vec<Item1>],
+    state: usize,
+    symbol: SymbolId,
+) {
+    if *cell != 0 && *cell != wanted {
+        panic!(
+            "parser conflict in state {state} on symbol {symbol}: have {:#x}, want {:#x}\n{:?}",
+            *cell, wanted, states[state]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The scanner: Python layout, strings, brackets
+// ---------------------------------------------------------------------------
+
+fn is_head_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "elif"
+            | "else"
+            | "while"
+            | "for"
+            | "with"
+            | "try"
+            | "except"
+            | "finally"
+            | "match"
+            | "case"
+    )
+}
+
+fn is_string_prefix(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "r" | "b" | "u" | "f" | "rb" | "br" | "fr" | "rf"
+    )
+}
+
+fn scan_string(bytes: &[u8], at: usize) -> usize {
+    let quote = bytes[at];
+    let triple = at + 2 < bytes.len() && bytes[at + 1] == quote && bytes[at + 2] == quote;
+    let mut i = if triple { at + 3 } else { at + 1 };
+    if triple {
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == quote
+                && i + 2 < bytes.len()
+                && bytes[i + 1] == quote
+                && bytes[i + 2] == quote
+            {
+                return i + 3;
+            }
+            i += 1;
+        }
+        return bytes.len();
+    }
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'\n' => return i,
+            byte if byte == quote => return i + 1,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// `(symbol, length)` for a byte that is a one-symbol token, if it is one.
+fn punctuation(byte: u8) -> Option<SymbolId> {
+    Some(match byte {
+        b'(' => LP,
+        b')' => RP,
+        b'[' => LB,
+        b']' => RB,
+        b'{' => LC,
+        b'}' => RC,
+        b',' | b';' | b'=' | b'.' | b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'|'
+        | b'&' | b'^' | b'~' | b'!' | b'?' => OP,
+        _ => return None,
+    })
+}
+
+fn lex_py(source: &str) -> Vec<Token> {
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut tokens: Vec<Token> = Vec::with_capacity(len / 4 + 8);
+    let mut indents: Vec<u32> = vec![0];
+    let mut depth: i32 = 0;
+    let mut at_line_start = true;
+    let mut line_first: Option<SymbolId> = None;
+    let mut i = 0usize;
+
+    macro_rules! push {
+        ($symbol:expr, $start:expr, $end:expr) => {{
+            let symbol = $symbol;
+            if line_first.is_none() && symbol != NL && symbol != INDENT && symbol != DEDENT {
+                line_first = Some(symbol);
+            }
+            tokens.push(Token {
+                symbol,
+                start: $start as u32,
+                end: $end as u32,
+            });
+        }};
+    }
+
+    while i < len {
+        if at_line_start {
+            let mut j = i;
+            while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            if j >= len {
+                i = j;
+                break;
+            }
+            if bytes[j] == b'\n' || bytes[j] == b'\r' || bytes[j] == b'#' {
+                // A blank or comment-only line: one NL, no layout change.
+                if bytes[j] == b'#' {
+                    while j < len && bytes[j] != b'\n' {
+                        j += 1;
+                    }
+                }
+                if j < len && bytes[j] == b'\r' {
+                    j += 1;
+                }
+                if j < len && bytes[j] == b'\n' {
+                    push!(NL, j, j + 1);
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            let width = (j - i) as u32;
+            let current = *indents.last().unwrap();
+            if width > current {
+                indents.push(width);
+                push!(INDENT, i, j);
+            } else if width < current {
+                while *indents.last().unwrap() > width {
+                    indents.pop();
+                    push!(DEDENT, i, j);
+                }
+                if *indents.last().unwrap() != width {
+                    indents.push(width);
+                }
+            }
+            i = j;
+            at_line_start = false;
+            line_first = None;
+            continue;
+        }
+
+        let byte = bytes[i];
+        match byte {
+            b' ' | b'\t' | b'\r' => {
+                i += 1;
+            }
+            b'\n' => {
+                // Inside brackets a newline is not a token: Python continues
+                // the logical line, and so does the grammar.
+                if depth <= 0 {
+                    depth = 0;
+                    push!(NL, i, i + 1);
+                    at_line_start = true;
+                    line_first = None;
+                }
+                i += 1;
+            }
+            b'\\' if i + 1 < len && (bytes[i + 1] == b'\n' || bytes[i + 1] == b'\r') => {
+                i += 1;
+                while i < len && (bytes[i] == b'\r' || bytes[i] == b'\n') {
+                    i += 1;
+                    break;
+                }
+            }
+            b'#' => {
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'\'' | b'"' => {
+                let end = scan_string(bytes, i);
+                push!(STR, i, end);
+                i = end;
+            }
+            b'0'..=b'9' => {
+                let start = i;
+                if bytes[i] == b'0' && i + 1 < len && matches!(bytes[i + 1], b'x' | b'X' | b'o' | b'O' | b'b' | b'B')
+                {
+                    i += 2;
+                    while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                        i += 1;
+                    }
+                } else {
+                    while i < len && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
+                        i += 1;
+                    }
+                    if i + 1 < len && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+                        i += 1;
+                        while i < len && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
+                            i += 1;
+                        }
+                    }
+                    if i < len && (bytes[i] == b'e' || bytes[i] == b'E') {
+                        let mut j = i + 1;
+                        if j < len && (bytes[j] == b'+' || bytes[j] == b'-') {
+                            j += 1;
+                        }
+                        if j < len && bytes[j].is_ascii_digit() {
+                            i = j;
+                            while i < len && bytes[i].is_ascii_digit() {
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+                push!(NUM, start, i);
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = i;
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let word = &source[start..i];
+                if is_string_prefix(word) && i < len && (bytes[i] == b'\'' || bytes[i] == b'"') {
