@@ -638,3 +638,324 @@ fn interpolated_string(c: &mut Cursor, verbatim: bool) -> bool {
         }
     }
 }
+
+/// A `{...}` hole of an interpolated string, through its `}`. Nested braces,
+/// quoted strings and comments are skipped. False if it never closes.
+fn interpolation_hole(c: &mut Cursor) -> bool {
+    let mut depth = 1u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'{' => {
+                depth += 1;
+                c.bump();
+            }
+            b'}' => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    return true;
+                }
+            }
+            b'"' => {
+                c.bump();
+                if !c.quoted(b'"', true) {
+                    return false;
+                }
+            }
+            b'\'' => {
+                c.bump();
+                if !c.quoted(b'\'', true) {
+                    return false;
+                }
+            }
+            b'/' if c.peek_at(1) == b'/' => {
+                c.eat_while(|byte| byte != b'\n');
+            }
+            b'/' if c.peek_at(1) == b'*' => {
+                c.bump_n(2);
+                while !c.at_end() && !c.starts_with(b"*/") {
+                    c.bump();
+                }
+                c.bump_n(2);
+            }
+            _ => {
+                c.bump();
+            }
+        }
+    }
+    false
+}
+
+/// A raw string literal: three or more quotes, to the same run of quotes.
+fn raw_string(c: &mut Cursor) -> bool {
+    let mut quotes = 0;
+    while c.peek_at(quotes) == b'"' {
+        quotes += 1;
+    }
+    c.bump_n(quotes);
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        if c.peek() == b'"' {
+            let mut run = 0;
+            while c.peek_at(run) == b'"' {
+                run += 1;
+            }
+            if run >= quotes {
+                c.bump_n(run);
+                return true;
+            }
+            c.bump_n(run);
+        } else {
+            c.bump();
+        }
+    }
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"abstract" => KW_ABSTRACT,
+        b"as" => KW_AS,
+        b"base" => KW_BASE,
+        b"bool" => KW_BOOL,
+        b"break" => KW_BREAK,
+        b"byte" => KW_BYTE,
+        b"case" => KW_CASE,
+        b"catch" => KW_CATCH,
+        b"char" => KW_CHAR,
+        b"checked" => KW_CHECKED,
+        b"class" => KW_CLASS,
+        b"const" => KW_CONST,
+        b"continue" => KW_CONTINUE,
+        b"decimal" => KW_DECIMAL,
+        b"default" => KW_DEFAULT,
+        b"delegate" => KW_DELEGATE,
+        b"do" => KW_DO,
+        b"double" => KW_DOUBLE,
+        b"else" => KW_ELSE,
+        b"enum" => KW_ENUM,
+        b"event" => KW_EVENT,
+        b"explicit" => KW_EXPLICIT,
+        b"extern" => KW_EXTERN,
+        b"false" => KW_FALSE,
+        b"finally" => KW_FINALLY,
+        b"fixed" => KW_FIXED,
+        b"float" => KW_FLOAT,
+        b"for" => KW_FOR,
+        b"foreach" => KW_FOREACH,
+        b"goto" => KW_GOTO,
+        b"if" => KW_IF,
+        b"implicit" => KW_IMPLICIT,
+        b"in" => KW_IN,
+        b"int" => KW_INT,
+        b"interface" => KW_INTERFACE,
+        b"internal" => KW_INTERNAL,
+        b"is" => KW_IS,
+        b"lock" => KW_LOCK,
+        b"long" => KW_LONG,
+        b"namespace" => KW_NAMESPACE,
+        b"new" => KW_NEW,
+        b"null" => KW_NULL,
+        b"object" => KW_OBJECT,
+        b"operator" => KW_OPERATOR,
+        b"out" => KW_OUT,
+        b"override" => KW_OVERRIDE,
+        b"params" => KW_PARAMS,
+        b"private" => KW_PRIVATE,
+        b"protected" => KW_PROTECTED,
+        b"public" => KW_PUBLIC,
+        b"readonly" => KW_READONLY,
+        b"ref" => KW_REF,
+        b"return" => KW_RETURN,
+        b"sbyte" => KW_SBYTE,
+        b"sealed" => KW_SEALED,
+        b"short" => KW_SHORT,
+        b"sizeof" => KW_SIZEOF,
+        b"stackalloc" => KW_STACKALLOC,
+        b"static" => KW_STATIC,
+        b"string" => KW_STRING,
+        b"struct" => KW_STRUCT,
+        b"switch" => KW_SWITCH,
+        b"this" => KW_THIS,
+        b"throw" => KW_THROW,
+        b"true" => KW_TRUE,
+        b"try" => KW_TRY,
+        b"typeof" => KW_TYPEOF,
+        b"uint" => KW_UINT,
+        b"ulong" => KW_ULONG,
+        b"unchecked" => KW_UNCHECKED,
+        b"unsafe" => KW_UNSAFE,
+        b"ushort" => KW_USHORT,
+        b"using" => KW_USING,
+        b"virtual" => KW_VIRTUAL,
+        b"void" => KW_VOID,
+        b"volatile" => KW_VOLATILE,
+        b"while" => KW_WHILE,
+        b"async" => KW_ASYNC,
+        b"await" => KW_AWAIT,
+        b"record" => KW_RECORD,
+        b"partial" => KW_PARTIAL,
+        b"where" => KW_WHERE,
+        b"get" => KW_GET,
+        b"set" => KW_SET,
+        b"init" => KW_INIT,
+        b"add" => KW_ADD,
+        b"remove" => KW_REMOVE,
+        b"value" => KW_VALUE,
+        b"when" => KW_WHEN,
+        b"required" => KW_REQUIRED,
+        b"global" => KW_GLOBAL,
+        b"nameof" => KW_NAMEOF,
+        b"dynamic" => KW_DYNAMIC,
+        b"scoped" => KW_SCOPED,
+        b"yield" => KW_YIELD,
+        b"alias" => KW_ALIAS,
+        b"file" => KW_FILE,
+        b"with" => KW_WITH,
+        b"var" => KW_VAR,
+        b"notnull" => KW_NOTNULL,
+        b"unmanaged" => KW_UNMANAGED,
+        _ => IDENT,
+    }
+}
+
+/// Decimal, hex and binary integers, decimal and hexadecimal floats, `_`
+/// separators and the `u`, `l`, `f`, `d`, `m` suffixes.
+fn number(c: &mut Cursor) -> Kind {
+    let mut kind = INTEGER;
+    let hex = c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X');
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B') {
+        c.bump_n(2);
+    }
+    let digits = |c: &mut Cursor| {
+        if hex {
+            c.eat_while(|byte| byte.is_ascii_hexdigit() || byte == b'_');
+        } else {
+            c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+        }
+    };
+    digits(c);
+    if c.peek() == b'.' && !is_word_start(c.peek_at(1)) {
+        kind = FLOAT;
+        c.bump();
+        digits(c);
+    }
+    if matches!(c.peek(), b'e' | b'E') && (c.peek_at(1).is_ascii_digit() || (matches!(c.peek_at(1), b'+' | b'-') && c.peek_at(2).is_ascii_digit())) {
+        kind = FLOAT;
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    while matches!(c.peek(), b'u' | b'U' | b'l' | b'L' | b'f' | b'F' | b'd' | b'D' | b'm' | b'M') {
+        if matches!(c.peek(), b'f' | b'F' | b'd' | b'D' | b'm' | b'M') {
+            kind = FLOAT;
+        }
+        c.bump();
+    }
+    kind
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'(', _, _) => (LPAREN, 1),
+        (b')', _, _) => (RPAREN, 1),
+        (b'[', _, _) => (LBRACKET, 1),
+        (b']', _, _) => (RBRACKET, 1),
+        (b'{', _, _) => (LBRACE, 1),
+        (b'}', _, _) => (RBRACE, 1),
+        (b';', _, _) => (SEMI, 1),
+        (b',', _, _) => (COMMA, 1),
+        (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        (b'.', _, _) => (DOT, 1),
+        (b'@', _, _) => (AT, 1),
+        (b':', b':', _) => (COLONCOLON, 2),
+        (b':', _, _) => (COLON, 1),
+        (b'?', b'?', b'=') => (NULLISH_EQ, 3),
+        (b'?', b'?', _) => (NULLISH, 2),
+        (b'?', b'.', _) => (CONDITIONAL_ACCESS, 2),
+        (b'?', _, _) => (QUESTION, 1),
+        (b'=', b'>', _) => (ARROW, 2),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'=', _, _) => (ASSIGN, 1),
+        (b'-', b'>', _) => (ARROW2, 2),
+        (b'!', b'=', _) => (NE, 2),
+        (b'!', _, _) => (BANG, 1),
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'<', _, _) => (LT, 1),
+        (b'>', b'>', _) => (GT_JOINED, 1),
+        (b'>', b'=', _) => (GE, 2),
+        (b'>', _, _) => (GT, 1),
+        (b'~', _, _) => (TILDE, 1),
+        (b'+', b'+', _) => (INCREMENT, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'+', _, _) => (PLUS, 1),
+        (b'-', b'-', _) => (DECREMENT, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'-', _, _) => (MINUS, 1),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'*', _, _) => (STAR, 1),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'/', _, _) => (SLASH, 1),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'%', _, _) => (PERCENT, 1),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'&', _, _) => (AMP, 1),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'|', _, _) => (PIPE, 1),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'^', _, _) => (CARET, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_a::fixtures;
+
+    const VALID: &[(&str, &str)] = &[
+        ("Cache.cs", "using_directive using_directive namespace_declaration"),
+        ("Controller.cs", "using_directive using_directive using_directive using_directive namespace_declaration"),
+        ("Extensions.cs", "using_directive using_directive using_directive namespace_declaration"),
+        ("Models.cs", "using_directive using_directive namespace_declaration"),
+        ("Options.cs", "using_directive using_directive namespace_declaration"),
+        ("Program.cs", "using_directive using_directive using_directive using_directive namespace_declaration"),
+        ("Repository.cs", "using_directive using_directive using_directive using_directive namespace_declaration"),
+        ("Workers.cs", "using_directive using_directive using_directive using_directive namespace_declaration"),
+    ];
+
+    const MALFORMED: &[(&str, &str)] = &[
+        ("broken_signature.cs", "namespace_declaration"),
+        ("unclosed_brace.cs", "namespace_declaration"),
+        ("unterminated_string.cs", "namespace_declaration"),
+    ];
+
+    #[test]
+    fn csharp_fixtures_parse_cleanly() {
+        fixtures::valid("csharp", &CSHARP, VALID);
+    }
+
+    #[test]
+    fn csharp_malformed_fixtures_keep_the_root_and_report_inside_it() {
+        fixtures::malformed("csharp", &CSHARP, MALFORMED);
+    }
+
+    #[test]
+    fn csharp_lexer_reads_string_forms() {
+        let kinds = fixtures::tokens(&CSHARP, "class A { string a = \"x\"; string b = @\"c:\\tmp\"; string c = $\"{a} {b}\"; }");
+        let strings: Vec<&str> = kinds.iter().copied().filter(|kind| kind.ends_with("string_literal")).collect();
+        assert_eq!(strings, ["string_literal", "verbatim_string_literal", "interpolated_string_literal"]);
+        assert!(fixtures::clean(&CSHARP, "class A { int F() { return 1; } }"));
+        assert!(!fixtures::clean(&CSHARP, "class A { int F( { } }"));
+    }
+}
