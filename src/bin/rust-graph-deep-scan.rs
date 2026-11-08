@@ -6,11 +6,14 @@
 //! rust-graph-deep-scan sexp  FILE [--all]    the tree as an S-expression
 //! rust-graph-deep-scan probe FILE [--reps N] [--max-depth D] [--stack-kb K]
 //! rust-graph-deep-scan bench LIST [--reps N]  files named one per line in LIST
+//! rust-graph-deep-scan compare LIST [--reps N]  JSON: the grammar! parser against the hand one
 //! ```
 //! `bench` mirrors the Tree-sitter driver used in Phase 1: every file is read
 //! first, then each is parsed `--reps` times and the best time counts.
 //! `probe` prints one line of measurements. `--stack-kb` parses on a thread with
-//! exactly that stack, to measure stack use per nesting level.
+//! exactly that stack, to measure stack use per nesting level. `compare` fails
+//! unless both JSON parsers give the same events, tree and outcome for every
+//! file, and reports both speeds, timed alternately on the same bytes.
 
 #[path = "../deep/mod.rs"]
 mod deep;
@@ -44,7 +47,8 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let (path, options) = rest.split_first().ok_or_else(usage)?;
-    if command == "bench" {
+    if command == "bench" || command == "compare" {
+        let is_bench = command == "bench";
         let reps = match options {
             [flag, value] if flag == "--reps" => value.parse().map_err(|_| "--reps needs a number".to_string())?,
             [] => 5,
@@ -54,7 +58,7 @@ fn run(args: &[String]) -> Result<(), String> {
         let files: Vec<String> = list.lines().filter(|line| !line.is_empty()).map(str::to_string).collect();
         return std::thread::Builder::new()
             .stack_size(PARSE_STACK)
-            .spawn(move || bench(&files, reps))
+            .spawn(move || if is_bench { bench(&files, reps) } else { compare(&files, reps) })
             .map_err(|error| format!("cannot start the parse thread: {error}"))?
             .join()
             .map_err(|_| "the parse thread panicked".to_string())?;
@@ -217,6 +221,58 @@ fn bench(files: &[String], reps: usize) -> Result<(), String> {
     Ok(())
 }
 
+fn compare(files: &[String], reps: usize) -> Result<(), String> {
+    let mut inputs = Vec::new();
+    for path in files {
+        if !path.to_ascii_lowercase().ends_with(".json") {
+            return Err(format!("{path}: compare is for JSON, the one language with both parsers"));
+        }
+        inputs.push(std::fs::read(path).map_err(|error| format!("{path}: {error}"))?);
+    }
+    let budget = Budget::default();
+    let (mut hand, mut generated) = (Workspace::default(), Workspace::default());
+    let (mut bytes, mut identical, mut hand_ms, mut macro_ms) = (0usize, 0usize, 0.0, 0.0);
+    for (path, src) in files.iter().zip(&inputs) {
+        let want = hand.parse(src, &deep::json::JSON, &budget).map_err(|_| format!("{path}: over 4 GiB"))?;
+        let got = generated.parse(src, &deep::json_grammar::JSON, &budget).map_err(|_| format!("{path}: over 4 GiB"))?;
+        if got == want && generated.events == hand.events && generated.tree.nodes == hand.tree.nodes {
+            identical += 1;
+        } else {
+            eprintln!("{path}: the parsers differ");
+        }
+        let (mut hand_best, mut macro_best) = (f64::INFINITY, f64::INFINITY);
+        for _ in 0..reps.max(1) {
+            let start = Instant::now();
+            hand.parse(src, &deep::json::JSON, &budget).map_err(|_| format!("{path}: over 4 GiB"))?;
+            hand_best = hand_best.min(start.elapsed().as_secs_f64() * 1e3);
+            let start = Instant::now();
+            generated.parse(src, &deep::json_grammar::JSON, &budget).map_err(|_| format!("{path}: over 4 GiB"))?;
+            macro_best = macro_best.min(start.elapsed().as_secs_f64() * 1e3);
+        }
+        hand_ms += hand_best;
+        macro_ms += macro_best;
+        bytes += src.len();
+    }
+    let rate = |ms: f64| bytes as f64 / 1e6 / (ms / 1e3);
+    println!(
+        "files={} bytes={} identical={}/{} hand_ms={:.1} macro_ms={:.1} hand_MB_s={:.1} macro_MB_s={:.1} macro_vs_hand={:+.1}%",
+        inputs.len(),
+        bytes,
+        identical,
+        inputs.len(),
+        hand_ms,
+        macro_ms,
+        rate(hand_ms),
+        rate(macro_ms),
+        100.0 * (rate(macro_ms) / rate(hand_ms) - 1.0),
+    );
+    if identical == inputs.len() {
+        Ok(())
+    } else {
+        Err(format!("{} of {} files differ", inputs.len() - identical, inputs.len()))
+    }
+}
+
 fn peak_rss_kb() -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -225,5 +281,5 @@ fn peak_rss_kb() -> u64 {
 }
 
 fn usage() -> String {
-    "usage: rust-graph-deep-scan --version | tree FILE | sexp FILE [--all] | probe FILE [--reps N] [--max-depth D] [--stack-kb K] | bench LIST [--reps N]".into()
+    "usage: rust-graph-deep-scan --version | tree FILE | sexp FILE [--all] | probe FILE [--reps N] [--max-depth D] [--stack-kb K] | bench LIST [--reps N] | compare LIST [--reps N]".into()
 }
