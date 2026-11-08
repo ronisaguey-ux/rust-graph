@@ -368,3 +368,373 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         rest_pattern
         | &(_member_key ":") pair_pattern
         | object_assignment_pattern
+        | _name,
+    pair_pattern: _member_key ":" _binding_element,
+    object_assignment_pattern: _name "=" _expression@assign,
+    array_pattern: "[" (_array_pattern_item [","] | ",")* "]",
+    _array_pattern_item: rest_pattern | _binding_element,
+    _binding_element: precedence _pattern {
+        postfix "=" _expression@assign => assignment_pattern,
+    },
+    rest_pattern: "..." _pattern,
+
+    // ---- expressions ----
+
+    _expressions: precedence _expression {
+        left "," => sequence_expression,
+    },
+    _expressions_st: precedence _expression_st {
+        postfix "," _expression@assign => sequence_expression,
+    },
+
+    _expression: precedence _primary {
+        assign: right "=" => assignment_expression,
+        right "+=" | "-=" | "*=" | "**=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" | GT_JOINED GT_JOINED ">=" | "&&=" | "||=" | "??=" => augmented_assignment_expression,
+        postfix "=>" _arrow_body => arrow_function,
+        postfix "?" _expression@assign ":" _expression@assign => ternary_expression,
+        nullish: left "??" => binary_expression,
+        or: left "||" => binary_expression,
+        and: left "&&" => binary_expression,
+        bor: left "|" => binary_expression,
+        xor: left "^" => binary_expression,
+        band: left "&" => binary_expression,
+        eq: left "==" | "!=" | "===" | "!==" => binary_expression,
+        rel: left "<" | ">" | "<=" | ">=" | "instanceof" | "in" => binary_expression,
+        postfix "as" ("const" | _type) => as_expression,
+        postfix "satisfies" _type => satisfies_expression,
+        shift: left "<<" | GT_JOINED ">" | GT_JOINED GT_JOINED ">" => binary_expression,
+        add: left "+" | "-" => binary_expression,
+        mul: left "*" | "/" | "%" => binary_expression,
+        exp: right "**" => binary_expression,
+        unary: prefix "!" | "~" | "-" | "+" | "typeof" | "void" | "delete" => unary_expression,
+        prefix "await" => await_expression,
+        prefix "++" | "--" => update_expression,
+        postfix "++" | "--" => update_expression,
+        member: postfix "!" => non_null_expression,
+        postfix arguments => call_expression,
+        postfix TEMPLATE => call_expression,
+        postfix &(type_arguments (arguments | TEMPLATE)) type_arguments (arguments | TEMPLATE) => call_expression,
+        postfix "." (_property_name | PRIVATE) => member_expression,
+        postfix "?." (_property_name | PRIVATE) => member_expression,
+        postfix "?." arguments => call_expression,
+        postfix "?." subscript => subscript_expression,
+        postfix subscript => subscript_expression,
+    },
+
+    /// `_expression` where a statement starts: no `{`, `function` or `class`
+    /// first. Right operands are full expressions.
+    _expression_st: precedence _primary_st {
+        postfix "=" _expression@assign => assignment_expression,
+        postfix ("+=" | "-=" | "*=" | "**=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" | GT_JOINED GT_JOINED ">=" | "&&=" | "||=" | "??=") _expression@assign => augmented_assignment_expression,
+        postfix "=>" _arrow_body => arrow_function,
+        postfix "?" _expression@assign ":" _expression@assign => ternary_expression,
+        postfix "??" _expression@or => binary_expression,
+        postfix "||" _expression@and => binary_expression,
+        postfix "&&" _expression@bor => binary_expression,
+        postfix "|" _expression@xor => binary_expression,
+        postfix "^" _expression@band => binary_expression,
+        postfix "&" _expression@eq => binary_expression,
+        postfix ("==" | "!=" | "===" | "!==") _expression@rel => binary_expression,
+        postfix ("<" | ">" | "<=" | ">=" | "instanceof" | "in") _expression@shift => binary_expression,
+        postfix "as" ("const" | _type) => as_expression,
+        postfix "satisfies" _type => satisfies_expression,
+        postfix ("<<" | GT_JOINED ">" | GT_JOINED GT_JOINED ">") _expression@add => binary_expression,
+        postfix ("+" | "-") _expression@mul => binary_expression,
+        postfix ("*" | "/" | "%") _expression@exp => binary_expression,
+        postfix "**" _expression@exp => binary_expression,
+        prefix "!" | "~" | "-" | "+" | "typeof" | "void" | "delete" => unary_expression,
+        prefix "await" => await_expression,
+        prefix "++" | "--" => update_expression,
+        postfix "++" | "--" => update_expression,
+        postfix "!" => non_null_expression,
+        postfix arguments => call_expression,
+        postfix TEMPLATE => call_expression,
+        postfix &(type_arguments (arguments | TEMPLATE)) type_arguments (arguments | TEMPLATE) => call_expression,
+        postfix "." (_property_name | PRIVATE) => member_expression,
+        postfix "?." (_property_name | PRIVATE) => member_expression,
+        postfix "?." arguments => call_expression,
+        postfix "?." subscript => subscript_expression,
+        postfix subscript => subscript_expression,
+    },
+
+    _primary: &("async" "function") function_expression | &("function") function_expression | _primary_st | object | class,
+    _primary_st:
+        &_arrow_head _arrow_parameters
+        | _name
+        | PRIVATE
+        | NUMBER
+        | STRING
+        | TEMPLATE
+        | REGEX
+        | JSX
+        | BAD_LITERAL
+        | "this"
+        | "super"
+        | "true"
+        | "false"
+        | "null"
+        | parenthesized_expression
+        | array
+        | new_expression
+        | meta_property
+        | yield_expression
+        | type_assertion
+        | _dynamic_import,
+    /// `<T>x`, in TypeScript; JavaScript and TSX read `<T>` as JSX.
+    type_assertion: type_arguments _expression@unary,
+    _dynamic_import: "import" arguments,
+    /// An arrow function's head, up to `=>`: its parameters are an operand,
+    /// and the `=>` row of the expression tables makes the `arrow_function`.
+    /// A lone name before `=>` is an operand already.
+    _arrow_head: "async" (_name | _signature) "=>" | _signature "=>",
+    _arrow_parameters: "async" (_name | _signature) | _signature,
+    /// A `{` after `=>` opens a block: the expression form starts with no `{`.
+    _arrow_body: statement_block | &("async" "function") function_expression | &("function") function_expression | class | _expression_st,
+    function_expression: ["async"] "function" ["*"] [_name] _signature statement_block,
+    class: decorator* "class" [_name] [type_parameters] [LINE_END] [class_heritage] class_body,
+    parenthesized_expression: "(" _expressions ")",
+    array: "[" (_array_item [","] | ",")* "]",
+    _array_item: spread_element | _expression@assign,
+    spread_element: "..." _expression@assign,
+    object: "{" (_object_member %? ",") "}",
+    _object_member:
+        spread_element
+        | &_method_head method_definition
+        | _pair_like,
+    _pair_like: precedence _member_key {
+        postfix ":" _expression@assign => pair,
+        postfix "=" _expression@assign => assignment_pattern,
+    },
+    arguments: "(" (_argument %? ",") ")",
+    _argument: spread_element | _expression@assign,
+    subscript: "[" _expressions "]",
+    new_expression: "new" _new_callee [type_arguments] [arguments],
+    _new_callee: precedence _new_target {
+        postfix "." (_property_name | PRIVATE) => member_expression,
+        postfix subscript => subscript_expression,
+    },
+    _new_target: &("function") function_expression | _name | "this" | "super" | parenthesized_expression | new_expression | class | array | _dynamic_import,
+    meta_property: "new" "." _name | "import" "." _name,
+    yield_expression: "yield" ["*"] [_expression@assign],
+
+    // ---- types ----
+
+    type_annotation: ":" _type,
+    type_annotation_return: ":" _return_type,
+    _return_type: &("asserts" (_name | "this")) asserts | &((_name | "this") "is") type_predicate | _type,
+    asserts: "asserts" (_name | "this") ["is" _type],
+    type_predicate: (_name | "this") "is" _type,
+
+    type_parameters: "<" (type_parameter %? ",") _gt,
+    type_parameter: ["const"] ["in"] _name ["extends" _type] ["=" _type],
+    type_arguments: "<" (_type %? ",") _gt,
+    _gt: ">" | GT_JOINED,
+
+    _type: precedence _primary_type {
+        cond: postfix "extends" _type@union "?" _type ":" _type => conditional_type,
+        union: left "|" => union_type,
+        prefix "|" => union_type,
+        inter: left "&" => intersection_type,
+        prefix "&" => intersection_type,
+        prefix "keyof" => index_type_query,
+        prefix "readonly" => readonly_type,
+        prefix "unique" => unique_type,
+        postfix type_subscript => lookup_type,
+        postfix "." _type_name => nested_type_identifier,
+        postfix type_arguments => generic_type,
+    },
+    type_subscript: "[" [_type] "]",
+    _primary_type:
+        &([type_parameters] formal_parameters "=>") function_type
+        | &(["abstract"] "new") constructor_type
+        | _type_path
+        | parenthesized_type
+        | object_type
+        | tuple_type
+        | type_query
+        | infer_type
+        | literal_type
+        | TEMPLATE
+        | "this"
+        | "void"
+        | "null"
+        | "true"
+        | "false"
+        | _dynamic_import,
+    function_type: [type_parameters] formal_parameters "=>" _return_type,
+    constructor_type: ["abstract"] "new" [type_parameters] formal_parameters "=>" _type,
+    parenthesized_type: "(" _type ")",
+    tuple_type: "[" (_tuple_element %? ",") "]",
+    _tuple_element: &(["..."] _name ["?"] ":") named_tuple_member | rest_type | _type ["?"],
+    named_tuple_member: ["..."] _name ["?"] ":" _type,
+    rest_type: "..." _type,
+    type_query: "typeof" (_entity_name | _dynamic_import) [type_arguments],
+    infer_type: "infer" _name,
+    literal_type: STRING | NUMBER | "-" NUMBER,
+    _type_path: precedence _type_name {
+        postfix "." _name => nested_type_identifier,
+        postfix type_arguments => generic_type,
+    },
+    _entity_name: _name ("." _name)*,
+
+    object_type: "{" (_type_member [";" | "," | LINE_END])* "}",
+    _type_member:
+        &(["-" | "+"] _modifier* index_signature_key) index_signature
+        | &(_member_key_modded ["?"] (type_parameters | formal_parameters)) method_signature
+        | &("new" (type_parameters | formal_parameters)) construct_signature
+        | call_signature
+        | property_signature,
+    index_signature: ["-" | "+"] _modifier* index_signature_key ["-" | "+"] ["?"] [type_annotation],
+    index_signature_key: "[" _name (":" _type | "in" _type ["as" _type]) "]",
+    method_signature: _member_key_modded ["?"] _signature,
+    call_signature: [type_parameters] formal_parameters [type_annotation_return],
+    construct_signature: "new" [type_parameters] formal_parameters [type_annotation],
+    property_signature: _member_key_modded ["?"] [type_annotation],
+
+    // ---- names ----
+
+    /// A name that can be bound: identifiers and contextual keywords.
+    _name:
+        IDENT | "async" | "get" | "set" | "static" | "of" | "from" | "as" | "type" | "interface"
+        | "namespace" | "module" | "declare" | "abstract" | "readonly" | "public" | "private"
+        | "protected" | "implements" | "keyof" | "infer" | "is" | "asserts" | "unique"
+        | "satisfies" | "override" | "accessor" | "global",
+    /// A type's name: not the words that start a type operator.
+    _type_name:
+        IDENT | "async" | "get" | "set" | "static" | "of" | "from" | "as" | "type" | "interface"
+        | "namespace" | "module" | "declare" | "public" | "private" | "protected" | "implements"
+        | "satisfies" | "override" | "accessor" | "global",
+    /// After `.` and as a key, every word is a name.
+    _property_name:
+        _name | "break" | "case" | "catch" | "class" | "const" | "continue" | "debugger" | "default"
+        | "delete" | "do" | "else" | "enum" | "export" | "extends" | "false" | "finally" | "for"
+        | "function" | "if" | "import" | "in" | "instanceof" | "new" | "null" | "return" | "super"
+        | "switch" | "this" | "throw" | "true" | "try" | "typeof" | "var" | "void" | "while"
+        | "with" | "let" | "yield" | "await",
+} }
+
+/// JavaScript: [`TYPESCRIPT`]'s grammar, with JSX.
+pub static JAVASCRIPT: Language = Language::new("javascript", PROGRAM, KINDS, lex_jsx, parse_program);
+/// TSX: [`TYPESCRIPT`]'s grammar, with JSX.
+pub static TSX: Language = Language::new("tsx", PROGRAM, KINDS, lex_jsx, parse_program);
+
+use crate::deep::syntax::Language;
+
+/// One token at the cursor, for TypeScript: `<` is always an operator.
+pub fn lex_typescript(c: &mut Cursor) -> Kind {
+    lex(c, false)
+}
+
+/// One token at the cursor, for JavaScript and TSX: `<` where an operand
+/// starts opens a JSX element.
+pub fn lex_jsx(c: &mut Cursor) -> Kind {
+    lex(c, true)
+}
+
+fn lex(c: &mut Cursor, jsx: bool) -> Kind {
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c' => {
+            let mut line_break = false;
+            c.eat_while(|byte| {
+                line_break |= byte == b'\n';
+                matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c')
+            });
+            if line_break && ends_statement(c) { LINE_END } else { WHITESPACE }
+        }
+        // No-break space, byte order mark, line and paragraph separators.
+        0xc2 if c.peek_at(1) == 0xa0 => {
+            c.bump_n(2);
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        0xe2 if c.peek_at(1) == 0x80 && matches!(c.peek_at(2), 0xa8 | 0xa9) => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            c.eat_while(|byte| byte != b'\n');
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            block_comment(c);
+            COMMENT
+        }
+        b'#' if c.pos() == 0 && c.peek_at(1) == b'!' => {
+            c.eat_while(|byte| byte != b'\n');
+            COMMENT
+        }
+        b'#' if is_word_start(c.peek_at(1)) => {
+            c.bump();
+            c.eat_while(is_word_byte);
+            PRIVATE
+        }
+        b'"' | b'\'' => {
+            let quote = c.peek();
+            c.bump();
+            if c.quoted(quote, true) { STRING } else { BAD_LITERAL }
+        }
+        b'`' => {
+            if template(c) { TEMPLATE } else { BAD_LITERAL }
+        }
+        b'/' if !ends_operand(c.previous()) => {
+            if regex(c) { REGEX } else { BAD_LITERAL }
+        }
+        b'<' if jsx && !ends_operand(c.previous()) && c.previous() != KW_FUNCTION && (is_word_start(c.peek_at(1)) || c.peek_at(1) == b'>') && !generic_arrow(c.rest()) => {
+            if jsx_element(c) { JSX } else { BAD_LITERAL }
+        }
+        b'0'..=b'9' => number(c),
+        b'.' if c.peek_at(1).is_ascii_digit() => number(c),
+        byte if is_word_start(byte) => word(c),
+        b'\\' if c.peek_at(1) == b'u' => word(c),
+        _ => operator(c),
+    }
+}
+
+/// After a line break: whether it ends the statement, as automatic semicolon
+/// insertion has it for the restricted productions (`return` and a value on
+/// the next line are two statements), and as TypeScript has it for a type
+/// followed by a line that starts with `[` (an interface's next member) or
+/// `extends` (a member named `extends`, not a conditional type).
+fn ends_statement(c: &Cursor) -> bool {
+    let previous = c.previous();
+    if matches!(previous, KW_BREAK | KW_CONTINUE | KW_RETURN | KW_YIELD) {
+        return true;
+    }
+    ends_operand(previous)
+        && (c.peek() == b'[' || c.starts_with(b"++") || c.starts_with(b"--") || (c.starts_with(b"extends") && !is_word_byte(c.peek_at(7))))
+}
+
+/// Whether a token of this kind can end an operand, so that a `/` after it
+/// divides and a `<` after it compares.
+fn ends_operand(kind: Kind) -> bool {
+    matches!(kind, IDENT | PRIVATE | NUMBER | STRING | TEMPLATE | REGEX | JSX | BAD_LITERAL | RPAREN | RBRACKET | RBRACE | KW_THIS | KW_SUPER | KW_TRUE | KW_FALSE | KW_NULL | INCREMENT | DECREMENT)
+        || (KW_ASYNC..=KW_GLOBAL).contains(&kind)
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+/// `/* ... */`. An unclosed one runs to the end of the file.
+fn block_comment(c: &mut Cursor) {
+    c.bump_n(2);
+    while !c.at_end() && !c.starts_with(b"*/") {
+        c.bump();
+    }
+    c.bump_n(2);
+}
+
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let mut length = 0;
+    loop {
+        let taken = c.eat_while(is_word_byte);
