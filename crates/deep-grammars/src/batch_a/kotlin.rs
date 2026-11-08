@@ -598,3 +598,259 @@ fn keyword(text: &[u8]) -> Kind {
         b"override" => KW_OVERRIDE,
         b"private" => KW_PRIVATE,
         b"protected" => KW_PROTECTED,
+        b"public" => KW_PUBLIC,
+        b"reified" => KW_REIFIED,
+        b"sealed" => KW_SEALED,
+        b"set" => KW_SET,
+        b"suspend" => KW_SUSPEND,
+        b"tailrec" => KW_TAILREC,
+        b"value" => KW_VALUE,
+        b"vararg" => KW_VARARG,
+        b"where" => KW_WHERE,
+        _ => IDENT,
+    }
+}
+
+/// A one-line string after its opening quote, with `${...}` and `$name`
+/// templates skipped. False if the line ends first.
+fn string_body(c: &mut Cursor) -> bool {
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        match c.peek() {
+            b'"' => {
+                c.bump();
+                return true;
+            }
+            b'\n' | b'\r' => return false,
+            b'\\' => c.bump_n(2),
+            b'$' if c.peek_at(1) == b'{' => {
+                c.bump_n(2);
+                if !template(c) {
+                    return false;
+                }
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// The code of a `${...}` template after its brace, with strings skipped and
+/// nested braces balanced. False if it never closes.
+fn template(c: &mut Cursor) -> bool {
+    let mut depth = 1u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'{' => {
+                depth += 1;
+                c.bump();
+            }
+            b'}' => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    return true;
+                }
+            }
+            b'"' => {
+                if c.starts_with(b"\"\"\"") {
+                    if !raw_string(c) {
+                        return false;
+                    }
+                } else {
+                    c.bump();
+                    if !string_body(c) {
+                        return false;
+                    }
+                }
+            }
+            b'\'' => {
+                c.bump();
+                if !c.quoted(b'\'', true) {
+                    return false;
+                }
+            }
+            _ => c.bump(),
+        }
+    }
+    false
+}
+
+/// A raw string from its first `"""`, to the closing `"""`.
+fn raw_string(c: &mut Cursor) -> bool {
+    c.bump_n(3);
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        if c.starts_with(b"\"\"\"") {
+            c.bump_n(3);
+            return true;
+        }
+        if c.peek() == b'$' && c.peek_at(1) == b'{' {
+            c.bump_n(2);
+            if !template(c) {
+                return false;
+            }
+        } else {
+            c.bump();
+        }
+    }
+}
+
+/// Decimal, hexadecimal and binary numbers with `_` separators, fractions and
+/// exponents, and the `f`, `F`, `L` and `u` suffixes.
+fn number(c: &mut Cursor) -> Kind {
+    let mut kind = INTEGER;
+    let hex = c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X');
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B') {
+        c.bump_n(2);
+    }
+    let digits = |c: &mut Cursor| {
+        if hex {
+            c.eat_while(|byte| byte.is_ascii_hexdigit() || byte == b'_');
+        } else {
+            c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+        }
+    };
+    digits(c);
+    if c.peek() == b'.' && !is_word_start(c.peek_at(1)) && c.peek_at(1) != b'.' {
+        kind = FLOAT;
+        c.bump();
+        digits(c);
+    }
+    if matches!(c.peek(), b'e' | b'E') && (c.peek_at(1).is_ascii_digit() || (matches!(c.peek_at(1), b'+' | b'-') && c.peek_at(2).is_ascii_digit())) {
+        kind = FLOAT;
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    match c.peek() {
+        b'f' | b'F' => {
+            c.bump();
+            FLOAT
+        }
+        b'u' | b'U' => {
+            c.bump();
+            kind
+        }
+        b'L' => {
+            c.bump();
+            kind
+        }
+        _ => kind,
+    }
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'(', _, _) => (LPAREN, 1),
+        (b')', _, _) => (RPAREN, 1),
+        (b'[', _, _) => (LBRACKET, 1),
+        (b']', _, _) => (RBRACKET, 1),
+        (b'{', _, _) => (LBRACE, 1),
+        (b'}', _, _) => (RBRACE, 1),
+        (b';', _, _) => (SEMI, 1),
+        (b',', _, _) => (COMMA, 1),
+        (b'.', b'.', b'<') => (RANGE_UNTIL, 3),
+        (b'.', b'.', _) => (RANGE, 2),
+        (b'.', _, _) => (DOT, 1),
+        (b'?', b'.', _) => (SAFE_CALL, 2),
+        (b'?', b':', _) => (ELVIS, 2),
+        (b'?', _, _) => (QUESTION, 1),
+        (b'!', b'!', _) => (BANG_BANG, 2),
+        (b'!', b'=', b'=') => (STRICT_NE, 3),
+        (b'!', b'=', _) => (NE, 2),
+        (b'!', b'i', b'n') if !is_word_byte(c.peek_at(3)) => (NOT_IN, 3),
+        (b'!', b'i', b's') if !is_word_byte(c.peek_at(3)) => (NOT_IS, 3),
+        (b'!', _, _) => (BANG, 1),
+        (b':', b':', _) => (COLONCOLON, 2),
+        (b':', _, _) => (COLON, 1),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b'=', b'=', b'=') => (STRICT_EQ, 3),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'=', _, _) => (ASSIGN, 1),
+        (b'<', b'=', _) => (LE, 2),
+        (b'<', _, _) => (LT, 1),
+        (b'>', b'>', _) => (GT_JOINED, 1),
+        (b'>', b'=', _) => (GE, 2),
+        (b'>', _, _) => (GT, 1),
+        (b'@', _, _) => (AT, 1),
+        (b'~', _, _) => (TILDE, 1),
+        (b'+', b'+', _) => (INCREMENT, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'+', _, _) => (PLUS, 1),
+        (b'-', b'-', _) => (DECREMENT, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'-', _, _) => (MINUS, 1),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'*', _, _) => (STAR, 1),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'/', _, _) => (SLASH, 1),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'%', _, _) => (PERCENT, 1),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'&', _, _) => (AMP, 1),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'|', _, _) => (PIPE, 1),
+        (b'^', _, _) => (CARET, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    // Parenthesis depth, for the newline rule. Braces are not counted: a
+    // newline inside a class body still ends statements.
+    match kind {
+        LPAREN | LBRACKET => DEPTH.with(|depth| depth.set(depth.get() + 1)),
+        RPAREN | RBRACKET => DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1))),
+        _ => {}
+    }
+    c.bump_n(width);
+    kind
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_a::fixtures;
+
+    const VALID: &[(&str, &str)] = &[
+        ("Cache.kt", "package_header import_header import_header import_header class_declaration"),
+        ("Extensions.kt", "package_header import_header function_declaration function_declaration function_declaration function_declaration function_declaration"),
+        ("Main.kt", "package_header import_header import_header import_header property_declaration function_declaration function_declaration function_declaration"),
+        ("Models.kt", "package_header import_header enum_class_declaration class_declaration interface_declaration typealias_declaration"),
+        ("Parser.kt", "package_header class_declaration class_declaration"),
+        ("Repository.kt", "package_header import_header interface_declaration class_declaration class_declaration"),
+        ("Routes.kt", "package_header import_header import_header class_declaration class_declaration"),
+        ("Service.kt", "package_header import_header import_header class_declaration"),
+    ];
+
+    const MALFORMED: &[(&str, &str)] = &[
+        ("broken_signature.kt", "package_header class_declaration"),
+        ("unclosed_brace.kt", "package_header class_declaration"),
+        ("unterminated_string.kt", "package_header class_declaration"),
+    ];
+
+    #[test]
+    fn kotlin_fixtures_parse_cleanly() {
+        fixtures::valid("kotlin", &KOTLIN, VALID);
+    }
+
+    #[test]
+    fn kotlin_malformed_fixtures_keep_the_root_and_report_inside_it() {
+        fixtures::malformed("kotlin", &KOTLIN, MALFORMED);
+    }
+
+    #[test]
+    fn kotlin_lexer_infers_statement_ends() {
+        let kinds = fixtures::tokens(&KOTLIN, "val a = 1\nval b = 2 + 3\n");
+        assert_eq!(kinds.iter().filter(|kind| **kind == "line_end").count(), 2);
+        let kinds = fixtures::tokens(&KOTLIN, "foo(\n  a,\n  b\n)\n");
+        assert_eq!(kinds.iter().filter(|kind| **kind == "line_end").count(), 1);
+        assert!(fixtures::clean(&KOTLIN, "fun f() = 1\n"));
+        assert!(!fixtures::clean(&KOTLIN, "fun f( { }\n"));
+    }
+
+}
