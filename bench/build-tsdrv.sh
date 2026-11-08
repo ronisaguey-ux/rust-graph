@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds target/bench/tsdrv, the Tree-sitter side of the parser gate, from
-# pinned sources. Run from the repository root:
+# pinned sources, and fetches the pinned repositories the corpora come from. Run from the repository root:
 #
 #     sh bench/build-tsdrv.sh
 #
@@ -16,7 +16,9 @@ CC="${CC:-cc}"
 mkdir -p "$OUT/obj" "$SRC"
 
 # name  repository  commit  grammar directories (comma separated; - for none)
-# tree-sitter itself is the v0.27.2 release.
+# tree-sitter itself is the v0.27.2 release. Rows with no grammar are corpus
+# sources, named by the lists in bench/corpus as target/bench/src/NAME/...:
+# rust-analyzer is its 2026-11-02 release tag, tokio its tokio-1.54.1 tag.
 PINS='
 tree-sitter            tree-sitter/tree-sitter            3fb7be49145acfb07e33b61ed5689e2b6771b2e9 -
 tree-sitter-python     tree-sitter/tree-sitter-python     26855eabccb19c6abf499fbc5b8dc7cc9ab8bc64 .
@@ -31,6 +33,8 @@ tree-sitter-ruby       tree-sitter/tree-sitter-ruby       ad907a69da0c8a4f7a943a
 tree-sitter-c          tree-sitter/tree-sitter-c          b780e47fc780ddc8da13afa35a3f4ed5c157823d .
 tree-sitter-cpp        tree-sitter/tree-sitter-cpp        c009222808634c1014f82438d4883753516a2c24 .
 tree-sitter-json       tree-sitter/tree-sitter-json       254c42a6476413b776221e03982ac8ae159eeb72 .
+rust-analyzer          rust-lang/rust-analyzer            b98172d80f0da12bbde3d6733c274e17cb6417aa -
+tokio                  tokio-rs/tokio                     b53b2001ed2ccfd9b87e32a0c6da1a1eebdc80b8 -
 '
 
 fetch() { # name repository commit
