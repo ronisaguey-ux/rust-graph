@@ -1,0 +1,18 @@
+[package]
+name = "deep-fuzz"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Deterministic mutational fuzzer, shrinker and tree checker for the deep CST parser. std only."
+publish = false
+
+[lib]
+name = "deep_fuzz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "deep-fuzz"
+path = "src/main.rs"
+
+[dependencies]
+deep-grammars = { path = "../deep-grammars" }
