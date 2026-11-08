@@ -1,0 +1,7 @@
+# This box has no C toolchain: build static musl binaries with the LLVM linker
+# that ships inside rustc, so `cargo build` works without gcc.
+[build]
+target = "x86_64-unknown-linux-musl"
+
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
