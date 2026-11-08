@@ -7,9 +7,10 @@ description = "A code knowledge graph for 40+ languages. Rust std only, no parse
 
 [workspace]
 members = [
-    "crates/deep-abi", "crates/rust-graph-deep", "crates/deep-grammars", "crates/deep-lex"]
+    "crates/deep-abi", "crates/rust-graph-deep", "crates/deep-grammars", "crates/deep-lex", "crates/deep-tables", "crates/deep-rt", "crates/deep-bench"]
 
 [features]
+deep = ["dep:deep-rt", "dep:deep-lex", "dep:deep-grammars"]
 parser = ["dep:rust-graph-deep"]
 
 [[bin]]
@@ -35,3 +36,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[[bin]]
+name = "rust-graph-deep-bench"
+path = "crates/deep-bench/src/main.rs"
