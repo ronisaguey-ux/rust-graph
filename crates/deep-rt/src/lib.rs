@@ -88,6 +88,7 @@
 pub mod budget;
 pub mod cst;
 pub mod driver;
+pub mod incremental;
 pub mod json;
 pub mod language_tables;
 pub mod lexer;
