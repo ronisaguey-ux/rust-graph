@@ -8,6 +8,7 @@ pub mod lex;
 
 pub mod json;
 pub mod shell;
+pub mod solidity;
 pub mod sql;
 pub mod tcl;
 pub mod awk;
