@@ -1,0 +1,8 @@
+[package]
+name = "deep-abi"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Shared types between the grammar macro, the table generator, the lexer and the GLR/CST runtime. No dependencies, no logic."
+
+[dependencies]
