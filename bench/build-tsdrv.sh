@@ -19,8 +19,8 @@ mkdir -p "$OUT/obj" "$SRC"
 # tree-sitter itself is the v0.27.2 release. Rows with no grammar are corpus
 # sources, named by the lists in bench/corpus as target/bench/src/NAME/...:
 # rust-analyzer is its 2026-11-02 release tag, tokio its tokio-1.54.1 tag,
-# webpack its v5.112.2 tag, vue-core v3.5.45, excalidraw v0.18.1, hugo v0.169.0
-# and go go1.25.14.
+# webpack its v5.112.2 tag, vue-core v3.5.45, excalidraw v0.18.1, hugo v0.169.0,
+# go go1.25.14, commons-lang rel/commons-lang-3.21.0 and spring-framework v7.0.10.
 PINS='
 tree-sitter            tree-sitter/tree-sitter            3fb7be49145acfb07e33b61ed5689e2b6771b2e9 -
 tree-sitter-python     tree-sitter/tree-sitter-python     26855eabccb19c6abf499fbc5b8dc7cc9ab8bc64 .
@@ -42,6 +42,8 @@ vue-core               vuejs/core                         8b479a89445868d474f17e
 excalidraw             excalidraw/excalidraw              a2ec2889babf7d2295469c6d90ebe77fae57df84 -
 hugo                   gohugoio/hugo                      1da10fc44701c566b1669cdb2d12638f155138bd -
 go                     golang/go                          08118a942518cc18db507ec182acffe7364a92a3 -
+commons-lang           apache/commons-lang                155db038d73fe0ea49612d42ae70f6e48ee3ebb9 -
+spring-framework       spring-projects/spring-framework   33a85b0bec67adb759aa898e3b80d603786be082 -
 '
 
 fetch() { # name repository commit
