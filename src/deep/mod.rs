@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 pub mod budget;
+pub mod javascript;
 pub mod json;
 pub mod json_grammar;
 pub mod lexer;
@@ -32,13 +33,17 @@ pub use parser::Workspace;
 /// Slice 4, so a new parser never reads facts cached by an old one.
 pub const PARSER_VERSION: u32 = 1;
 
-/// The language for a path, by extension: JSON, Python and Rust so far.
+/// The language for a path, by extension: JSON, Python, Rust, JavaScript,
+/// TypeScript and TSX so far.
 pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
     let extension = path.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase())?;
     match extension.as_str() {
         "json" => Some(&json::JSON),
         "py" | "pyi" => Some(&python::PYTHON),
         "rs" => Some(&rust::RUST),
+        "js" | "mjs" | "cjs" | "jsx" => Some(&javascript::JAVASCRIPT),
+        "ts" | "mts" | "cts" => Some(&javascript::TYPESCRIPT),
+        "tsx" => Some(&javascript::TSX),
         _ => None,
     }
 }
