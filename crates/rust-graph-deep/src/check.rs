@@ -54,6 +54,13 @@ impl Set {
         self.0.iter().all(|word| *word == 0)
     }
 
+    /// Keeps only what `other` has too.
+    pub fn intersect(&mut self, other: &Set) {
+        for (word, keep) in self.0.iter_mut().zip(&other.0) {
+            *word &= keep;
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.0.len() * 64).filter(|token| self.contains(*token))
     }
@@ -556,6 +563,15 @@ impl Checked {
                 set.union(&self.first[*rule]);
             }
             Expr::Pred(_) => {}
+            // `&p x` is only taken where `p` matches, so it starts with what
+            // both `p` and `x` can start with: a loop over statements whose
+            // declarations are guarded by their modifiers does not take a
+            // token that only an unguarded declaration could start.
+            Expr::Seq(items) if matches!(items.first().map(|item| &item.expr), Some(Expr::Pred(_))) && items[1..].iter().any(|item| !self.nullable(item)) => {
+                let Expr::Pred(inner) = &items[0].expr else { unreachable!("matched") };
+                set = self.first(inner);
+                set.intersect(&self.first_of_rest(&items[1..], &Set::new(self.size())));
+            }
             Expr::Seq(items) => {
                 for item in items {
                     set.union(&self.first(item));
@@ -860,6 +876,15 @@ mod tests {
         let g = checked(r#"top: (p | q)*, p: A B q, q: C,"#).unwrap();
         assert_eq!(g.rule_guard(1), Guard::Prefix(vec![0, 1]));
         assert_eq!(g.rule_guard(2), Guard::Set(Set::of(g.size(), 2)));
+    }
+
+    #[test]
+    fn a_predicate_narrows_what_its_alternative_starts_with() {
+        // `x` alone starts with A or B, but `&(A) x` is only taken on A, so a
+        // loop over `y` claims A and C, not B.
+        let g = checked(r#"top: y* [B], y: &(A) x | C, x: A | B,"#).unwrap();
+        assert_eq!(names(&g, &g.first[1]), "a c");
+        assert_eq!(names(&g, &g.first[2]), "a b");
     }
 
     #[test]
