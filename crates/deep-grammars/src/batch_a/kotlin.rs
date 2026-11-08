@@ -298,3 +298,303 @@ rust_graph_deep::grammar! { KOTLIN {
 
     // ---- statements ----
 
+    block: "{" _block_item* "}",
+    _block_item: _statement | LINE_END | ";",
+    _statement:
+        &_declaration _declaration
+        | &(block) block
+        | &(_name "@") labeled_statement
+        | while_statement
+        | do_statement
+        | for_statement
+        | return_statement
+        | throw_statement
+        | break_statement
+        | continue_statement
+        | expression_statement,
+
+    labeled_statement: _name "@" _statement,
+    if_statement: "if" parenthesized_expression _statement ["else" _statement],
+    while_statement: "while" parenthesized_expression _statement,
+    do_statement: "do" _statement "while" parenthesized_expression,
+    for_statement: "for" for_header _statement,
+    for_header: "(" _for_variable "in" _expression ")",
+    _for_variable: _name | destructuring_declaration,
+    destructuring_declaration: "(" (_name %? ",") ")",
+    when_statement: "when" [when_subject] when_body,
+    when_subject: "(" _when_subject_body ")",
+    _when_subject_body: ("val" | "var") _name "=" _expression | _expression,
+    when_body: "{" _when_item* "}",
+    _when_item: when_entry | LINE_END | ";",
+    when_entry: [annotations] _when_condition ("," _when_condition)* "->" (&(block) block | _statement),
+    _when_condition: "else" | "in" _expression | NOT_IN _expression | "is" _type | NOT_IS _type | _expression,
+    try_statement: "try" block (catch_clause+ [finally_clause] | finally_clause),
+    catch_clause: "catch" catch_parameter block,
+    catch_parameter: "(" _name ":" _type ")",
+    finally_clause: "finally" block,
+    return_statement: "return" ["@" _name] [_expression],
+    throw_statement: "throw" _expression,
+    break_statement: "break" ["@" _name],
+    continue_statement: "continue" ["@" _name],
+    expression_statement: _expression,
+
+    parenthesized_expression: "(" _expression ")",
+    arguments: "(" (_argument %? ",") ")",
+    _argument: &(_name "=") named_argument | _expression,
+    named_argument: _name "=" _expression,
+    annotation_arguments: "(" (_annotation_argument %? ",") ")",
+    _annotation_argument: _expression,
+
+    // ---- expressions ----
+
+    _expression: precedence _primary {
+        right "=" | "+=" | "-=" | "*=" | "/=" | "%=" => assignment_expression,
+        elvis: right "?:" => elvis_expression,
+        left "||" => binary_expression,
+        left "&&" => binary_expression,
+        eq: left "==" | "!=" | "===" | "!==" => binary_expression,
+        rel: left "<" | ">" | "<=" | ">=" => binary_expression,
+        named: left "in" | NOT_IN => binary_expression,
+        type_test: postfix "is" _type => is_expression,
+        postfix NOT_IS _type => is_expression,
+        cast: postfix "as" ["?"] _type => as_expression,
+        range: left ".." | "..<" => range_expression,
+        add: left "+" | "-" => binary_expression,
+        mul: left "*" | "/" | "%" => binary_expression,
+        unary: prefix "-" | "+" | "!" | "~" => unary_expression,
+        prefix "++" | "--" => prefix_expression,
+        postfix "++" | "--" => postfix_expression,
+        postfix arguments => call_expression,
+        postfix &(type_arguments arguments) type_arguments arguments => call_expression,
+        postfix &(type_arguments lambda_literal) type_arguments lambda_literal => call_expression,
+        postfix lambda_literal => call_expression,
+        postfix subscript => index_expression,
+        postfix "." _name => navigation_expression,
+        postfix "?." _name => navigation_expression,
+        postfix "::" _name => callable_reference,
+        postfix BANG_BANG => not_null_expression,
+    },
+
+    _primary:
+        _literal
+        | _name
+        | "this"
+        | "super"
+        | parenthesized_expression
+        | lambda_literal
+        | object_expression
+        | if_statement
+        | when_statement
+        | try_statement,
+    _literal: INTEGER | FLOAT | CHAR | STRING | RAW_STRING | "true" | "false" | "null",
+    subscript: "[" _expression ("," _expression)* "]",
+    lambda_literal: "{" lambda_body "}",
+    lambda_body: &(_lambda_parameters "->") _lambda_parameters "->" _block_item* | lambda_items,
+    lambda_items: _block_item+,
+    _lambda_parameters: _lambda_parameter ("," _lambda_parameter)*,
+    _lambda_parameter: destructuring_parameter | _name [":" _type],
+    destructuring_parameter: "(" (_name %? ",") ")",
+    object_expression: "object" [":" supertypes] [class_body],
+
+    // ---- types ----
+
+    _type: precedence _type_head {
+        postfix "?" => nullable_type,
+        postfix type_arguments => generic_type,
+        postfix "." _name => qualified_type,
+    },
+    _type_head: _name | function_type,
+    function_type: function_parameters "->" _type,
+    function_parameters: "(" (_type %? ",") ")",
+
+    _name:
+        IDENT | "abstract" | "actual" | "annotation" | "by" | "companion" | "const"
+        | "constructor" | "context" | "crossinline" | "data" | "delegate" | "dynamic" | "enum"
+        | "expect" | "external" | "field" | "final" | "get" | "infix" | "init" | "inline"
+        | "inner" | "internal" | "lateinit" | "noinline" | "open" | "operator" | "out"
+        | "override" | "private" | "protected" | "public" | "reified" | "sealed" | "set"
+        | "suspend" | "tailrec" | "value" | "vararg" | "where",
+} }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    if c.pos() == 0 {
+        DEPTH.with(|depth| depth.set(0));
+    }
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' => {
+            let mut line_break = false;
+            let mut anonymous = false;
+            c.eat_while(|byte| {
+                line_break |= byte == b'\n';
+                anonymous |= byte == b'\r';
+                matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c')
+            });
+            if (line_break || anonymous)
+                && DEPTH.with(|depth| depth.get()) == 0
+                && ends_statement(c.previous())
+                && !continues(c)
+            {
+                LINE_END
+            } else {
+                WHITESPACE
+            }
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            c.eat_while(|byte| byte != b'\n');
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            // Kotlin block comments nest.
+            let mut depth = 1u32;
+            c.bump_n(2);
+            while !c.at_end() && depth > 0 {
+                if c.starts_with(b"/*") {
+                    depth += 1;
+                    c.bump_n(2);
+                } else if c.starts_with(b"*/") {
+                    depth -= 1;
+                    c.bump_n(2);
+                } else {
+                    c.bump();
+                }
+            }
+            COMMENT
+        }
+        b'"' if c.starts_with(b"\"\"\"") => {
+            if raw_string(c) { RAW_STRING } else { BAD_LITERAL }
+        }
+        b'"' => {
+            c.bump();
+            if string_body(c) { STRING } else { BAD_LITERAL }
+        }
+        b'\'' => {
+            c.bump();
+            if c.quoted(b'\'', true) { CHAR } else { BAD_LITERAL }
+        }
+        b'`' => {
+            c.bump();
+            if c.eat_while(|byte| byte != b'`' && byte != b'\n') > 0 && c.eat(b'`') {
+                IDENT
+            } else {
+                c.eat_while(|byte| byte != b'\n');
+                BAD_LITERAL
+            }
+        }
+        b'0'..=b'9' => number(c),
+        b'.' if c.peek_at(1).is_ascii_digit() => number(c),
+        byte if is_word_start(byte) => {
+            let start = c.pos();
+            c.eat_while(is_word_byte);
+            keyword(c.since(start))
+        }
+        _ => operator(c),
+    }
+}
+
+/// Whether a line break after a token of this kind may end a statement.
+fn ends_statement(kind: Kind) -> bool {
+    matches!(
+        kind,
+        IDENT | INTEGER | FLOAT | CHAR | STRING | RAW_STRING | BAD_LITERAL | RPAREN
+            | RBRACKET | RBRACE | KW_RETURN | KW_BREAK | KW_CONTINUE | KW_THIS | KW_SUPER
+            | KW_NULL | KW_TRUE | KW_FALSE | INCREMENT | DECREMENT | BANG_BANG
+    )
+}
+
+/// Whether the token at the cursor continues the previous line, so that no
+/// statement ends before it.
+fn continues(c: &Cursor) -> bool {
+    match c.peek() {
+        b'.' | b'?' | b':' | b',' | b'=' | b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>'
+        | b'!' | b'&' | b'|' | b')' | b']' | b'}' | b';' | b'{' => true,
+        byte if is_word_start(byte) => matches!(
+            word_at(c.rest()),
+            b"else" | b"catch" | b"finally" | b"where" | b"by" | b"as" | b"is" | b"in"
+        ),
+        _ => false,
+    }
+}
+
+fn word_at(rest: &[u8]) -> &[u8] {
+    let end = rest.iter().position(|byte| !is_word_byte(*byte)).unwrap_or(rest.len());
+    &rest[..end]
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"as" => KW_AS,
+        b"break" => KW_BREAK,
+        b"class" => KW_CLASS,
+        b"continue" => KW_CONTINUE,
+        b"do" => KW_DO,
+        b"else" => KW_ELSE,
+        b"false" => KW_FALSE,
+        b"for" => KW_FOR,
+        b"fun" => KW_FUN,
+        b"if" => KW_IF,
+        b"in" => KW_IN,
+        b"interface" => KW_INTERFACE,
+        b"is" => KW_IS,
+        b"null" => KW_NULL,
+        b"object" => KW_OBJECT,
+        b"package" => KW_PACKAGE,
+        b"return" => KW_RETURN,
+        b"super" => KW_SUPER,
+        b"this" => KW_THIS,
+        b"throw" => KW_THROW,
+        b"true" => KW_TRUE,
+        b"try" => KW_TRY,
+        b"typealias" => KW_TYPEALIAS,
+        b"val" => KW_VAL,
+        b"var" => KW_VAR,
+        b"when" => KW_WHEN,
+        b"while" => KW_WHILE,
+        b"import" => KW_IMPORT,
+        b"finally" => KW_FINALLY,
+        b"catch" => KW_CATCH,
+        b"abstract" => KW_ABSTRACT,
+        b"actual" => KW_ACTUAL,
+        b"annotation" => KW_ANNOTATION,
+        b"by" => KW_BY,
+        b"companion" => KW_COMPANION,
+        b"const" => KW_CONST,
+        b"constructor" => KW_CONSTRUCTOR,
+        b"context" => KW_CONTEXT,
+        b"crossinline" => KW_CROSSINLINE,
+        b"data" => KW_DATA,
+        b"delegate" => KW_DELEGATE,
+        b"dynamic" => KW_DYNAMIC,
+        b"enum" => KW_ENUM,
+        b"expect" => KW_EXPECT,
+        b"external" => KW_EXTERNAL,
+        b"field" => KW_FIELD,
+        b"final" => KW_FINAL,
+        b"get" => KW_GET,
+        b"infix" => KW_INFIX,
+        b"init" => KW_INIT,
+        b"inline" => KW_INLINE,
+        b"inner" => KW_INNER,
+        b"internal" => KW_INTERNAL,
+        b"lateinit" => KW_LATEINIT,
+        b"noinline" => KW_NOINLINE,
+        b"open" => KW_OPEN,
+        b"operator" => KW_OPERATOR,
+        b"out" => KW_OUT,
+        b"override" => KW_OVERRIDE,
+        b"private" => KW_PRIVATE,
+        b"protected" => KW_PROTECTED,
