@@ -1,18 +1,27 @@
 //! POSIX shell and bash: commands, pipelines, and/or lists, redirections,
-//! assignments, functions, `if`, `for` and `while`/`until`.
+//! assignments, functions, `if`, `for`, `while`/`until` and `case`/`esac`.
 //!
 //! The lexer decides what is a reserved word from the token before it, because
 //! shell reserved words are only reserved at the start of a command: `echo if`
 //! is two words, `if x; then` is a clause. A word is a keyword when it follows
-//! a command boundary (start of file, newline, `;`, `&&`, `||`, `|`, `&`, `(`,
-//! `{`, `then`, `do`, `else`, `elif`), which is where bash recognises one too.
+//! a command boundary (start of file, newline, `;`, `;;`, `&&`, `||`, `|`, `&`,
+//! `(`, `{`, `then`, `do`, `else`, `elif`), which is where bash recognises one
+//! too.
+//!
+//! The `)` that ends a `case` pattern is the reason the DSL lets a closing
+//! delimiter stand as an ordinary terminal: `case $x in a) ... ;; esac` has a
+//! closer with no opener, and `find_delimiter` in the macro no longer refuses
+//! it (an *opening* delimiter must still open a whole rule, because only then
+//! does the parser set up the group firewall).
 //!
 //! What is missing, named here rather than accepted silently:
 //!
-//! - **`in` is not a reserved word.** It is only reserved after the `for`/`case`
-//!   word, and the lexer cannot see two tokens back, so it is lexed as a word.
-//!   `for x in a b` therefore models its word list with `in` inside it; the loop
-//!   variable and every word are still nodes of the tree.
+//! - **`in` is a heuristic.** It is only reserved after the `for`/`case` head,
+//!   and the lexer can see one token back, so a word-shaped token before `in`
+//!   makes it the keyword. `echo x in` therefore reads `in` as a keyword, which
+//!   parses anyway because `_simple_item` accepts it. `for x in a b` models its
+//!   word list with `in` outside it; the loop variable and every word are still
+//!   nodes of the tree.
 //! - **Here-documents.** `<<EOF` is one redirect token and the body would be
 //!   read as commands, so a heredoc is not modelled. So are process
 //!   substitution's internals: `$( ... )`, `${ ... }` and `$(( ... ))` are one
@@ -68,6 +77,10 @@ rust_graph_deep::grammar! { SHELL {
         KW_DO = "do",
         KW_DONE = "done",
         KW_FUNCTION = "function",
+        KW_CASE = "case",
+        KW_ESAC = "esac",
+        /// `;;`: the end of one `case` clause.
+        DBL_SEMI = ";;",
     }
 
     program: _body,
@@ -83,6 +96,7 @@ rust_graph_deep::grammar! { SHELL {
         | for_clause
         | while_clause
         | until_clause
+        | case_clause
         | function_definition
         | paren_function
         | brace_group
@@ -95,6 +109,13 @@ rust_graph_deep::grammar! { SHELL {
     for_clause: "for" _name ["in"] _word* _terminator* "do" _body "done",
     while_clause: "while" _body "do" _body "done",
     until_clause: "until" _body "do" _body "done",
+
+    /// `case WORD in PAT) ... ;; esac`. The `)` after a pattern opens and
+    /// closes nothing: it is an ordinary terminal, which is what a close token
+    /// may be outside a group rule.
+    case_clause: "case" _word "in" _terminator* case_item* "esac",
+    case_item: _case_pattern ")" _terminator* _command* ";;" _terminator*,
+    _case_pattern: _word ("|" _word)*,
 
     function_definition: "function" _name [empty_parens] _compound,
     paren_function: FUNCTION_NAME empty_parens _compound,
@@ -119,7 +140,7 @@ rust_graph_deep::grammar! { SHELL {
 fn command_start(previous: Kind) -> bool {
     matches!(
         previous,
-        crate::deep::syntax::UNKNOWN | NEWLINE | SEMI | PIPE | OR | AND | AMP | LPAREN | LBRACE | KW_THEN | KW_DO | KW_ELSE | KW_ELIF
+        crate::deep::syntax::UNKNOWN | NEWLINE | SEMI | PIPE | OR | AND | AMP | LPAREN | LBRACE | KW_THEN | KW_DO | KW_ELSE | KW_ELIF | DBL_SEMI
     )
 }
 
@@ -183,11 +204,14 @@ pub fn lex_sh(c: &mut Cursor) -> Kind {
             c.bump();
             RBRACE
         }
+        b';' if c.peek_at(1) == b';' => {
+            c.bump_n(2);
+            DBL_SEMI
+        }
         b';' => {
             c.bump();
             SEMI
-        }
-        b'|' if c.peek_at(1) == b'|' => {
+        }        b'|' if c.peek_at(1) == b'|' => {
             c.bump_n(2);
             OR
         }
@@ -347,11 +371,15 @@ fn word(c: &mut Cursor) -> Kind {
             b"do" => return KW_DO,
             b"done" => return KW_DONE,
             b"function" => return KW_FUNCTION,
+            b"case" => return KW_CASE,
+            b"esac" => return KW_ESAC,
             _ => {}
         }
     }
-    // `in` after the loop or case word, which is all the context there is.
-    if text == b"in" && c.previous() == WORD {
+    // `in` after the loop or case word, which is all the context there is. The
+    // subject may be a word, a variable or a quoted string (`case "$1" in`), so
+    // the last token of a `for`/`case` head is any word-shaped one.
+    if text == b"in" && matches!(c.previous(), WORD | VARIABLE | STRING | ASSIGNMENT) {
         return KW_IN;
     }
     WORD

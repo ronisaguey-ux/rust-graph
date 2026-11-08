@@ -31,6 +31,18 @@ case_guard() {
 
 fetch() {
     local url=$1
+    # A case clause: the `)` ends the pattern and opens nothing.
+    case "$2" in
+        prod | production)
+            log "fetching a production build"
+            ;;
+        staging)
+            ;;
+        *)
+            log "unknown environment: $2"
+            return 1
+            ;;
+    esac
     curl --fail --silent --show-error --location "$url" -o "$RELEASE_DIR/$APP-$STAMP.tar.gz"
 }
 
