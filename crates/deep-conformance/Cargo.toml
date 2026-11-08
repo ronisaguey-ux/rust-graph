@@ -1,0 +1,24 @@
+[package]
+name = "deep-conformance"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Corpus conformance and performance measurement for the deep CST parser: scan, summary, gates, diff."
+publish = false
+
+[lib]
+name = "deep_conformance"
+path = "src/lib.rs"
+
+[[bin]]
+name = "deep-conformance"
+path = "src/main.rs"
+
+[features]
+# Populates the registry with the grammars that exist in this worktree today
+# (Python, JavaScript, TypeScript). The integrator's job is to replace this
+# adapter when the language crates land; nothing else in the crate changes.
+deep-grammars = ["dep:deep-grammars"]
+
+[dependencies]
+deep-grammars = { path = "../deep-grammars", optional = true }
