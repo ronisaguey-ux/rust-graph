@@ -1163,3 +1163,225 @@ fn incremental_reuses_the_rest_of_a_structural_edit() {
     );
 }
 
+#[test]
+fn incremental_falls_back_on_an_error_tree() {
+    let tables = build_tables();
+    let grammar = tables.grammar();
+    // Pick a source the batch parser turns into a tree *with* error nodes: a
+    // parse can also fail outright, and that is a different code path.
+    let mut found = None;
+    for candidate in [
+        "x = 1\ndef broken(:\n    y = 2\n",
+        "class A:\n    x = = 1\n",
+        "def f():\n    )\n    return 1\n",
+    ] {
+        let tokens = lex_py(candidate);
+        if let Ok(tree) = try_full_parse(&grammar, &tokens) {
+            if tree.errors > 0 {
+                found = Some((candidate, tokens, tree));
+                break;
+            }
+        }
+    }
+    let (broken, _tokens, old) = found.expect("a malformed source with error nodes");
+
+    let edit = Edit::insert(0, 1);
+    let new_source = edit.apply(broken.as_bytes(), b"#");
+    let new_source = String::from_utf8(new_source).unwrap();
+    let new_tokens = lex_py(&new_source);
+    let full = full_parse(&grammar, &new_tokens);
+    let (tree, report) = incremental::reparse(
+        &grammar,
+        &old,
+        broken.len() as u32,
+        &edit,
+        &new_tokens,
+        &Config::new(),
+    )
+    .expect("a tree");
+    assert!(report.fell_back, "an error tree is never reused");
+    assert_eq!(
+        shape(&full.nodes, full.root),
+        shape(&tree.nodes, tree.root),
+        "the fallback is a full parse"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The measurement
+// ---------------------------------------------------------------------------
+
+fn best_of<F: FnMut()>(runs: usize, mut f: F) -> Duration {
+    let mut best = Duration::from_secs(3_600);
+    for _ in 0..runs {
+        let start = Instant::now();
+        f();
+        let elapsed = start.elapsed();
+        if elapsed < best {
+            best = elapsed;
+        }
+    }
+    best
+}
+
+struct Case {
+    label: &'static str,
+    edit: Edit,
+    text: String,
+}
+
+#[test]
+fn incremental_is_faster_per_edit() {
+    let tables = build_tables();
+    let grammar = tables.grammar();
+
+    // A file-sized corpus: every python fixture in one source.
+    let mut big = String::new();
+    for (_, source) in fixtures() {
+        big.push_str(&source);
+        if !big.ends_with('\n') {
+            big.push('\n');
+        }
+    }
+    let tokens = lex_py(&big);
+    let old = full_parse(&grammar, &tokens);
+    assert_eq!(old.errors, 0, "the corpus parses cleanly");
+    let old_len = big.len() as u32;
+
+    // One line, near the middle, at the same indentation so the file stays
+    // valid python — an invalid edit would only measure the fallback.
+    let mid = big.len() / 2;
+    let line_at = big[..mid].rfind('\n').unwrap() + 1;
+    let line_end = big[line_at..].find('\n').unwrap() + line_at;
+    // Walk forward to the first line whose replacement leaves valid python
+    // (blank lines, string bodies and continuation lines are not usable).
+    let mut small_edit = None;
+    for (at, end) in line_spans(&big).into_iter().filter(|(at, _)| *at >= line_at) {
+        let line = &big[at..end];
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let text = format!("{}total = total + 1\n", " ".repeat(indent));
+        let edit = Edit::replace(at as u32, (end - at) as u32, text.len() as u32);
+        let candidate = edit.apply(big.as_bytes(), text.as_bytes());
+        let candidate = String::from_utf8(candidate).unwrap();
+        if try_full_parse(&grammar, &lex_py(&candidate)).map(|cst| cst.errors) == Ok(0) {
+            small_edit = Some((edit, text));
+            break;
+        }
+    }
+    let (small_edit, small_text) = small_edit.expect("a line whose replacement is valid");
+    let _ = (line_at, line_end);
+
+    // One whole function, near the middle.
+    let def_at = big[..mid].rfind("\ndef ").unwrap() + 1;
+    let def_end = big[def_at + 1..]
+        .find("\ndef ")
+        .map(|offset| offset + def_at + 1)
+        .unwrap_or(big.len());
+    let def_indent = big[def_at..].len() - big[def_at..].trim_start().len();
+    let medium_text = format!(
+        "{}def rewritten(a, b):\n{}    return a + b\n",
+        " ".repeat(def_indent),
+        " ".repeat(def_indent)
+    );
+
+    // A large change: a third of the file's worth of text appended at the end,
+    // which is the size of a whole small file. The batch parser has to build
+    // every node; the incremental pass only builds the new tail.
+    let third = big.len() / 3;
+    let appended = big[..third].to_string();
+    let large_edit = Edit::insert(big.len() as u32, appended.len() as u32);
+    let large_text = appended;
+
+    let cases = vec![
+        Case {
+            label: "small (1 line)",
+            edit: small_edit,
+            text: small_text,
+        },
+        Case {
+            label: "medium (1 function)",
+            edit: Edit::replace(
+                def_at as u32,
+                (def_end - def_at) as u32,
+                medium_text.len() as u32,
+            ),
+            text: medium_text,
+        },
+        Case {
+            label: "large (a file's worth)",
+            edit: large_edit,
+            text: large_text,
+        },
+    ];
+
+    eprintln!(
+        "corpus: {} bytes, {} tokens, {} nodes",
+        old_len,
+        tokens.len(),
+        old.nodes.len()
+    );
+    let lex_time = best_of(21, || {
+        let _ = lex_py(&big);
+    });
+    eprintln!("lexing the whole corpus: {:?}", lex_time);
+    eprintln!(
+        "{:<26} {:>12} {:>12} {:>9} {:>8} {:>10}",
+        "case", "full parse", "incremental", "speedup", "reused", "splices"
+    );
+
+    let mut results: Vec<(&'static str, Duration, Duration, f64)> = Vec::new();
+    for case in &cases {
+        let new_source = case.edit.apply(big.as_bytes(), case.text.as_bytes());
+        let new_source = String::from_utf8(new_source).unwrap();
+        let new_tokens = lex_py(&new_source);
+        let reference = full_parse(&grammar, &new_tokens);
+        assert_eq!(
+            reference.errors, 0,
+            "{}: the edit must leave a valid source",
+            case.label
+        );
+
+        let full_time = best_of(21, || {
+            let _ = full_parse(&grammar, &new_tokens);
+        });
+        let mut last = None;
+        let incremental_time = best_of(21, || {
+            let (tree, report) = incremental::reparse(
+                &grammar,
+                &old,
+                old_len,
+                &case.edit,
+                &new_tokens,
+                &Config::new(),
+            )
+            .expect("a tree");
+            debug_assert_eq!(
+                shape(&reference.nodes, reference.root),
+                shape(&tree.nodes, tree.root)
+            );
+            last = Some(report);
+        });
+        let report: Report = last.expect("at least one run");
+        assert!(
+        !report.fell_back,
+        "{}: must stay incremental (window {}..{}, splices {})",
+        case.label, report.window_start, report.window_end, report.splices
+    );
+        let speedup = full_time.as_nanos() as f64 / incremental_time.as_nanos().max(1) as f64;
+        eprintln!(
+            "{:<26} {:>10.1?} {:>12.1?} {:>8.2}x {:>7.0}% {:>8} window {}..{}",
+            case.label,
+            full_time,
+            incremental_time,
+            speedup,
+            report.reuse_ratio() * 100.0,
+            report.splices,
+            report.window_start,
+            report.window_end
+        );
+        results.push((case.label, full_time, incremental_time, speedup));
+    }
+
