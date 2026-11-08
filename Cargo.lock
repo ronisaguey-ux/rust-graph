@@ -11,6 +11,13 @@ name = "deep-bench"
 version = "0.1.0"
 
 [[package]]
+name = "deep-conformance"
+version = "0.1.0"
+dependencies = [
+ "deep-grammars",
+]
+
+[[package]]
 name = "deep-grammars"
 version = "0.1.0"
 dependencies = [
