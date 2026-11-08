@@ -171,7 +171,9 @@ pub fn check(mut grammar: Grammar) -> Result<Checked, Error> {
                 return Err(Error::at(table.operand.spot, "a precedence operand must not match nothing"));
             }
             for row in &table.rows {
-                checked.check_node(&row.ops, false)?;
+                // An operator after an operand may start with a predicate, as
+                // TypeScript's `f<T>(x)` must against `a < b`.
+                checked.check_node(&row.ops, row.fix != Fix::Prefix)?;
                 if checked.nullable(&row.ops) {
                     return Err(Error::at(row.spot, "an operator must not match nothing"));
                 }

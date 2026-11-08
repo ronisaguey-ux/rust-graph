@@ -388,38 +388,64 @@ impl<'c> Emitter<'c> {
                 led.extend(alternatives(&row.ops).into_iter().map(|alt| (alt, index)));
             }
         }
-        let tail = if led.is_empty() {
+        // Operators that start with a predicate are tried first, in order.
+        let (predicated, led): (Vec<(&Node, usize)>, Vec<(&Node, usize)>) =
+            led.into_iter().partition(|(node, _)| matches!(&node.expr, Expr::Seq(seq) if matches!(seq[0].expr, Expr::Pred(_))));
+        let tail = if led.is_empty() && predicated.is_empty() {
             "let _ = (start, min);".to_string()
         } else {
             let nodes: Vec<&Node> = led.iter().map(|(node, _)| *node).collect();
-            let decision = checked.decide(&nodes, &after_any, table.rows[led[0].1].spot, false)?;
-            let body = self.decision(
-                &decision,
-                &|alt, matched| {
-                    let (node, index) = led[alt];
-                    let row = &table.rows[index];
-                    let level = index as u32 + 1;
-                    let (ops_after, right) = match row.fix {
-                        Fix::Left => (&checked.first[rule], operand(level + 1)),
-                        Fix::Right => (&checked.first[rule], operand(level)),
-                        _ => (&after_operand, String::new()),
-                    };
-                    let mut out = format!(
-                        "if {level} < min {{ break; }} let marker = p.wrap(start); {} {right} p.close(marker, {});",
-                        self.guarded(node, ops_after, matched)?,
-                        rule_constant(&row.node)
-                    );
-                    // An operator is taken on its whole leading run: `not` alone
-                    // after an operand is not `not in`.
-                    if let Guard::Prefix(tokens) = checked.guard(node) {
-                        if tokens.len() > matched {
-                            out = format!("if {} {{ {out} }} else {{ break; }}", self.cond(&Guard::Prefix(tokens[matched..].to_vec()), matched as u32));
+            let mut body = if led.is_empty() {
+                "break;".to_string()
+            } else {
+                let decision = checked.decide(&nodes, &after_any, table.rows[led[0].1].spot, false)?;
+                self.decision(
+                    &decision,
+                    &|alt, matched| {
+                        let (node, index) = led[alt];
+                        let row = &table.rows[index];
+                        let level = index as u32 + 1;
+                        let (ops_after, right) = match row.fix {
+                            Fix::Left => (&checked.first[rule], operand(level + 1)),
+                            Fix::Right => (&checked.first[rule], operand(level)),
+                            _ => (&after_operand, String::new()),
+                        };
+                        let mut out = format!(
+                            "if {level} < min {{ break; }} let marker = p.wrap(start); {} {right} p.close(marker, {});",
+                            self.guarded(node, ops_after, matched)?,
+                            rule_constant(&row.node)
+                        );
+                        // An operator is taken on its whole leading run: `not` alone
+                        // after an operand is not `not in`.
+                        if let Guard::Prefix(tokens) = checked.guard(node) {
+                            if tokens.len() > matched {
+                                out = format!("if {} {{ {out} }} else {{ break; }}", self.cond(&Guard::Prefix(tokens[matched..].to_vec()), matched as u32));
+                            }
                         }
-                    }
-                    Ok(out)
-                },
-                "break;",
-            )?;
+                        Ok(out)
+                    },
+                    "break;",
+                )?
+            };
+            for (node, index) in predicated.iter().rev() {
+                let Expr::Seq(seq) = &node.expr else { unreachable!("partitioned") };
+                let Expr::Pred(inner) = &seq[0].expr else { unreachable!("partitioned") };
+                let rest = if seq.len() == 2 { seq[1].clone() } else { Node { expr: Expr::Seq(seq[1..].to_vec()), spot: seq[1].spot } };
+                let row = &table.rows[*index];
+                let level = *index as u32 + 1;
+                let (ops_after, right) = match row.fix {
+                    Fix::Left => (&checked.first[rule], operand(level + 1)),
+                    Fix::Right => (&checked.first[rule], operand(level)),
+                    _ => (&after_operand, String::new()),
+                };
+                let predicate = self.predicate(inner)?;
+                body = format!(
+                    "if {} && {level} >= min && {predicate}(p) {{ let marker = p.wrap(start); {} {right} p.close(marker, {}); }} else {{ {body} }}",
+                    self.cond(&Guard::Set(checked.first(inner)), 0),
+                    self.guarded(&rest, ops_after, 0)?,
+                    rule_constant(&row.node)
+                );
+            }
             format!("loop {{ {body} }}")
         };
         Ok(format!(
@@ -581,6 +607,16 @@ mod tests {
         assert!(out.contains("if p.at(A) && predicate_0(p) { parse_m(p); } else { match p.current() { A => { p.bump();p.expect(C); } _ => { p.error_one(); } } }"), "{out}");
         assert!(out.contains("fn predicate_0(p: &mut rt::parser::Parser) -> bool { let trial = p.trial(); if p.at(A) { p.bump();p.expect(B); }"), "{out}");
         assert!(try_emit("top: s*, s: A &(B) C,").unwrap_err().contains("only start an alternative"));
+    }
+
+    #[test]
+    fn an_operator_row_may_start_with_a_predicate() {
+        // `-` stands for `<`: `a - b` is a difference, `a - b + ()` a generic call.
+        let out = emitted("top: _e*, _e: precedence A { cmp: left \"-\" => less, postfix &(targs args) targs args => generic_call, }, targs: \"-\" B \"+\", args: \"(\" \")\",");
+        assert!(out.contains("loop { if p.at(MINUS) && 2 >= min && predicate_0(p) { let marker = p.wrap(start); if p.at(MINUS) { parse_targs(p); }"), "{out}");
+        assert!(out.contains("p.close(marker, GENERIC_CALL); } else { match p.current() { MINUS => { if 1 < min { break; }"), "{out}");
+        let error = try_emit("top: _e*, _e: precedence A { prefix &(B) B => neg, },").unwrap_err();
+        assert!(error.contains("only start an alternative"), "{error}");
     }
 
     #[test]

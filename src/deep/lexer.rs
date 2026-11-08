@@ -60,11 +60,22 @@ impl Tokens {
 pub struct Cursor<'s> {
     src: &'s [u8],
     pos: usize,
+    /// The kind of the last token that is not trivia, or `UNKNOWN` at the start.
+    previous: Kind,
 }
 
 impl<'s> Cursor<'s> {
     pub fn new(src: &'s [u8]) -> Self {
-        Cursor { src, pos: 0 }
+        Cursor { src, pos: 0, previous: UNKNOWN }
+    }
+
+    /// The kind of the last significant token before the cursor, or `UNKNOWN`
+    /// at the start of the file. Set by the lexer driver, so a step lexer can
+    /// tell what a token may be from what came before it: in JavaScript a `/`
+    /// after an operand divides, and anywhere else starts a regular expression.
+    #[inline]
+    pub fn previous(&self) -> Kind {
+        self.previous
     }
 
     #[inline]
@@ -193,6 +204,9 @@ pub fn lex(src: &[u8], language: &Language, tokens: &mut Tokens) {
             kind = UNKNOWN;
         }
         let end = cursor.pos as u32;
+        if !language.is_trivia(kind) {
+            cursor.previous = kind;
+        }
         if kind == UNKNOWN && tokens.kind.last() == Some(&UNKNOWN) {
             *tokens.end.last_mut().expect("a last kind has a last end") = end;
         } else {
@@ -245,6 +259,9 @@ fn lex_layout(src: &[u8], language: &Language, layout: &Layout, tokens: &mut Tok
             kind = UNKNOWN;
         }
         let end = cursor.pos as u32;
+        if kind != layout.newline && !language.is_trivia(kind) {
+            cursor.previous = kind;
+        }
         if kind == layout.newline {
             tokens.push(WHITESPACE, end);
             line_start = cursor.pos;
