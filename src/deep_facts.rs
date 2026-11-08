@@ -991,3 +991,389 @@ impl<'a> Walker<'a> {
         text.trim_matches(|ch| matches!(ch, '"' | '\'' | '`')).to_string()
     }
 
+    // -- values -------------------------------------------------------------
+
+    /// The flow form of one expression, recording every call it contains, in
+    /// the same shapes `crate::expr` documents:
+    ///
+    /// ```text
+    /// 0                    a constant
+    /// ["n","a.b"]          a name or attribute path
+    /// ["m",[e,...]]        values combined (operator, format string, mapping)
+    /// ["t",[e,...]]        a tuple or list, element by element
+    /// ["c",id,recv,[arg]]  a call; `id` indexes the symbol's call table
+    /// ["k","name",e]       a keyword argument, only inside a call's arguments
+    /// ```
+    fn form(&mut self, id: u32) -> String {
+        let kind = self.kind(id);
+        if self.kinds.calls.contains(&kind) {
+            return self.call_form(id);
+        }
+        match kind {
+            "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" => {
+                let text = self.text_string(id);
+                let text = if text == "this" { "self".to_string() } else { text };
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &text);
+                    out.push(']');
+                    out
+                }
+            }
+            "attribute" | "member_expression" | "subscript" | "subscript_expression" => {
+                let path = self.form_path(id);
+                if path.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    out
+                }
+            }
+            "argument_list" | "arguments" | "parenthesized_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.tuple_form(&items),
+                }
+            }
+            "binary_operator" | "comparison_operator" | "boolean_operator" | "binary_expression" | "ternary_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.len() == 1 {
+                    return self.form(items[0]);
+                }
+                self.merge_form(&items)
+            }
+            "not_operator" | "unary_operator" | "unary_expression" | "await_expression" | "yield_expression"
+            | "typeof" | "void" | "non_null_expression" | "as_expression" | "type_assertion" | "delete_expression" => {
+                match self.expression_child(id) {
+                    Some(child) => {
+                        let inner = self.form(child);
+                        format!("[\"m\",[{inner}]]")
+                    }
+                    None => "0".to_string(),
+                }
+            }
+            "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern" | "array_pattern" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.tuple_form(&items)
+                }
+            }
+            "list_comprehension" | "set_comprehension" | "generator_expression" | "dictionary_comprehension" => {
+                // `[f(x) for x in xs if p(x)]`: the element and every clause's
+                // value are what the reader needs, and the clauses carry calls.
+                let mut items: Vec<u32> = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    items.push(child);
+                }
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.tuple_form(&items)
+                }
+            }
+            "for_in_clause" | "if_clause" | "comprehension_clause" => {
+                // `for x in xs` / `if p(x)`: the value is the last child; the
+                // target is a binding, not a value.
+                match self.children(id).into_iter().rev().find(|&child| !self.is_layout(child)) {
+                    Some(child) => self.form(child),
+                    None => "0".to_string(),
+                }
+            }
+            "dictionary" | "object" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.merge_form(&items)
+                }
+            }
+            "pair" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => {
+                        let key = self.form(items[0]);
+                        let value = self.form(items[items.len() - 1]);
+                        format!("[\"m\",[{key},{value}]]")
+                    }
+                }
+            }
+            "keyword_argument" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.as_slice() {
+                    [name, value] => {
+                        let mut out = "[\"k\",".to_string();
+                        push_string(&mut out, &self.text_string(*name));
+                        out.push(',');
+                        out.push_str(&self.form(*value));
+                        out.push(']');
+                        out
+                    }
+                    _ => "0".to_string(),
+                }
+            }
+            "spread_element" | "rest_pattern" | "list_splat" | "list_splat_pattern" => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
+            "assignment" | "assignment_expression" | "augmented_assignment_expression" => {
+                let children = self.children(id);
+                children.last().filter(|&&last| last != children[0]).map(|&last| self.form(last)).unwrap_or_else(|| "0".to_string())
+            }
+            "string" | "string_literal" | "template_string" | "number" | "integer" | "float" | "true" | "false"
+            | "none" | "null" | "undefined" | "regex" | "comment" | "lambda" | "f_string" => "0".to_string(),
+            _ => {
+                // A node with no mapping: its first value-bearing child, so a
+                // wrapper the grammar added costs nothing.
+                match self.expression_child(id) {
+                    Some(child) if self.node(child).first_child != NONE => self.form(child),
+                    _ => "0".to_string(),
+                }
+            }
+        }
+    }
+
+    fn tuple_form(&mut self, items: &[u32]) -> String {
+        let mut out = "[\"t\",[".to_string();
+        for (index, &item) in items.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&self.form(item));
+        }
+        out.push_str("]]");
+        out
+    }
+
+    fn merge_form(&mut self, items: &[u32]) -> String {
+        let mut out = "[\"m\",[".to_string();
+        for (index, &item) in items.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&self.form(item));
+        }
+        out.push_str("]]");
+        out
+    }
+
+    fn call_form(&mut self, id: u32) -> String {
+        let children = self.children(id);
+        let is_new = self.kind(id) == "new_expression";
+        let callee = children
+            .iter()
+            .copied()
+            .find(|&child| !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")"))
+            .unwrap_or(id);
+        // `f().g()`: the receiver is a call, and it is a fact of its own.
+        if matches!(self.kind(callee), "attribute" | "member_expression") {
+            if let Some(&object) = self.children(callee).first() {
+                // `new URL(x).toString()`, `[...xs].filter(f)`: the receiver is
+                // an expression that may hold calls of its own.
+                self.form(object);
+            }
+        }
+        let (path, receiver) = self.call_target(callee);
+        let line = self.call_line(callee, id);
+        let index = self.push_call(path, line);
+        let args = children
+            .iter()
+            .copied()
+            .find(|&child| matches!(self.kind(child), "argument_list" | "arguments"));
+        let mut out = format!("[\"c\",{index},{receiver},");
+        match args {
+            Some(list) => out.push_str(&self.arguments(list)),
+            None => out.push_str("[]"),
+        }
+        out.push(']');
+        let _ = is_new;
+        out
+    }
+
+    /// The called path and the receiver form: `f(x)` -> (`f`, `0`),
+    /// `a.b.c(x)` -> (`a.b.c`, `["n","a.b"]`).
+    fn call_target(&self, callee: u32) -> (String, String) {
+        match self.kind(callee) {
+            "attribute" | "member_expression" => {
+                let children = self.children(callee);
+                let name = self.member_name(callee);
+                let object = children.first().copied();
+                let receiver_path = object.map(|node| self.path_of(node)).unwrap_or_default();
+                let path = if receiver_path.is_empty() {
+                    format!(".{name}")
+                } else {
+                    format!("{receiver_path}.{name}")
+                };
+                let receiver = if receiver_path.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &receiver_path);
+                    out.push(']');
+                    out
+                };
+                (path, receiver)
+            }
+            "call" | "call_expression" => {
+                // `f()(...)`: no name to call, so the path is the callee's and
+                // the receiver is unknown.
+                let (path, _) = self.call_target(callee);
+                (path, "0".to_string())
+            }
+            _ => {
+                let path = self.path_of(callee);
+                (path, "0".to_string())
+            }
+        }
+    }
+
+    /// The property name of an `a.b` node: the last leaf after the dot. It is
+    /// read by position, not by kind, because a member called `get` carries the
+    /// grammar's `get` kind and a private one carries `#`.
+    fn member_name(&self, id: u32) -> String {
+        for &child in self.children(id).iter().rev() {
+            if self.node(child).first_child != NONE {
+                continue;
+            }
+            let text = self.text(child);
+            if text.is_empty() {
+                continue;
+            }
+            if text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'#' || text[0] == b'$' {
+                return String::from_utf8_lossy(text).trim_start_matches('#').to_string();
+            }
+        }
+        String::new()
+    }
+
+    /// A dotted path, recording the calls on the way: `urlparse(x).netloc` has
+    /// a call under the attribute, and that call is a fact.
+    fn form_path(&mut self, id: u32) -> String {
+        let kind = self.kind(id);
+        let children = self.children(id);
+        if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression") {
+            if let Some(&object) = children.first() {
+                // A receiver can be any expression; nothing is recorded for a
+                // plain name, so this costs a walk and never a wrong fact.
+                self.form(object);
+            }
+        }
+        // `name[len(prefix):]`: the index is an expression of its own.
+        if matches!(kind, "subscript" | "subscript_expression") {
+            for &child in children.iter().skip(1) {
+                if !self.is_layout(child) {
+                    self.form(child);
+                }
+            }
+        }
+        self.path_of(id)
+    }
+
+    /// The line a call is written on. For `path\n  .replace(...)` that is the
+    /// line of `replace`, which is what a reader points at; Tree-sitter's node
+    /// start would say the line of `path`.
+    fn call_line(&self, callee: u32, call: u32) -> u32 {
+        match self.kind(callee) {
+            "attribute" | "member_expression" => {
+                let children = self.children(callee);
+                if let Some(&name) = children.iter().rev().find(|&&child| {
+                    self.node(child).first_child == NONE && !self.is_layout(child)
+                }) {
+                    return self.line(name);
+                }
+                self.line(call)
+            }
+            _ => self.line(callee),
+        }
+    }
+
+    fn arguments(&mut self, list: u32) -> String {
+        let mut out = "[".to_string();
+        let mut first = true;
+        for child in self.children(list) {
+            if self.is_layout(child) {
+                continue;
+            }
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            out.push_str(&self.form(child));
+        }
+        out.push(']');
+        out
+    }
+
+    /// A dotted name off the source: `a . b` and `a.b` are the same path, and
+    /// `this` becomes `self` as the flow form spells it.
+    fn path_of(&self, id: u32) -> String {
+        match self.kind(id) {
+            "identifier" | "property_identifier" | "private_property_identifier" | "type_identifier"
+            | "shorthand_property_identifier" | "this" | "super" => {
+                let text = self.text_string(id);
+                if text == "this" {
+                    "self".to_string()
+                } else {
+                    text.trim_start_matches('#').to_string()
+                }
+            }
+            "attribute" | "member_expression" => {
+                let children = self.children(id);
+                let name = self.member_name(id);
+                let base = children.first().map(|&child| self.path_of(child)).unwrap_or_default();
+                if base.is_empty() {
+                    format!(".{name}")
+                } else {
+                    format!("{base}.{name}")
+                }
+            }
+            "subscript" | "subscript_expression" => {
+                let base = self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default();
+                base
+            }
+            "parenthesized_expression" => self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default(),
+            "as_expression" | "type_assertion" | "non_null_expression" => {
+                self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
+            }
+            // A call has no name of its own: `f().x` names `.x`.
+            "call" | "call_expression" | "new_expression" => String::new(),
+            _ => String::new(),
+        }
+    }
+
+    /// The path of a value used as an assignment target, or empty when the
+    /// target is not a name (a literal index, a call).
+    fn value_path(&self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "identifier" | "attribute" | "member_expression" | "subscript" | "subscript_expression" | "this" => {
+                let path = self.path_of(id);
+                (!path.is_empty()).then_some(path)
+            }
+            "tuple_pattern" | "pattern_list" | "array_pattern" | "list_pattern" | "object_pattern" => None,
+            _ => None,
+        }
+    }
+}
+
+/// Byte offset of the start of each line, so a node's line is a binary search.
+fn line_starts(src: &[u8]) -> Vec<u32> {
+    let mut out = vec![0u32];
+    for (index, byte) in src.iter().enumerate() {
+        if *byte == b'\n' {
+            out.push(index as u32 + 1);
+        }
+    }
+    out
+}
