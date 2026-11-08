@@ -10,6 +10,12 @@
 
 #![no_std]
 
+// The crate is no_std, but the CST owns a Vec: allocate through alloc, which
+// every target with a heap provides, rather than pulling in std.
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 /// A parser state. 65,535 states is far past any grammar here.
 pub type StateId = u16;
 /// A grammar symbol: terminal or non-terminal, in one numbering.
