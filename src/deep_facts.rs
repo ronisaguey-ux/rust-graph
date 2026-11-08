@@ -338,3 +338,246 @@ impl<'a> Walker<'a> {
             "elif_clause" | "else_clause" => {
                 self.event("[\"e\"]");
                 if kind == "elif_clause" {
+                    self.condition_before(id);
+                }
+            }
+            "with_statement" => match self.loop_binding(id) {
+                Some((targets, value)) => {
+                    self.event("[\"b\"]");
+                    self.assignment_event(targets, value, self.line(id), false);
+                }
+                None => {
+                    self.condition_before(id);
+                    self.event("[\"b\"]");
+                }
+            },
+            "for_statement" | "for_in_statement" => {
+                self.event("[\"b\"]");
+                if let Some((target, value)) = self.loop_binding(id) {
+                    self.assignment_event(target, value, self.line(id), false);
+                }
+            }
+            "while_statement" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
+            "try_statement" | "switch_statement" | "match_statement" => self.event("[\"b\"]"),
+            "catch_clause" | "finally_clause" | "except_clause" | "switch_case" | "case_clause" => {
+                self.event("[\"e\"]")
+            }
+            _ => {}
+        }
+    }
+
+    fn leave(&mut self, id: u32) {
+        let kind = self.kind(id);
+        // `(a) => f(a)`: the body is an expression, not a block, so nothing in
+        // the walk below would read it. It is this function's return value.
+        if kind == "arrow_function" && self.frame().node == id {
+            if let Some(&body) = self.children(id).last() {
+                if !matches!(self.kind(body), "statement_block" | "block") {
+                    let line = self.line(id);
+                    let value = self.form(body);
+                    self.event(&format!("[\"r\",{line},{value}]"));
+                }
+            }
+        }
+        if matches!(
+            kind,
+            "if_statement"
+                | "for_statement"
+                | "for_in_statement"
+                | "while_statement"
+                | "try_statement"
+                | "switch_statement"
+                | "match_statement"
+                | "with_statement"
+        ) {
+            self.event("[\"j\"]");
+        }
+        if self.frame().node != id {
+            return;
+        }
+        let frame = self.stack.pop().expect("a frame to pop");
+        if let Some(index) = frame.defines {
+            self.facts.symbols[index].end_line = self.end_line(id);
+        }
+    }
+
+    fn is_js(&self) -> bool {
+        self.kinds.js
+    }
+
+    // -- definitions --------------------------------------------------------
+
+    fn open_definition(&mut self, id: u32, def: &Def) {
+        let line = self.line(id);
+        if def.container {
+            let name = self.def_name(id, def).unwrap_or_default();
+            if name.is_empty() {
+                return;
+            }
+            let bases = self.bases(id);
+            let index = self.add_symbol(name.clone(), String::new(), KIND_CLASS, line, Vec::new());
+            self.facts.symbols[index].bases = bases;
+            // A class body writes onto the enclosing symbol; only its methods
+            // take the class name as an owner.
+            let symbol = self.frame().symbol;
+            self.stack.push(Frame { node: id, symbol, class: name, container: true, defines: Some(index) });
+            return;
+        }
+        let named = self
+            .def_name(id, def)
+            .or_else(|| {
+                let at = self.bound.iter().position(|(node, _)| *node == id)?;
+                Some(self.bound.remove(at).1)
+            });
+        let name = named.unwrap_or_else(|| format!("<anonymous>@{line}"));
+        let owner = if self.frame().container { self.frame().class.clone() } else { String::new() };
+        let mut params = def.params.map(|kind| self.child_of_kind(id, kind)).flatten().map(|node| self.params(id, node)).unwrap_or_default();
+        if params.first().is_some_and(|first| matches!(first.as_str(), "self" | "cls" | "this")) {
+            params.remove(0);
+        }
+        let index = self.add_symbol(name, owner.clone(), KIND_FUNCTION, line, params);
+        self.stack.push(Frame { node: id, symbol: index, class: owner, container: false, defines: Some(index) });
+    }
+
+    /// The name a definition node carries, if any.
+    fn def_name(&self, id: u32, def: &Def) -> Option<String> {
+        if let Some(node) = def.name.iter().find_map(|kind| self.child_of_kind(id, *kind)) {
+            return Some(self.text_string(node));
+        }
+        // A method called `get` or `set` reads as the modifier that introduces
+        // a getter, so the grammar gives it that kind: the name is then the leaf
+        // just before the parameter list.
+        if def.kind == "method_definition" {
+            let children = self.children(id);
+            let at = children.iter().position(|&child| self.kind(child) == "formal_parameters")?;
+            let name = children.get(at.checked_sub(1)?)?;
+            if self.node(*name).first_child == NONE {
+                return Some(self.text_string(*name));
+            }
+        }
+        None
+    }
+
+    fn bases(&self, id: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        let Some(heritage) = self
+            .children(id)
+            .into_iter()
+            .find(|&child| matches!(self.kind(child), "argument_list" | "class_heritage" | "implements_clause"))
+        else {
+            return out;
+        };
+        let mut walk = vec![heritage];
+        while let Some(node) = walk.pop() {
+            for child in self.children(node) {
+                match self.kind(child) {
+                    "identifier" | "type_identifier" => out.push(self.text_string(child)),
+                    "attribute" | "member_expression" | "nested_type_identifier" => {
+                        if let Some(last) = self.last_name(child) {
+                            out.push(last);
+                        }
+                    }
+                    "(" | ")" | "," | ":" | "extends" | "implements" | "with" | "argument_list" | "class_heritage"
+                    | "implements_clause" | "type_arguments" => walk.push(child),
+                    _ => walk.push(child),
+                }
+            }
+        }
+        out
+    }
+
+    fn last_name(&self, id: u32) -> Option<String> {
+        let mut last = None;
+        let mut walk = vec![id];
+        while let Some(node) = walk.pop() {
+            let kind = self.kind(node);
+            if matches!(kind, "identifier" | "property_identifier" | "type_identifier") {
+                last = Some(self.text_string(node));
+            }
+            let mut child = self.node(node).first_child;
+            while child != NONE {
+                walk.push(child);
+                child = self.node(child).next_sibling;
+            }
+        }
+        last
+    }
+
+    /// `def f(a, b=1, *c)`, `function f(a, {b}, ...c)`, `(a, b) => {}`.
+    fn params(&self, def: u32, list: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        let list_kind = self.kind(list);
+        // JS class heritage shares the slot but is not a parameter list.
+        if list_kind == "class_heritage" {
+            return out;
+        }
+        for child in self.children(list) {
+            let kind = self.kind(child);
+            match kind {
+                "(" | ")" | "," | "[" | "]" | "{" | "}" | ":" => {}
+                "parameter" | "identifier" | "required_parameter" | "optional_parameter" | "rest_parameter"
+                | "typed_parameter" | "default_parameter" | "typed_default_parameter" | "list_splat_pattern"
+                | "dictionary_splat_pattern" => {
+                    if let Some(name) = self.first_identifier(child) {
+                        out.push(name);
+                    }
+                }
+                "object_pattern" | "array_pattern" => {
+                    out.extend(self.pattern_names(child));
+                }
+                _ => {
+                    if let Some(name) = self.first_identifier(child) {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+        let _ = def;
+        out
+    }
+
+    fn first_identifier(&self, id: u32) -> Option<String> {
+        if matches!(self.kind(id), "identifier" | "property_identifier") {
+            return Some(self.text_string(id));
+        }
+        let mut child = self.node(id).first_child;
+        while child != NONE {
+            if let Some(name) = self.first_identifier(child) {
+                return Some(name);
+            }
+            child = self.node(child).next_sibling;
+        }
+        None
+    }
+
+    fn pattern_names(&self, id: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut walk = vec![id];
+        while let Some(node) = walk.pop() {
+            match self.kind(node) {
+                "shorthand_property_identifier_pattern" | "shorthand_property_identifier" => {
+                    out.push(self.text_string(node))
+                }
+                "pair" | "object_assignment_pattern" => {
+                    if let Some(last) = self.children(node).into_iter().last() {
+                        walk.push(last);
+                    }
+                }
+                "identifier" | "property_identifier" | "private_property_identifier" => {
+                    out.push(self.text_string(node).trim_start_matches('#').to_string())
+                }
+                _ => {
+                    let mut child = self.node(node).first_child;
+                    while child != NONE {
+                        walk.push(child);
+                        child = self.node(child).next_sibling;
+                    }
+                }
+            }
+        }
+        out
+    }
+
