@@ -358,3 +358,370 @@ rust_graph_deep::grammar! { JAVA {
     // ---- expressions ----
 
     _expression: precedence _primary {
+        postfix "->" _lambda_body => lambda_expression,
+        right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" | GT_JOINED GT_JOINED ">=" => assignment_expression,
+        cond: postfix "?" _expression ":" _expression@cond => ternary_expression,
+        left "||" => binary_expression,
+        left "&&" => binary_expression,
+        left "|" => binary_expression,
+        left "^" => binary_expression,
+        left "&" => binary_expression,
+        left "==" | "!=" => binary_expression,
+        left "<" | ">" | "<=" | ">=" => binary_expression,
+        postfix "instanceof" ["final"] _type [_name | record_pattern_body] => instanceof_expression,
+        left "<<" | GT_JOINED ">" | GT_JOINED GT_JOINED ">" => binary_expression,
+        left "+" | "-" => binary_expression,
+        left "*" | "/" | "%" => binary_expression,
+        unary: prefix "+" | "-" | "!" | "~" => unary_expression,
+        prefix "++" | "--" => update_expression,
+        postfix "++" | "--" => update_expression,
+        postfix arguments => method_invocation,
+        postfix "." _name => field_access,
+        postfix "." type_arguments _name arguments => method_invocation,
+        postfix "." "class" => class_literal,
+        postfix "." "this" => qualified_this,
+        postfix "." "super" => qualified_super,
+        postfix "." object_creation_expression => qualified_creation,
+        postfix index => array_access,
+        postfix &(type_arguments index* "::") type_arguments => generic_type,
+        postfix "::" [type_arguments] (_name | "new") => method_reference,
+    },
+    _lambda_body: block | _expression,
+    _primary:
+        &(lambda_parameters "->") lambda_parameters
+        | &(primitive_cast_type) cast_expression
+        | &(cast_type _cast_operand) cast_expression
+        | parenthesized_expression
+        | _literal
+        | _name
+        | "this"
+        | "super"
+        | object_creation_expression
+        | switch_expression
+        | _primitive_type,
+    _literal: INTEGER | FLOAT | CHAR | STRING | TEXT_BLOCK | "true" | "false" | "null",
+    lambda_parameters: "(" (_lambda_parameter %? ",") ")",
+    _lambda_parameter: &([_local_modifiers] _type _name) formal_parameter | _name,
+    cast_expression: cast_type _expression@unary,
+    cast_type: "(" _type ("&" _type)* ")",
+    /// Only tried, never kept: a cast to a primitive type casts any operand.
+    primitive_cast_type: "(" _primitive_type dimensions* ")",
+    /// What a cast to a reference type may cast: not `+x` or `-x`, which
+    /// make `(a) + b` a sum.
+    _cast_operand:
+        &(lambda_parameters "->") lambda_parameters
+        | &(cast_type) cast_type
+        | parenthesized_expression
+        | _literal
+        | _name
+        | "this"
+        | "super"
+        | "new"
+        | "switch"
+        | "!"
+        | "~"
+        | _primitive_type,
+    parenthesized_expression: "(" _expression ")",
+    arguments: "(" (_expression %? ",") ")",
+    index: "[" [_expression] "]",
+    object_creation_expression: "new" [type_arguments] _creation_type (arguments [class_body] | dimensions_expr+ [array_initializer]),
+    dimensions_expr: "[" [_expression] "]",
+
+    _name:
+        IDENT | "record" | "yield" | "sealed" | "permits" | "when" | "module" | "open" | "requires"
+        | "exports" | "opens" | "to" | "uses" | "provides" | "with" | "transitive",
+    /// A type's name: not `record`, `yield`, `sealed` or `permits`, which Java
+    /// restricts, so a modifier never reads as a type.
+    _type_identifier:
+        IDENT | "when" | "module" | "open" | "requires" | "exports" | "opens" | "to" | "uses"
+        | "provides" | "with" | "transitive",
+} }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            c.eat_while(|byte| byte != b'\n');
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            c.bump_n(2);
+            while !c.at_end() && !c.starts_with(b"*/") {
+                c.bump();
+            }
+            c.bump_n(2);
+            COMMENT
+        }
+        b'"' if c.starts_with(b"\"\"\"") => {
+            c.bump_n(3);
+            while !c.at_end() && !c.starts_with(b"\"\"\"") {
+                if c.peek() == b'\\' {
+                    c.bump();
+                }
+                c.bump();
+            }
+            if c.starts_with(b"\"\"\"") {
+                c.bump_n(3);
+                TEXT_BLOCK
+            } else {
+                BAD_LITERAL
+            }
+        }
+        b'"' => {
+            c.bump();
+            if c.quoted(b'"', true) { STRING } else { BAD_LITERAL }
+        }
+        b'\'' => {
+            c.bump();
+            if c.quoted(b'\'', true) { CHAR } else { BAD_LITERAL }
+        }
+        b'0'..=b'9' => number(c),
+        b'.' if c.peek_at(1).is_ascii_digit() => number(c),
+        b'@' if c.rest()[1..].starts_with(b"interface") && !is_word_byte(c.peek_at(10)) => {
+            c.bump_n(10);
+            AT_INTERFACE
+        }
+        byte if is_word_start(byte) => {
+            let start = c.pos();
+            c.eat_while(is_word_byte);
+            let text = c.since(start);
+            if text == b"non" && c.starts_with(b"-sealed") && !is_word_byte(c.peek_at(7)) {
+                c.bump_n(7);
+                return KW_NON_SEALED;
+            }
+            keyword(text)
+        }
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"abstract" => KW_ABSTRACT,
+        b"assert" => KW_ASSERT,
+        b"boolean" => KW_BOOLEAN,
+        b"break" => KW_BREAK,
+        b"byte" => KW_BYTE,
+        b"case" => KW_CASE,
+        b"catch" => KW_CATCH,
+        b"char" => KW_CHAR,
+        b"class" => KW_CLASS,
+        b"continue" => KW_CONTINUE,
+        b"default" => KW_DEFAULT,
+        b"do" => KW_DO,
+        b"double" => KW_DOUBLE,
+        b"else" => KW_ELSE,
+        b"enum" => KW_ENUM,
+        b"extends" => KW_EXTENDS,
+        b"final" => KW_FINAL,
+        b"finally" => KW_FINALLY,
+        b"float" => KW_FLOAT,
+        b"for" => KW_FOR,
+        b"if" => KW_IF,
+        b"implements" => KW_IMPLEMENTS,
+        b"import" => KW_IMPORT,
+        b"instanceof" => KW_INSTANCEOF,
+        b"int" => KW_INT,
+        b"interface" => KW_INTERFACE,
+        b"long" => KW_LONG,
+        b"native" => KW_NATIVE,
+        b"new" => KW_NEW,
+        b"package" => KW_PACKAGE,
+        b"private" => KW_PRIVATE,
+        b"protected" => KW_PROTECTED,
+        b"public" => KW_PUBLIC,
+        b"return" => KW_RETURN,
+        b"short" => KW_SHORT,
+        b"static" => KW_STATIC,
+        b"strictfp" => KW_STRICTFP,
+        b"super" => KW_SUPER,
+        b"switch" => KW_SWITCH,
+        b"synchronized" => KW_SYNCHRONIZED,
+        b"this" => KW_THIS,
+        b"throw" => KW_THROW,
+        b"throws" => KW_THROWS,
+        b"transient" => KW_TRANSIENT,
+        b"try" => KW_TRY,
+        b"void" => KW_VOID,
+        b"volatile" => KW_VOLATILE,
+        b"while" => KW_WHILE,
+        b"true" => KW_TRUE,
+        b"false" => KW_FALSE,
+        b"null" => KW_NULL,
+        b"record" => KW_RECORD,
+        b"yield" => KW_YIELD,
+        b"sealed" => KW_SEALED,
+        b"permits" => KW_PERMITS,
+        b"when" => KW_WHEN,
+        b"module" => KW_MODULE,
+        b"open" => KW_OPEN,
+        b"requires" => KW_REQUIRES,
+        b"exports" => KW_EXPORTS,
+        b"opens" => KW_OPENS,
+        b"to" => KW_TO,
+        b"uses" => KW_USES,
+        b"provides" => KW_PROVIDES,
+        b"with" => KW_WITH,
+        b"transitive" => KW_TRANSITIVE,
+        _ => IDENT,
+    }
+}
+
+/// An integer or floating-point literal: decimal, `0x`, `0b` or octal, with
+/// `_` separators, exponents (`p` for hexadecimal) and the `L`, `f` and `d`
+/// suffixes.
+fn number(c: &mut Cursor) -> Kind {
+    let mut kind = INTEGER;
+    let hex = c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X');
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B') {
+        c.bump_n(2);
+    }
+    let digits = |c: &mut Cursor| {
+        if hex {
+            c.eat_while(|byte| byte.is_ascii_hexdigit() || byte == b'_');
+        } else {
+            c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+        }
+    };
+    digits(c);
+    if c.peek() == b'.' && (hex || !is_word_start(c.peek_at(1))) {
+        kind = FLOAT;
+        c.bump();
+        digits(c);
+    }
+    let exponent = if hex { matches!(c.peek(), b'p' | b'P') } else { matches!(c.peek(), b'e' | b'E') };
+    if exponent && (c.peek_at(1).is_ascii_digit() || (matches!(c.peek_at(1), b'+' | b'-') && c.peek_at(2).is_ascii_digit())) {
+        kind = FLOAT;
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    match c.peek() {
+        b'l' | b'L' if kind == INTEGER => c.bump(),
+        b'f' | b'F' | b'd' | b'D' if !hex || kind == FLOAT => {
+            c.bump();
+            kind = FLOAT;
+        }
+        _ => {}
+    }
+    kind
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'(', _, _) => (LPAREN, 1),
+        (b')', _, _) => (RPAREN, 1),
+        (b'[', _, _) => (LBRACKET, 1),
+        (b']', _, _) => (RBRACKET, 1),
+        (b'{', _, _) => (LBRACE, 1),
+        (b'}', _, _) => (RBRACE, 1),
+        (b';', _, _) => (SEMI, 1),
+        (b',', _, _) => (COMMA, 1),
+        (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        (b'.', _, _) => (DOT, 1),
+        (b'@', _, _) => (AT, 1),
+        (b':', b':', _) => (COLONCOLON, 2),
+        (b':', _, _) => (COLON, 1),
+        (b'?', _, _) => (QUESTION, 1),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'=', _, _) => (ASSIGN, 1),
+        (b'!', b'=', _) => (NE, 2),
+        (b'!', _, _) => (BANG, 1),
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'<', _, _) => (LT, 1),
+        (b'>', b'>', _) => (GT_JOINED, 1),
+        (b'>', b'=', _) => (GE, 2),
+        (b'>', _, _) => (GT, 1),
+        (b'~', _, _) => (TILDE, 1),
+        (b'+', b'+', _) => (INCREMENT, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'+', _, _) => (PLUS, 1),
+        (b'-', b'-', _) => (DECREMENT, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'-', _, _) => (MINUS, 1),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'*', _, _) => (STAR, 1),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'/', _, _) => (SLASH, 1),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'%', _, _) => (PERCENT, 1),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'&', _, _) => (AMP, 1),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'|', _, _) => (PIPE, 1),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'^', _, _) => (CARET, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_a::fixtures;
+
+    const VALID: &[(&str, &str)] = &[
+        ("Cache.java", "package_declaration import_declaration import_declaration import_declaration import_declaration class_declaration"),
+        ("Controller.java", "package_declaration import_declaration import_declaration import_declaration import_declaration class_declaration"),
+        ("Enums.java", "package_declaration class_declaration"),
+        ("Geometry.java", "package_declaration interface_declaration"),
+        ("Models.java", "package_declaration import_declaration import_declaration import_declaration import_declaration class_declaration"),
+        ("Repository.java", "package_declaration import_declaration import_declaration import_declaration import_declaration import_declaration class_declaration"),
+        ("Shapes.java", "package_declaration import_declaration import_declaration import_declaration class_declaration"),
+        ("module-info.java", "module_declaration"),
+    ];
+
+    const MALFORMED: &[(&str, &str)] = &[
+        ("broken_signature.java", "package_declaration class_declaration"),
+        ("unclosed_brace.java", "package_declaration class_declaration"),
+        ("unterminated_string.java", "package_declaration class_declaration"),
+    ];
+
+    #[test]
+    fn java_fixtures_parse_cleanly() {
+        fixtures::valid("java", &JAVA, VALID);
+    }
+
+    #[test]
+    fn java_malformed_fixtures_keep_the_root_and_report_inside_it() {
+        fixtures::malformed("java", &JAVA, MALFORMED);
+    }
+
+    #[test]
+    fn java_lexer_joins_nested_generic_closers() {
+        let kinds = fixtures::tokens(&JAVA, "class A { java.util.List<java.util.List<String>> x; }");
+        let joined = kinds.iter().position(|kind| *kind == ">joined").expect("a joined >");
+        assert_eq!(&kinds[joined..joined + 2], [">joined", ">"]);
+        assert!(fixtures::clean(&JAVA, "class A { int f() { return 1; } }"));
+        assert!(!fixtures::clean(&JAVA, "class A { int f( { } }"));
+    }
+
+}
