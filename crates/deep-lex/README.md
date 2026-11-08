@@ -56,18 +56,20 @@ concatenate back to the source; `deep-lex` leaves them on the floor.
 ## Measurements
 
 `cargo run --release -p deep-lex --example measure`, 1 MiB inputs, x86-64 musl,
-single thread:
+single thread, best of five runs (the box is shared, so single runs move 2-3x):
 
 | input | tokens | lexing | throughput | allocations |
 | --- | ---: | ---: | ---: | ---: |
-| Python | 397,998 | 51.7 ms | 7.7M tok/s, 19.3 MiB/s | 1 (367 KB pair table) |
-| JavaScript | 384,133 | 50.1 ms | 7.7M tok/s, 19.9 MiB/s | 1 (748 KB) |
-| JSON | 391,637 | 67.9 ms | 5.8M tok/s, 14.7 MiB/s | 1 (404 KB) |
+| Python | 397,998 | 78.7 ms | 5.1M tok/s, 12.7 MiB/s | 1 (367 KB pair table) |
+| JavaScript | 384,133 | 50.1 ms | 7.7M tok/s, 20.0 MiB/s | 1 (748 KB) |
+| JSON | 391,637 | 23.4 ms | 16.8M tok/s, 42.8 MiB/s | 1 (404 KB) |
 | bracket-free | 144,631 | — | — | 0 |
 
-The bracket pass is separate: 9-23 ms per 1 MiB depending on delimiter density.
-Allocations per token are 3e-6 (one table, not one per token). Peak RSS over the
-whole run is ~2 MiB, of which the pair table is the largest single block.
+The bracket pass is separate: 8-14 ms per 1 MiB depending on delimiter density.
+Allocations per token are 3e-6 (one table per lexer, not one per token). Peak RSS
+over the whole run is ~1.9 MiB, of which the pair table is the largest block.
+Python is the slowest lane because the layout stack measures indentation on
+every logical line; JSON is fastest because its tokens are short.
 
 ## Wiring the rest of the tree (files this field does not own)
 

@@ -105,8 +105,7 @@ fn json_mb() -> Vec<u8> {
 }
 
 fn measure(label: &str, src: &[u8], lang: Language) {
-    // Warm up once so the bracket Vec's capacity growth, if any, is not counted
-    // as per-token cost; then measure a fresh lexer on the same bytes.
+    // Warm up once so the first-touch page faults are not counted.
     {
         let mut warm = DeepLexer::new(src, lang);
         while warm.next_token(0).is_some() {}
@@ -115,55 +114,68 @@ fn measure(label: &str, src: &[u8], lang: Language) {
     let allocs_before = ALLOCS.load(Ordering::Relaxed);
     let bytes_before = BYTES.load(Ordering::Relaxed);
 
-    // Construction separately: the bracket pass is one O(n) scan and its
-    // `pair` Vec is the lexer's only allocation.
-    let build_start = Instant::now();
-    let mut lexer = DeepLexer::new(src, lang);
-    let build = build_start.elapsed();
+    let mut best = f64::MAX;
+    let mut best_tokens = 0u64;
+    let mut best_significant = 0u64;
+    let mut best_build = f64::MAX;
+    let mut pair_bytes = 0usize;
+    for _ in 0..5 {
+        // Construction separately: the bracket pass is one O(n) scan and its
+        // `pair` Vec is the lexer's only allocation.
+        let build_start = Instant::now();
+        let mut lexer = DeepLexer::new(src, lang);
+        let build = build_start.elapsed().as_secs_f64();
 
-    let start = Instant::now();
-    let mut tokens = 0u64;
-    let mut significant = 0u64;
-    while let Some(token) = lexer.next_token(0) {
-        tokens += 1;
-        // Compare symbols directly: `Kind::from_symbol` is a linear search and
-        // would measure itself, not the lexer.
-        let layout = token.symbol == Kind::Newline as u16
-            || token.symbol == Kind::Indent as u16
-            || token.symbol == Kind::Dedent as u16;
-        if !layout {
-            significant += 1;
+        let start = Instant::now();
+        let mut tokens = 0u64;
+        let mut significant = 0u64;
+        while let Some(token) = lexer.next_token(0) {
+            tokens += 1;
+            // Compare symbols directly: `Kind::from_symbol` is a linear search
+            // and would measure itself, not the lexer.
+            let layout = token.symbol == Kind::Newline as u16
+                || token.symbol == Kind::Indent as u16
+                || token.symbol == Kind::Dedent as u16;
+            if !layout {
+                significant += 1;
+            }
         }
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed < best {
+            best = elapsed;
+            best_tokens = tokens;
+            best_significant = significant;
+        }
+        best_build = best_build.min(build);
+        pair_bytes = lexer.pair().len() * 4;
     }
-    let elapsed = start.elapsed();
 
     let allocs = ALLOCS.load(Ordering::Relaxed) - allocs_before;
     let bytes = BYTES.load(Ordering::Relaxed) - bytes_before;
     let rss_after = rss_kb();
     let peak = peak_rss_kb();
 
-    let seconds = elapsed.as_secs_f64();
-    let per_second = tokens as f64 / seconds;
-    let mb_per_second = (src.len() as f64 / (1 << 20) as f64) / seconds;
-    let per_token = allocs as f64 / tokens as f64;
+    let per_second = best_tokens as f64 / best;
+    let mb_per_second = (src.len() as f64 / (1 << 20) as f64) / best;
+    let per_token = allocs as f64 / (best_tokens * 5) as f64;
 
-    println!("{label}");
+    println!("{label} (best of five)");
     println!("  input            {} bytes ({} KiB)", src.len(), src.len() / 1024);
-    println!("  tokens           {tokens} ({significant} significant, {} layout)", tokens - significant);
-    println!("  construction     {:.3} ms (bracket pair pass)", build.as_secs_f64() * 1e3);
-    println!("  lexing           {:.3} ms", seconds * 1e3);
+    println!(
+        "  tokens           {best_tokens} ({best_significant} significant, {} layout)",
+        best_tokens - best_significant
+    );
+    println!("  construction     {:.3} ms (bracket pair pass)", best_build * 1e3);
+    println!("  lexing           {:.3} ms", best * 1e3);
     println!("  throughput       {per_second:.0} tokens/s, {mb_per_second:.1} MiB/s");
-    println!("  ns per token     {:.1}", seconds * 1e9 / tokens as f64);
-    println!("  allocations      {allocs} ({bytes} bytes), {per_token:.6} per token");
-    println!("  bracket pairs    {} bytes of pair[]", lexer.pair().len() * 4);
+    println!("  ns per token     {:.1}", best * 1e9 / best_tokens as f64);
+    println!("  allocations      {allocs} over five runs ({bytes} bytes), {per_token:.6} per token");
+    println!("  bracket pairs    {pair_bytes} bytes of pair[]");
     println!("  RSS before/after {rss_before} / {rss_after} KiB, peak {peak} KiB");
     println!();
 
-    // The claim: one allocation for the bracket table, none per token.
-    assert!(
-        allocs <= 1,
-        "{label}: {allocs} allocations for {tokens} tokens"
-    );
+    // The claim: one allocation for the bracket table per lexer, none per token.
+    assert!(allocs <= 5, "{label}: {allocs} allocations for five lexers");
     assert!(per_token < 1e-5, "{label}: {per_token} allocations per token");
 }
 
