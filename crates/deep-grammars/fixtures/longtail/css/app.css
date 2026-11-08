@@ -1,0 +1,51 @@
+@charset "utf-8";
+
+:root {
+  --bg: #101318;
+  --fg: #e6e8eb;
+  --accent: rgb(76, 141, 255);
+  --radius: 6px;
+}
+
+body.dark {
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 "Inter", system-ui, sans-serif;
+  margin: 0;
+}
+
+header#top nav a {
+  color: var(--accent);
+  text-decoration: none;
+  padding: 0.25rem 0.5rem;
+}
+
+header#top nav a:hover,
+header#top nav a.active {
+  text-decoration: underline;
+}
+
+ul.repo-list > li::marker {
+  content: "\2022  ";
+  color: #7a8794;
+}
+
+@media (max-width: 720px) {
+  body.dark {
+    font-size: 13px;
+  }
+  ul.repo-list > li {
+    display: block;
+  }
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/static/inter.woff2") format("woff2");
+  font-weight: 400;
+}
+
+.card .badge::after {
+  content: none;
+  margin-left: calc(var(--radius) * 2);
+}
