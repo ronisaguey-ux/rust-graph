@@ -20,6 +20,7 @@
 pub mod batch_a;
 pub mod batch_b;
 pub mod batch_c;
+pub mod batch_d;
 pub mod deep;
 pub mod javascript;
 pub mod python;
