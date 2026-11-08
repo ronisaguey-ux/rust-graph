@@ -270,7 +270,8 @@ the rest:
 
 The differential test `crates/deep-rt/tests/incremental.rs` asserts the
 incremental tree is byte-identical to a full parse on real Python files, edits
-included, and that it is faster; that test is the contract, not the prose.
+included, and (in a release build, where the timing assertion is not skipped)
+that it is faster; that test is the contract, not the prose.
 
 Limits, explicitly:
 
