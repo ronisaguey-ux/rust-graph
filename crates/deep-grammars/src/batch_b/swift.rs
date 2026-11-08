@@ -1,0 +1,383 @@
+//! Swift through `grammar!`: one of Field 6's four languages (Ruby, PHP, Swift,
+//! Scala).
+//!
+//! Swift is brace-delimited and has no statement terminator, so no layout rule
+//! is needed: a line break is whitespace and a block ends at its `}`. Node
+//! names follow Tree-sitter's Swift where that costs nothing; the tree is not
+//! the same tree.
+//!
+//! What the DSL covers here:
+//!
+//! - **Declarations carry modifiers and attributes.** `@MainActor public final
+//!   class`, `static func` and `private var` share a prefix, so each
+//!   declaration alternative is entered through `&([declaration_modifiers]
+//!   "keyword")`, the same answer Java's grammar uses.
+//! - **`let`/`var` are declarations anywhere.** A local binding and a stored
+//!   property are the same rule, because Swift makes them the same construct;
+//!   the node is `property_declaration` in both places.
+//! - **Closures are the weakest postfix row.** `foo { ... }` is a trailing
+//!   closure, and the row sits below assignment so that a statement's
+//!   expression takes it while an `if`/`while` condition, entered at
+//!   `_expression@assign`, does not: that is what keeps `if x { ... }` a
+//!   statement and its body rather than a call.
+//! - **Optional chaining is one token.** `a?.b` lexes `?.`, so the ternary `?`
+//!   row never sees it.
+//! - **`>` before `>` is `GT_JOINED`**, as in the Rust, JavaScript and Java
+//!   grammars, so `Foo<Bar<Baz>>` closes two type lists and `a >> b` is
+//!   `GT_JOINED ">"`.
+//! - **Strings are single tokens.** A string's `\(...)` interpolation is
+//!   scanned with its parentheses and inner strings balanced and stays opaque;
+//!   a multi-line string and a raw string are one token each.
+//!
+//! What the DSL cannot express, and how it is handled here instead:
+//!
+//! - **A string's interpolation is a mode switch.** `\(` returns to code and
+//!   the matching `)` returns to the string; the DSL's one-function-per-token
+//!   lexer has no mode stack, so the step lexer scans the whole literal and the
+//!   fields stay unparsed. This is why `interpolation` is not a node.
+//! - **Custom operators cannot be enumerated.** Swift lets a program declare
+//!   any operator; a grammar cannot, so this one takes the fixed set the
+//!   standard library uses (`+ - * / % == != < > <= >= && || ?? ... ..< =~`)
+//!   and every augmentation of `=`. A file that declares its own operator
+//!   lexes it as `UNKNOWN`.
+//! - **Automatic semicolon insertion does not exist here.** A line break is
+//!   whitespace, so `x = 1` followed by `y = 2` is two statements only because
+//!   a second expression cannot continue the first without an operator. A file
+//!   relying on a following line that begins with an operator (Swift allows
+//!   neither) would parse differently; real Swift does not.
+//! - **The type grammar is shallow.** `some`/`any`/`inout`, optionals,
+//!   generics, tuples, dictionaries, arrays and function arrows are types;
+//!   `where` constraints are parsed as types too. Opaque `some P & Q` and
+//!   protocol compositions are not modelled.
+//! - **A decision sees three tokens.** Declarations sharing a modifier prefix
+//!   and a closure's `(x: Int) in` head both need more, so they use `&(...)`
+//!   predicates.
+//! - **One kind per rule**, so `class`, `struct`, `enum`, `protocol`,
+//!   `extension` and `actor` are six rules.
+
+use crate::deep::lexer::Cursor;
+use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
+
+rust_graph_deep::grammar! { SWIFT {
+    name = "swift";
+    lex = lex;
+
+    tokens {
+        LPAREN = "(" open parens,
+        RPAREN = ")" close parens,
+        LBRACKET = "[" open brackets,
+        RBRACKET = "]" close brackets,
+        LBRACE = "{" open braces,
+        RBRACE = "}" close braces,
+        IDENT = "identifier",
+        NUMBER = "integer",
+        FLOAT = "float",
+        STRING = "string",
+        /// A string or raw string with no end.
+        BAD_LITERAL = "bad_literal" bad,
+
+        KW_ACTOR = "actor",
+        KW_ANY = "any",
+        KW_AS = "as",
+        KW_ASYNC = "async",
+        KW_AWAIT = "await",
+        KW_BREAK = "break",
+        KW_CASE = "case",
+        KW_CATCH = "catch",
+        KW_CLASS = "class",
+        KW_CONTINUE = "continue",
+        KW_DEFAULT = "default",
+        KW_DEFER = "defer",
+        KW_DEINIT = "deinit",
+        KW_DO = "do",
+        KW_ELSE = "else",
+        KW_ENUM = "enum",
+        KW_EXTENSION = "extension",
+        KW_FALSE = "false",
+        KW_FOR = "for",
+        KW_FUNC = "func",
+        KW_GUARD = "guard",
+        KW_IF = "if",
+        KW_IMPORT = "import",
+        KW_IN = "in",
+        KW_INIT = "init",
+        KW_INOUT = "inout",
+        KW_IS = "is",
+        KW_LET = "let",
+        KW_NIL = "nil",
+        KW_PROTOCOL = "protocol",
+        KW_REPEAT = "repeat",
+        KW_RETHROWS = "rethrows",
+        KW_RETURN = "return",
+        KW_SELF = "self",
+        KW_SOME = "some",
+        KW_STRUCT = "struct",
+        KW_SUBSCRIPT = "subscript",
+        KW_SUPER = "super",
+        KW_SWITCH = "switch",
+        KW_THROW = "throw",
+        KW_THROWS = "throws",
+        KW_TRUE = "true",
+        KW_TRY = "try",
+        KW_TYPEALIAS = "typealias",
+        KW_VAR = "var",
+        KW_WHERE = "where",
+        KW_WHILE = "while",
+
+        /// Declaration modifiers: names everywhere but where a declaration starts.
+        KW_PUBLIC = "public",
+        KW_PRIVATE = "private",
+        KW_FILEPRIVATE = "fileprivate",
+        KW_INTERNAL = "internal",
+        KW_OPEN = "open",
+        KW_FINAL = "final",
+        KW_STATIC = "static",
+        KW_OVERRIDE = "override",
+        KW_MUTATING = "mutating",
+        KW_NONMUTATING = "nonmutating",
+        KW_LAZY = "lazy",
+        KW_WEAK = "weak",
+        KW_UNOWNED = "unowned",
+        KW_REQUIRED = "required",
+        KW_CONVENIENCE = "convenience",
+        KW_DYNAMIC = "dynamic",
+        KW_INDIRECT = "indirect",
+
+        SEMI = ";",
+        COMMA = ",",
+        DOT = ".",
+        BACKSLASH = "\\",
+        DOTDOT = "..",
+        ELLIPSIS = "...",
+        RANGE_OPEN = "..<",
+        OPTIONAL_CHAIN = "?.",
+        COLON = ":",
+        QUESTION = "?",
+        AT = "@",
+        ARROW = "->",
+        ASSIGN = "=",
+        PLUS_EQ = "+=",
+        MINUS_EQ = "-=",
+        STAR_EQ = "*=",
+        SLASH_EQ = "/=",
+        PERCENT_EQ = "%=",
+        AMP_EQ = "&=",
+        PIPE_EQ = "|=",
+        CARET_EQ = "^=",
+        SHL_EQ = "<<=",
+        SHR_EQ = ">>=",
+        EQ = "==",
+        STRICT_EQ = "===",
+        NE = "!=",
+        STRICT_NE = "!==",
+        LE = "<=",
+        GE = ">=",
+        ANDAND = "&&",
+        OROR = "||",
+        NULLISH = "??",
+        SHL = "<<",
+        PLUS = "+",
+        MINUS = "-",
+        STAR = "*",
+        SLASH = "/",
+        PERCENT = "%",
+        AMP = "&",
+        PIPE = "|",
+        CARET = "^",
+        TILDE = "~",
+        BANG = "!",
+        LT = "<",
+        GT = ">",
+        /// A `>` right before another `>`: the first half of `>>`, `>>=`, or a
+        /// generic argument list closing right before another.
+        GT_JOINED = ">joined",
+    }
+
+    program: _statement*,
+
+    _statement:
+        &([declaration_modifiers] "func") function_declaration
+        | &([declaration_modifiers] "class") class_declaration
+        | &([declaration_modifiers] "struct") struct_declaration
+        | &([declaration_modifiers] "enum") enum_declaration
+        | &([declaration_modifiers] "protocol") protocol_declaration
+        | &([declaration_modifiers] "extension") extension_declaration
+        | &([declaration_modifiers] "actor") actor_declaration
+        | &([declaration_modifiers] "init") initializer_declaration
+        | &([declaration_modifiers] "subscript") subscript_declaration
+        | &([declaration_modifiers] ("let" | "var")) property_declaration
+        | &("deinit") deinitializer_declaration
+        | &("import") import_declaration
+        | &("typealias") typealias_declaration
+        | if_statement
+        | guard_statement
+        | while_statement
+        | repeat_statement
+        | for_statement
+        | switch_statement
+        | do_statement
+        | defer_statement
+        | return_statement
+        | throw_statement
+        | break_statement
+        | continue_statement
+        | ";"
+        | expression_statement,
+
+    // ---- declarations ----
+
+    declaration_modifiers: (attribute | modifier)+,
+    modifier:
+        "public" | "private" | "fileprivate" | "internal" | "open" | "final" | "static"
+        | "override" | "mutating" | "nonmutating" | "lazy" | "weak" | "unowned" | "required"
+        | "convenience" | "dynamic" | "indirect",
+    attribute: "@" _name [attribute_arguments],
+    attribute_arguments: "(" (_expression %? ",") ")",
+
+    import_declaration: "import" ["class" | "struct" | "enum" | "protocol" | "func" | "var" | "let" | "typealias"] _name ("." _name)*,
+    typealias_declaration: "typealias" _name [generic_parameters] "=" _type,
+
+    class_declaration: [declaration_modifiers] "class" _name [generic_parameters] [inheritance_clause] [where_clause] type_body,
+    struct_declaration: [declaration_modifiers] "struct" _name [generic_parameters] [inheritance_clause] [where_clause] type_body,
+    enum_declaration: [declaration_modifiers] "enum" _name [generic_parameters] [inheritance_clause] [where_clause] type_body,
+    protocol_declaration: [declaration_modifiers] "protocol" _name [inheritance_clause] [where_clause] type_body,
+    extension_declaration: [declaration_modifiers] "extension" _name [inheritance_clause] [where_clause] type_body,
+    actor_declaration: [declaration_modifiers] "actor" _name [generic_parameters] [inheritance_clause] [where_clause] type_body,
+    inheritance_clause: ":" (_type % ","),
+    where_clause: "where" (_where_constraint % ","),
+    _where_constraint: _type ("==" _type | ":" _type),
+    type_body: "{" _type_member* "}",
+    _type_member: enum_case_declaration | _statement,
+    enum_case_declaration: "case" (_enum_case % ","),
+    _enum_case: _name [enum_case_values],
+    enum_case_values: "(" (_type %? ",") ")",
+
+    function_declaration: [declaration_modifiers] "func" _name [generic_parameters] parameter_clause ["async"] ["throws" | "rethrows"] ["->" _type] [where_clause] [(block | ";")],
+    initializer_declaration: [declaration_modifiers] "init" ["?" | "!"] parameter_clause ["async"] ["throws"] [where_clause] (block | ";"),
+    deinitializer_declaration: "deinit" block,
+    subscript_declaration: [declaration_modifiers] "subscript" parameter_clause "->" _type (block | ";"),
+    parameter_clause: "(" (parameter %? ",") ")",
+    parameter: simple_parameter | labeled_parameter,
+    simple_parameter: _name ":" _type ["..."] ["=" _expression@assign],
+    /// `label name: Type`: the label comes first and shadows nothing.
+    labeled_parameter: _name simple_parameter,
+    property_declaration: [declaration_modifiers] ("let" | "var") (_binding % ","),
+    _binding: _name [":" _type] [block | "=" _expression@assign],
+
+    generic_parameters: "<" (generic_parameter %? ",") _gt,
+    generic_parameter: _name [":" _type],
+    _gt: ">" | GT_JOINED,
+
+    // ---- statements ----
+
+    block: "{" _statement* "}",
+    expression_statement: _expression,
+
+    if_statement: "if" _condition block [else_clause],
+    else_clause: "else" (if_statement | block),
+    guard_statement: "guard" _condition "else" block,
+    while_statement: "while" _condition block,
+    repeat_statement: "repeat" block "while" _condition,
+    for_statement: "for" _for_binding "in" _expression@nilco block,
+    _for_binding: [_for_owner] _name,
+    _for_owner: "let" | "var",
+    _condition: binding_condition | _expression@nilco,
+    /// `if let x = ...`, `guard var y = ...`: a binding, where the keyword tells
+    /// it from a plain condition.
+    binding_condition: ("let" | "var") condition_binding,
+    /// A condition's binding stops before the block: its initializer is entered
+    /// above the trailing-closure row, `if foo {` and `if let x = foo {` alike.
+    condition_binding: _name [":" _type] ["=" _expression@nilco],
+
+    switch_statement: "switch" _expression@nilco switch_body,
+    switch_body: "{" switch_case* "}",
+    switch_case: case_label ":" _statement*,
+    case_label: "case" (_pattern % ",") | "default",
+    _pattern: _expression@assign,
+
+    do_statement: "do" block catch_clause*,
+    catch_clause: "catch" [_name] block,
+    defer_statement: "defer" block,
+    return_statement: "return" [_expression],
+    throw_statement: "throw" _expression,
+    break_statement: "break" [_name],
+    continue_statement: "continue" [_name],
+
+    // ---- expressions ----
+
+    _expression: precedence _primary {
+        assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" => assignment,
+        cond: postfix "?" _expression ":" _expression@assign => ternary,
+        closure: postfix closure => trailing_closure,
+        nilco: left "??" => nil_coalescing,
+        or: left "||" => binary,
+        and: left "&&" => binary,
+        eq: left "==" | "!=" | "===" | "!==" => binary,
+        cmp: left "<" | ">" | "<=" | ">=" => binary,
+        cast: left "is" _type | "as" ["?" | "!"] _type => cast,
+        range: left "..." | "..<" => range,
+        bor: left "|" => binary,
+        xor: left "^" => binary,
+        band: left "&" => binary,
+        shift: left "<<" | GT_JOINED ">" => binary,
+        add: left "+" | "-" => binary,
+        mul: left "*" | "/" | "%" => binary,
+        try: prefix "try" ["?" | "!"] => try_expression,
+        await: prefix "await" => await_expression,
+        unary: prefix "-" | "+" | "!" | "~" | "&" => prefix_expression,
+        postfix "!" => force_unwrap,
+        postfix "?." _property => optional_chaining_expression,
+        postfix "." _property => navigation_expression,
+        postfix arguments => call_expression,
+        postfix subscript => subscript_expression,
+    },
+
+    _primary:
+        NUMBER | FLOAT | STRING
+        | "true" | "false" | "nil" | "self" | "super"
+        | _name
+        | parenthesized_expression
+        | collection_literal
+        | closure
+        | implicit_member_expression
+        | key_path_expression,
+
+    _name: IDENT,
+    _property: IDENT | "self" | "init" | "default" | "class",
+    parenthesized_expression: "(" _expression ")",
+    arguments: "(" (_argument %? ",") ")",
+    _argument: &(_name ":") labeled_argument | _argument_value,
+    labeled_argument: _name ":" _argument_value,
+    _argument_value: ("let" | "var") _name | _expression@assign,
+    subscript: "[" (_argument %? ",") "]",
+    /// An array or dictionary literal: one node kind, because `[a: b]` and
+    /// `[a, b]` are told apart by a `:` inside the brackets, which the DSL's
+    /// group rule cannot look for before it opens the group.
+    collection_literal: "[" [collection_body] "]",
+    collection_body: ":" | _collection_items,
+    _collection_items: _collection_item ("," _collection_item)*,
+    _collection_item: &(_expression ":") pair_entry | _expression,
+    pair_entry: _expression ":" _expression,
+    implicit_member_expression: "." _property,
+    key_path_expression: "\\" ("." _property | _name ("." _property)*),
+    closure: "{" [closure_signature] _statement* "}",
+    closure_signature:
+        &(_closure_parameter_list "in") _closure_parameter_list "in"
+        | &(_closure_parameter_name "in") _closure_parameter_name "in",
+    _closure_parameter_list: closure_parameter_group ["->" _type],
+    closure_parameter_group: "(" (_name %? ",") ")",
+    _closure_parameter_name: _name ["->" _type],
+
+    // ---- types ----
+
+    _type: _type_shape ["->" _type],
+    _type_shape: [_type_modifier] _type_atom _type_suffix*,
+    _type_modifier: "some" | "any" | "inout",
+    _type_atom: _name | collection_type | tuple_type,
+    _type_suffix: "?" | "!" | "." _name | type_arguments,
+    /// `[Int]` or `[String: Int]`: one rule, like the literal.
+    collection_type: "[" _type [":" _type] "]",
+    tuple_type: "(" (_type %? ",") ")",
+    type_arguments: "<" (_type %? ",") _gt,
+} }
+
