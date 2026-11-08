@@ -280,3 +280,289 @@ fn full_parse(
     parse(grammar, &mut lexer, config)
 }
 
+/// Everything the replay learned about the old tree, and the window to start at.
+struct Prepared {
+    /// State on top of the stack at the first byte of each old node.
+    state_before: Vec<StateId>,
+    /// Stack height (states.len()) at the first byte of each old node.
+    height_before: Vec<u32>,
+    /// The stack at `window_start`, as `(state, old node)` pairs.
+    prefix_states: Vec<StateId>,
+    prefix_nodes: Vec<NodeId>,
+    /// First and one-past-last token ordinal of each old node's subtree, in
+    /// document order. These are what a splice advances the token index by:
+    /// byte offsets cannot tell two zero-width `DEDENT`s at the same position
+    /// apart, token ordinals can.
+    leaf_start: Vec<u32>,
+    leaf_end: Vec<u32>,
+    /// The old token stream in document order: symbol and span of every leaf.
+    /// A splice must find exactly these tokens, shifted, in the new stream.
+    leaves: Vec<(SymbolId, Offset, Offset)>,
+    /// How many zero-width tokens at `window.start` the prefix already
+    /// consumed (the `DEDENT`s that close the blocks before a statement).
+    empty_before: u32,
+    /// The smallest node covering the edit.
+    window: NodeId,
+    /// Old nodes strictly after the edit, sorted by start and then by span
+    /// descending: `(old_start, old_id)`.
+    suffix: Vec<(Offset, NodeId)>,
+}
+
+/// Walk the old tree in the order the parser built it, replaying the LR stack.
+///
+/// Returns `None` when the tree cannot be replayed exactly (a missing node, an
+/// action the table does not have), which the caller treats as "parse it all".
+fn prepare(
+    grammar: &Grammar<'_>,
+    old: &Cst,
+    edit: &Edit,
+    old_len: Offset,
+    tokens: &[Token],
+    widen: usize,
+) -> Option<Prepared> {
+    // The smallest node covering the edit is the first candidate. When the
+    // prefix's token stream no longer matches the new one — a deleted line can
+    // remove a `DEDENT` *before* the window — widen to the parent and try again.
+    // The last candidate is the root, whose prefix is empty. `widen` starts the
+    // search higher, for the caller's retry after a parse that did not line up.
+    let parent = parents(old);
+    let mut window = covering(&old.nodes, old.root, edit);
+    for _ in 0..widen {
+        if window == old.root {
+            break;
+        }
+        window = parent[window as usize];
+    }
+    loop {
+        if let Some(prepared) = prepare_at(grammar, old, edit, old_len, window, tokens) {
+            return Some(prepared);
+        }
+        if window == old.root {
+            return None;
+        }
+        window = parent[window as usize];
+    }
+}
+
+/// Parent of every node, so a window can be widened one level at a time.
+fn parents(old: &Cst) -> Vec<NodeId> {
+    let mut parent = vec![NONE; old.nodes.len()];
+    let mut stack: Vec<NodeId> = vec![old.root];
+    while let Some(id) = stack.pop() {
+        let mut child = old.nodes[id as usize].first_child;
+        while child != NONE {
+            parent[child as usize] = id;
+            stack.push(child);
+            child = old.nodes[child as usize].next_sibling;
+        }
+    }
+    parent
+}
+
+fn prepare_at(
+    grammar: &Grammar<'_>,
+    old: &Cst,
+    edit: &Edit,
+    old_len: Offset,
+    window: NodeId,
+    tokens: &[Token],
+) -> Option<Prepared> {
+    macro_rules! giveup {
+        ($($t:tt)*) => {{
+            return None;
+        }};
+    }
+    let nodes = &old.nodes;
+    let mut state_before = vec![StateId::MAX; nodes.len()];
+    let mut height_before = vec![0u32; nodes.len()];
+    let mut leaf_start = vec![0u32; nodes.len()];
+    let mut leaf_end = vec![0u32; nodes.len()];
+    let mut leaves = 0u32;
+    let mut leaf_tokens: Vec<(SymbolId, Offset, Offset)> = Vec::new();
+    let mut states: Vec<StateId> = Vec::with_capacity(64);
+    states.push(0);
+    let mut entries: Vec<NodeId> = Vec::with_capacity(64);
+    entries.push(NONE);
+    let mut prefix: Option<(Vec<StateId>, Vec<NodeId>)> = None;
+
+    // Iterative post-order: children before their parent, left to right.
+    let mut work: Vec<(NodeId, bool)> = Vec::with_capacity(64);
+    work.push((old.root, false));
+    let mut kids: Vec<NodeId> = Vec::new();
+    while let Some((id, done)) = work.pop() {
+        let node = nodes[id as usize];
+        if !done {
+            work.push((id, true));
+            kids.clear();
+            let mut child = node.first_child;
+            while child != NONE {
+                if nodes[child as usize].flags & FLAG_ERROR == 0 {
+                    kids.push(child);
+                }
+                child = nodes[child as usize].next_sibling;
+            }
+            for &child in kids.iter().rev() {
+                work.push((child, false));
+            }
+            continue;
+        }
+
+        if node.flags & (FLAG_ERROR | FLAG_MISSING) != 0 {
+            // Error nodes are adopted into a parent and missing nodes are
+            // inserted, so neither is a plain stack entry.
+            giveup!("prepare: error/missing node");
+        }
+
+        // Count the children this node's reduction pops.
+        let mut popped = 0usize;
+        let mut child = node.first_child;
+        while child != NONE {
+            if nodes[child as usize].flags & FLAG_ERROR == 0 {
+                popped += 1;
+            }
+            child = nodes[child as usize].next_sibling;
+        }
+        if popped > 0 && popped + 1 > states.len() {
+            giveup!("prepare: stack too short at {id}");
+        }
+        if popped > 0 {
+            let keep = states.len() - popped;
+            states.truncate(keep);
+            entries.truncate(keep);
+        }
+        let top = *states.last()?;
+        state_before[id as usize] = top;
+        height_before[id as usize] = states.len() as u32;
+        if id == window {
+            prefix = Some((states.clone(), entries.clone()));
+        }
+
+        if popped == 0 {
+            // Either a terminal the parser shifted, or a node an ε production
+            // reduced — an empty `STMTS` has no children and is not a token.
+            match table::action(grammar, top, node.kind) {
+                Action::Shift(target) => {
+                    leaf_start[id as usize] = leaves;
+                    leaves += 1;
+                    leaf_end[id as usize] = leaves;
+                    leaf_tokens.push((node.kind, node.start, node.end));
+                    states.push(target);
+                    entries.push(id);
+                }
+                _ => match table::goto(grammar, top, node.kind) {
+                    Some(target) => {
+                        leaf_start[id as usize] = leaves;
+                        leaf_end[id as usize] = leaves;
+                        states.push(target);
+                        entries.push(id);
+                    }
+                    None => giveup!("prepare: no goto/shift for kind {} at {id}", node.kind),
+                },
+            }
+        } else {
+            let kind = node.kind;
+            leaf_end[id as usize] = leaves;
+            let mut first = node.first_child;
+            leaf_start[id as usize] = leaves;
+            while first != NONE {
+                if nodes[first as usize].flags & FLAG_ERROR == 0 {
+                    leaf_start[id as usize] = leaf_start[first as usize];
+                    break;
+                }
+                first = nodes[first as usize].next_sibling;
+            }
+            match table::goto(grammar, top, kind) {
+                Some(target) => {
+                    states.push(target);
+                    entries.push(id);
+                }
+                None => giveup!("prepare: no goto for kind {kind} from {top} at {id}"),
+            }
+        }
+    }
+
+    // A clean replay ends with state 0 plus the root.
+    if states.len() != 2 {
+        giveup!("prepare: replay ended at len {}", states.len());
+    }
+    let Some((prefix_states, prefix_nodes)) = prefix else {
+        giveup!("prepare: window {window} was never visited");
+    };
+    // Zero-width tokens sit at the same byte as the node that follows them, so
+    // a byte lookup lands on one the prefix already ate.
+    let window_start = nodes[window as usize].start;
+    let mut empty_before = 0u32;
+    for (id, node) in nodes.iter().enumerate() {
+        if node.start == window_start
+            && node.end == window_start
+            && leaf_end[id] == leaf_start[id] + 1
+            && leaf_start[id] < leaf_start[window as usize]
+        {
+            empty_before += 1;
+        }
+    }
+
+    // Children of the window that the edit does not touch are still candidates
+    // but the window itself is not: it is the region we rebuild.
+    let mut suffix: Vec<(Offset, NodeId)> = Vec::new();
+    for (id, node) in nodes.iter().enumerate() {
+        if node.flags & (FLAG_ERROR | FLAG_MISSING) != 0 {
+            continue;
+        }
+        if node.end <= node.start || node.start < edit.old_end() || node.end > old_len {
+            continue;
+        }
+        suffix.push((node.start, id as NodeId));
+    }
+    // Biggest span first inside each start, so the first candidate that lines up
+    // reuses as much as possible.
+    suffix.sort_unstable_by(|a, b| {
+        let sa = nodes[a.1 as usize].end - nodes[a.1 as usize].start;
+        let sb = nodes[b.1 as usize].end - nodes[b.1 as usize].start;
+        a.0.cmp(&b.0).then(sb.cmp(&sa)).then(a.1.cmp(&b.1))
+    });
+
+    // Is the prefix really the same token sequence? Layout tokens are the
+    // reason this matters: deleting the `def` that opened a block removes a
+    // `DEDENT` before the edit, and every state after it is then meaningless.
+    let mut ti = 0usize;
+    while ti < tokens.len() && tokens[ti].start < window_start {
+        ti += 1;
+    }
+    ti += empty_before as usize;
+    let before = leaf_start[window as usize] as usize;
+    if ti != before {
+        giveup!("prepare: prefix has {before} tokens, the new stream {ti}");
+    }
+    let order = leaf_tokens;
+    // The prefix state must be able to act on the next token. When an edit
+    // deletes a whole token — dedenting a line removes its `INDENT` — the state
+    // that expected that token cannot continue, and the window has to go back
+    // to an enclosing production.
+    if let (Some(top), Some(next)) = (prefix_states.last().copied(), tokens.get(ti)) {
+        if table::action(grammar, top, next.symbol) == Action::None {
+            giveup!("prepare: state {top} cannot act on symbol {}", next.symbol);
+        }
+    }
+    if ti > 0 {
+        for at in 0..ti {
+            if order[at].0 != tokens[at].symbol {
+                giveup!("prepare: token {at} was {} and is now {}", order[at].0, tokens[at].symbol);
+            }
+        }
+    }
+
+    Some(Prepared {
+        state_before,
+        height_before,
+        leaf_start,
+        leaf_end,
+        prefix_states,
+        prefix_nodes,
+        empty_before,
+        leaves: order,
+        window,
+        suffix,
+    })
+}
+
