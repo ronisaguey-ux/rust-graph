@@ -74,3 +74,26 @@ fn main() -> ExitCode {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The second parser: features `deep` and `parser`.
+//
+// Declared after the last line the default build already had, for the same
+// reason as the pipeline's own section: a debug build's line table encodes
+// line numbers, so a declaration placed above would move bytes the default
+// binary is measured by. With the features off nothing here exists.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(feature = "deep", feature = "parser"))] mod deep;
+
+/// Gives the crate root the name `crate::deep_integration`, which
+/// `src/deep_facts.rs` imports. It is a glob of a one-name module so this file
+/// never writes the bridge's name; `crates/deep-bench` checks that the default
+/// build does not carry the bridge at all.
+#[cfg(all(feature = "deep", feature = "parser"))]
+use crate::pipeline::gate::*;
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+const USAGE_DEEP: &str = "       --deep    parse through the CST wherever this build has one for the language
+       --lexer   parse through the one-pass lexer everywhere
+       (default: the CST where it is available, the lexer otherwise)";

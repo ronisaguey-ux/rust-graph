@@ -650,3 +650,298 @@ pub fn build(options: &Options) -> io::Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// The second parser: features `deep` and `parser`.
+//
+// Everything in this section compiles only when both features are on, and it
+// sits after the last line the default build already had. The placement is
+// measured, not cosmetic: a panic site stores its file and line, so adding a
+// line anywhere above would move bytes in the default binary even with the
+// code `cfg`'d out. The hooks in the pipeline above are therefore one line
+// each — a `cfg`-chosen call, never a new block — and this section is where
+// the work they name lives. `crates/deep-bench/default-build.sha256` records
+// what the default binary hashes to.
+// ---------------------------------------------------------------------------
+
+/// Which parser a build uses: the one-pass lexer, the CST, or — the default —
+/// the CST where this build has one for the language and the lexer elsewhere.
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PathMode {
+    #[default]
+    Auto,
+    Deep,
+    Lexer,
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+impl PathMode {
+    fn description(self) -> &'static str {
+        match self {
+            PathMode::Auto => "auto",
+            PathMode::Deep => "deep",
+            PathMode::Lexer => "lexer",
+        }
+    }
+}
+
+/// The bridge, re-exported under the name `src/deep_facts.rs` already uses.
+///
+/// The bridge is a module of the pipeline rather than of the crate root so that
+/// `src/main.rs` never has to name it: the crate-root glob in `main.rs` is what
+/// gives `crate::deep_integration` its meaning, and it exists only under the
+/// feature gate.
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[path = "deep_integration.rs"]
+pub(crate) mod bridge;
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+pub(crate) mod gate {
+    pub(crate) use super::bridge as deep_integration;
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[path = "deep_facts.rs"]
+mod deep_facts;
+
+/// The parser this run is using, and the per-file record of what each file
+/// took.
+///
+/// `pack_header` and `parse_source` both need the mode and neither has the
+/// `Options` in hand, so it lives here: `build` sets it once, and a build is
+/// one thread. The per-file record is written beside the pack, because the pack
+/// holds facts and a pak of facts cannot say which parser wrote them.
+#[cfg(all(feature = "deep", feature = "parser"))]
+mod deep_run {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::io::{self, Write};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    use super::PathMode;
+
+    static MODE: AtomicU8 = AtomicU8::new(0);
+
+    pub(super) fn set(mode: PathMode) {
+        MODE.store(mode as u8, Ordering::Relaxed);
+    }
+
+    pub(super) fn get() -> PathMode {
+        match MODE.load(Ordering::Relaxed) {
+            1 => PathMode::Deep,
+            2 => PathMode::Lexer,
+            _ => PathMode::Auto,
+        }
+    }
+
+    /// The mode's slot in the pack header's version word: a pack written by one
+    /// parser is never served to another, which is what keeps a lexer-built
+    /// cache from silently standing in for a requested CST parse.
+    pub(super) fn bits() -> u32 {
+        match get() {
+            PathMode::Auto => 1,
+            PathMode::Deep => 2,
+            PathMode::Lexer => 3,
+        }
+    }
+
+    /// What one file's facts went through.
+    #[derive(Clone, Default)]
+    pub(super) struct Taken {
+        pub(super) deep: bool,
+        /// The CST's own count of `ERROR` nodes: recovery, not a fallback.
+        pub(super) errors: u32,
+        /// Written only when the deep path was expected and not taken.
+        pub(super) fallback: Option<String>,
+    }
+
+    thread_local! {
+        // Pass one decides and pass two renders; a `String` and a flag per
+        // parsed file is the whole cost.
+        static RECORDS: RefCell<Vec<(String, Taken)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(path: &str, taken: Taken) {
+        RECORDS.with(|records| records.borrow_mut().push((path.to_string(), taken)));
+    }
+
+    #[derive(Default)]
+    pub(super) struct State {
+        records: HashMap<String, Taken>,
+        deep: u64,
+        lexer: u64,
+        fallbacks: u64,
+        reused: u64,
+    }
+
+    impl State {
+        /// Move pass one's records in, once pass one has finished.
+        pub(super) fn absorb(&mut self) {
+            self.records = RECORDS.with(|records| std::mem::take(&mut *records.borrow_mut())).into_iter().collect();
+        }
+
+        /// Fill in the files the pack supplied, from the provenance file that
+        /// was written with it. Without this a warm build could not say which
+        /// parser its facts came from and its output would differ from a cold
+        /// one for no reason a reader could see.
+        pub(super) fn merge(&mut self, old: Option<HashMap<String, Taken>>) {
+            if let Some(old) = old {
+                for (path, taken) in old {
+                    self.records.entry(path).or_insert(taken);
+                }
+            }
+        }
+
+        /// The provenance for every file in the pack, for the next build.
+        pub(super) fn save(&self, dir: &Path) -> io::Result<()> {
+            let mut text = format!("rust-graph facts.meta {}\n", bits());
+            let mut rows: Vec<(&String, &Taken)> = self.records.iter().collect();
+            rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            for (path, taken) in rows {
+                let parser = match (taken.deep, taken.fallback.is_some()) {
+                    (true, _) => "deep",
+                    (false, true) => "lexer(fallback)",
+                    (false, false) => "lexer",
+                };
+                text.push_str(&format!(
+                    "{} {} {} {}\n",
+                    escape(path),
+                    parser,
+                    taken.errors,
+                    escape(taken.fallback.as_deref().unwrap_or(""))
+                ));
+            }
+            let temporary = dir.join("facts.meta.tmp");
+            std::fs::write(&temporary, text)?;
+            std::fs::rename(&temporary, dir.join("facts.meta"))
+        }
+
+        /// Write one file's provenance into its `sources` row.
+        pub(super) fn note(&mut self, row: &mut String, path: &str) {
+            let taken = self.records.get(path);
+            let parsed_by = match taken {
+                Some(taken) if taken.deep => {
+                    self.deep += 1;
+                    "deep"
+                }
+                Some(_) => {
+                    self.lexer += 1;
+                    "lexer"
+                }
+                // Only when a cache predates the provenance file: the facts are
+                // the pack's and which parser wrote them is not recorded.
+                None => {
+                    self.reused += 1;
+                    "cache"
+                }
+            };
+            // The row was built closed; open it again for the parser fields.
+            row.truncate(row.len() - 1);
+            row.push_str(",\"parsed_by\":\"");
+            row.push_str(parsed_by);
+            row.push('"');
+            if let Some(taken) = taken {
+                if taken.errors > 0 {
+                    row.push_str(&format!(",\"deep_errors\":{}", taken.errors));
+                }
+                if let Some(reason) = taken.fallback.as_deref() {
+                    self.fallbacks += 1;
+                    row.push_str(",\"deep_fallback\":");
+                    super::push_string(row, reason);
+                }
+            }
+            row.push('}');
+        }
+
+        /// One object a reader can count without opening `sources`.
+        pub(super) fn heading(&self, out: &mut dyn Write) -> io::Result<()> {
+            write!(
+                out,
+                ",\"deep\":{{\"mode\":\"{}\",\"deep\":{},\"lexer\":{},\"fallbacks\":{}}}",
+                get().description(),
+                self.deep,
+                self.lexer,
+                self.fallbacks
+            )
+        }
+
+        pub(super) fn report_line(&self, text: &str) -> String {
+            format!(
+                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\n",
+                self.deep, self.lexer, self.fallbacks
+            )
+        }
+
+        pub(super) fn stderr_line(&self) -> String {
+            format!(
+                "rust-graph: parser {}, {} deep, {} lexer, {} fallbacks, {} cached",
+                get().description(),
+                self.deep,
+                self.lexer,
+                self.fallbacks,
+                self.reused
+            )
+        }
+    }
+
+    /// Load the provenance written beside a previous pack, or `None` when there
+    /// is none or it was written by another parser. The pack header already
+    /// rejects a foreign pack; this keeps the two in step.
+    pub(super) fn load(dir: &Path) -> Option<HashMap<String, Taken>> {
+        let text = std::fs::read_to_string(dir.join("facts.meta")).ok()?;
+        let mut lines = text.lines();
+        if lines.next()? != format!("rust-graph facts.meta {}", bits()) {
+            return None;
+        }
+        let mut out = HashMap::new();
+        for line in lines {
+            let mut fields = line.split(' ');
+            let path = unescape(fields.next()?);
+            let parser = fields.next()?;
+            let errors: u32 = fields.next()?.parse().ok()?;
+            let reason = unescape(fields.next().unwrap_or(""));
+            out.insert(
+                path,
+                Taken { deep: parser == "deep", errors, fallback: (!reason.is_empty()).then_some(reason) },
+            );
+        }
+        Some(out)
+    }
+
+    /// A path may hold a space; a newline or a tab would break the line format.
+    fn escape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for ch in text.chars() {
+            match ch {
+                '%' => out.push_str("%25"),
+                ' ' => out.push_str("%20"),
+                '\n' => out.push_str("%0A"),
+                '\t' => out.push_str("%09"),
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
+    fn unescape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' && index + 2 < bytes.len() {
+                let hex = &text[index + 1..index + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte as char);
+                    index += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[index] as char);
+            index += 1;
+        }
+        out
+    }
+}
+
