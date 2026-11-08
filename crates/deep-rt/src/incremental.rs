@@ -842,3 +842,37 @@ fn copy_subtree(
     copy_subtree_with(arena, old, src, shift, &mut work, report)
 }
 
+/// Copy with a caller-owned work stack, so a splice allocates nothing.
+fn copy_subtree_with(
+    arena: &mut Arena,
+    old: &[Node],
+    src: NodeId,
+    shift: i64,
+    work: &mut Vec<(NodeId, NodeId)>,
+    report: &mut Report,
+) -> NodeId {
+    let source = old[src as usize];
+    let root = push_shifted(arena, &source, shift);
+    report.reused_nodes += 1;
+    work.clear();
+    work.push((src, root));
+    while let Some((old_id, new_id)) = work.pop() {
+        let mut child = old[old_id as usize].first_child;
+        let mut prev = NONE;
+        while child != NONE {
+            let node = old[child as usize];
+            let copy = push_shifted(arena, &node, shift);
+            report.reused_nodes += 1;
+            if prev == NONE {
+                arena.nodes[new_id as usize].first_child = copy;
+            } else {
+                arena.nodes[prev as usize].next_sibling = copy;
+            }
+            prev = copy;
+            work.push((child, copy));
+            child = node.next_sibling;
+        }
+    }
+    root
+}
+
