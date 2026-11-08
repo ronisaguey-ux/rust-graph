@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod abi;
 pub mod compress;
 mod error;
 pub mod first;
@@ -237,6 +238,12 @@ impl Compiled {
     /// The tables as the flat, borrowed shape the ABI expects.
     pub fn as_grammar(&self) -> deep_abi::Grammar<'_> {
         self.tables.as_grammar(&self.name)
+    }
+
+    /// The tables in the layout `deep-rt` reads, ready to be emitted as the
+    /// slices of a [`deep_abi::Grammar`].
+    pub fn runtime_tables(&self) -> abi::RuntimeTables {
+        abi::encode(self)
     }
 
     /// What the parser does in `state` on `sym`.
