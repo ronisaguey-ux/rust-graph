@@ -343,3 +343,238 @@ rust_graph_deep::grammar! { OCAML {
     parenthesized_type: "(" [_type] ")",
     bracketed_type: "[" (_type %? "|") "]",
 } }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' | 0x0b => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' | 0x0b));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'(' if c.peek_at(1) == b'*' => {
+            // A comment runs to `*)`, nesting like OCaml's own.
+            lex::block_comment(c, b"(*", b"*)", true);
+            COMMENT
+        }
+        b'"' => if string(c) { STRING } else { BAD_LITERAL },
+        b'\'' => character_or_variable(c),
+        b'`' => {
+            c.bump();
+            c.eat_while(is_word_byte);
+            POLY_VARIANT
+        }
+        b'0'..=b'9' => {
+            lex::number(c);
+            NUMBER
+        }
+        b'a'..=b'z' => word(c),
+        b'_' if !is_word_byte(c.peek_at(1)) => {
+            c.bump();
+            UNDERSCORE
+        }
+        b'A'..=b'Z' => uword(c),
+        byte if byte == b'_' || byte >= 0x80 => word(c),
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+/// A lower-case identifier, which may carry primes (`x'`, `fold''`).
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    eat_primes(c);
+    keyword(&start[..length])
+}
+
+/// An upper-case name: a constructor or a module.
+fn uword(c: &mut Cursor) -> Kind {
+    c.eat_while(is_word_byte);
+    eat_primes(c);
+    UIDENT
+}
+
+/// `'` is allowed inside an identifier and does not join two words, because it
+/// needs the word byte before it.
+fn eat_primes(c: &mut Cursor) {
+    while c.peek() == b'\'' && is_word_byte(c.peek_at(1)) {
+        c.bump_n(2);
+        c.eat_while(is_word_byte);
+    }
+    if c.peek() == b'\'' && !matches!(c.peek_at(1), b'\'') && !is_word_start(c.peek_at(1)) {
+        // `x'` with nothing after: the prime still belongs to the name.
+        c.bump();
+    }
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"and" => KW_AND,
+        b"as" => KW_AS,
+        b"assert" => KW_ASSERT,
+        b"begin" => KW_BEGIN,
+        b"class" => KW_CLASS,
+        b"constraint" => KW_CONSTRAINT,
+        b"do" => KW_DO,
+        b"done" => KW_DONE,
+        b"downto" => KW_DOWNTO,
+        b"else" => KW_ELSE,
+        b"end" => KW_END,
+        b"exception" => KW_EXCEPTION,
+        b"external" => KW_EXTERNAL,
+        b"false" => KW_FALSE,
+        b"for" => KW_FOR,
+        b"fun" => KW_FUN,
+        b"function" => KW_FUNCTION,
+        b"functor" => KW_FUNCTOR,
+        b"if" => KW_IF,
+        b"in" => KW_IN,
+        b"include" => KW_INCLUDE,
+        b"inherit" => KW_INHERIT,
+        b"initializer" => KW_INITIALIZER,
+        b"lazy" => KW_LAZY,
+        b"let" => KW_LET,
+        b"land" => KW_LAND,
+        b"lor" => KW_LOR,
+        b"lxor" => KW_LXOR,
+        b"match" => KW_MATCH,
+        b"method" => KW_METHOD,
+        b"mod" => KW_MOD,
+        b"module" => KW_MODULE,
+        b"mutable" => KW_MUTABLE,
+        b"new" => KW_NEW,
+        b"nonrec" => KW_NONREC,
+        b"object" => KW_OBJECT,
+        b"of" => KW_OF,
+        b"open" => KW_OPEN,
+        b"or" => KW_OR,
+        b"private" => KW_PRIVATE,
+        b"rec" => KW_REC,
+        b"sig" => KW_SIG,
+        b"struct" => KW_STRUCT,
+        b"then" => KW_THEN,
+        b"to" => KW_TO,
+        b"true" => KW_TRUE,
+        b"try" => KW_TRY,
+        b"type" => KW_TYPE,
+        b"val" => KW_VAL,
+        b"virtual" => KW_VIRTUAL,
+        b"when" => KW_WHEN,
+        b"while" => KW_WHILE,
+        b"with" => KW_WITH,
+        _ => IDENT,
+    }
+}
+
+/// A character literal, or a type variable when the quote is followed by a
+/// name instead of a character and a closing quote.
+fn character_or_variable(c: &mut Cursor) -> Kind {
+    if c.peek_at(1) == b'\\' {
+        c.bump_n(2);
+        while !c.at_end() {
+            match c.peek() {
+                b'\'' => {
+                    c.bump();
+                    return CHAR;
+                }
+                b'\n' | b'\r' => return BAD_LITERAL,
+                _ => c.bump_char(),
+            }
+        }
+        return BAD_LITERAL;
+    }
+    if c.peek_at(2) == b'\'' && c.peek_at(1) != b'\'' {
+        c.bump_n(3);
+        return CHAR;
+    }
+    c.bump();
+    c.eat_while(is_word_byte);
+    TYPE_VAR
+}
+
+/// A string from its opening quote. Newlines are legal inside an OCaml
+/// string, so only the end of the input can break one; a backslash escapes the
+/// next byte, including a line break.
+fn string(c: &mut Cursor) -> bool {
+    c.bump();
+    while !c.at_end() {
+        match c.peek() {
+            b'\\' => c.bump_n(2),
+            b'"' => {
+                c.bump();
+                return true;
+            }
+            _ => c.bump_char(),
+        }
+    }
+    false
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b';', b';', _) => (SEMISEMI, 2),
+        (b':', b':', _) => (COLONCOLON, 2),
+        (b':', b'=', _) => (COLON_EQ, 2),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b'<', b'-', _) => (LARROW, 2),
+        (b'<', b'>', _) => (NE, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'>', b'=', _) => (GE, 2),
+        (b'=', b'=', _) => (EQEQ, 2),
+        (b'!', b'=', _) => (BANGEQ, 2),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'*', b'*', _) => (STARSTAR, 2),
+        (b'+', b'.', _) => (PLUSDOT, 2),
+        (b'-', b'.', _) => (MINUSDOT, 2),
+        (b'[', b'|', _) => (ARRAY_OPEN, 2),
+        (b'|', b']', _) => (ARRAY_CLOSE, 2),
+        (b'(', ..) => (LPAREN, 1),
+        (b')', ..) => (RPAREN, 1),
+        (b'[', ..) => (LBRACKET, 1),
+        (b']', ..) => (RBRACKET, 1),
+        (b'{', ..) => (LBRACE, 1),
+        (b'}', ..) => (RBRACE, 1),
+        (b';', ..) => (SEMI, 1),
+        (b',', ..) => (COMMA, 1),
+        (b'.', ..) => (DOT, 1),
+        (b':', ..) => (COLON, 1),
+        (b'|', ..) => (BAR, 1),
+        (b'&', ..) => (AMP, 1),
+        (b'=', ..) => (EQ, 1),
+        (b'<', ..) => (LT, 1),
+        (b'>', ..) => (GT, 1),
+        (b'+', ..) => (PLUS, 1),
+        (b'-', ..) => (MINUS, 1),
+        (b'*', ..) => (STAR, 1),
+        (b'/', ..) => (SLASH, 1),
+        (b'%', ..) => (PERCENT, 1),
+        (b'@', ..) => (AT, 1),
+        (b'^', ..) => (CARET, 1),
+        (b'!', ..) => (BANG, 1),
+        (b'?', ..) => (QUESTION, 1),
+        (b'~', ..) => (TILDE, 1),
+        (b'#', ..) => (HASH, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
