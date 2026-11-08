@@ -347,3 +347,401 @@ rust_graph_deep::grammar! { CRYSTAL {
         | "extend" | "include" | "until" | "elsif" | "else" | "rescue" | "ensure"
         | "next" | "break" | "for",
 } }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
+            WHITESPACE
+        }
+        b'#' => {
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            COMMENT
+        }
+        b'"' => if string(c) { STRING } else { BAD_LITERAL },
+        b'\'' => {
+            c.bump();
+            if lex::quoted(c, b'\'') { STRING } else { BAD_LITERAL }
+        }
+        b'%' if !ends_operand(c.previous()) && percent_delimiter(c.peek_at(1)) => percent_literal(c),
+        b'<' if c.peek_at(1) == b'<' && !ends_operand(c.previous()) && heredoc_start(c) => heredoc(c),
+        b'/' if c.peek_at(1) != b'=' && !ends_operand(c.previous()) => {
+            if regex(c) {
+                REGEX
+            } else {
+                SLASH
+            }
+        }
+        b':' if c.peek_at(1) != b':' && is_symbol_start(c.peek_at(1)) && !ends_operand(c.previous()) => symbol(c),
+        b'@' if is_word_start(c.peek_at(1)) || c.peek_at(1) == b'@' => variable(c),
+        b'$' if is_word_start(c.peek_at(1)) || c.peek_at(1).is_ascii_digit() => variable(c),
+        b'0'..=b'9' => {
+            lex::number(c);
+            NUMBER
+        }
+        b'.' if c.peek_at(1).is_ascii_digit() && !ends_operand(c.previous()) => {
+            c.bump();
+            lex::number(c);
+            NUMBER
+        }
+        byte if is_word_start(byte) => word(c),
+        _ => operator(c),
+    }
+}
+
+#[inline]
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte >= 0x80
+}
+
+#[inline]
+fn is_symbol_start(byte: u8) -> bool {
+    is_word_start(byte) || matches!(byte, b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'<' | b'>' | b'!' | b'?' | b'@' | b'[' | b']')
+}
+
+#[inline]
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+/// A token that ends an operand, so a following `/`, `%`, `<` or `:` is an
+/// operator, not the start of a literal.
+fn ends_operand(previous: Kind) -> bool {
+    matches!(
+        previous,
+        IDENT | CONSTANT | NUMBER | STRING | SYMBOL | REGEX | INSTANCE_VAR | CLASS_VAR | GLOBAL_VAR
+            | RPAREN | RBRACKET | RBRACE | KW_SELF | KW_NIL | KW_TRUE | KW_FALSE
+            | KW_END | KW_SUPER | KW_YIELD
+    )
+}
+
+/// `@name`, `@@name` or `$name`: one variable token.
+fn variable(c: &mut Cursor) -> Kind {
+    let sigil = c.peek();
+    c.bump();
+    if sigil == b'@' && c.peek() == b'@' {
+        c.bump();
+        c.eat_while(is_word_byte);
+        return CLASS_VAR;
+    }
+    c.eat_while(is_word_byte);
+    if sigil == b'@' { INSTANCE_VAR } else { GLOBAL_VAR }
+}
+
+/// An identifier, a method name ending in `?`/`!`, or a constant.
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    let text = &start[..length];
+    let suffix = matches!(c.peek(), b'?' | b'!') && c.peek_at(1) != b'=' && !is_word_byte(c.peek_at(1));
+    if suffix {
+        c.bump();
+        return IDENT;
+    }
+    if text[0].is_ascii_uppercase() {
+        return CONSTANT;
+    }
+    keyword(text)
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"abstract" => KW_ABSTRACT,
+        b"alias" => KW_ALIAS,
+        b"annotation" => KW_ANNOTATION,
+        b"as" => KW_AS,
+        b"asm" => KW_ASM,
+        b"begin" => KW_BEGIN,
+        b"break" => KW_BREAK,
+        b"case" => KW_CASE,
+        b"class" => KW_CLASS,
+        b"def" => KW_DEF,
+        b"do" => KW_DO,
+        b"else" => KW_ELSE,
+        b"elsif" => KW_ELSIF,
+        b"end" => KW_END,
+        b"ensure" => KW_ENSURE,
+        b"enum" => KW_ENUM,
+        b"extend" => KW_EXTEND,
+        b"false" => KW_FALSE,
+        b"for" => KW_FOR,
+        b"fun" => KW_FUN,
+        b"if" => KW_IF,
+        b"in" => KW_IN,
+        b"include" => KW_INCLUDE,
+        b"instance_sizeof" => KW_INSTANCE_SIZEOF,
+        b"lib" => KW_LIB,
+        b"module" => KW_MODULE,
+        b"next" => KW_NEXT,
+        b"nil" => KW_NIL,
+        b"of" => KW_OF,
+        b"offsetof" => KW_OFFSETOF,
+        b"pointerof" => KW_POINTEROF,
+        b"private" => KW_PRIVATE,
+        b"protected" => KW_PROTECTED,
+        b"require" => KW_REQUIRE,
+        b"rescue" => KW_RESCUE,
+        b"return" => KW_RETURN,
+        b"select" => KW_SELECT,
+        b"self" => KW_SELF,
+        b"sizeof" => KW_SIZEOF,
+        b"struct" => KW_STRUCT,
+        b"super" => KW_SUPER,
+        b"then" => KW_THEN,
+        b"true" => KW_TRUE,
+        b"type" => KW_TYPE,
+        b"typeof" => KW_TYPEOF,
+        b"uninitialized" => KW_UNINITIALIZED,
+        b"union" => KW_UNION,
+        b"unless" => KW_UNLESS,
+        b"until" => KW_UNTIL,
+        b"when" => KW_WHEN,
+        b"while" => KW_WHILE,
+        b"with" => KW_WITH,
+        b"yield" => KW_YIELD,
+        _ => IDENT,
+    }
+}
+
+/// A double-quoted string with `#{}` interpolation: the field's braces and any
+/// string inside them are balanced and stay opaque.
+fn string(c: &mut Cursor) -> bool {
+    c.bump();
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        match c.peek() {
+            b'\\' => c.bump_n(2),
+            b'"' => {
+                c.bump();
+                return true;
+            }
+            b'#' if c.peek_at(1) == b'{' => {
+                c.bump_n(2);
+                interpolation(c);
+            }
+            b'\n' | b'\r' => return false,
+            _ => c.bump_char(),
+        }
+    }
+}
+
+/// The body of a `#{...}` after its brace, through the closing brace.
+fn interpolation(c: &mut Cursor) {
+    let mut depth = 1u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'{' => {
+                depth += 1;
+                c.bump();
+            }
+            b'}' => {
+                c.bump();
+                depth -= 1;
+                if depth == 0 {
+                    return;
+                }
+            }
+            b'"' | b'\'' => {
+                let quote = c.peek();
+                c.bump();
+                lex::quoted(c, quote);
+            }
+            b'\n' | b'\r' => return,
+            _ => c.bump_char(),
+        }
+    }
+}
+
+/// `:name`, `:+` or `:"quoted"`.
+fn symbol(c: &mut Cursor) -> Kind {
+    c.bump();
+    if c.peek() == b'"' {
+        return if lex::quoted(c, b'"') { SYMBOL } else { BAD_LITERAL };
+    }
+    if is_word_start(c.peek()) {
+        c.eat_while(is_word_byte);
+        if matches!(c.peek(), b'?' | b'!' | b'=') && !is_word_byte(c.peek_at(1)) {
+            c.bump();
+        }
+        return SYMBOL;
+    }
+    c.bump();
+    SYMBOL
+}
+
+/// `%w[...]`, `%i(...)`, `%q{...}` and friends: one token, delimiter-balanced.
+fn percent_literal(c: &mut Cursor) -> Kind {
+    c.bump();
+    c.eat(b'w') || c.eat(b'i') || c.eat(b'q') || c.eat(b'Q') || c.eat(b'r') || c.eat(b'x');
+    let open = c.peek();
+    let close = match open {
+        b'[' => b']',
+        b'(' => b')',
+        b'{' => b'}',
+        b'<' => b'>',
+        b'|' => b'|',
+        b'/' => b'/',
+        _ => return BAD_LITERAL,
+    };
+    c.bump();
+    let mut depth = 1u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'\\' => c.bump_n(2),
+            byte if byte == open && close != open => {
+                depth += 1;
+                c.bump();
+            }
+            byte if byte == close => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    return STRING;
+                }
+            }
+            _ => c.bump_char(),
+        }
+    }
+    BAD_LITERAL
+}
+
+#[inline]
+fn percent_delimiter(byte: u8) -> bool {
+    matches!(byte, b'w' | b'i' | b'q' | b'Q' | b'r' | b'x' | b'[' | b'(' | b'{' | b'<' | b'|' | b'/')
+}
+
+/// `<<-EOS`, `<<~EOS` or `<<"EOS"` at the start of a heredoc.
+fn heredoc_start(c: &mut Cursor) -> bool {
+    let mut at = 2;
+    if matches!(c.peek_at(at), b'-' | b'~') {
+        at += 1;
+    }
+    is_word_start(c.peek_at(at)) || c.peek_at(at) == b'"'
+}
+
+/// A heredoc from its `<<` through the terminator line.
+fn heredoc(c: &mut Cursor) -> Kind {
+    c.bump_n(2);
+    c.eat(b'-');
+    c.eat(b'~');
+    let quoted = c.peek() == b'"';
+    if quoted {
+        c.bump();
+    }
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    let terminator = start[..length].to_vec();
+    if quoted {
+        c.eat(b'"');
+    }
+    loop {
+        if c.at_end() {
+            return BAD_LITERAL;
+        }
+        c.eat_while(|byte| byte != b'\n');
+        c.eat(b'\n');
+        // A terminator is the whole line, indented or not.
+        c.eat_while(|byte| byte == b' ' || byte == b'\t');
+        if c.starts_with(&terminator) && matches!(c.peek_at(terminator.len()), b'\n' | b'\r' | 0) {
+            c.bump_n(terminator.len());
+            return STRING;
+        }
+    }
+}
+
+/// A `/.../` regex from its opening slash. False when the line ends first.
+fn regex(c: &mut Cursor) -> bool {
+    c.bump();
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        match c.peek() {
+            b'\\' => c.bump_n(2),
+            b'/' => {
+                c.bump();
+                // Flags.
+                c.eat_while(|byte| byte.is_ascii_alphabetic());
+                return true;
+            }
+            b'\n' | b'\r' => return false,
+            _ => c.bump_char(),
+        }
+    }
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'>', b'>', b'=') => (SHR_EQ, 3),
+        (b'*', b'*', b'=') => (STARSTAR_EQ, 3),
+        (b'&', b'&', b'=') => (ANDAND_EQ, 3),
+        (b'|', b'|', b'=') => (OROR_EQ, 3),
+        (b'=', b'=', b'=') => (TEQ, 3),
+        (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'>', b'>', _) => (SHR, 2),
+        (b'<', b'=', b'>') => (CMP, 3),
+        (b'<', b'=', _) => (LE, 2),
+        (b'>', b'=', _) => (GE, 2),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'!', b'=', _) => (NE, 2),
+        (b'=', b'~', _) => (MATCH, 2),
+        (b'!', b'~', _) => (NMATCH, 2),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'*', b'*', _) => (STARSTAR, 2),
+        (b'.', b'.', _) => (DOTDOT, 2),
+        (b'=', b'>', _) => (FATARROW, 2),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b':', b':', _) => (COLONCOLON, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'(', ..) => (LPAREN, 1),
+        (b')', ..) => (RPAREN, 1),
+        (b'[', ..) => (LBRACKET, 1),
+        (b']', ..) => (RBRACKET, 1),
+        (b'{', ..) => (LBRACE, 1),
+        (b'}', ..) => (RBRACE, 1),
+        (b';', ..) => (SEMI, 1),
+        (b',', ..) => (COMMA, 1),
+        (b'.', ..) => (DOT, 1),
+        (b':', ..) => (COLON, 1),
+        (b'?', ..) => (QUESTION, 1),
+        (b'=', ..) => (ASSIGN, 1),
+        (b'+', ..) => (PLUS, 1),
+        (b'-', ..) => (MINUS, 1),
+        (b'*', ..) => (STAR, 1),
+        (b'/', ..) => (SLASH, 1),
+        (b'%', ..) => (PERCENT, 1),
+        (b'&', ..) => (AMP, 1),
+        (b'|', ..) => (PIPE, 1),
+        (b'^', ..) => (CARET, 1),
+        (b'~', ..) => (TILDE, 1),
+        (b'!', ..) => (BANG, 1),
+        (b'<', ..) => (LT, 1),
+        (b'>', ..) => (GT, 1),
+        (b'@', ..) => (AT, 1),
+        (b'$', ..) => (DOLLAR, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
