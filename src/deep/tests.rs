@@ -599,7 +599,7 @@ mod pp {
             p.bump();
         }
     }
-    pub static PP: Language = Language { name: "pp", root: ROOT, kinds: KINDS, lex, parse };
+    pub static PP: Language = Language::new("pp", ROOT, KINDS, lex, parse);
 }
 
 /// Pairs over the non-space characters of `src`, as (opener at, closer at) char indices.
@@ -796,7 +796,7 @@ mod calc {
         }
     }
 
-    pub static CALC: Language = Language { name: "calc", root: ROOT, kinds: KINDS, lex, parse };
+    pub static CALC: Language = Language::new("calc", ROOT, KINDS, lex, parse);
 }
 
 fn calc(src: &str) -> (Workspace, Outcome) {
@@ -851,7 +851,7 @@ fn abandon_and_rewind_leave_no_trace() {
             p.bump();
         }
     }
-    static SPECULATE: Language = Language { name: "speculate", root: calc::ROOT, kinds: calc::CALC.kinds, lex: calc::CALC.lex, parse: rule };
+    static SPECULATE: Language = Language::new("speculate", calc::ROOT, calc::CALC.kinds, calc::CALC.lex, rule);
     let mut workspace = Workspace::default();
     workspace.parse(b"1 + 2", &SPECULATE, &Budget::default()).unwrap();
     check(&workspace, b"1 + 2", &SPECULATE);

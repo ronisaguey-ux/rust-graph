@@ -57,7 +57,7 @@ const KINDS: &[KindInfo] = &[
     KindInfo { name: "pair", class: Class::Node },
 ];
 
-pub static JSON: Language = Language { name: "json", root: DOCUMENT, kinds: KINDS, lex, parse: document };
+pub static JSON: Language = Language::new("json", DOCUMENT, KINDS, lex, document);
 
 const VALUE_START: &[Kind] = &[LBRACE, LBRACKET, STRING, NUMBER, TRUE, FALSE, NULL];
 

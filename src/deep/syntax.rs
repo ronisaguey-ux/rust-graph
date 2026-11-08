@@ -79,6 +79,10 @@ pub struct Language {
 }
 
 impl Language {
+    pub const fn new(name: &'static str, root: Kind, kinds: &'static [KindInfo], lex: fn(&mut Cursor) -> Kind, parse: fn(&mut Parser)) -> Self {
+        Language { name, root, kinds, lex, parse }
+    }
+
     #[inline]
     pub fn info(&self, kind: Kind) -> KindInfo {
         if kind < FIRST_LANGUAGE_KIND {
