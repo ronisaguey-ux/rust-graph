@@ -369,7 +369,10 @@ Proof that the harness can fail: `crates/deep-fuzz/src/harness.rs` contains
 real `Language` whose parse function panics and drives it through the real
 workspace and lexer, plus targets that return a truncated `subtree_end` and a
 node whose span escapes its parent. `crates/deep-fuzz/src/shrink.rs` reduces a
-27-byte input to the exact 5-byte trigger in `shrink_reduces_to_the_trigger`.
+27-byte input to the exact 5-byte trigger in `shrink_reduces_to_the_trigger`,
+and `shrink_drives_the_real_runtime_to_the_trigger_byte` builds a real
+`Language` whose lexer panics on one byte and shrinks a 40-byte input to that
+single byte through the workspace, the lexer and the parser.
 
 ## 10. Measurements
 
@@ -455,7 +458,7 @@ target/x86_64-unknown-linux-musl/debug/deep-fuzz corpus --dir crates/deep-gramma
 
 | measure | command | value |
 |:--|:--|--:|
-| fuzzer unit tests | `cargo test -p deep-fuzz` | 29 tests: 25 unit and 4 integration, all pass |
+| fuzzer tests | `cargo test -p deep-fuzz` | 30 tests: 26 unit and 4 integration, all pass |
 | fixture files checked | `find crates/deep-grammars/fixtures -type f | wc -l` | 233 |
 | fuzzable languages | `deep-fuzz languages | wc -l` | 31 |
 | `deep-fuzz` debug binary | `ls -l target/x86_64-unknown-linux-musl/debug/deep-fuzz` | 15,454,688 bytes (14.7 MiB, debug) |
