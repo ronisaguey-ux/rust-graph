@@ -298,3 +298,247 @@ rust_graph_deep::grammar! { OBJC {
     // ---- expressions ----
 
     _expression: precedence _primary {
+        assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" => assignment_expression,
+        cond: postfix "?" _expression@assign ":" _expression@assign => conditional_expression,
+        lor: left "||" => binary_expression,
+        land: left "&&" => binary_expression,
+        bor: left "|" => binary_expression,
+        bxor: left "^" => binary_expression,
+        band: left "&" => binary_expression,
+        eq: left "==" | "!=" => binary_expression,
+        rel: left "<" | ">" | "<=" | ">=" => binary_expression,
+        shift: left "<<" | GT_JOINED ">" => binary_expression,
+        add: left "+" | "-" => binary_expression,
+        mul: left "*" | "/" | "%" => binary_expression,
+        unary: prefix "!" | "~" | "-" | "+" | "*" | "&" => unary_expression,
+        postfix "++" | "--" => update_expression,
+        postfix arguments => call_expression,
+        postfix message => message_expression,
+        postfix "." _member => field_expression,
+        postfix "->" _member => field_expression,
+    },
+
+    _primary:
+        &(cast_type) cast_expression
+        | sizeof_expression
+        | selector_expression
+        | encode_expression
+        | parenthesized_expression
+        | message
+        | string
+        | "self"
+        | "super"
+        | "nil"
+        | "YES"
+        | "NO"
+        | _name
+        | NUMBER
+        | CHAR_LITERAL,
+
+    _name: IDENT,
+    _member: IDENT,
+    string: STR+,
+    cast_expression: cast_type _expression@unary,
+    cast_type: "(" (_type_prefixed | _user_type_name) ")",
+    sizeof_expression: "sizeof" sizeof_operand,
+    sizeof_operand: &(cast_type) cast_type | _expression@unary,
+    selector_expression: "@selector" selector_arguments,
+    selector_arguments: "(" method_selector ")",
+    encode_expression: "@encode" encode_arguments,
+    encode_arguments: "(" type_name ")",
+    arguments: "(" (_argument %? ",") ")",
+    _argument: _expression@assign,
+    message: "[" _expression [_message_selector] "]",
+    _message_selector: IDENT | _message_keyword+,
+    _message_keyword: IDENT ":" _expression ("," _expression)*,
+} }
+
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
+    if let Some(kind) = trivia(c) {
+        return kind;
+    }
+    if directive(c) {
+        return DIRECTIVE;
+    }
+    match c.peek() {
+        b'@' => at_word(c),
+        b'"' => {
+            c.bump();
+            if quoted(c, b'"') { STR } else { BAD_LITERAL }
+        }
+        b'\'' => {
+            c.bump();
+            if quoted(c, b'\'') { CHAR_LITERAL } else { BAD_LITERAL }
+        }
+        b'0'..=b'9' => {
+            number(c, false);
+            NUMBER
+        }
+        b'.' if c.peek_at(1).is_ascii_digit() => {
+            number(c, false);
+            NUMBER
+        }
+        byte if is_word_start(byte) => word(c),
+        _ => operator(c),
+    }
+}
+
+/// `@keyword`, or an Objective-C string literal `@"..."`.
+fn at_word(c: &mut Cursor) -> Kind {
+    if c.peek_at(1) == b'"' {
+        c.bump();
+        c.bump();
+        return if quoted(c, b'"') { STR } else { BAD_LITERAL };
+    }
+    let start = c.rest();
+    c.bump();
+    let length = c.eat_while(is_word_byte);
+    match &start[1..length + 1] {
+        b"interface" => AT_INTERFACE,
+        b"implementation" => AT_IMPLEMENTATION,
+        b"protocol" => AT_PROTOCOL,
+        b"end" => AT_END,
+        b"class" => AT_CLASS,
+        b"property" => AT_PROPERTY,
+        b"synthesize" => AT_SYNTHESIZE,
+        b"dynamic" => AT_DYNAMIC,
+        b"selector" => AT_SELECTOR,
+        b"encode" => AT_ENCODE,
+        b"optional" => AT_OPTIONAL,
+        b"required" => AT_REQUIRED,
+        b"try" => AT_TRY,
+        b"catch" => AT_CATCH,
+        b"finally" => AT_FINALLY,
+        b"throw" => AT_THROW,
+        b"autoreleasepool" => AT_AUTORELEASEPOOL,
+        b"synchronized" => AT_SYNCHRONIZED,
+        b"import" => AT_IMPORT,
+        b"defs" => AT_DEFS,
+        _ => UNKNOWN,
+    }
+}
+
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    let text = &start[..length];
+    if matches!(c.peek(), b'"' | b'\'') {
+        if literal_prefix(text).is_some() {
+            let quote = c.peek();
+            c.bump();
+            return match (quoted(c, quote), quote) {
+                (false, _) => BAD_LITERAL,
+                (true, b'"') => STR,
+                (true, _) => CHAR_LITERAL,
+            };
+        }
+    }
+    keyword(text)
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"auto" => KW_AUTO,
+        b"break" => KW_BREAK,
+        b"case" => KW_CASE,
+        b"char" => KW_CHAR,
+        b"const" => KW_CONST,
+        b"continue" => KW_CONTINUE,
+        b"default" => KW_DEFAULT,
+        b"do" => KW_DO,
+        b"double" => KW_DOUBLE,
+        b"else" => KW_ELSE,
+        b"enum" => KW_ENUM,
+        b"extern" => KW_EXTERN,
+        b"float" => KW_FLOAT,
+        b"for" => KW_FOR,
+        b"goto" => KW_GOTO,
+        b"if" => KW_IF,
+        b"in" => KW_IN,
+        b"inline" => KW_INLINE,
+        b"int" => KW_INT,
+        b"long" => KW_LONG,
+        b"register" => KW_REGISTER,
+        b"return" => KW_RETURN,
+        b"short" => KW_SHORT,
+        b"signed" => KW_SIGNED,
+        b"sizeof" => KW_SIZEOF,
+        b"static" => KW_STATIC,
+        b"struct" => KW_STRUCT,
+        b"switch" => KW_SWITCH,
+        b"typedef" => KW_TYPEDEF,
+        b"union" => KW_UNION,
+        b"unsigned" => KW_UNSIGNED,
+        b"void" => KW_VOID,
+        b"volatile" => KW_VOLATILE,
+        b"while" => KW_WHILE,
+        b"BOOL" => KW_BOOL,
+        b"id" => KW_ID,
+        b"SEL" => KW_SEL,
+        b"Class" => KW_CLASS,
+        b"self" => KW_SELF,
+        b"super" => KW_SUPER,
+        b"nil" => KW_NIL,
+        b"YES" => KW_YES,
+        b"NO" => KW_NO,
+        _ => IDENT,
+    }
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'<', _, _) => (LT, 1),
+        (b'>', b'>', _) => (GT_JOINED, 1),
+        (b'>', b'=', _) => (GE, 2),
+        (b'>', _, _) => (GT, 1),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'=', _, _) => (ASSIGN, 1),
+        (b'!', b'=', _) => (NE, 2),
+        (b'!', _, _) => (BANG, 1),
+        (b'&', b'&', _) => (ANDAND, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'&', _, _) => (AMP, 1),
+        (b'|', b'|', _) => (OROR, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'|', _, _) => (PIPE, 1),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'^', _, _) => (CARET, 1),
+        (b'+', b'+', _) => (INCREMENT, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'+', _, _) => (PLUS, 1),
+        (b'-', b'-', _) => (DECREMENT, 2),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'-', _, _) => (MINUS, 1),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'*', _, _) => (STAR, 1),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'/', _, _) => (SLASH, 1),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'%', _, _) => (PERCENT, 1),
+        (b'~', _, _) => (TILDE, 1),
+        (b'(', _, _) => (LPAREN, 1),
+        (b')', _, _) => (RPAREN, 1),
+        (b'[', _, _) => (LBRACKET, 1),
+        (b']', _, _) => (RBRACKET, 1),
+        (b'{', _, _) => (LBRACE, 1),
+        (b'}', _, _) => (RBRACE, 1),
+        (b',', _, _) => (COMMA, 1),
+        (b';', _, _) => (SEMI, 1),
+        (b':', _, _) => (COLON, 1),
+        (b'?', _, _) => (QUESTION, 1),
+        (b'.', _, _) => (DOT, 1),
+        _ => {
+            c.bump_char();
+            return UNKNOWN;
+        }
+    };
+    c.bump_n(width);
+    kind
+}
