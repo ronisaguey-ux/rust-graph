@@ -240,3 +240,226 @@ impl<'a> Parser<'a> {
         !self.at_end()
     }
 
+    /// Errors recorded so far. A predicate compares it before and after a trial.
+    pub fn errors(&self) -> u32 {
+        self.errors
+    }
+
+    /// Where the next node would start in the events: remember it before an
+    /// operand, and [`Parser::wrap`] the operand once an operator follows.
+    pub fn event_count(&self) -> u32 {
+        self.events.len() as u32
+    }
+
+    /// Opens a node around everything recorded since `start`, an
+    /// [`Parser::event_count`] taken before one complete operand: how a Pratt
+    /// loop turns `a` into `(a + b)`. A node there is preceded in O(1). A leaf
+    /// (a token, or a few, as in `"a" "b"`) gets a start inserted before it,
+    /// which moves only the operand's own events.
+    pub fn wrap(&mut self, start: u32) -> Marker {
+        let at = start as usize;
+        if let Some(&Event::Start { kind, mut forward_parent }) = self.events.get(at) {
+            if kind != TOMBSTONE {
+                // Wrapped before (`f(x)[0]`): the outermost wrapper is the operand now.
+                let mut outer = start;
+                if self.wrapped.0 == start {
+                    outer = self.wrapped.1;
+                    let Event::Start { forward_parent: next, .. } = self.events[outer as usize] else { unreachable!("the cached wrapper is a start") };
+                    forward_parent = next;
+                }
+                while forward_parent != 0 {
+                    outer += forward_parent;
+                    let Event::Start { forward_parent: next, .. } = self.events[outer as usize] else { unreachable!("a forward parent is a start") };
+                    forward_parent = next;
+                }
+                let marker = self.precede(Closed(outer));
+                self.wrapped = (start, marker.0);
+                return marker;
+            }
+        }
+        // Nothing past `start` is linked to anything before it: a Pratt loop
+        // only ever wraps its own last operand.
+        self.events.insert(at, Event::Start { kind: TOMBSTONE, forward_parent: 0 });
+        if self.wrapped.0 != NONE && self.wrapped.0 >= start {
+            self.wrapped = (NONE, NONE);
+        } else if self.wrapped.1 != NONE && self.wrapped.1 >= start {
+            self.wrapped.1 += 1;
+        }
+        // Only links made since `start` was taken can point past it, and those
+        // are the tail of the list: the scan stops at the first older one, so
+        // wrapping stays O(operand) however long the file.
+        for link in self.links.iter_mut().rev() {
+            if link.made_at <= start {
+                break;
+            }
+            link.made_at += 1;
+            if link.at >= start {
+                link.at += 1;
+            }
+        }
+        Marker(start)
+    }
+
+    /// The current token alone as an `ERROR`.
+    pub fn error_one(&mut self) {
+        if self.at_end() {
+            return;
+        }
+        self.errors += 1;
+        if self.trial_errors != NONE {
+            self.limit = self.pos;
+            return;
+        }
+        let marker = self.open();
+        self.bump_balanced();
+        self.close(marker, ERROR);
+    }
+
+    /// One token, or a whole balanced group if the token opens one.
+    fn bump_balanced(&mut self) {
+        let close = self.partner();
+        if close == NONE {
+            self.bump();
+            return;
+        }
+        while self.pos <= close && self.pos < self.limit {
+            self.bump();
+        }
+    }
+
+    /// The closer paired with the current token if it is an opener, else `NONE`.
+    fn partner(&self) -> u32 {
+        if self.pos >= self.limit {
+            return NONE;
+        }
+        match self.language.class(self.kinds[self.pos as usize]) {
+            Class::Open(_) => self.pair[self.pos as usize],
+            _ => NONE,
+        }
+    }
+
+    pub fn open(&mut self) -> Marker {
+        let at = self.events.len() as u32;
+        self.events.push(Event::Start { kind: TOMBSTONE, forward_parent: 0 });
+        Marker(at)
+    }
+
+    pub fn close(&mut self, marker: Marker, kind: Kind) -> Closed {
+        if let Event::Start { forward_parent, .. } = self.events[marker.0 as usize] {
+            self.events[marker.0 as usize] = Event::Start { kind, forward_parent };
+        }
+        self.events.push(Event::Finish);
+        Closed(marker.0)
+    }
+
+    pub fn abandon(&mut self, marker: Marker) {
+        if marker.0 as usize + 1 == self.events.len() {
+            self.events.pop();
+        } else {
+            self.events[marker.0 as usize] = Event::Start { kind: TOMBSTONE, forward_parent: 0 };
+        }
+    }
+
+    /// Opens a node that becomes the parent of `closed`, without moving any event:
+    /// how a Pratt loop turns `a` into `(a + b)` in O(1).
+    pub fn precede(&mut self, closed: Closed) -> Marker {
+        let marker = self.open();
+        if let Event::Start { kind, .. } = self.events[closed.0 as usize] {
+            self.events[closed.0 as usize] = Event::Start { kind, forward_parent: marker.0 - closed.0 };
+            self.links.push(Link { at: closed.0, made_at: self.events.len() as u32 });
+        }
+        marker
+    }
+
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint { events: self.events.len() as u32, links: self.links.len() as u32, pos: self.pos, errors: self.errors }
+    }
+
+    /// Forgets everything since `checkpoint`. Only valid within the group the
+    /// checkpoint was taken in.
+    pub fn rewind(&mut self, checkpoint: Checkpoint) {
+        while self.links.len() as u32 > checkpoint.links {
+            let at = self.links.pop().expect("length checked").at as usize;
+            if at < checkpoint.events as usize {
+                if let Event::Start { kind, .. } = self.events[at] {
+                    self.events[at] = Event::Start { kind, forward_parent: 0 };
+                }
+            }
+        }
+        self.events.truncate(checkpoint.events as usize);
+        if self.wrapped.1 != NONE && self.wrapped.1 >= checkpoint.events {
+            self.wrapped = (NONE, NONE);
+        }
+        self.pos = checkpoint.pos;
+        self.errors = checkpoint.errors;
+    }
+
+    /// Parses the balanced group at the current opener as a `kind` node, with `body`
+    /// bound to the group: the body sees `EOF` at the closer, so no error inside
+    /// can reach outside. That is the delimiter firewall. An opener with no closer
+    /// runs to the end of the enclosing group and is flagged `UNCLOSED`. Past
+    /// `max_depth` the group becomes one `SKIPPED` leaf, in O(1).
+    pub fn group(&mut self, kind: Kind, body: impl FnOnce(&mut Self)) -> Option<Closed> {
+        if self.at_end() {
+            return None;
+        }
+        debug_assert!(matches!(self.language.class(self.kinds[self.pos as usize]), Class::Open(_)), "group() needs an opener");
+        let close = self.partner();
+        if self.depth >= self.max_depth {
+            let last = if close == NONE { self.last_significant_before(self.limit) } else { close };
+            self.events.push(Event::Span { kind: SKIPPED, first: self.pos, last });
+            self.skipped += 1;
+            self.pos = if close == NONE { self.limit } else { self.skip_trivia(close + 1) };
+            return None;
+        }
+        let marker = self.open();
+        self.bump();
+        let outer = self.limit;
+        if close != NONE {
+            self.limit = close;
+        } else if let Some(layout) = self.language.layout {
+            // Unclosed in a layout language: the lexer ended the bracket at a
+            // line end, so the group ends there too.
+            self.limit = self.line_end(layout.newline).min(outer);
+        }
+        self.depth += 1;
+        self.deepest = self.deepest.max(self.depth);
+        body(self);
+        self.depth -= 1;
+        self.take_rest();
+        if self.trial_errors != NONE && self.errors > self.trial_errors {
+            // A failed trial stops inside the group: the outer rules see `EOF` too.
+            self.limit = self.pos;
+            return Some(self.close(marker, kind));
+        }
+        self.limit = outer;
+        if close == NONE {
+            // The closer is missing, as a token would be: an error the walkers see.
+            self.missing();
+            self.events.push(Event::Flag(UNCLOSED));
+        } else {
+            debug_assert_eq!(self.pos, close);
+            self.bump();
+        }
+        Some(self.close(marker, kind))
+    }
+
+    /// Runs `rule` one level deeper, for recursion that does not open a group
+    /// (prefix operators, nested statements). Past `max_depth` the rest of the
+    /// group becomes one `SKIPPED` leaf and `rule` does not run.
+    pub fn nested<R>(&mut self, rule: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        if self.depth >= self.max_depth {
+            if self.pos < self.limit {
+                let last = self.last_significant_before(self.limit);
+                self.events.push(Event::Span { kind: SKIPPED, first: self.pos, last });
+                self.skipped += 1;
+                self.pos = self.limit;
+            }
+            return None;
+        }
+        self.depth += 1;
+        self.deepest = self.deepest.max(self.depth);
+        let result = rule(self);
+        self.depth -= 1;
+        Some(result)
+    }
