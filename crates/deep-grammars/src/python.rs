@@ -348,3 +348,302 @@ fn is_word_byte(byte: u8) -> bool {
 /// The string prefix letters `word` spells, if it is one: whether it makes an
 /// f-string (or t-string), whose fields hold code.
 fn string_prefix(word: &[u8]) -> Option<bool> {
+    if word.len() > 2 {
+        return None;
+    }
+    let mut seen = 0u8;
+    let mut code = false;
+    for &letter in word {
+        let bit = match letter.to_ascii_lowercase() {
+            b'r' => 1,
+            b'b' => 2,
+            b'u' => 4,
+            b'f' | b't' => {
+                code = true;
+                8
+            }
+            _ => return None,
+        };
+        if seen & bit != 0 {
+            return None;
+        }
+        seen |= bit;
+    }
+    // `u` stands alone; bytes are never f-strings.
+    if (seen & 4 != 0 && word.len() > 1) || seen & 10 == 10 {
+        return None;
+    }
+    Some(code)
+}
+
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(is_word_byte);
+    let text = &start[..length];
+    if matches!(c.peek(), b'\'' | b'"') {
+        if let Some(code) = string_prefix(text) {
+            return string(c, code);
+        }
+    }
+    keyword(text)
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"False" => KW_FALSE,
+        b"None" => KW_NONE,
+        b"True" => KW_TRUE,
+        b"and" => KW_AND,
+        b"as" => KW_AS,
+        b"assert" => KW_ASSERT,
+        b"async" => KW_ASYNC,
+        b"await" => KW_AWAIT,
+        b"break" => KW_BREAK,
+        b"class" => KW_CLASS,
+        b"continue" => KW_CONTINUE,
+        b"def" => KW_DEF,
+        b"del" => KW_DEL,
+        b"elif" => KW_ELIF,
+        b"else" => KW_ELSE,
+        b"except" => KW_EXCEPT,
+        b"finally" => KW_FINALLY,
+        b"for" => KW_FOR,
+        b"from" => KW_FROM,
+        b"global" => KW_GLOBAL,
+        b"if" => KW_IF,
+        b"import" => KW_IMPORT,
+        b"in" => KW_IN,
+        b"is" => KW_IS,
+        b"lambda" => KW_LAMBDA,
+        b"nonlocal" => KW_NONLOCAL,
+        b"not" => KW_NOT,
+        b"or" => KW_OR,
+        b"pass" => KW_PASS,
+        b"raise" => KW_RAISE,
+        b"return" => KW_RETURN,
+        b"try" => KW_TRY,
+        b"while" => KW_WHILE,
+        b"with" => KW_WITH,
+        b"yield" => KW_YIELD,
+        b"match" => KW_MATCH,
+        b"case" => KW_CASE,
+        b"type" => KW_TYPE,
+        _ => IDENT,
+    }
+}
+
+/// A string from its opening quote. A one-line string ends at its line if it
+/// does not close there; a triple-quoted one runs to the end of the file.
+///
+/// Fields of a one-line f-string may span lines (Python 3.12). Such a string
+/// is taken whole only if it then closes; otherwise it is lexed again with
+/// fields ending at the line, so a broken one costs one line.
+fn string(c: &mut Cursor, code: bool) -> Kind {
+    let quote = c.peek();
+    let triple = c.peek_at(1) == quote && c.peek_at(2) == quote;
+    let open = if triple { 3 } else { 1 };
+    if code && !triple {
+        let mut trial = Cursor::new(c.rest());
+        trial.bump_n(open);
+        if string_body(&mut trial, quote, false, true, true) {
+            c.bump_n(trial.pos());
+            return STR;
+        }
+    }
+    c.bump_n(open);
+    if string_body(c, quote, triple, code, false) { STR } else { BAD_STR }
+}
+
+/// The rest of a string after its opening quotes. True if it closed.
+fn string_body(c: &mut Cursor, quote: u8, triple: bool, code: bool, spanning: bool) -> bool {
+    loop {
+        if c.at_end() {
+            return false;
+        }
+        match c.peek() {
+            // A backslash never escapes a brace: `rf"\{{"` is a backslash and `{`.
+            b'\\' if code && matches!(c.peek_at(1), b'{' | b'}') => c.bump(),
+            b'\\' => c.bump_n(2),
+            byte if byte == quote => {
+                if !triple {
+                    c.bump();
+                    return true;
+                }
+                if c.peek_at(1) == quote && c.peek_at(2) == quote {
+                    c.bump_n(3);
+                    return true;
+                }
+                c.bump();
+            }
+            b'\n' | b'\r' if !triple => return false,
+            b'{' if code => {
+                if c.peek_at(1) == b'{' {
+                    c.bump_n(2);
+                } else {
+                    c.bump();
+                    field(c, quote, triple || spanning);
+                }
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// An f-string replacement field after its `{`, through its `}`. Strings
+/// inside may reuse the outer quote (Python 3.12). In a one-line string a line
+/// break ends the field, so a broken field cannot swallow the file.
+fn field(c: &mut Cursor, quote: u8, triple: bool) {
+    let mut depth = 0u32;
+    loop {
+        if c.at_end() {
+            return;
+        }
+        match c.peek() {
+            b'\'' | b'"' => {
+                let inner = c.peek();
+                let inner_triple = c.peek_at(1) == inner && c.peek_at(2) == inner;
+                if !inner_triple && !triple && inner == quote && depth == 0 && matches!(c.peek_at(1), b'\n' | b'\r' | 0) {
+                    // `f"{x"` then the line ends: the outer string's end.
+                    return;
+                }
+                string(c, false);
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = c.rest();
+                let length = c.eat_while(is_word_byte);
+                if matches!(c.peek(), b'\'' | b'"') {
+                    if let Some(code) = string_prefix(&start[..length]) {
+                        string(c, code);
+                    }
+                }
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                c.bump();
+            }
+            b')' | b']' => {
+                depth = depth.saturating_sub(1);
+                c.bump();
+            }
+            b'}' => {
+                c.bump();
+                if depth == 0 {
+                    return;
+                }
+                depth -= 1;
+            }
+            b':' if depth == 0 => {
+                c.bump();
+                return spec(c, quote, triple);
+            }
+            b'\n' | b'\r' if !triple => return,
+            _ => c.bump(),
+        }
+    }
+}
+
+/// A format spec after its `:`, through the field's `}`. It may hold fields.
+fn spec(c: &mut Cursor, quote: u8, triple: bool) {
+    loop {
+        if c.at_end() {
+            return;
+        }
+        match c.peek() {
+            b'{' => {
+                c.bump();
+                field(c, quote, triple);
+            }
+            b'}' => {
+                c.bump();
+                return;
+            }
+            byte if byte == quote => return,
+            b'\n' | b'\r' if !triple => return,
+            b'\\' => c.bump_n(2),
+            _ => c.bump(),
+        }
+    }
+}
+
+fn number(c: &mut Cursor) -> Kind {
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'o' | b'O' | b'b' | b'B') {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        return NUMBER;
+    }
+    c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    if c.peek() == b'.' {
+        c.bump();
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    if matches!(c.peek(), b'e' | b'E') {
+        let sign = usize::from(matches!(c.peek_at(1), b'+' | b'-'));
+        if c.peek_at(1 + sign).is_ascii_digit() {
+            c.bump_n(1 + sign);
+            c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+        }
+    }
+    if matches!(c.peek(), b'j' | b'J' | b'l' | b'L') {
+        c.bump();
+    }
+    NUMBER
+}
+
+fn operator(c: &mut Cursor) -> Kind {
+    let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
+    let (kind, width) = match (a, b, d) {
+        (b'*', b'*', b'=') => (STARSTAR_EQ, 3),
+        (b'/', b'/', b'=') => (SLASHSLASH_EQ, 3),
+        (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'>', b'>', b'=') => (SHR_EQ, 3),
+        (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        (b'*', b'*', _) => (STARSTAR, 2),
+        (b'/', b'/', _) => (SLASHSLASH, 2),
+        (b'<', b'<', _) => (SHL, 2),
+        (b'>', b'>', _) => (SHR, 2),
+        (b'<', b'=', _) => (LE, 2),
+        (b'>', b'=', _) => (GE, 2),
+        (b'=', b'=', _) => (EQ, 2),
+        (b'!', b'=', _) => (NE, 2),
+        (b'<', b'>', _) => (LTGT, 2),
+        (b'-', b'>', _) => (ARROW, 2),
+        (b':', b'=', _) => (WALRUS, 2),
+        (b'+', b'=', _) => (PLUS_EQ, 2),
+        (b'-', b'=', _) => (MINUS_EQ, 2),
+        (b'*', b'=', _) => (STAR_EQ, 2),
+        (b'/', b'=', _) => (SLASH_EQ, 2),
+        (b'%', b'=', _) => (PERCENT_EQ, 2),
+        (b'|', b'=', _) => (PIPE_EQ, 2),
+        (b'^', b'=', _) => (CARET_EQ, 2),
+        (b'&', b'=', _) => (AMP_EQ, 2),
+        (b'@', b'=', _) => (AT_EQ, 2),
+        (b'(', ..) => (LPAREN, 1),
+        (b')', ..) => (RPAREN, 1),
+        (b'[', ..) => (LBRACKET, 1),
+        (b']', ..) => (RBRACKET, 1),
+        (b'{', ..) => (LBRACE, 1),
+        (b'}', ..) => (RBRACE, 1),
+        (b',', ..) => (COMMA, 1),
+        (b':', ..) => (COLON, 1),
+        (b';', ..) => (SEMI, 1),
+        (b'.', ..) => (DOT, 1),
+        (b'@', ..) => (AT, 1),
+        (b'=', ..) => (ASSIGN, 1),
+        (b'+', ..) => (PLUS, 1),
+        (b'-', ..) => (MINUS, 1),
+        (b'*', ..) => (STAR, 1),
+        (b'/', ..) => (SLASH, 1),
+        (b'%', ..) => (PERCENT, 1),
+        (b'|', ..) => (PIPE, 1),
+        (b'^', ..) => (CARET, 1),
+        (b'&', ..) => (AMP, 1),
+        (b'~', ..) => (TILDE, 1),
+        (b'<', ..) => (LT, 1),
+        (b'>', ..) => (GT, 1),
+        (b'!', ..) => (BANG, 1),
+        _ => return UNKNOWN,
+    };
+    c.bump_n(width);
+    kind
+}
+
