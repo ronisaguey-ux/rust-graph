@@ -34,7 +34,7 @@ pub struct Options {
     pub cache: Option<PathBuf>,
     pub no_cache: bool,
     pub max_files: usize,
-    pub max_file_bytes: u64,
+    pub max_file_bytes: u64, #[cfg(all(feature = "deep", feature = "parser"))] pub path: PathMode,
 }
 
 impl Default for Options {
@@ -46,7 +46,7 @@ impl Default for Options {
             cache: None,
             no_cache: false,
             max_files: 200_000,
-            max_file_bytes: 2 * 1024 * 1024,
+            max_file_bytes: 2 * 1024 * 1024, #[cfg(all(feature = "deep", feature = "parser"))] path: PathMode::Auto,
         }
     }
 }
@@ -129,7 +129,7 @@ fn write_record(pack: &mut impl Write, path: &str, sha: &[u8; 32], body: &[u8]) 
 
 fn pack_header() -> Vec<u8> {
     let mut header = PACK_MAGIC.to_vec();
-    header.extend_from_slice(&FACTS_VERSION.to_le_bytes());
+    #[cfg(not(all(feature = "deep", feature = "parser")))] header.extend_from_slice(&FACTS_VERSION.to_le_bytes()); #[cfg(all(feature = "deep", feature = "parser"))] header.extend_from_slice(&(FACTS_VERSION | (deep_run::bits() << 8)).to_le_bytes());
     header
 }
 
@@ -386,7 +386,7 @@ fn parse_pass(
             }
             None => {
                 let Some(language) = language_of(path, &content) else { continue };
-                let facts = parser::parse(&content, language);
+                #[cfg(not(all(feature = "deep", feature = "parser")))] let facts = parser::parse(&content, language); #[cfg(all(feature = "deep", feature = "parser"))] let facts = parse_source(&content, path, language);
                 totals.parsed += 1;
                 (facts.encode(), facts)
             }
@@ -534,7 +534,7 @@ pub fn build(options: &Options) -> io::Result<()> {
     if !options.root.is_dir() {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not a directory", options.root.display())));
     }
-    let mut paths = Vec::new();
+    let mut paths = Vec::new(); #[cfg(all(feature = "deep", feature = "parser"))] deep_run::set(options.path);
     walk(&options.root, "", &mut paths)?;
     let mut totals = Totals::default();
     if paths.len() > options.max_files {
@@ -545,10 +545,10 @@ pub fn build(options: &Options) -> io::Result<()> {
     let scratch = Scratch::new()?;
     let cache_dir = (!options.no_cache).then(|| options.cache.clone().unwrap_or_else(|| options.root.join(".rust-graph")));
     let old_path = cache_dir.as_ref().map(|dir| dir.join("facts.pack"));
-    let mut old = old_path.as_deref().and_then(open_old_pack);
+    let mut old = old_path.as_deref().and_then(open_old_pack); #[cfg(all(feature = "deep", feature = "parser"))] let old_meta = cache_dir.as_ref().and_then(|dir| deep_run::load(dir));
     let pack_path = scratch.file("facts.pack");
-    let mut index = Index::default();
-    let entries = parse_pass(options, &paths, &mut old, &pack_path, &mut index, &mut totals)?;
+    let mut index = Index::default(); #[cfg(all(feature = "deep", feature = "parser"))] let mut parser_state = deep_run::State::default();
+    let entries = parse_pass(options, &paths, &mut old, &pack_path, &mut index, &mut totals)?; #[cfg(all(feature = "deep", feature = "parser"))] { parser_state.absorb(); parser_state.merge(old_meta); }
     drop(old);
     drop(paths);
     index.seal();
@@ -582,7 +582,7 @@ pub fn build(options: &Options) -> io::Result<()> {
             hex(&entry.sha),
             entry.bytes,
             facts.lines
-        ));
+        )); #[cfg(all(feature = "deep", feature = "parser"))] parser_state.note(&mut row, &path);
         sections.sources.row(&row)?;
         let defined = facts.symbols.iter().filter(|symbol| symbol.kind != KIND_MODULE).count() as u64;
         symbol_count += defined;
@@ -597,7 +597,7 @@ pub fn build(options: &Options) -> io::Result<()> {
             out,
             "{{\"version\":1,\"tool\":\"rust-graph\",\"files\":{},\"bytes\":{},\"truncated\":{},\"too_large\":{}",
             total_files, totals.bytes, totals.truncated, totals.too_large
-        )?;
+        )?; #[cfg(all(feature = "deep", feature = "parser"))] parser_state.heading(out)?;
         let parts = [
             ("sources", sections.sources),
             ("symbols", sections.symbols),
@@ -630,7 +630,7 @@ pub fn build(options: &Options) -> io::Result<()> {
         drop(out);
         fs::rename(&temporary, dir.join("graph.json"))?;
     }
-    let text = report(&totals, stats, total_files, symbol_count);
+    let text = report(&totals, stats, total_files, symbol_count); #[cfg(all(feature = "deep", feature = "parser"))] let text = parser_state.report_line(&text);
     if let Some(dir) = target_dir.as_ref().filter(|_| !options.stdout) {
         fs::write(dir.join("report.md"), &text)?;
     }
@@ -638,7 +638,7 @@ pub fn build(options: &Options) -> io::Result<()> {
         fs::create_dir_all(&dir)?;
         let temporary = dir.join("facts.pack.tmp");
         fs::copy(&pack_path, &temporary)?;
-        fs::rename(&temporary, dir.join("facts.pack"))?;
+        fs::rename(&temporary, dir.join("facts.pack"))?; #[cfg(all(feature = "deep", feature = "parser"))] parser_state.save(&dir)?;
     }
     eprintln!(
         "rust-graph: {} files ({} parsed, {} cached), {symbol_count} symbols, {} ms, peak {} KB",
@@ -647,7 +647,7 @@ pub fn build(options: &Options) -> io::Result<()> {
         totals.reused,
         started.elapsed().as_millis(),
         peak_rss_kb()
-    );
+    ); #[cfg(all(feature = "deep", feature = "parser"))] eprintln!("{}", parser_state.stderr_line());
     Ok(())
 }
 
@@ -945,3 +945,102 @@ mod deep_run {
     }
 }
 
+/// Whether the CST record lost anything the lexer's found on this file.
+///
+/// The deep walk is the better reader where its tables cover a construct, but
+/// where a grammar or a table has not reached one it can silently see less than
+/// the one-pass lexer — `from m import *`, `a, b = f(x), 1`, `f"{x}"` are three
+/// the differential fixtures do not carry. `auto` therefore compares the two
+/// records and keeps the lexer's when the CST's is missing something: fewer
+/// imports, a named symbol the lexer had, a call, or a flow event. A loss is
+/// recorded as a fallback rather than hidden, and `--deep` skips the comparison
+/// because the user asked for the CST.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn loses(lexer: &Facts, deep: &Facts) -> bool {
+    for import in &lexer.imports {
+        let same = deep.imports.iter().any(|row| {
+            row.module == import.module && row.name == import.name && row.alias == import.alias && row.kind == import.kind
+        });
+        if !same {
+            return true;
+        }
+    }
+    for symbol in lexer.symbols.iter().filter(|symbol| symbol.kind != KIND_MODULE) {
+        let same = deep
+            .symbols
+            .iter()
+            .any(|row| row.name == symbol.name && row.kind == symbol.kind);
+        if !same {
+            return true;
+        }
+    }
+    let name_of = |path: &str| path.rsplit('.').next().unwrap_or(path).to_string();
+    for symbol in &lexer.symbols {
+        for call in &symbol.calls {
+            let name = name_of(&call.path);
+            let near = |line: u32| (line as i64 - call.line as i64).abs() <= 1;
+            let same = deep
+                .symbols
+                .iter()
+                .flat_map(|row| row.calls.iter())
+                .any(|row| name_of(&row.path) == name && near(row.line));
+            if !same {
+                return true;
+            }
+        }
+    }
+    let events = |facts: &Facts, marker: &str| -> usize {
+        facts.symbols.iter().map(|symbol| symbol.events.matches(marker).count()).sum()
+    };
+    for marker in ["[\"a\",", "[\"r\",", "[\"x\","] {
+        if events(deep, marker) < events(lexer, marker) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The facts for one file, and the record of which parser produced them.
+///
+/// `--lexer` is the old path unchanged. `--deep` asks for the CST. `auto` takes
+/// the CST where `deep_facts` can read facts off it, then checks the record
+/// against the lexer's and keeps the lexer's when the CST lost a fact — with the
+/// reason recorded, so a downgrade is counted and never silent.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts {
+    use gate::deep_integration::{self, Lang};
+
+    let mode = deep_run::get();
+    if mode == PathMode::Lexer {
+        deep_run::record(path, deep_run::Taken::default());
+        return parser::parse(bytes, language);
+    }
+    // `deep_facts::lang_for` is keyed by the lexer tag; TSX shares TS's tag but
+    // not its grammar, so the suffix decides between them.
+    let lang = match deep_facts::lang_for(language.tag) {
+        Some(Lang::TypeScript) if path.ends_with(".tsx") => Some(Lang::Tsx),
+        other => other,
+    };
+    let Some(lang) = lang else {
+        // Forcing the CST on a language this build has no table for is a
+        // downgrade and says so. Under `auto` the language was never eligible,
+        // so the lexer is the choice and not a fallback.
+        let fallback = (mode == PathMode::Deep).then(|| format!("no deep parser for {}", language.tag));
+        deep_run::record(path, deep_run::Taken { fallback, ..deep_run::Taken::default() });
+        return parser::parse(bytes, language);
+    };
+    let lexer = parser::parse(bytes, language);
+    let Some(cst) = deep_integration::parse_file(bytes, lang) else {
+        let fallback = Some("the deep parser returned no tree".to_string());
+        deep_run::record(path, deep_run::Taken { fallback, ..deep_run::Taken::default() });
+        return lexer;
+    };
+    let deep = deep_facts::extract(bytes, &cst, lang);
+    if mode == PathMode::Auto && loses(&lexer, &deep) {
+        let fallback = Some("the CST record lost facts the lexer found".to_string());
+        deep_run::record(path, deep_run::Taken { fallback, ..deep_run::Taken::default() });
+        return lexer;
+    }
+    deep_run::record(path, deep_run::Taken { deep: true, errors: cst.errors, fallback: None });
+    deep
+}

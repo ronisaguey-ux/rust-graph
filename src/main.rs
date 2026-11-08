@@ -41,6 +41,7 @@ fn options(args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--no-cache" => options.no_cache = true,
             "--max-files" => options.max_files = number(args.next(), "--max-files")? as usize,
             "--max-file-bytes" => options.max_file_bytes = number(args.next(), "--max-file-bytes")?,
+            #[cfg(all(feature = "deep", feature = "parser"))] "--deep" | "--lexer" => { if options.path != pipeline::PathMode::Auto { return Err("choose one of --deep and --lexer, not both".to_string()); } options.path = if arg == "--deep" { pipeline::PathMode::Deep } else { pipeline::PathMode::Lexer }; },
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             path if root.is_none() => root = Some(PathBuf::from(path)),
             extra => return Err(format!("unexpected argument {extra}")),
@@ -69,7 +70,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("rust-graph: {message}");
+            eprintln!("rust-graph: {message}"); #[cfg(all(feature = "deep", feature = "parser"))] if message.starts_with("usage:") { eprintln!("{USAGE_DEEP}"); }
             ExitCode::from(2)
         }
     }
