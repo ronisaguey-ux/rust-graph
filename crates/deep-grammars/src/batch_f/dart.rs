@@ -298,3 +298,323 @@ rust_graph_deep::grammar! { DART {
         left "|" => bitwise_or,
         left "^" => bitwise_xor,
         left "&" => bitwise_and,
+        left "<<" | ">>" => shift,
+        left "+" | "-" => additive,
+        left "*" | "/" | "%" | "~/" => multiplicative,
+        prefix "!" | "-" | "~" => unary,
+        prefix "await" | "new" => await_expression,
+        postfix "++" | "--" => update,
+        prefix "++" | "--" => update,
+        postfix argument_list => call,
+        postfix "." _name => member_access,
+        postfix "?." _name => null_aware_member,
+        postfix index_expression => index,
+        postfix "!" => null_assertion,
+    },
+
+    argument_list: "(" [_argument %? ","] ")",
+    index_expression: "[" _expression "]",
+    _argument: &(IDENT ":") named_argument | _expression,
+    named_argument: _name ":" _expression,
+    _name: IDENT,
+
+    _primary:
+        IDENT
+        | NUMBER
+        | string_literal
+        | "true"
+        | "false"
+        | "null"
+        | "this"
+        | "super"
+        | parenthesized_expression
+        | list_literal,
+
+    string_literal: (STRING | BAD_STRING)+,
+    parenthesized_expression: "(" (_expression %? ",") ")",
+    paren_expression: "(" _expression ")",
+    list_literal: "[" [_expression %? ","] "]",
+} }
+
+/// One token at the cursor.
+pub fn lex_dart(c: &mut Cursor) -> Kind {
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'\x0c'));
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'/' => {
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            COMMENT
+        }
+        b'/' if c.peek_at(1) == b'*' => {
+            if crate::batch_d::lex::block_comment(c, b"/*", b"*/", true) {
+                COMMENT
+            } else {
+                COMMENT
+            }
+        }
+        b'\'' | b'"' => string(c),
+        b'r' | b'R' if matches!(c.peek_at(1), b'\'' | b'"') => {
+            c.bump();
+            string(c)
+        }
+        b'0'..=b'9' => { number(c); NUMBER }
+        b'.' if c.peek_at(1).is_ascii_digit() => { number(c); NUMBER }
+        b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => word(c),
+        b'(' => { c.bump(); LPAREN }
+        b')' => { c.bump(); RPAREN }
+        b'[' => { c.bump(); LBRACKET }
+        b']' => { c.bump(); RBRACKET }
+        b'{' => { c.bump(); LBRACE }
+        b'}' => { c.bump(); RBRACE }
+        b',' => { c.bump(); COMMA }
+        b';' => { c.bump(); SEMI }
+        b':' => { c.bump(); COLON }
+        b'.' => { c.bump(); DOT }
+        b'?' if c.peek_at(1) == b'.' => { c.bump_n(2); QUESTION_DOT }
+        b'?' => { c.bump(); QUESTION }
+        b'=' if c.peek_at(1) == b'>' => { c.bump_n(2); ARROW }
+        b'=' if c.peek_at(1) == b'=' => { c.bump_n(2); EQ }
+        b'=' => { c.bump(); ASSIGN }
+        b'!' if c.peek_at(1) == b'=' => { c.bump_n(2); NE }
+        b'!' => { c.bump(); BANG }
+        b'<' if c.peek_at(1) == b'=' => { c.bump_n(2); LE }
+        b'<' if c.peek_at(1) == b'<' => { c.bump_n(2); SHL }
+        b'<' => { c.bump(); LT }
+        b'>' if c.peek_at(1) == b'=' => { c.bump_n(2); GE }
+        b'>' if c.peek_at(1) == b'>' => { c.bump_n(2); SHR }
+        b'>' => { c.bump(); GT }
+        b'&' if c.peek_at(1) == b'&' => { c.bump_n(2); AND }
+        b'&' => { c.bump(); AMP }
+        b'|' if c.peek_at(1) == b'|' => { c.bump_n(2); OR }
+        b'|' => { c.bump(); PIPE }
+        b'^' => { c.bump(); CARET }
+        b'~' if c.peek_at(1) == b'/' => { c.bump_n(2); TILDE_SLASH }
+        b'~' => { c.bump(); TILDE }
+        b'+' if c.peek_at(1) == b'+' => { c.bump_n(2); INCR }
+        b'+' if c.peek_at(1) == b'=' => { c.bump_n(2); PLUS_ASSIGN }
+        b'+' => { c.bump(); PLUS }
+        b'-' if c.peek_at(1) == b'-' => { c.bump_n(2); DECR }
+        b'-' if c.peek_at(1) == b'=' => { c.bump_n(2); MINUS_ASSIGN }
+        b'-' => { c.bump(); MINUS }
+        b'*' if c.peek_at(1) == b'=' => { c.bump_n(2); STAR_ASSIGN }
+        b'*' => { c.bump(); STAR }
+        b'/' if c.peek_at(1) == b'=' => { c.bump_n(2); SLASH_ASSIGN }
+        b'/' => { c.bump(); SLASH }
+        b'%' if c.peek_at(1) == b'=' => { c.bump_n(2); PERCENT_ASSIGN }
+        b'%' => { c.bump(); PERCENT }
+        b'@' => { c.bump(); AT }
+        _ => UNKNOWN,
+    }
+}
+
+/// The prefix `async*`/`sync*` cannot be a word because `*` is an operator, so
+/// the two are recognised here rather than in `word`.
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    let length = c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$');
+    let text = &start[..length];
+    if text == b"async" && c.peek() == b'*' {
+        c.bump();
+        return KW_ASYNC_STAR;
+    }
+    if text == b"sync" && c.peek() == b'*' {
+        c.bump();
+        return KW_SYNC_STAR;
+    }
+    keyword(text)
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"import" => KW_IMPORT,
+        b"export" => KW_EXPORT,
+        b"library" => KW_LIBRARY,
+        b"part" => KW_PART,
+        b"class" => KW_CLASS,
+        b"abstract" => KW_ABSTRACT,
+        b"interface" => KW_INTERFACE,
+        b"mixin" => KW_MIXIN,
+        b"enum" => KW_ENUM,
+        b"extension" => KW_EXTENSION,
+        b"extends" => KW_EXTENDS,
+        b"implements" => KW_IMPLEMENTS,
+        b"with" => KW_WITH,
+        b"on" => KW_ON,
+        b"of" => KW_OF,
+        b"typedef" => KW_TYPEDEF,
+        b"static" => KW_STATIC,
+        b"final" => KW_FINAL,
+        b"const" => KW_CONST,
+        b"var" => KW_VAR,
+        b"late" => KW_LATE,
+        b"void" => KW_VOID,
+        b"dynamic" => KW_DYNAMIC,
+        b"int" => KW_INT,
+        b"double" => KW_DOUBLE,
+        b"num" => KW_NUM,
+        b"bool" => KW_BOOL,
+        b"new" => KW_NEW,
+        b"this" => KW_THIS,
+        b"super" => KW_SUPER,
+        b"return" => KW_RETURN,
+        b"if" => KW_IF,
+        b"else" => KW_ELSE,
+        b"for" => KW_FOR,
+        b"in" => KW_IN,
+        b"while" => KW_WHILE,
+        b"do" => KW_DO,
+        b"switch" => KW_SWITCH,
+        b"case" => KW_CASE,
+        b"default" => KW_DEFAULT,
+        b"break" => KW_BREAK,
+        b"continue" => KW_CONTINUE,
+        b"try" => KW_TRY,
+        b"catch" => KW_CATCH,
+        b"finally" => KW_FINALLY,
+        b"throw" => KW_THROW,
+        b"rethrow" => KW_RETHROW,
+        b"async" => KW_ASYNC,
+        b"await" => KW_AWAIT,
+        b"yield" => KW_YIELD,
+        b"get" => KW_GET,
+        b"set" => KW_SET,
+        b"factory" => KW_FACTORY,
+        b"external" => KW_EXTERNAL,
+        b"covariant" => KW_COVARIANT,
+        b"required" => KW_REQUIRED,
+        b"operator" => KW_OPERATOR,
+        b"as" => KW_AS,
+        b"is" => KW_IS,
+        b"true" => KW_TRUE,
+        b"false" => KW_FALSE,
+        b"null" => KW_NULL,
+        b"show" => KW_SHOW,
+        b"hide" => KW_HIDE,
+        _ => IDENT,
+    }
+}
+
+/// A string from its opening quote: one line, or triple-quoted to the closing
+/// three quotes. `r` prefixes are handled by the caller.
+fn string(c: &mut Cursor) -> Kind {
+    let quote = c.peek();
+    let triple = c.peek_at(1) == quote && c.peek_at(2) == quote;
+    if triple {
+        c.bump_n(3);
+        loop {
+            if c.at_end() {
+                return BAD_STRING;
+            }
+            if c.peek() == b'\\' {
+                c.bump_n(2);
+            } else if c.peek() == quote && c.peek_at(1) == quote && c.peek_at(2) == quote {
+                c.bump_n(3);
+                return STRING;
+            } else {
+                c.bump_char();
+            }
+        }
+    }
+    c.bump();
+    if c.quoted(quote, true) {
+        STRING
+    } else {
+        BAD_STRING
+    }
+}
+
+fn number(c: &mut Cursor) {
+    if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B') {
+        c.bump_n(2);
+        c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        return;
+    }
+    c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    if c.peek() == b'.' && c.peek_at(1).is_ascii_digit() {
+        c.bump();
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'_');
+    }
+    if matches!(c.peek(), b'e' | b'E') {
+        let sign = usize::from(matches!(c.peek_at(1), b'+' | b'-'));
+        if c.peek_at(1 + sign).is_ascii_digit() {
+            c.bump_n(1 + sign);
+            c.eat_while(|byte| byte.is_ascii_digit());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_f::harness;
+
+    const VALID: &[(&str, &[&str])] = &[
+        (
+            "main.dart",
+            &[
+                "import_directive",
+                "import_directive",
+                "part_directive",
+                "class_declaration",
+                "function_declaration",
+            ],
+        ),
+        (
+            "models.dart",
+            &["library_directive", "enum_declaration", "class_declaration", "class_declaration"],
+        ),
+        (
+            "pipeline.dart",
+            &[
+                "import_directive",
+                "variable_declaration",
+                "variable_declaration",
+                "variable_declaration",
+                "function_declaration",
+                "function_declaration",
+                "function_declaration",
+            ],
+        ),
+    ];
+
+    #[test]
+    fn valid_fixtures() {
+        harness::check_valid("dart", &DART, VALID);
+    }
+
+    #[test]
+    fn malformed_keeps_the_root() {
+        harness::check_malformed(
+            "malformed",
+            "dart_broken.dart",
+            &DART,
+            &["import_directive", "class_declaration"],
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_top_level_kinds() {
+        harness::dump("dart", &DART);
+        harness::dump("malformed", &DART);
+    }
+
+    #[test]
+    fn lexes_strings_and_comments() {
+        use crate::deep::lexer::{lex, Tokens};
+        let src = br#"// c
+var s = "a ${b} c";
+var t = '''x
+y''';
+"#;
+        let mut tokens = Tokens::default();
+        lex(src, &DART, &mut tokens);
+        let kinds: Vec<&str> = (0..tokens.len()).map(|i| DART.name(tokens.kind[i])).collect();
+        assert!(kinds.contains(&"string"), "{kinds:?}");
+        assert_eq!(kinds.iter().filter(|kind| **kind == "string").count(), 2, "{kinds:?}");
+        assert!(kinds.contains(&"comment"), "{kinds:?}");
+    }
+}
