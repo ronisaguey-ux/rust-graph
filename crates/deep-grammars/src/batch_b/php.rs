@@ -622,17 +622,6 @@ fn heredoc(c: &mut Cursor) -> Kind {
     }
 }
 
-fn trim_start(mut bytes: &[u8]) -> &[u8] {
-    while let [first, rest @ ..] = bytes {
-        if matches!(first, b' ' | b'\t') {
-            bytes = rest;
-        } else {
-            break;
-        }
-    }
-    bytes
-}
-
 fn trim_end(mut bytes: &[u8]) -> &[u8] {
     while let [rest @ .., last] = bytes {
         if matches!(last, b' ' | b'\t' | b'\r') {
