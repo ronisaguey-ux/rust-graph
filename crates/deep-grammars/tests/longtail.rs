@@ -19,6 +19,7 @@ use deep_grammars::batch_d::yaml::YAML;
 use deep_grammars::batch_d::css::CSS;
 use deep_grammars::batch_d::html::HTML;
 use deep_grammars::batch_d::lua::LUA;
+use deep_grammars::batch_d::perl::PERL;
 use deep_grammars::batch_d::r::R;
 use deep_grammars::batch_d::awk::AWK;
 use deep_grammars::batch_d::clojure::CLOJURE;
@@ -40,6 +41,7 @@ fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str,
         ("clojure", &CLOJURE, CLOJURE_VALID),
         ("tcl", &TCL, TCL_VALID),
         ("awk", &AWK, AWK_VALID),
+        ("perl", &PERL, PERL_VALID),
     ]
 }
 
@@ -163,6 +165,21 @@ const AWK_VALID: &[(&str, &str)] = &[
     ("summary.awk", "begin_block pattern_rule end_block function_definition"),
 ];
 
+const PERL_VALID: &[(&str, &str)] = &[
+    (
+        "report.pl",
+        "use_statement use_statement my_declaration sub_definition sub_definition expression_statement expression_statement print_statement",
+    ),
+    (
+        "rules.pl",
+        "package_statement use_statement my_declaration sub_definition sub_definition sub_definition expression_statement",
+    ),
+    (
+        "scanner.pl",
+        "use_statement use_statement use_statement package_statement my_declaration sub_definition sub_definition sub_definition expression_statement",
+    ),
+];
+
 /// `(file, language name, top-level kinds)` for every malformed fixture.
 const MALFORMED: &[(&str, &str, &str)] = &[
     ("awk_broken.awk", "awk", "begin_block"),
@@ -172,6 +189,7 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     ("json_broken_array.json", "json", "object"),
     ("julia_broken.jl", "julia", "function_definition"),
     ("lua_broken.lua", "lua", "local_function"),
+    ("perl_broken.pl", "perl", "package_statement sub_definition"),
     ("r_broken.R", "r", "expression_statement"),
     ("shell_broken_if.sh", "shell", "simple_command if_clause ERROR"),
     ("sql_broken_insert.sql", "sql", "select_statement insert_statement"),

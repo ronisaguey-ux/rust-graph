@@ -16,5 +16,6 @@ pub mod css;
 pub mod html;
 pub mod julia;
 pub mod lua;
+pub mod perl;
 pub mod r;
 pub mod yaml;
