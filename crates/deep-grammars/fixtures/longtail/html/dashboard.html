@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Scanner dashboard</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="dark" data-page="dashboard">
+  <header id="top">
+    <h1>Repositories</h1>
+    <nav>
+      <a href="/repos" class="active">Repositories</a>
+      <a href="/runs">Runs</a>
+    </nav>
+  </header>
+  <main>
+    <ul class="repo-list">
+      <li data-id="1">rust-graph <span class="badge">ok</span></li>
+      <li data-id="2">deep-scan <span class="badge warn">slow</span></li>
+    </ul>
+    <img src="/chart.svg" alt="throughput">
+    <hr>
+  </main>
+  <footer>
+    <p>&copy; 2026 RS Systems</p>
+  </footer>
+</body>
+</html>

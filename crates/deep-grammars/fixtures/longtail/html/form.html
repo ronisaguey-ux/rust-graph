@@ -1,0 +1,11 @@
+<form action="/scan" method="post" class="scan-form">
+  <!-- The target is validated server-side as well. -->
+  <label for="target">Repository URL</label>
+  <input id="target" name="target" type="url" required placeholder="https://...">
+  <select name="depth">
+    <option value="4">shallow</option>
+    <option value="12" selected>default</option>
+  </select>
+  <textarea name="notes" rows="4" cols="40"></textarea>
+  <button type="submit" disabled>Start scan</button>
+</form>
