@@ -204,6 +204,38 @@ mod tests {
         assert!(shrink_with(ContainsToken::new, b"nothing here", Duration::from_secs(1), 100).is_none());
     }
 
+    /// A real `Language` whose lexer panics on `Z`: the shrinker drives the
+    /// actual workspace, lexer and parser, not a stand-in target.
+    static BROKEN_LEXER: deep_grammars::deep::syntax::Language = deep_grammars::deep::syntax::Language::new(
+        "broken-lexer",
+        16,
+        &[],
+        broken_lex,
+        broken_parse,
+    );
+
+    fn broken_lex(cursor: &mut deep_grammars::deep::lexer::Cursor) -> u16 {
+        if cursor.peek() == b'Z' {
+            panic!("injected lexer bug: Z is not a byte this lexer handles");
+        }
+        cursor.bump_char();
+        deep_grammars::deep::syntax::WHITESPACE
+    }
+
+    fn broken_parse(_: &mut deep_grammars::deep::parser::Parser) {}
+
+    #[test]
+    fn shrink_drives_the_real_runtime_to_the_trigger_byte() {
+        let input = b"aaaaaaaaaaaaaaaaaaaaaaaaZaZaaaaaaaaaaaaaaaa";
+        let make = || {
+            crate::harness::LanguageTarget::from_language(&BROKEN_LEXER, deep_grammars::deep::Budget::default())
+        };
+        let result = shrink_with(make, input, Duration::from_secs(10), 10_000).expect("the broken lexer fails");
+        assert_eq!(result.bytes, b"Z");
+        assert!(matches!(result.failure, Some(crate::harness::Failure::Panic { .. })), "{:?}", result.failure);
+        assert!(!result.capped);
+    }
+
     #[test]
     fn escape_is_lossless_for_the_report() {
         assert_eq!(escape(b"a\n\x00\xff\\"), "a\\n\\x00\\xff\\\\");
