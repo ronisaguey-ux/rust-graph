@@ -7,10 +7,10 @@ name = "deep-abi"
 version = "0.1.0"
 
 [[package]]
-name = "deep-grammars"
+name = "deep-lex"
 version = "0.1.0"
 dependencies = [
- "rust-graph-deep",
+ "deep-abi",
 ]
 
 [[package]]
