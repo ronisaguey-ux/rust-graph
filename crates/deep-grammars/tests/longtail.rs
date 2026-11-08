@@ -14,6 +14,7 @@ use deep_grammars::deep::{Budget, Workspace};
 
 use deep_grammars::batch_d::json::JSON;
 use deep_grammars::batch_d::shell::SHELL;
+use deep_grammars::batch_d::solidity::SOLIDITY;
 use deep_grammars::batch_d::sql::SQL;
 use deep_grammars::batch_d::yaml::YAML;
 use deep_grammars::batch_d::zig::ZIG;
@@ -48,6 +49,7 @@ fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str,
         ("elixir", &ELIXIR, ELIXIR_VALID),
         ("erlang", &ERLANG, ERLANG_VALID),
         ("zig", &ZIG, ZIG_VALID),
+        ("solidity", &SOLIDITY, SOLIDITY_VALID),
     ]
 }
 
@@ -207,6 +209,15 @@ const ZIG_VALID: &[(&str, &str)] = &[
     ("main.zig", "var_declaration var_declaration fn_declaration fn_declaration"),
 ];
 
+const SOLIDITY_VALID: &[(&str, &str)] = &[
+    ("registry.sol", "pragma_directive import_directive contract_definition"),
+    ("staking.sol", "pragma_directive contract_definition contract_definition"),
+    (
+        "voting.sol",
+        "pragma_directive contract_definition contract_definition contract_definition",
+    ),
+];
+
 /// `(file, language name, top-level kinds)` for every malformed fixture.
 const MALFORMED: &[(&str, &str, &str)] = &[
     ("awk_broken.awk", "awk", "begin_block"),
@@ -221,6 +232,7 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     ("perl_broken.pl", "perl", "package_statement sub_definition"),
     ("r_broken.R", "r", "expression_statement"),
     ("shell_broken_if.sh", "shell", "simple_command if_clause ERROR"),
+    ("solidity_broken.sol", "solidity", "pragma_directive contract_definition"),
     ("sql_broken_insert.sql", "sql", "select_statement insert_statement"),
     ("tcl_broken.tcl", "tcl", "proc_command"),
     ("yaml_broken.yaml", "yaml", "key_entry"),
