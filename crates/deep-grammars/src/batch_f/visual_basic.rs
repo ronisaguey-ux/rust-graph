@@ -248,3 +248,238 @@ rust_graph_deep::grammar! { VISUAL_BASIC {
 
     argument_list: "(" [_argument %? ","] ")",
     _argument: _expression,
+
+    _expression: precedence _primary {
+        right "=" => assignment,
+        left "OrElse" | "Or" | "Xor" => logical_or,
+        left "AndAlso" | "And" => logical_and,
+        left "<>" | "<" | ">" | "<=" | ">=" | "Is" | "Like" => comparison,
+        left "&" => concatenation,
+        left "+" | "-" => additive,
+        left "Mod" => modulo,
+        left "*" | "/" => multiplicative,
+        left "\\" => integer_division,
+        right "^" => power,
+        prefix "Not" | "-" | "+" => unary,
+        postfix argument_list => call,
+        postfix "." _name => member_access,
+    },
+
+    _primary:
+        _name
+        | NUMBER
+        | STRING
+        | DATE
+        | "Nothing"
+        | "True"
+        | "False"
+        | parenthesized_expression
+        | object_creation,
+
+    _name: IDENT | "Me",
+    parenthesized_expression: "(" _expression ")",
+} }
+
+pub fn lex_vb(c: &mut Cursor) -> Kind {
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\x0c'));
+            WHITESPACE
+        }
+        b'\n' => { c.bump(); NEWLINE }
+        b'\r' => {
+            c.bump();
+            c.eat(b'\n');
+            NEWLINE
+        }
+        b'_' if matches!(c.peek_at(1), b'\n' | b'\r') => {
+            c.bump();
+            c.eat(b'\r');
+            c.eat(b'\n');
+            WHITESPACE
+        }
+        b'\'' => {
+            lex::line_comment(c);
+            COMMENT
+        }
+        b'"' => {
+            c.bump();
+            if c.quoted(b'"', true) {
+                STRING
+            } else {
+                BAD_STRING
+            }
+        }
+        b'#' => {
+            c.bump();
+            c.eat_while(|byte| byte != b'#' && byte != b'\n' && byte != b'\r');
+            c.eat(b'#');
+            DATE
+        }
+        b'0'..=b'9' => { lex::number(c); NUMBER }
+        b'.' if c.peek_at(1).is_ascii_digit() => { c.bump(); lex::number(c); NUMBER }
+        b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'[' => {
+            if byte == b'[' {
+                // `[If]` escapes a keyword as a name.
+                c.bump();
+                c.eat_while(|byte| byte != b']' && byte != b'\n');
+                c.eat(b']');
+                return IDENT;
+            }
+            let start = c.rest();
+            let length = c.eat_while(lex::is_word_byte);
+            let text = &start[..length];
+            if text.eq_ignore_ascii_case(b"REM") {
+                lex::line_comment(c);
+                return COMMENT;
+            }
+            keyword(&lex::upper(text))
+        }
+        b'(' => { c.bump(); LPAREN }
+        b')' => { c.bump(); RPAREN }
+        b'[' => { c.bump(); LBRACKET }
+        b']' => { c.bump(); RBRACKET }
+        b',' => { c.bump(); COMMA }
+        b'.' => { c.bump(); DOT }
+        b':' => { c.bump(); COLON }
+        b'=' => { c.bump(); ASSIGN }
+        b'<' if c.peek_at(1) == b'=' => { c.bump_n(2); LE }
+        b'<' if c.peek_at(1) == b'>' => { c.bump_n(2); NE }
+        b'<' => { c.bump(); LT }
+        b'>' if c.peek_at(1) == b'=' => { c.bump_n(2); GE }
+        b'>' => { c.bump(); GT }
+        b'+' => { c.bump(); PLUS }
+        b'-' => { c.bump(); MINUS }
+        b'*' => { c.bump(); STAR }
+        b'/' => { c.bump(); SLASH }
+        b'\\' => { c.bump(); BACKSLASH }
+        b'^' => { c.bump(); CARET }
+        b'&' => { c.bump(); AMP }
+        b'?' => { c.bump(); QUESTION }
+        _ => UNKNOWN,
+    }
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    match text {
+        b"IMPORTS" => KW_IMPORTS,
+        b"NAMESPACE" => KW_NAMESPACE,
+        b"MODULE" => KW_MODULE,
+        b"CLASS" => KW_CLASS,
+        b"STRUCTURE" => KW_STRUCTURE,
+        b"INTERFACE" => KW_INTERFACE,
+        b"ENUM" => KW_ENUM,
+        b"SUB" => KW_SUB,
+        b"FUNCTION" => KW_FUNCTION,
+        b"PROPERTY" => KW_PROPERTY,
+        b"GET" => KW_GET,
+        b"SET" => KW_SET,
+        b"DIM" => KW_DIM,
+        b"CONST" => KW_CONST,
+        b"AS" => KW_AS,
+        b"NEW" => KW_NEW,
+        b"RETURN" => KW_RETURN,
+        b"IF" => KW_IF,
+        b"THEN" => KW_THEN,
+        b"ELSEIF" => KW_ELSEIF,
+        b"ELSE" => KW_ELSE,
+        b"END" => KW_END,
+        b"FOR" => KW_FOR,
+        b"TO" => KW_TO,
+        b"STEP" => KW_STEP,
+        b"NEXT" => KW_NEXT,
+        b"EACH" => KW_EACH,
+        b"IN" => KW_IN,
+        b"WHILE" => KW_WHILE,
+        b"DO" => KW_DO,
+        b"LOOP" => KW_LOOP,
+        b"UNTIL" => KW_UNTIL,
+        b"SELECT" => KW_SELECT,
+        b"CASE" => KW_CASE,
+        b"IS" => KW_IS,
+        b"TRY" => KW_TRY,
+        b"CATCH" => KW_CATCH,
+        b"FINALLY" => KW_FINALLY,
+        b"THROW" => KW_THROW,
+        b"EXIT" => KW_EXIT,
+        b"CONTINUE" => KW_CONTINUE,
+        b"WITH" => KW_WITH,
+        b"USING" => KW_USING,
+        b"BYVAL" => KW_BYVAL,
+        b"BYREF" => KW_BYREF,
+        b"OPTIONAL" => KW_OPTIONAL,
+        b"PUBLIC" => KW_PUBLIC,
+        b"PRIVATE" => KW_PRIVATE,
+        b"PROTECTED" => KW_PROTECTED,
+        b"FRIEND" => KW_FRIEND,
+        b"SHARED" => KW_SHARED,
+        b"STATIC" => KW_STATIC,
+        b"READONLY" => KW_READONLY,
+        b"OVERRIDES" => KW_OVERRIDES,
+        b"MUSTINHERIT" => KW_MUSTINHERIT,
+        b"NOTHING" => KW_NOTHING,
+        b"TRUE" => KW_TRUE,
+        b"FALSE" => KW_FALSE,
+        b"AND" => KW_AND,
+        b"OR" => KW_OR,
+        b"NOT" => KW_NOT,
+        b"XOR" => KW_XOR,
+        b"MOD" => KW_MOD,
+        b"LIKE" => KW_LIKE,
+        b"ANDALSO" => KW_ANDALSO,
+        b"ORELSE" => KW_ORELSE,
+        b"OF" => KW_OF,
+        b"HANDLES" => KW_HANDLES,
+        b"WHEN" => KW_WHEN,
+        b"ME" => KW_ME,
+        _ => IDENT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_f::harness;
+
+    const VALID: &[(&str, &[&str])] = &[
+        ("Module1.vb", &["import_statement", "import_statement", "unmodified_declaration"]),
+        ("Report.vb", &["import_statement", "declaration"]),
+        ("Service.vb", &["namespace_block"]),
+    ];
+
+    #[test]
+    fn valid_fixtures() {
+        harness::check_valid("visual_basic", &VISUAL_BASIC, VALID);
+    }
+
+    #[test]
+    fn malformed_keeps_the_root() {
+        harness::check_malformed(
+            "malformed",
+            "visual_basic_broken.vb",
+            &VISUAL_BASIC,
+            &["import_statement", "unmodified_declaration"],
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_top_level_kinds() {
+        harness::dump("visual_basic", &VISUAL_BASIC);
+        harness::dump("malformed", &VISUAL_BASIC);
+    }
+
+    #[test]
+    fn lexes_case_insensitive_keywords_and_a_comment() {
+        use crate::deep::lexer::{lex, Tokens};
+        let src = b"dIm x As InTeGeR ' note\n";
+        let mut tokens = Tokens::default();
+        lex(src, &VISUAL_BASIC, &mut tokens);
+        let kinds: Vec<&str> = (0..tokens.len())
+            .map(|i| VISUAL_BASIC.name(tokens.kind[i]))
+            .filter(|kind| *kind != "whitespace")
+            .collect();
+        assert_eq!(kinds, ["Dim", "identifier", "As", "identifier", "comment", "newline"]);
+    }
+}
