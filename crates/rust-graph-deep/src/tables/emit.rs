@@ -58,7 +58,7 @@ pub fn conflict_error(rules: &[(String, Vec<String>, Spot)], conflict: Conflict)
 
 /// The emitted source: kinds, the symbol names, and the ABI static.
 pub fn emit(grammar: &Grammar) -> Result<String, Error> {
-    if let Some(error) = runtime_error(grammar) {
+    if let Some(error) = runtime_error(grammar).or_else(|| super::unsupported_modes(grammar)) {
         return Err(error);
     }
     let tables = build(grammar)?;

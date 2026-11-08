@@ -51,8 +51,22 @@ pub fn runtime_reads_tables(grammar: &Grammar) -> bool {
     grammar.runtime != DEFAULT_RUNTIME
 }
 
+/// A lexer mode switch is the step lexer's: the table driver never calls
+/// `Language::lex`, so a table grammar that declared one would lose it without
+/// a word. Refused by name here, and again by [`emit`] for `mode = tables;`.
+pub fn unsupported_modes(grammar: &Grammar) -> Option<Error> {
+    if grammar.modes.is_empty() && grammar.switches.is_empty() {
+        return None;
+    }
+    let spot = grammar.modes.first().map(|mode| mode.spot).or_else(|| grammar.switches.first().map(|switch| switch.spot)).flatten();
+    Some(Error::at(spot, "a lexer mode belongs to the step lexer, which the table driver never runs: use `mode = recursive;`"))
+}
+
 /// What the table path refuses, and why. `None` when the grammar is expressible.
 pub fn unsupported(grammar: &Grammar) -> Option<Error> {
+    if let Some(error) = unsupported_modes(grammar) {
+        return Some(error);
+    }
     if let Some(layout) = &grammar.layout {
         return Some(Error::at(
             layout.spot,
