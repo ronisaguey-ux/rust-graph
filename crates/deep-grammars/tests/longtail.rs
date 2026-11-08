@@ -19,6 +19,7 @@ use deep_grammars::batch_d::yaml::YAML;
 use deep_grammars::batch_d::css::CSS;
 use deep_grammars::batch_d::html::HTML;
 use deep_grammars::batch_d::lua::LUA;
+use deep_grammars::batch_d::r::R;
 
 /// `(language name, static, valid fixtures)`.
 fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str, &'static str)])> {
@@ -30,6 +31,7 @@ fn languages() -> Vec<(&'static str, &'static Language, &'static [(&'static str,
         ("html", &HTML, HTML_VALID),
         ("css", &CSS, CSS_VALID),
         ("lua", &LUA, LUA_VALID),
+        ("r", &R, R_VALID),
     ]
 }
 
@@ -99,12 +101,28 @@ const LUA_VALID: &[(&str, &str)] = &[
     ),
 ];
 
+const R_VALID: &[(&str, &str)] = &[
+    (
+        "analysis.R",
+        "expression_statement expression_statement expression_statement expression_statement",
+    ),
+    (
+        "pipeline.R",
+        "expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement",
+    ),
+    (
+        "report.R",
+        "expression_statement expression_statement expression_statement expression_statement expression_statement",
+    ),
+];
+
 /// `(file, language name, top-level kinds)` for every malformed fixture.
 const MALFORMED: &[(&str, &str, &str)] = &[
     ("css_broken.css", "css", "rule_set rule_set"),
     ("html_broken.html", "html", "element"),
     ("json_broken_array.json", "json", "object"),
     ("lua_broken.lua", "lua", "local_function"),
+    ("r_broken.R", "r", "expression_statement"),
     ("shell_broken_if.sh", "shell", "simple_command if_clause ERROR"),
     ("sql_broken_insert.sql", "sql", "select_statement insert_statement"),
     ("yaml_broken.yaml", "yaml", "key_entry"),
