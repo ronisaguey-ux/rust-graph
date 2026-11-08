@@ -61,7 +61,7 @@ pub static JSON: Language = Language { name: "json", root: DOCUMENT, kinds: KIND
 
 const VALUE_START: &[Kind] = &[LBRACE, LBRACKET, STRING, NUMBER, TRUE, FALSE, NULL];
 
-fn lex(cursor: &mut Cursor) -> Kind {
+pub(super) fn lex(cursor: &mut Cursor) -> Kind {
     match cursor.peek() {
         b' ' | b'\t' | b'\n' | b'\r' => {
             cursor.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'));

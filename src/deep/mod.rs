@@ -5,13 +5,15 @@
 //! &[u8] -> lexer -> delimiter pass -> grammar on the parser runtime -> flat tree
 //!          tokens    pair[]             events, budgets                 16 B nodes
 //! ```
-//! Slice 1 is the runtime and JSON written by hand on it. Parts of the runtime API
-//! (precede, checkpoints, `nested`) are first used by the grammars of later slices
-//! and by the tests here.
+//! Slice 1 is the runtime and JSON written by hand on it. Slice 2 is `grammar!`
+//! and JSON through it (`json_grammar`), proved event for event against the hand.
+//! Parts of the runtime API (precede, checkpoints) are first used by the grammars
+//! of later slices and by the tests here.
 #![allow(dead_code)]
 
 pub mod budget;
 pub mod json;
+pub mod json_grammar;
 pub mod lexer;
 pub mod pairs;
 pub mod parser;
