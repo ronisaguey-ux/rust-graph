@@ -402,10 +402,6 @@ fn resolve(grammar: &Grammar, labels: &[Option<Vec<Option<String>>>], node: &mut
     Ok(())
 }
 
-fn is_delimiter(grammar: &Grammar, token: usize) -> bool {
-    matches!(grammar.tokens[token].class, TokenClass::Open(_) | TokenClass::Close(_))
-}
-
 fn shapes(grammar: &Grammar) -> Result<Vec<Shape>, Error> {
     let mut shapes = Vec::new();
     for (index, rule) in grammar.rules.iter().enumerate() {
@@ -458,9 +454,14 @@ fn group_inner(grammar: &Grammar, body: &Node) -> Option<Option<Node>> {
     })
 }
 
+/// The first *opening* delimiter outside a whole-rule group. A lone closer is
+/// an ordinary terminal: the parser takes a closer only where a rule names it
+/// (`p.bump()`), and it never opens anything, so shell's `case x in pat) ... ;;`
+/// is expressible. An opener is still refused, because `p.bump()` would take it
+/// alone and the group firewall (`Parser::group`) would not be established.
 fn find_delimiter(grammar: &Grammar, node: &Node) -> Option<Spot> {
     match &node.expr {
-        Expr::Token(token) if is_delimiter(grammar, *token) => Some(node.spot),
+        Expr::Token(token) if matches!(grammar.tokens[*token].class, TokenClass::Open(_)) => Some(node.spot),
         Expr::Seq(items) | Expr::Choice(items) => items.iter().find_map(|item| find_delimiter(grammar, item)),
         Expr::Opt(inner) | Expr::Star(inner) | Expr::Plus(inner) | Expr::Pred(inner) => find_delimiter(grammar, inner),
         Expr::Sep(inner, separator, _) => find_delimiter(grammar, inner).or_else(|| find_delimiter(grammar, separator)),
@@ -893,6 +894,18 @@ mod tests {
         assert!(g.nested[1][1], "x -> x passes through no group");
         assert!(!g.nested[2][1], "group -> x is inside the group");
         assert!(!g.nested[1][2], "x -> group closes no unguarded cycle");
+    }
+
+    #[test]
+    fn a_lone_closer_is_an_ordinary_terminal() {
+        // Shell's `case x in pat) ... ;; esac`: `)` closes nothing here, so it
+        // is a plain token in the middle of a rule.
+        let g = checked(r#"top: item*, item: A ")" B | group, group: "(" A ")","#).unwrap();
+        assert!(matches!(g.shapes[2], Shape::Group(Some(_))));
+        // An *opening* delimiter still has to open a whole rule: taken alone it
+        // would not establish the group firewall.
+        rejects(r#"top: x, x: A "(" B ")" "#, "give this group a rule of its own");
+        rejects(r#"top: "(" A ")" "#, "give this group a rule of its own");
     }
 
     #[test]
