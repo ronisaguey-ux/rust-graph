@@ -589,3 +589,284 @@ fn lex_py(source: &str) -> Vec<Token> {
                 }
                 let word = &source[start..i];
                 if is_string_prefix(word) && i < len && (bytes[i] == b'\'' || bytes[i] == b'"') {
+                    let end = scan_string(bytes, i);
+                    push!(STR, start, end);
+                    i = end;
+                    continue;
+                }
+                if word == "async" {
+                    // `async def f():` is one `def`: the token spans both words
+                    // so every byte of the source stays inside the tree.
+                    let mut j = i;
+                    while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                        j += 1;
+                    }
+                    let mut k = j;
+                    while k < len && bytes[k].is_ascii_alphabetic() {
+                        k += 1;
+                    }
+                    match &source[j..k] {
+                        "def" => {
+                            i = k;
+                            push!(DEF, start, k);
+                            continue;
+                        }
+                        "for" | "with" => {
+                            i = k;
+                            push!(HEAD, start, k);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                let first = line_first.is_none();
+                let symbol = match word {
+                    // Line-start keywords get the terminal that can only start a
+                    // block; the same word mid-line is just an item.
+                    "def" if first => DEF,
+                    "class" if first => CLASS,
+                    other if is_head_keyword(other) => {
+                        if first {
+                            HEAD
+                        } else {
+                            HEAD_EXPR
+                        }
+                    }
+                    _ => NAME,
+                };
+                push!(symbol, start, i);
+            }
+            b'@' => {
+                let symbol = if line_first.is_none() { AT } else { AT_EXPR };
+                push!(symbol, i, i + 1);
+                i += 1;
+            }
+            b':' => {
+                let symbol = if depth == 0
+                    && matches!(line_first, Some(DEF) | Some(CLASS) | Some(HEAD))
+                {
+                    COLON
+                } else {
+                    COLON2
+                };
+                push!(symbol, i, i + 1);
+                i += 1;
+            }
+            other => match punctuation(other) {
+                Some(symbol) => {
+                    match symbol {
+                        LP | LB | LC => depth += 1,
+                        RP | RB | RC => depth -= 1,
+                        _ => {}
+                    }
+                    push!(symbol, i, i + 1);
+                    i += 1;
+                }
+                None => {
+                    push!(OP, i, i + 1);
+                    i += 1;
+                }
+            },
+        }
+    }
+
+    if let Some(last) = tokens.last() {
+        if last.symbol != NL {
+            push!(NL, len, len);
+        }
+    }
+    while indents.len() > 1 {
+        indents.pop();
+        push!(DEDENT, len, len);
+    }
+    tokens
+}
+
+// ---------------------------------------------------------------------------
+// Parse helpers
+// ---------------------------------------------------------------------------
+
+struct SliceLexer<'a> {
+    tokens: &'a [Token],
+    at: usize,
+}
+
+impl Lexer for SliceLexer<'_> {
+    fn next_token(&mut self, _state: StateId) -> Option<Token> {
+        let token = self.tokens.get(self.at).copied();
+        if token.is_some() {
+            self.at += 1;
+        }
+        token
+    }
+}
+
+fn try_full_parse(grammar: &Grammar<'_>, tokens: &[Token]) -> Result<Cst, deep_rt::Fatal> {
+    let mut lexer = SliceLexer { tokens, at: 0 };
+    parse(grammar, &mut lexer, &Config::new()).map(|(cst, _)| cst)
+}
+
+fn full_parse(grammar: &Grammar<'_>, tokens: &[Token]) -> Cst {
+    try_full_parse(grammar, tokens).expect("a tree")
+}
+
+/// A canonical serialisation: kind and byte range in document order, with the
+/// nesting made explicit. Two trees are the same tree iff their shapes are equal.
+fn shape(nodes: &[Node], root: NodeId) -> String {
+    let mut out = String::with_capacity(nodes.len() * 12);
+    let mut stack: Vec<(NodeId, bool)> = vec![(root, false)];
+    let mut kids: Vec<NodeId> = Vec::new();
+    while let Some((id, close)) = stack.pop() {
+        let node = nodes[id as usize];
+        if close {
+            out.push(')');
+            continue;
+        }
+        out.push('(');
+        out.push_str(&node.kind.to_string());
+        out.push('@');
+        out.push_str(&node.start.to_string());
+        out.push_str("..");
+        out.push_str(&node.end.to_string());
+        stack.push((id, true));
+        kids.clear();
+        let mut child = node.first_child;
+        while child != NONE {
+            kids.push(child);
+            child = nodes[child as usize].next_sibling;
+        }
+        for &child in kids.iter().rev() {
+            stack.push((child, false));
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Fixtures and the edits applied to them
+// ---------------------------------------------------------------------------
+
+fn fixture_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("deep-grammars")
+        .join("fixtures")
+        .join("python")
+}
+
+fn fixtures() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let dir = fixture_dir();
+    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().map(|ext| ext == "py").unwrap_or(false))
+        .collect();
+    names.sort();
+    for path in names {
+        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(&path).expect("read fixture");
+        out.push((name, text));
+    }
+    assert!(out.len() >= 10, "the python fixtures are the corpus");
+    out
+}
+
+/// `(start, end)` of every line, end exclusive of the newline only when the
+/// line is blank; `end` always points at the line's terminating newline or EOF.
+fn line_spans(source: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for (index, byte) in source.bytes().enumerate() {
+        if byte == b'\n' {
+            spans.push((at, index + 1));
+            at = index + 1;
+        }
+    }
+    if at < source.len() {
+        spans.push((at, source.len()));
+    }
+    spans
+}
+
+fn line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (at, byte) in source.bytes().enumerate() {
+        if byte == b'\n' && at + 1 < source.len() {
+            starts.push(at + 1);
+        }
+    }
+    starts
+}
+
+/// A deterministic set of edits: at least thirty by the time it is run over the
+/// ten fixtures. Every replacement text matches its `Edit::new_len`.
+fn edits_for(source: &str) -> Vec<(String, Edit, String)> {
+    let bytes = source.as_bytes();
+    let starts = line_starts(source);
+    let mut edits: Vec<(String, Edit, String)> = Vec::new();
+
+    // Insert a statement at the start of a line, deep enough to be inside a
+    // block: a one-line change in the middle of the file.
+    for (n, &at) in starts.iter().enumerate().skip(8).step_by(11) {
+        // Same indentation as the line it is inserted before: a new statement
+        // in the same block, not an accidental indent.
+        let mut width = 0usize;
+        while at + width < bytes.len() && bytes[at + width] == b' ' {
+            width += 1;
+        }
+        let inserted = format!("{}x = 1\n", " ".repeat(width));
+        edits.push((
+            format!("insert-statement-at-line-{n}"),
+            Edit::insert(at as u32, inserted.len() as u32),
+            inserted,
+        ));
+    }
+
+    // Delete a whole line.
+    for (n, window) in starts.windows(2).enumerate().skip(5).step_by(13) {
+        let (at, next) = (window[0], window[1]);
+        edits.push((
+            format!("delete-line-{n}"),
+            Edit::delete(at as u32, (next - at) as u32),
+            String::new(),
+        ));
+    }
+
+    // Replace one word with a longer and a shorter one.
+    for (label, needle, replacement) in [
+        ("widen-a-name", "self", "this_object"),
+        ("narrow-a-name", "return", "ret"),
+        ("number", "1", "1234"),
+    ] {
+        if let Some(at) = source.find(needle) {
+            edits.push((
+                label.to_string(),
+                Edit::replace(at as u32, needle.len() as u32, replacement.len() as u32),
+                replacement.to_string(),
+            ));
+        }
+    }
+
+    // Insert exactly at a node boundary: right before a `def` at column zero.
+    if let Some(at) = source.find("\ndef ") {
+        let at = at + 1;
+        let text = "BOUNDARY = 1\n";
+        edits.push((
+            "insert-at-def-boundary".to_string(),
+            Edit::insert(at as u32, text.len() as u32),
+            text.to_string(),
+        ));
+    }
+
+    // Indentation change that keeps the file valid: dedent a method out of its
+    // class. This is the case where the moved subtree cannot be reused.
+    if let Some(at) = source.find("\n    def ") {
+        let at = at + 1;
+        edits.push((
+            "dedent-a-method-out-of-its-class".to_string(),
+            Edit::delete(at as u32, 4),
+            String::new(),
+        ));
+    }
+
