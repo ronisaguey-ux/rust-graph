@@ -13,6 +13,7 @@
 
 pub mod php;
 pub mod ruby;
+pub mod swift;
 
 #[cfg(test)]
 mod tests {
@@ -25,6 +26,7 @@ mod tests {
 
     use crate::batch_b::php::PHP;
     use crate::batch_b::ruby::RUBY;
+    use crate::batch_b::swift::SWIFT;
 
     /// `(file, top-level node kinds)` for every valid fixture, in order.
     const RUBY_VALID: &[(&str, &str)] = &[
@@ -86,6 +88,37 @@ mod tests {
         ("broken_string.php", "class_declaration"),
         ("missing_semicolon.php", "function_declaration"),
         ("unclosed_class.php", "class_declaration"),
+    ];
+
+    /// `(file, top-level node kinds)` for every valid Swift fixture.
+    const SWIFT_VALID: &[(&str, &str)] = &[
+        (
+            "collections.swift",
+            "property_declaration expression_statement property_declaration property_declaration property_declaration property_declaration property_declaration property_declaration property_declaration property_declaration expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement",
+        ),
+        (
+            "control_flow.swift",
+            "function_declaration function_declaration property_declaration while_statement repeat_statement for_statement switch_statement defer_statement",
+        ),
+        ("enums.swift", "enum_declaration function_declaration"),
+        (
+            "functions.swift",
+            "import_declaration function_declaration function_declaration function_declaration property_declaration property_declaration property_declaration property_declaration expression_statement expression_statement expression_statement expression_statement expression_statement",
+        ),
+        ("generics.swift", "struct_declaration extension_declaration function_declaration"),
+        ("models.swift", "import_declaration protocol_declaration struct_declaration class_declaration enum_declaration"),
+        ("service.swift", "import_declaration protocol_declaration class_declaration function_declaration"),
+        (
+            "strings.swift",
+            "property_declaration property_declaration property_declaration property_declaration property_declaration property_declaration property_declaration expression_statement expression_statement expression_statement expression_statement expression_statement",
+        ),
+    ];
+
+    /// `(file, top-level node kinds)` for every malformed Swift fixture.
+    const SWIFT_MALFORMED: &[(&str, &str)] = &[
+        ("broken_string.swift", "property_declaration"),
+        ("stray_brace.swift", "function_declaration ERROR"),
+        ("unclosed_function.swift", "struct_declaration"),
     ];
 
 /// What one parse produced, as the tests compare it.
@@ -185,6 +218,7 @@ mod tests {
     fn dump_trees() {
         dump("ruby", &RUBY);
         dump("php", &PHP);
+        dump("swift", &SWIFT);
     }
 
     fn dump(folder: &str, language: &'static Language) {
@@ -245,5 +279,22 @@ mod tests {
         assert!(PHP.layout.is_none());
         assert!(PHP.kinds.len() > 100, "a grammar this size has hundreds of kinds, not {}", PHP.kinds.len());
         assert!(PHP.kinds.iter().any(|kind| kind.name == "<?php"), "the opening tag is a token, trivia though it is");
+    }
+
+    #[test]
+    fn swift_fixtures_parse_cleanly() {
+        check_valid("swift", &SWIFT, SWIFT_VALID);
+    }
+
+    #[test]
+    fn swift_malformed_fixtures_keep_the_root() {
+        check_malformed("swift", &SWIFT, SWIFT_MALFORMED);
+    }
+
+    #[test]
+    fn swift_names_its_root() {
+        assert_eq!((SWIFT.name, SWIFT.name(SWIFT.root)), ("swift", "program"));
+        assert!(SWIFT.layout.is_none());
+        assert!(SWIFT.kinds.len() > 100, "a grammar this size has hundreds of kinds, not {}", SWIFT.kinds.len());
     }
 }
