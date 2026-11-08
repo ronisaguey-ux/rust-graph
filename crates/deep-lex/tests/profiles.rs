@@ -29,7 +29,7 @@ fn each_profile_lexes_its_own_language() {
             (Kind::Eq, 12, 13),
             (Kind::Number, 14, 15),
             (Kind::Newline, 15, 15),
-            (Kind::Dedent, 16, 16),
+            (Kind::Dedent, 15, 15), // on the block's last token
         ]
     );
     // JSON: signed number is one token, keywords stay identifiers for the
