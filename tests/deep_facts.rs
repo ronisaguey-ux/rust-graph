@@ -253,6 +253,7 @@ fn category(name: &'static str) -> &'static str {
             "an arrow function / function expression the lexer does not name; the CST opens a symbol for every callable (right)"
         }
         "cst-call" => "a call in a place the lexer does not look (class field, decorator, default argument); the CST sees it (right)",
+        "cst-tagged-template" => "a tagged template is a call (`tag`x ${y}`); the lexer has no tag for that shape, the CST does (right)",
         "cst-receiver-less" => "a call the CST knows the receiver of and the lexer does not (right)",
         "call-receiver-prefix" => {
             "the same call written `a.b` by the CST and `b` by the lexer: a chained call loses its receiver in the one-pass lexer (right)"
@@ -375,7 +376,12 @@ fn classify(report: &mut Report, src: &str) -> Vec<(&'static str, String)> {
     for call in deep_calls {
         let line = line_text(src, call.1);
         let name = last_component(&call.0);
-        if line.contains(&format!("{name}(")) || line.contains(&format!("{name}<")) {
+        // A tagged template is a call in JavaScript and TypeScript: `tag\`x ${y}\``
+        // invokes `tag`. The one-pass lexer has no tag for that shape, so the CST
+        // is the only side that records it.
+        if line.contains(&format!("{name}`")) {
+            out.push(("cst-tagged-template", format!("{}|{}", call.0, call.1)));
+        } else if line.contains(&format!("{name}(")) || line.contains(&format!("{name}<")) {
             out.push(("cst-call", format!("{}|{}", call.0, call.1)));
         } else if call.0.starts_with('.') {
             out.push(("cst-receiver-less", format!("{}|{}", call.0, call.1)));
