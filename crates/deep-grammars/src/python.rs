@@ -3,8 +3,11 @@
 //! lexer below knows strings, f-strings and numbers.
 //!
 //! The tree is close to Tree-sitter's Python where that costs nothing, but it
-//! is not the same tree: strings are single tokens (f-string fields are not
-//! parsed), and a few rarely seen forms nest differently.
+//! is not the same tree: a plain string is one token, and a few rarely seen
+//! forms nest differently. An f-string is a `f_string` node over a start token,
+//! its text, one `{...}` field per replacement field and an end token: the
+//! lexer mode stack (`modes`/`switch`) says when the bytes after `f"` are text
+//! and when they are a field, so every field keeps its own byte span.
 //!
 //! What the DSL cannot express, and how it is handled here instead:
 //!
@@ -13,19 +16,28 @@
 //!   three inferred tokens to the runtime lexer, and the rules consume them
 //!   like any other token (`block: INDENT _statement* DEDENT`). A grammar that
 //!   needed layout without a runtime that infers it could not be written.
-//! - **An f-string's `{...}` fields are not code.** Parsing them needs the
-//!   lexer to switch to a string mode and back at a nested brace depth, which
-//!   the DSL's one-function-per-token lexer cannot ask for, so a whole string
-//!   is one `string_literal` token. `string()` in this file scans the prefix,
-//!   the quotes and the escapes; the fields stay opaque.
+//! - **An f-string's field is a span, not a parse.** `modes { FSTRING = ... }`
+//!   lets the lexer leave code mode at the start token and return at the end,
+//!   and `lex_fstring_text` scans a whole `{...}` (nested braces, a format spec,
+//!   a conversion) as one `fstring_field` token. The expression inside is not
+//!   turned into grammar nodes — that would need the mode to return to code
+//!   *inside* the field and back at its own brace depth — but the token's byte
+//!   span is the exact source of the field, so a reader can slice it.
 //! - **No negative lookahead and no token beyond the third.** A choice is
 //!   decided by the next one to three tokens, so `match`/`case`/`type` as soft
 //!   keywords are resolved with a leading predicate (`&(...)`), not by a
 //!   general lookahead. A construct that needs four tokens of context would
-//!   have to be split into extra hidden rules.
+//!   have to be split into extra hidden rules. An assignment starts like the
+//!   expression it assigns, so the statement rule asks a predicate whether the
+//!   target list is followed by `=` (`&(_targets "=")`) and keeps one plain
+//!   alternative.
 //! - **One kind per rule.** Two alternatives that must produce different node
 //!   names need two rules (`function_definition` versus `class_definition`),
-//!   because naming an alternative is not part of the DSL.
+//!   because naming an alternative is not part of the DSL. An assigned lambda
+//!   therefore carries the name as the definition's own child, not as a second
+//!   node kind.
+
+use std::cell::Cell;
 
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
@@ -34,6 +46,16 @@ rust_graph_deep::grammar! { PYTHON {
     name = "python";
     lex = lex;
     layout = NEWLINE INDENT DEDENT;
+
+    /// After an f-string's opening quote the step lexer runs in `FSTRING`: the
+    /// bytes are text, not code, until the closing quote. The start pushes the
+    /// mode and the end (or a line that cannot close the string) pops it.
+    modes {
+        FSTRING = lex_fstring_text,
+    }
+    switch FSTRING_START => push FSTRING;
+    switch FSTRING_END => pop;
+    switch FSTRING_BAD => pop;
 
     tokens {
         /// A line break; the runtime turns these into logical line ends.
@@ -51,6 +73,16 @@ rust_graph_deep::grammar! { PYTHON {
         STR = "string_literal",
         /// A string with no closing quote.
         BAD_STR = "bad_string" bad,
+        /// `f"` or `rf'''`: the prefix and opening quotes of an f-string.
+        FSTRING_START = "fstring_start",
+        /// The bytes between fields.
+        FSTRING_TEXT = "fstring_text",
+        /// One `{...}` replacement field, braces included.
+        FSTRING_FIELD = "fstring_field",
+        /// The closing quotes of an f-string.
+        FSTRING_END = "fstring_end",
+        /// An f-string that cannot close on its line.
+        FSTRING_BAD = "bad_fstring" bad,
 
         KW_FALSE = "False",
         KW_NONE = "None",
@@ -141,6 +173,13 @@ rust_graph_deep::grammar! { PYTHON {
 
     _statement:
         &("match" _expressions ":") match_statement
+        // A `def` does not start with the token the ordinary statements start
+        // with, so two guards pick it before the plain choice; the plain tree
+        // then holds only keyword-led compound forms and the simple statements.
+        // `x = lambda ...` is picked inside `_simple_statements`, where its new
+        // line is the statement's.
+        | &("def") function_definition
+        | &("async" "def") function_definition
         | _compound_statement
         | _simple_statements,
 
@@ -164,9 +203,8 @@ rust_graph_deep::grammar! { PYTHON {
         | expression_statement,
 
     import_statement: "import" _import_names,
-    import_from_statement: "from" (relative_import | dotted_name) "import" (wildcard_import | import_list | _import_names),
+    import_from_statement: "from" (relative_import | dotted_name) "import" ("*" | import_list | _import_names),
     import_list: "(" (_import_name %? ",") ")",
-    wildcard_import: "*",
     relative_import: ("." | "...")+ [dotted_name],
     _import_names: _import_name ("," _import_name)*,
     _import_name: dotted_name ["as" _name],
@@ -182,12 +220,18 @@ rust_graph_deep::grammar! { PYTHON {
     nonlocal_statement: "nonlocal" _name ("," _name)*,
     type_alias_statement: "type" _name [type_parameters] "=" _expression,
 
-    expression_statement: _assignment_chain,
-    /// `a: int = b = 1`, `a += 1`, or an expression alone.
+    expression_statement: &(_name "=" "lambda") function_definition | &(_targets ":") annotated | &(_targets "=") assignment | _assignment_chain,
+    /// `a: int`, `a: int = 1`, `a: int = b = 1`: the annotation's target keeps
+    /// its node, so a reader can name what is declared.
+    annotated: _targets ":" _expression ["=" _assignment_rhs],
+    /// `a, b = f(x), 1`: the target list keeps its own node (`pattern_list`, or
+    /// `list`/`attribute`/`subscript`), so a reader can name every binding. The
+    /// right side recurses, so `a = b = 1` nests one assignment per binding.
+    assignment: _targets "=" _assignment_rhs,
+    _assignment_rhs: &(_targets "=") assignment | _assignment_chain,
+    /// `a += 1`, or an expression alone.
     _assignment_chain: precedence _expressions {
-        right "=" => assignment,
         right "+=" | "-=" | "*=" | "**=" | "/=" | "//=" | "%=" | "|=" | "^=" | "&=" | "<<=" | ">>=" | "@=" => augmented_assignment,
-        left ":" => annotated,
     },
 
     _compound_statement:
@@ -196,7 +240,6 @@ rust_graph_deep::grammar! { PYTHON {
         | while_statement
         | try_statement
         | with_statement
-        | function_definition
         | class_definition
         | decorated_definition,
 
@@ -209,7 +252,7 @@ rust_graph_deep::grammar! { PYTHON {
     except_clause: "except" ["*"] [_expressions] ":" _suite,
     finally_clause: "finally" ":" _suite,
     with_statement: ["async"] "with" _expression ("," _expression)* ":" _suite,
-    function_definition: ["async"] "def" _name [type_parameters] parameters ["->" _expression] ":" _suite,
+    function_definition: ["async"] "def" _name [type_parameters] parameters ["->" _expression] ":" _suite | _name "=" lambda,
     class_definition: "class" _name [type_parameters] [argument_list] ":" _suite,
     decorated_definition: decorator+ (class_definition | function_definition),
     decorator: "@" _expression NEWLINE,
@@ -262,6 +305,7 @@ rust_graph_deep::grammar! { PYTHON {
         _name
         | NUMBER
         | string
+        | f_string
         | "True"
         | "False"
         | "None"
@@ -274,6 +318,14 @@ rust_graph_deep::grammar! { PYTHON {
 
     _name: IDENT | "match" | "case" | "type",
     string: (STR | BAD_STR)+,
+    /// `f"a{x!r:>{w}}b"`: the opening quotes, the text between fields, one
+    /// node per replacement field and the closing quotes. A field node's span
+    /// is the source text of the expression (`{x!r:>{w}}`), so a reader that
+    /// wants the expression can slice it.
+    f_string: FSTRING_START (_fstring_part)* FSTRING_END,
+    _fstring_part: string_content | interpolation,
+    string_content: FSTRING_TEXT,
+    interpolation: FSTRING_FIELD,
     parenthesized_expression: "(" (_list_item %? ",") ")",
     list: "[" (_list_item %? ",") "]",
     dictionary: "{" (_dictionary_item %? ",") "}",
@@ -381,11 +433,82 @@ fn word(c: &mut Cursor) -> Kind {
     let length = c.eat_while(is_word_byte);
     let text = &start[..length];
     if matches!(c.peek(), b'\'' | b'"') {
-        if let Some(code) = string_prefix(text) {
-            return string(c, code);
+        match string_prefix(text) {
+            Some(true) => return fstring_start(c),
+            Some(false) => return string(c, false),
+            None => {}
         }
     }
     keyword(text)
+}
+
+thread_local! {
+    /// The quote byte and whether it is tripled, for the string body the
+    /// `FSTRING` mode is inside. The step function that sees `f"` writes it,
+    /// and the mode's own step function reads it, as the heredoc's delimiter
+    /// lives in its step function.
+    static FSTRING: Cell<(u8, bool)> = const { Cell::new((0, false)) };
+}
+
+/// `f"`, `rf'''`, `t"`: the prefix was consumed by `word`; this takes the
+/// opening quotes and remembers how the body closes.
+fn fstring_start(c: &mut Cursor) -> Kind {
+    let quote = c.peek();
+    let triple = c.peek_at(1) == quote && c.peek_at(2) == quote;
+    c.bump_n(if triple { 3 } else { 1 });
+    FSTRING.with(|state| state.set((quote, triple)));
+    FSTRING_START
+}
+
+/// The `FSTRING` mode's step: text between fields, one `{...}` field, or the
+/// closing quotes. In a one-line string a line break ends it badly, so a
+/// broken string costs its line and the mode pops.
+pub fn lex_fstring_text(c: &mut Cursor) -> Kind {
+    if c.at_end() {
+        return FSTRING_BAD;
+    }
+    let (quote, triple) = FSTRING.with(|state| state.get());
+    let closes = if triple { c.peek() == quote && c.peek_at(1) == quote && c.peek_at(2) == quote } else { c.peek() == quote };
+    if closes {
+        c.bump_n(if triple { 3 } else { 1 });
+        return FSTRING_END;
+    }
+    if !triple && matches!(c.peek(), b'\n' | b'\r') {
+        c.bump();
+        c.eat(b'\n');
+        return FSTRING_BAD;
+    }
+    if c.peek() == b'{' && c.peek_at(1) != b'{' {
+        c.bump();
+        // `field` takes the spec and any nested braces, so the token is the
+        // whole replacement field, braces included, and its span is the
+        // expression's source.
+        field(c, quote, triple);
+        return FSTRING_FIELD;
+    }
+    // Text up to a field, the closing quotes, or a line break in a one-line
+    // string. `{{` and `}}` are escaped braces and stay text.
+    loop {
+        if c.at_end() {
+            return FSTRING_TEXT;
+        }
+        let byte = c.peek();
+        if triple {
+            if byte == quote && c.peek_at(1) == quote && c.peek_at(2) == quote {
+                return FSTRING_TEXT;
+            }
+        } else if byte == quote || matches!(byte, b'\n' | b'\r') {
+            return FSTRING_TEXT;
+        }
+        if byte == b'{' && c.peek_at(1) != b'{' {
+            return FSTRING_TEXT;
+        }
+        match byte {
+            b'\\' => c.bump_n(2),
+            b'{' | b'}' if c.peek_at(1) == byte => c.bump_n(2),
+            _ => c.bump(),
+        }
+    }
 }
 
 fn keyword(text: &[u8]) -> Kind {

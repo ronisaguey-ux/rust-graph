@@ -41,10 +41,20 @@ fn class_of(language: &'static Language, src: &str) -> Class {
 
 #[test]
 fn python_string_prefixes_are_one_token() {
-    for src in [r#"x = "plain""#, "x = 'plain'", "x = b\"bytes\\n\"", "x = rb'\\d+'", "x = f\"{a!r:>{w}}\"", "x = '''multi\nline'''"] {
+    for src in [r#"x = "plain""#, "x = 'plain'", "x = b\"bytes\\n\"", "x = rb'\\d+'", "x = '''multi\nline'''"] {
         assert_eq!(significant(&PYTHON, src), ["identifier", "=", "string_literal", "newline"], "{src:?}");
         assert_eq!(class_of(&PYTHON, src.trim_start_matches("x = ")), Class::Token);
     }
+    // An f-string is not one token: its opening quotes, each `{...}` field and
+    // its closing quotes are tokens, so a field has a span a reader can slice.
+    // The field includes its conversion and format spec, `{w}` and all.
+    let src = r#"x = f"{a!r:>{w}}""#;
+    assert_eq!(
+        significant(&PYTHON, src),
+        ["identifier", "=", "fstring_start", "fstring_field", "fstring_end", "newline"],
+        "{src:?}"
+    );
+    assert_eq!(class_of(&PYTHON, src.trim_start_matches("x = ")), Class::Token);
 }
 
 #[test]
