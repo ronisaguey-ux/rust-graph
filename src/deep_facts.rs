@@ -290,6 +290,29 @@ impl<'a> Walker<'a> {
         None
     }
 
+    /// The text of a leaf that spells a name.
+    ///
+    /// The kind alone is not enough: a grammar gives a keyword reused as an
+    /// identifier its own kind (`match.group(...)` has an object of kind
+    /// `match`, `type` and `case` the same), and a name is what the source
+    /// says it is. A leaf whose text is an identifier is a name whatever label
+    /// the grammar put on it; punctuation, string literals and numbers are not.
+    fn leaf_name(&self, id: u32) -> Option<String> {
+        let node = self.node(id);
+        if node.first_child != NONE {
+            return None;
+        }
+        let text = self.text(id);
+        let first = *text.first()?;
+        if !(first.is_ascii_alphabetic() || first == b'_') {
+            return None;
+        }
+        if !text.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$') {
+            return None;
+        }
+        Some(String::from_utf8_lossy(text).into_owned())
+    }
+
     fn has_kind(&self, id: u32, kinds: &[&str]) -> bool {
         kinds.contains(&self.kind(id))
     }
@@ -365,6 +388,10 @@ impl<'a> Walker<'a> {
         }
         match kind {
             "expression_statement" => self.expression_statement(id),
+            // `assert f(x), "why"`: the one-pass lexer reads the line as an
+            // expression statement and files its calls; the CST must not drop
+            // them just because the statement has a keyword.
+            "assert_statement" => self.expression_statement(id),
             "return_statement" => self.return_statement(id),
             "variable_declarator" if self.is_js() => self.declarator(id),
             "public_field_definition" | "field_definition" | "property_signature" if self.is_js() => {
@@ -374,6 +401,19 @@ impl<'a> Walker<'a> {
             // `raise E(x) from c(y)`, `assert a(v), b(v)`, `del xs[k(v)]`:
             // every value-bearing child is read, not only the first.
             "raise_statement" | "assert_statement" | "delete_statement" => self.statement_values(id),
+            "throw_statement" | "raise_statement" | "decorator" => self.expression_statement(id),
+            // `pass`, `break`, `continue`: the one-pass lexer reads the word as
+            // an expression and files an `x` event for it, so the CST does too.
+            // The module symbol is emitted only when it has events, so losing
+            // the event for a module-level `pass` dropped the whole symbol.
+            "pass_statement" | "break_statement" | "continue_statement" => {
+                let line = self.line(id);
+                let word = self.text_string(id);
+                let mut text = format!("[\"x\",{line},[\"n\",");
+                push_string(&mut text, &word);
+                text.push_str("]]");
+                self.event(&text);
+            }
             "if_statement" => {
                 self.condition_before(id);
                 self.event("[\"b\"]");
@@ -382,6 +422,11 @@ impl<'a> Walker<'a> {
                 self.event("[\"e\"]");
                 if kind == "elif_clause" {
                     self.condition_before(id);
+                } else {
+                    // `["f"]`: an arm with no condition, so the branches cover
+                    // every case. The lexer writes it for a bare `else`; the
+                    // events are the same fact either way.
+                    self.event("[\"f\"]");
                 }
             }
             "with_statement" => match self.loop_binding(id) {
@@ -769,9 +814,18 @@ impl<'a> Walker<'a> {
             | "expression_list" => {
                 self.children(id).into_iter().filter_map(|child| self.value_path(child)).collect()
             }
-            // `NAME: Set[str] = {...}` binds `NAME`; the annotation is a type,
-            // not a value, so the target is the name before it.
-            "annotated" => self.children(id).into_iter().find_map(|child| self.value_path(child)).into_iter().collect(),
+            // NOTE: a Python multi-target assignment is an `expression_list`
+            // here (`a, b = g(x), 1`), and mapping it would emit the `a` event
+            // the lexer writes. It is left unmapped on purpose: this file's
+            // record would then be kept by `auto` for a file whose f-string
+            // return the CST cannot read (`["r",3,0]` where the lexer has
+            // `["r",3,["n","a"]]`), and `pipeline::loses` compares event
+            // *counts*, so it cannot see that loss. Fixing the guard first is
+            // the condition; see the report.
+            // `x: Dict[str, int] = {}`: the target is the name inside the
+            // annotation, not the annotation. Reading it keeps the event an
+            // assignment (`["a",...]`) instead of a bare expression (`["x",...]`).
+            "annotated" => self.children(id).first().and_then(|&first| self.value_path(first)).into_iter().collect(),
             _ => self.value_path(id).into_iter().collect(),
         }
     }
@@ -780,7 +834,40 @@ impl<'a> Walker<'a> {
         self.assignment_parts(targets, value, line, augmented);
     }
 
+    /// `provider = lambda client="": dashboard.payload(...)` is a definition,
+    /// not a value: the one-pass lexer opens a symbol for it, so the CST walk
+    /// does too, and its body is read inside that symbol so the calls land on
+    /// it rather than on the enclosing function.
+    fn bound_lambda(&mut self, name: &str, node: u32, line: u32) -> bool {
+        if self.kind(node) != "lambda" {
+            return false;
+        }
+        let owner = if self.frame().container { self.frame().class.clone() } else { String::new() };
+        let params = self
+            .child_of_kind(node, "lambda_parameters")
+            .map(|list| self.params(node, list))
+            .unwrap_or_default();
+        let index = self.add_symbol(name.to_string(), owner.clone(), KIND_FUNCTION, line, params);
+        let body = self.children(node).into_iter().rev().find(|&child| !self.is_layout(child));
+        self.stack.push(Frame { node, symbol: index, class: owner, container: false, defines: Some(index) });
+        if let Some(body) = body {
+            if !matches!(self.kind(body), "block" | "statement_block") {
+                let at = self.line(body);
+                let value = self.form(body);
+                if value != "0" {
+                    self.event(&format!("[\"r\",{at},{value}]"));
+                }
+            }
+            self.facts.symbols[index].end_line = self.end_line(body);
+        }
+        self.stack.pop();
+        true
+    }
+
     fn assignment_parts(&mut self, targets: Vec<String>, value: u32, line: u32, augmented: bool) {
+        if !augmented && targets.len() == 1 && self.bound_lambda(&targets[0].clone(), value, line) {
+            return;
+        }
         let weak = augmented || targets.is_empty();
         let expr = self.form(value);
         if targets.is_empty() {
@@ -808,23 +895,63 @@ impl<'a> Walker<'a> {
     /// The class a call constructs, by the same convention the lexer uses: a
     /// capitalised callee, or anything after `new`.
     fn constructed(&self, value: u32) -> Option<String> {
-        let kind = self.kind(value);
-        if kind == "new_expression" {
-            let path = self.children(value).into_iter().find_map(|child| {
+        // `Path(__file__).resolve().parent`: the value is an attribute chain
+        // whose base is the call. The lexer reads the first token, so the
+        // chain is unwrapped to the call that starts it.
+        let call = self.value_root_call(value)?;
+        if self.kind(call) == "new_expression" {
+            let path = self.children(call).into_iter().find_map(|child| {
                 matches!(self.kind(child), "identifier" | "member_expression" | "attribute").then(|| self.path_of(child))
             })?;
             let last = path.rsplit('.').next().unwrap_or(&path);
             return last.starts_with(|ch: char| ch.is_uppercase()).then_some(last.to_string());
         }
-        if kind == "call" || kind == "call_expression" {
-            let callee = self.children(value).into_iter().find(|&child| {
-                !matches!(self.kind(child), "argument_list" | "arguments" | "type_arguments")
-            })?;
-            let path = self.path_of(callee);
-            let last = path.rsplit('.').next().unwrap_or("").to_string();
-            return (last.starts_with(|ch: char| ch.is_uppercase()) && !last.contains('(')).then_some(last);
+        let path = self.root_callee(call)?;
+        let last = path.rsplit('.').next().unwrap_or("").to_string();
+        (last.starts_with(|ch: char| ch.is_uppercase()) && !last.contains('(')).then_some(last)
+    }
+
+    /// The call a value starts with: `a().b` -> the `a()` node, `a.b()` ->
+    /// `a.b()`, `(a)` -> the call in the parentheses.
+    fn value_root_call(&self, id: u32) -> Option<u32> {
+        match self.kind(id) {
+            "call" | "call_expression" | "new_expression" => Some(id),
+            "attribute" | "member_expression" | "subscript" | "subscript_expression" | "parenthesized_expression" => {
+                self.children(id).first().and_then(|&object| self.value_root_call(object))
+            }
+            // `candidate = Path(x).parent / candidate`: a binary value starts
+            // with its left operand, which is what the lexer's first token is.
+            "binary_operator" | "binary_expression" | "boolean_operator" | "conditional_expression"
+            | "ternary_expression" => self.children(id).first().and_then(|&left| self.value_root_call(left)),
+            _ => None,
         }
-        None
+    }
+
+    /// The callee at the root of a call chain: `a.b().c()` -> `a.b`, `f()()` ->
+    /// `f`, `a.b()` -> `a.b`.
+    fn root_callee(&self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "call" | "call_expression" | "new_expression" => {
+                let callee = self.children(id).into_iter().find(|&child| {
+                    !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")")
+                })?;
+                (callee != id).then(|| self.root_callee(callee)).flatten()
+            }
+            "attribute" | "member_expression" => {
+                let object = self.children(id).first().copied()?;
+                match self.root_callee(object) {
+                    Some(root) => Some(root),
+                    None => {
+                        let path = self.path_of(id);
+                        (!path.is_empty()).then_some(path)
+                    }
+                }
+            }
+            _ => {
+                let path = self.path_of(id);
+                (!path.is_empty()).then_some(path)
+            }
+        }
     }
 
     // -- control flow -------------------------------------------------------
@@ -928,33 +1055,68 @@ impl<'a> Walker<'a> {
 
     fn python_import(&mut self, id: u32) {
         let line = self.line(id);
-        let children = self.children(id);
-        if self.kind(id) == "import_from_statement" {
-            // `from <module> import <bindings>`. The module may be relative
-            // (`.`, `..pkg.mod`) and the bindings may sit in a parenthesised
-            // `import_list`, which is one list of names, not a wrapper to skip.
-            let module_at = children
-                .iter()
-                .position(|&child| matches!(self.kind(child), "dotted_name" | "identifier" | "relative_import"));
-            let module = module_at.map(|at| self.text_string(children[at])).unwrap_or_default();
-            let bindings = module_at.map(|at| &children[at + 1..]).unwrap_or(&children[..]);
-            self.import_bindings(bindings, &module, line);
-            return;
+        // `from m import (a, b)` and `import a, b`: the grammar wraps the
+        // names it lists in an `import_list`, so the clause's own children are
+        // not the names. Flattening it here is what makes a multi-line import
+        // read the same as a single-line one.
+        let mut children = Vec::new();
+        for child in self.children(id) {
+            if matches!(self.kind(child), "import_list" | "parenthesized_expression" | "parenthesized_list") {
+                children.extend(self.children(child));
+            } else {
+                children.push(child);
+            }
         }
-        // `import a.b as c, d`: each clause is a module and an optional alias.
-        // The alias is a name of its own, not the module of the next clause.
+        let from = self.kind(id) == "import_from_statement";
+        let mut module = String::new();
+        let mut seen_from = false;
         let mut index = 0;
         while index < children.len() {
             let child = children[index];
-            let aliased = index > 0 && self.kind(children[index - 1]) == "as";
-            if !aliased && matches!(self.kind(child), "dotted_name" | "identifier") {
-                let module = self.text_string(child);
-                let alias = children
-                    .get(index + 2)
-                    .filter(|_| children.get(index + 1).is_some_and(|&n| self.kind(n) == "as"))
-                    .map(|&n| self.text_string(n))
-                    .unwrap_or_else(|| module.clone());
-                self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+            match self.kind(child) {
+                "import_list" => {
+                    let inner = self.children(child);
+                    self.import_bindings(&inner, &module, line);
+                }
+                "wildcard_import" | "*" => {
+                    self.facts.imports.push(Import { line, module: module.clone(), kind: IMPORT_STAR, ..Import::default() });
+                }
+                "aliased_import" => {
+                    let inner = self.children(child);
+                    let Some(&name_node) = inner.first() else {
+                        index += 1;
+                        continue;
+                    };
+                    let name = self.text_string(name_node);
+                    let alias = inner
+                        .last()
+                        .filter(|&&last| last != name_node)
+                        .map(|&last| self.text_string(last))
+                        .unwrap_or_else(|| name.clone());
+                    self.facts.imports.push(Import { line, module: module.clone(), name, alias, kind: IMPORT_MODULE });
+                }
+                "dotted_name" | "identifier" => {
+                    // Inside `import (a, b as c)` the grammar does not wrap the
+                    // pair in `aliased_import`: the alias is the name after
+                    // `as`, already written by the arm above. Reading it again
+                    // would invent an import of `c` from `c`.
+                    if index > 0 && self.kind(children[index - 1]) == "as" {
+                        index += 1;
+                        continue;
+                    }
+                    let name = self.text_string(child);
+                    let aliased = children.get(index + 1).is_some_and(|&next| self.kind(next) == "as");
+                    let alias = if aliased {
+                        children.get(index + 2).map(|&next| self.text_string(next)).unwrap_or_else(|| name.clone())
+                    } else {
+                        name.clone()
+                    };
+                    self.facts.imports.push(Import { line, module: module.clone(), name, alias, kind: IMPORT_MODULE });
+                    if aliased {
+                        index += 2;
+                    }
+                }
+                _ => {}
             }
             index += 1;
         }
@@ -969,7 +1131,7 @@ impl<'a> Walker<'a> {
             match self.kind(child) {
                 "import_list" => {
                     let inner = self.children(child);
-                    self.import_bindings(&inner, module, line);
+                    self.import_bindings(&inner, &module, line);
                 }
                 "wildcard_import" | "*" => {
                     self.facts.imports.push(Import { line, module: module.into(), kind: IMPORT_STAR, ..Import::default() });
@@ -1160,10 +1322,53 @@ impl<'a> Walker<'a> {
                     None => "0".to_string(),
                 }
             }
-            // `return f(a), g(b)` / `x = a, b`: the statement's value is the
-            // whole list, so every element is read, not only the first.
-            "expression_list" | "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern"
-            | "array_pattern" => {
+            // `a if p(x) else b`: the condition is an expression of its own and
+            // the call in it is a fact. The lexer's flow form reads the whole
+            // conditional, so the CST must too.
+            "conditional_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `xs[1:min(len(xs), n)]`, `for x in a, b`: a slice or an
+            // expression list is a run of expressions and every one of them
+            // can carry a call. Reading only the first would drop the bound.
+            "slice" | "open_slice" | "subscript_list" | "expression_list" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.tuple_form(&items),
+                }
+            }
+            // `z: "Thing"` with no value: the statement is the annotation, and
+            // the name in it is what the lexer reads as the expression.
+            "annotated" => match self.children(id).first() {
+                Some(&first) => self.form(first),
+                None => "0".to_string(),
+            },
+            // `path := f(x)`: a walrus expression is the value, and the name
+            // is a binding.
+            "named_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => {
+                        let value = items[items.len() - 1];
+                        self.form(value)
+                    }
+                }
+            }
+            // `lambda x: f(x)`: the body is the expression the lambda yields.
+            "lambda" => match self.children(id).into_iter().rev().find(|&child| !self.is_layout(child)) {
+                Some(body) => self.form(body),
+                None => "0".to_string(),
+            },
+            "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern" | "array_pattern" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 if items.is_empty() {
                     "0".to_string()
@@ -1245,6 +1450,16 @@ impl<'a> Walker<'a> {
             },
             "string" | "string_literal" | "template_string" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment" | "f_string" => "0".to_string(),
+            // A keyword reused as an identifier (`match`, `type`, `case`)
+            // carries that keyword as its kind; the spelling is the name.
+            _ if self.leaf_name(id).is_some() => {
+                let text = self.leaf_name(id).unwrap_or_default();
+                let text = if text == "this" { "self".to_string() } else { text };
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &text);
+                out.push(']');
+                out
+            }
             _ => {
                 // A node with no mapping: its first value-bearing child, so a
                 // wrapper the grammar added costs nothing.
@@ -1288,6 +1503,18 @@ impl<'a> Walker<'a> {
             .copied()
             .find(|&child| !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")"))
             .unwrap_or(id);
+        // `type("H", (), {...})()`: the callee is a value produced by another
+        // call. That inner call is the fact and its arguments are where the
+        // dictionary (and everything in it) lives; the outer call has no name
+        // of its own, so it adds none. `callee != id` keeps a recovered call
+        // whose own callee is itself from descending forever.
+        if callee != id && matches!(self.kind(callee), "call" | "call_expression" | "new_expression") {
+            let inner = self.form(callee);
+            if let Some(list) = children.iter().copied().find(|&child| matches!(self.kind(child), "argument_list" | "arguments")) {
+                self.arguments(list);
+            }
+            return inner;
+        }
         // `f().g()`: the receiver is a call, and it is a fact of its own.
         if matches!(self.kind(callee), "attribute" | "member_expression") {
             if let Some(&object) = self.children(callee).first() {
@@ -1480,7 +1707,8 @@ impl<'a> Walker<'a> {
             }
             // A call has no name of its own: `f().x` names `.x`.
             "call" | "call_expression" | "new_expression" => String::new(),
-            _ => String::new(),
+            // `match.group`, `type.name`: a keyword reused as an identifier.
+            _ => self.leaf_name(id).map(|text| if text == "this" { "self".to_string() } else { text }).unwrap_or_default(),
         }
     }
 
@@ -1496,7 +1724,7 @@ impl<'a> Walker<'a> {
                 (!path.is_empty()).then_some(path)
             }
             "tuple_pattern" | "pattern_list" | "array_pattern" | "list_pattern" | "object_pattern" => None,
-            _ => None,
+            _ => self.leaf_name(id).filter(|path| !path.is_empty()),
         }
     }
 }
