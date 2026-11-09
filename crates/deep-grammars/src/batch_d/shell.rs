@@ -765,3 +765,82 @@ fn dollar_starts(c: &Cursor) -> bool {
         || matches!(next, b'_' | b'@' | b'*' | b'#' | b'?' | b'$' | b'!' | b'-' | b'(' | b'{')
 }
 
+fn word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    // A backslash escapes the byte after it, so `\;`, `\"` and `foo\ bar` are
+    // one word: `find -exec ... {} \;` and `printf "a\"b"` depend on it.
+    loop {
+        match c.peek() {
+            b'\\' if !c.at_end() => c.bump_n(2),
+            b' ' | b'\t' | b'\n' | b'\r' | b';' | b'|' | b'&' | b'(' | b')' | b'<' | b'>' | b'\'' | b'"' | b'#' | b'$' | b'`' | 0 => break,
+            _ => c.bump_char(),
+        }
+    }
+    let length = start.len() - c.rest().len();
+    let text = &start[..length];
+
+    // `name=value` is one assignment word, and `name=(a b)` is one followed by
+    // an array literal. `name+=value` assigns by appending.
+    if let Some(eq) = text.iter().position(|&byte| byte == b'=') {
+        let mut name = &text[..eq];
+        if name.last() == Some(&b'+') {
+            name = &name[..name.len() - 1];
+        }
+        let name_shaped = !name.is_empty()
+            && name.iter().all(|&byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            && !name[0].is_ascii_digit();
+        if name_shaped {
+            return ASSIGNMENT;
+        }
+    }
+
+    if text.is_empty() {
+        // A character the word scan stops on with nothing taken: one byte, so
+        // the lexer always advances.
+        c.bump_char();
+        return WORD;
+    }
+
+    if command_start(c.previous()) && parens_ahead(c) {
+        return FUNCTION_NAME;
+    }
+
+    if command_start(c.previous()) {
+        match text {
+            b"if" => return KW_IF,
+            b"then" => return KW_THEN,
+            b"elif" => return KW_ELIF,
+            b"else" => return KW_ELSE,
+            b"fi" => return KW_FI,
+            b"for" => return KW_FOR,
+            b"select" => return KW_SELECT,
+            b"while" => return KW_WHILE,
+            b"until" => return KW_UNTIL,
+            b"do" => return KW_DO,
+            b"done" => return KW_DONE,
+            b"function" => return KW_FUNCTION,
+            b"case" => return KW_CASE,
+            b"esac" => return KW_ESAC,
+            _ => {}
+        }
+    }
+    // `in` after the loop or case word, which is all the context there is. The
+    // subject may be a word, a variable or a quoted string (`case "$1" in`), so
+    // the last token of a `for`/`case` head is any word-shaped one.
+    if text == b"in" && head_end(c.previous()) {
+        return KW_IN;
+    }
+    WORD
+}
+
+/// Whether the cursor sits at `(`, with only blanks between: `foo () {`.
+fn parens_ahead(c: &Cursor) -> bool {
+    let mut at = 0;
+    while matches!(c.peek_at(at), b' ' | b'\t') {
+        at += 1;
+    }
+    c.peek_at(at) == b'(' && c.peek_at(at + 1) == b')'
+}
+
+/// The `STRING` mode's step: text between expansions, one expansion, or the
+/// closing quote.
