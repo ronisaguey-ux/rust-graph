@@ -499,12 +499,19 @@ pub fn lex(c: &mut Cursor) -> Kind {
             block_comment(c);
             COMMENT
         }
-        b'#' if c.peek_at(1) == b'"' || c.peek_at(1) == b'#' => string(c),
-        b'"' => string(c),
+        b'#' if c.peek_at(1) == b'"' || c.peek_at(1) == b'#' => string_literal(c),
+        b'"' => string_literal(c),
         b'`' => {
             c.bump();
             c.eat_while(|byte| byte != b'`' && byte != b'\n');
             c.eat(b'`');
+            IDENT
+        }
+        b'$' if is_word_start(c.peek_at(1)) || c.peek_at(1).is_ascii_digit() => {
+            // A projected property wrapper (`$query`) and a closure argument
+            // (`$0`) are ordinary names to the grammar.
+            c.bump();
+            c.eat_while(is_word_byte);
             IDENT
         }
         b'#' if is_word_start(c.peek_at(1)) => {
@@ -544,6 +551,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"actor" => KW_ACTOR,
         b"any" => KW_ANY,
         b"as" => KW_AS,
+        b"associatedtype" => KW_ASSOCIATEDTYPE,
         b"async" => KW_ASYNC,
         b"await" => KW_AWAIT,
         b"break" => KW_BREAK,
@@ -575,6 +583,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"rethrows" => KW_RETHROWS,
         b"return" => KW_RETURN,
         b"self" => KW_SELF,
+        b"set" => KW_SET,
         b"some" => KW_SOME,
         b"struct" => KW_STRUCT,
         b"subscript" => KW_SUBSCRIPT,
@@ -626,6 +635,206 @@ fn block_comment(c: &mut Cursor) {
     }
 }
 
+/// One open literal: what closes it and whether it is raw.
+#[derive(Clone, Copy)]
+struct Frame {
+    quote: u8,
+    hashes: usize,
+    triple: bool,
+}
+
+thread_local! {
+    /// One frame per literal the `STRING_BODY` mode is inside, innermost last:
+    /// a nested literal restores the outer one on the way out.
+    static STRINGS: std::cell::RefCell<Vec<Frame>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Open brackets inside each `\(...)` field, one entry per field. The
+    /// frame pops at the `)` that matches the field's own `(`.
+    static DEPTHS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn current_frame() -> Option<Frame> {
+    STRINGS.with(|frames| frames.borrow().last().copied())
+}
+
+fn pop_frame() {
+    STRINGS.with(|frames| {
+        frames.borrow_mut().pop();
+    });
+}
+
+/// A literal from its first byte: `"`, `"""`, `#"` or `###"`. A literal with a
+/// `\(...)` field is split into start/text/field/end tokens so the field is
+/// code; one without a field stays a single opaque token.
+fn string_literal(c: &mut Cursor) -> Kind {
+    let rest = c.rest();
+    let hashes = rest.iter().take_while(|&&byte| byte == b'#').count();
+    if rest.get(hashes) != Some(&b'"') {
+        return BAD_LITERAL;
+    }
+    let triple = rest.get(hashes + 1) == Some(&b'"') && rest.get(hashes + 2) == Some(&b'"');
+    let open = hashes + if triple { 3 } else { 1 };
+    if has_field(rest, open, b'"', hashes, triple) {
+        c.bump_n(open);
+        STRINGS.with(|frames| frames.borrow_mut().push(Frame { quote: b'"', hashes, triple }));
+        STRING_START
+    } else {
+        string(c)
+    }
+}
+
+/// Whether the cursor stands on the closing quotes (and `#`s) of a literal.
+/// In a raw literal a quote is only closing when its `#`s follow, so
+/// `#"a "quoted" word"#` is one literal.
+fn closes_literal(c: &Cursor, hashes: usize, triple: bool) -> bool {
+    let quotes = if triple { 3 } else { 1 };
+    if !(0..quotes).all(|at| c.peek_at(at) == b'"') {
+        return false;
+    }
+    (0..hashes).all(|at| c.peek_at(quotes + at) == b'#')
+}
+
+/// Whether the literal body starting at `from` holds a field before its
+/// closing quote. `\\(` is a field in a plain literal and `\#(` in one with
+/// `#` hashes; everything else that follows a backslash is text.
+fn has_field(bytes: &[u8], from: usize, quote: u8, hashes: usize, triple: bool) -> bool {
+    let mut at = from;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        let quotes = if triple { 3 } else { 1 };
+        let closing = (0..quotes).all(|next| bytes.get(at + next) == Some(&quote))
+            && (0..hashes).all(|next| bytes.get(at + quotes + next) == Some(&b'#'));
+        if closing {
+            return false;
+        }
+        if !triple && matches!(byte, b'\n' | b'\r') {
+            return false;
+        }
+        if byte == b'\\' {
+            let width = field_width(bytes, at, hashes);
+            if width > 0 {
+                return true;
+            }
+            at += if hashes == 0 { 2 } else { 1 };
+            continue;
+        }
+        at += 1;
+    }
+    false
+}
+
+/// The byte width of the field opener at `at`, or 0 for an escape that is text.
+fn field_width(bytes: &[u8], at: usize, hashes: usize) -> usize {
+    if bytes.get(at) != Some(&b'\\') {
+        return 0;
+    }
+    if hashes == 0 {
+        return usize::from(bytes.get(at + 1) == Some(&b'(')) * 2;
+    }
+    let mut seen = 0;
+    while seen < hashes && bytes.get(at + 1 + seen) == Some(&b'#') {
+        seen += 1;
+    }
+    if seen == hashes && bytes.get(at + 1 + hashes) == Some(&b'(') { hashes + 2 } else { 0 }
+}
+
+/// The `STRING_BODY` mode: the literal's text up to a field, its closing
+/// quotes, or (in a one-line literal) a line break, which ends it badly.
+pub fn lex_string_text(c: &mut Cursor) -> Kind {
+    let Some(frame) = current_frame() else {
+        // The frame stack and the mode stack disagree; take one byte as text so
+        // lexing always advances and the parser still gets a tree.
+        c.bump();
+        return STRING_TEXT;
+    };
+    if c.at_end() {
+        pop_frame();
+        return STRING_BAD;
+    }
+    let quote = frame.quote;
+    let triple = frame.triple;
+    let closes = closes_literal(c, frame.hashes, triple);
+    if closes {
+        c.bump_n(if triple { 3 } else { 1 });
+        let mut seen = 0usize;
+        while seen < frame.hashes && c.peek() == b'#' {
+            c.bump();
+            seen += 1;
+        }
+        pop_frame();
+        return if seen == frame.hashes { STRING_END } else { STRING_BAD };
+    }
+    if !triple && matches!(c.peek(), b'\n' | b'\r') {
+        c.bump();
+        c.eat(b'\n');
+        pop_frame();
+        return STRING_BAD;
+    }
+    if field_width(c.rest(), 0, frame.hashes) > 0 {
+        c.bump_n(field_width(c.rest(), 0, frame.hashes));
+        DEPTHS.with(|depths| depths.borrow_mut().push(0));
+        return INTERP_OPEN;
+    }
+    let start = c.pos();
+    loop {
+        if c.at_end() {
+            break;
+        }
+        if closes_literal(c, frame.hashes, triple) {
+            break;
+        }
+        if !triple && matches!(c.peek(), b'\n' | b'\r') {
+            break;
+        }
+        if field_width(c.rest(), 0, frame.hashes) > 0 {
+            break;
+        }
+        if c.peek() == b'\\' {
+            c.bump_n(if frame.hashes == 0 { 2 } else { 1 });
+            continue;
+        }
+        c.bump_char();
+    }
+    if c.pos() == start {
+        c.bump_char();
+    }
+    STRING_TEXT
+}
+
+/// The `INTERPOLATION` mode: ordinary code until the `)` that matches the
+/// field's `(`. Brackets inside the field are counted so a call, a closure or
+/// a subscript keeps its own close.
+pub fn lex_interpolation(c: &mut Cursor) -> Kind {
+    if c.at_end() {
+        DEPTHS.with(|depths| {
+            depths.borrow_mut().pop();
+        });
+        return STRING_BAD;
+    }
+    let depth = DEPTHS.with(|depths| depths.borrow().last().copied()).unwrap_or(0);
+    if c.peek() == b')' && depth == 0 {
+        c.bump();
+        DEPTHS.with(|depths| {
+            depths.borrow_mut().pop();
+        });
+        return INTERP_CLOSE;
+    }
+    let kind = lex(c);
+    match kind {
+        LPAREN | LBRACKET | LBRACE => DEPTHS.with(|depths| {
+            if let Some(top) = depths.borrow_mut().last_mut() {
+                *top += 1;
+            }
+        }),
+        RPAREN | RBRACKET | RBRACE => DEPTHS.with(|depths| {
+            if let Some(top) = depths.borrow_mut().last_mut() {
+                *top = top.saturating_sub(1);
+            }
+        }),
+        _ => {}
+    }
+    kind
+}
+
 /// A string from its first byte: plain, multi-line (`"""`) or raw (`#"`).
 fn string(c: &mut Cursor) -> Kind {
     let mut hashes = 0usize;
@@ -662,12 +871,8 @@ fn string(c: &mut Cursor) -> Kind {
                     c.bump_n(at);
                 }
             }
-            b'"' if triple && c.peek_at(1) == b'"' && c.peek_at(2) == b'"' => {
-                c.bump_n(3);
-                return closing_hashes(c, hashes);
-            }
-            b'"' if !triple => {
-                c.bump();
+            b'"' if closes_literal(c, hashes, triple) => {
+                c.bump_n(if triple { 3 } else { 1 });
                 return closing_hashes(c, hashes);
             }
             _ => c.bump(),
@@ -779,8 +984,8 @@ fn operator(c: &mut Cursor) -> Kind {
         (b'|', b'=', _) => (PIPE_EQ, 2),
         (b'^', b'=', _) => (CARET_EQ, 2),
         (b'>', b'>', _) => (GT_JOINED, 1),
-        (b'(', ..) => (LPAREN, 1),
-        (b')', ..) => (RPAREN, 1),
+        (b'\\', ..) => (BACKSLASH, 1),
+        (b'(', ..) => (LPAREN, 1),        (b')', ..) => (RPAREN, 1),
         (b'[', ..) => (LBRACKET, 1),
         (b']', ..) => (RBRACKET, 1),
         (b'{', ..) => (LBRACE, 1),
