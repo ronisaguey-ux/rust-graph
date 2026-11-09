@@ -8,10 +8,11 @@
 //!
 //! The fixture is measured, not assumed: `deep_more.ts` is a win the CST finds
 //! on a generic call (`g<number>(x)`, which the one-pass lexer does not record),
-//! `lossy.py` holds a call inside an f-string field the CST's tables still
-//! cannot see, `tie.py` is one function with nothing to differ on, and
-//! `plain.c` has no CST at all. Python now agrees on everything else measured
-//! here, so the split no longer comes from import lists. The expected counters
+//! `lossy.js` holds a call inside a template literal's `${...}`, which the
+//! JavaScript grammar still keeps as one token, `tie.py` is one function with
+//! nothing to differ on, and `plain.c` has no CST at all. Python agrees on
+//! everything measured here (an f-string field is parsed now), so the split
+//! comes from the template literal and the generic call. The expected counters
 //! in the tests are the values this fixture produces.
 #![cfg(all(feature = "deep", feature = "parser"))]
 
@@ -24,9 +25,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_rust-graph");
 const FIXTURE: &[(&str, &str)] = &[
     // The CST reads the call behind the type arguments; the lexer stops there.
     ("deep_more.ts", "import { a, b } from \"./m\";\n\nconst x: number = f(1);\nexport const y = g<number>(x);\n"),
-    // An f-string field is a span, not a subtree, so a call inside it is a fact
-    // only the lexer's record carries; the guard keeps that record.
-    ("lossy.py", "def f(x):\n    return f\"{g(x)}\"\n"),
+    // A template literal is one token to the deep grammar, so a call inside
+    // `${...}` is a fact only the lexer's record carries; the guard keeps it.
+    ("lossy.js", "function f(x) {\n  return `value ${g(x)}`;\n}\n"),
     // Nothing to differ on: both records weigh the same.
     ("tie.py", "def f(x):\n    return x\n"),
     // No deep parser for C: the lexer stands alone and is not a comparison.
@@ -106,12 +107,12 @@ fn a_lost_fact_keeps_the_lexer_and_is_counted_as_a_fallback() {
     let tree = Tree::new("loss");
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
-    let row = source_row(&json, "lossy.py");
+    let row = source_row(&json, "lossy.js");
     assert!(row.contains("\"path_choice\":\"lexer:fallback\""), "{row}");
     assert!(row.contains("\"parsed_by\":\"lexer\""), "{row}");
     assert!(row.contains("\"deep_fallback\":\"the CST record lost facts the lexer found\""), "{row}");
-    // The call inside the f-string field is only in the lexer's record, so it
-    // survives the fallback.
+    // The call inside the template literal is only in the lexer's record, so
+    // it survives the fallback.
     assert!(json.contains(r#""calls":[["g",2,null,null,0]]"#), "{json}");
     assert!(json.contains(r#""fallbacks":1"#), "{json}");
 }
@@ -146,7 +147,7 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
         "{text}"
     );
     assert!(
-        text.contains("lossy.py\tsymbols deep=2 lexer=2 (+0)\tcalls deep=0 lexer=1 (-1)\timports deep=0 lexer=0 (+0)\n"),
+        text.contains("lossy.js\tsymbols deep=2 lexer=2 (+0)\tcalls deep=0 lexer=1 (-1)\timports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
     assert!(

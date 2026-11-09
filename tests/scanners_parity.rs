@@ -76,14 +76,21 @@ const FIXTURES: &[&str] = &[
 /// Measured on `felicity-run/felicity/scanners` at base `579deb2`, with the
 /// same comparison this test runs: calls, imports.
 const REAL_CORPUS_BEFORE: (usize, usize) = (3578, 373);
-/// Measured on the same directory after the mapping fixes in `deep_facts.rs`.
-const REAL_CORPUS_AFTER: (usize, usize) = (3676, 387);
+/// Measured on the same directory after the f-string field grammar landed:
+/// every field expression is a subtree, so a call written in a field is a
+/// `call` node on the cst side too.
+const REAL_CORPUS_AFTER: (usize, usize) = (3786, 387);
 const REAL_CORPUS_LEXER: (usize, usize) = (3743, 387);
 
-/// The same pair on these fixtures, before the fix. Printed by the test and
+/// The same pair on these fixtures, before either fix. Printed by the test and
 /// asserted as a lower bound, so an edit that gives a fact back cannot go
 /// unnoticed.
 const FIXTURES_BEFORE: (usize, usize) = (61, 16);
+
+/// The same pair after the mapping fixes and the f-string field grammar: the
+/// cst now reads every call the one-pass lexer reads on these shapes. Held as
+/// a floor for the same reason.
+const FIXTURES_AFTER: (usize, usize) = (90, 31);
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scanners")
@@ -333,19 +340,21 @@ fn every_call_and_import_in_the_scanner_shapes_is_accounted_for() {
         REAL_CORPUS_LEXER.0, REAL_CORPUS_LEXER.1
     );
     println!(
-        "fixtures ({} files): before fix cst calls/imports = {}/{}; after = {}/{}, lexer = {}/{}",
+        "fixtures ({} files): before fix cst calls/imports = {}/{}; after the field grammar = {}/{} (mapping fix reached {}/{}), lexer = {}/{}",
         FIXTURES.len(),
         FIXTURES_BEFORE.0,
         FIXTURES_BEFORE.1,
         deep_calls,
         deep_imports,
+        FIXTURES_AFTER.0 - 10,
+        FIXTURES_AFTER.1,
         lexer_calls,
         lexer_imports
     );
     println!();
     println!("differences by reason:");
     println!("  {:4}  receiver-spelling (cst is precise)", tally.receiver.len());
-    println!("  {:4}  grammar-f-string-field (grammar ask)", tally.grammar.len());
+    println!("  {:4}  grammar-f-string-field (must be zero)", tally.grammar.len());
     println!("  {:4}  lexer-omission (cst is right)", tally.lexer_omission.len());
     println!("  {:4}  mapping (must be zero)", tally.mapping.len());
     if !tally.grammar.is_empty() {
@@ -361,15 +370,13 @@ fn every_call_and_import_in_the_scanner_shapes_is_accounted_for() {
     // No fact the CST used to find may disappear: this is the before/after line
     // of the fix, held as a floor.
     assert!(
-        deep_calls >= FIXTURES_BEFORE.0 + 19,
-        "the cst finds {deep_calls} calls, fewer than the 80 the mapping fix reached"
+        deep_calls >= FIXTURES_AFTER.0,
+        "the cst finds {deep_calls} calls, fewer than the {} the field grammar reached",
+        FIXTURES_AFTER.0
     );
-    // The remaining loss is the grammar's f-string handling and nothing else.
-    assert_eq!(
-        tally.grammar.len(),
-        10,
-        "the f-string field count changed: the grammar was edited, update the ask"
-    );
+    // Nothing is lost to the grammar any more: a field's expression is parsed,
+    // so a call written in one is a `call` node like any other.
+    assert_eq!(tally.grammar.len(), 0, "an f-string field lost a call again:\n{}", tally.grammar.join("\n"));
     assert_eq!(tally.receiver.len(), 5, "receiver spelling pairs changed");
 }
 
