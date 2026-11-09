@@ -331,7 +331,9 @@ rust_graph_deep::grammar! { PHP {
     use_declaration: "use" [("function" | "const")] (_use_name % ",") ";",
     /// `Foo\Bar`, and `Foo\{Bar, Baz as Qux}`: the group is a tail of the same
     /// name, so the two forms share every token up to the brace the group needs.
-    _use_name: [BACKSLASH] _name (BACKSLASH _name)* [BACKSLASH use_group] ["as" _name],
+    _use_name: [BACKSLASH] _name use_segment* ["as" _name],
+    /// `\Bar`, or `\{Bar, Baz}`: the token after the backslash decides.
+    use_segment: BACKSLASH (_name | use_group),
     use_group: "{" (_use_item %? ",") "}",
     _use_item: _qualified_name ["as" _name],
 
@@ -498,7 +500,10 @@ rust_graph_deep::grammar! { PHP {
     /// between them is ordinary grammar.
     interpolation: INTERPOLATION_OPEN _expression INTERPOLATION_CLOSE,
     /// `"$a"`, `"$a->b"`, `"$a[0]"`: a variable named in a string, not code.
-    interpolated_variable: VARIABLE [("->" _member_name) | subscript],
+    interpolated_variable: VARIABLE [simple_member | simple_subscript],
+    simple_member: "->" _member_name,
+    simple_subscript: "[" _simple_key "]",
+    _simple_key: IDENT | NUMBER | VARIABLE,
 
     _qualified_name: [BACKSLASH] _name (BACKSLASH _name)*,
     _name: IDENT,
@@ -567,6 +572,45 @@ thread_local! {
     /// frame is pushed when the lexer emits `INTERPOLATION_OPEN` and popped on
     /// the `}` that matches it, so `"{$a["k"]}"` closes at the right brace.
     static FIELDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// What the simple form of an interpolation (`"$a->b"`, `"$a[0]"`) may
+    /// continue with, one frame per open string or heredoc. Without it the
+    /// `->b` and `[0]` would be text: they are code only right after `$a`.
+    static TAILS: RefCell<Vec<Tail>> = const { RefCell::new(Vec::new()) };
+}
+
+/// How a string's text may continue after the token just emitted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tail {
+    /// Ordinary text.
+    None,
+    /// Right after a `$name`: a `->` or a `[` continues the interpolation.
+    AfterVariable,
+    /// Right after that `->`: a member name follows.
+    AfterArrow,
+    /// Inside `$name[`: a key and then the `]`.
+    InIndex,
+}
+
+fn tail_push() {
+    TAILS.with(|tails| tails.borrow_mut().push(Tail::None));
+}
+
+fn tail_pop() {
+    TAILS.with(|tails| {
+        tails.borrow_mut().pop();
+    });
+}
+
+fn tail() -> Tail {
+    TAILS.with(|tails| tails.borrow().last().copied().unwrap_or(Tail::None))
+}
+
+fn set_tail(tail: Tail) {
+    TAILS.with(|tails| {
+        if let Some(frame) = tails.borrow_mut().last_mut() {
+            *frame = tail;
+        }
+    });
 }
 
 /// The HTML mode, mode 0: the file starts here. Bytes are `inline_html` up to
@@ -634,6 +678,7 @@ pub fn lex_php(c: &mut Cursor) -> Kind {
         b'\'' | b'`' => string(c),
         b'"' => {
             c.bump();
+            tail_push();
             DQUOTE_START
         }
         b'$' if is_word_start(c.peek_at(1)) => {
@@ -659,11 +704,16 @@ pub fn lex_php(c: &mut Cursor) -> Kind {
 /// by one are text, which is what PHP itself decided.
 pub fn lex_dquote(c: &mut Cursor) -> Kind {
     if c.at_end() {
+        tail_pop();
         return DQUOTE_BAD;
+    }
+    if let Some(kind) = tail_step(c) {
+        return kind;
     }
     match c.peek() {
         b'"' => {
             c.bump();
+            tail_pop();
             return DQUOTE_END;
         }
         b'\\' => {
@@ -686,10 +736,12 @@ pub fn lex_dquote(c: &mut Cursor) -> Kind {
         b'$' if is_word_start(c.peek_at(1)) => {
             c.bump();
             c.eat_while(is_word_byte);
+            set_tail(Tail::AfterVariable);
             return VARIABLE;
         }
         _ => {}
     }
+    set_tail(Tail::None);
     // Text up to the next quote, escape or interpolation.
     loop {
         if c.at_end() {
@@ -703,6 +755,55 @@ pub fn lex_dquote(c: &mut Cursor) -> Kind {
             _ => c.bump(),
         }
     }
+}
+
+/// The tokens that continue a simple interpolation: `->name`, and `[key]` with
+/// its one key token. Nothing else in a string's text is code.
+fn tail_step(c: &mut Cursor) -> Option<Kind> {
+    match tail() {
+        Tail::AfterVariable => {
+            if c.starts_with(b"->") {
+                c.bump_n(2);
+                set_tail(Tail::AfterArrow);
+                return Some(ARROW);
+            }
+            if c.peek() == b'[' {
+                c.bump();
+                set_tail(Tail::InIndex);
+                return Some(LBRACKET);
+            }
+            set_tail(Tail::None);
+        }
+        Tail::AfterArrow => {
+            if is_word_start(c.peek()) {
+                c.eat_while(is_word_byte);
+                set_tail(Tail::None);
+                return Some(IDENT);
+            }
+            set_tail(Tail::None);
+        }
+        Tail::InIndex => match c.peek() {
+            b']' => {
+                c.bump();
+                set_tail(Tail::None);
+                return Some(RBRACKET);
+            }
+            b'$' if is_word_start(c.peek_at(1)) => {
+                c.bump();
+                c.eat_while(is_word_byte);
+                return Some(VARIABLE);
+            }
+            b'0'..=b'9' => return Some(number(c)),
+            b'-' if c.peek_at(1).is_ascii_digit() => return Some(number(c)),
+            byte if is_word_start(byte) => {
+                c.eat_while(is_word_byte);
+                return Some(IDENT);
+            }
+            _ => set_tail(Tail::None),
+        },
+        Tail::None => {}
+    }
+    None
 }
 
 /// The `FIELD` mode: ordinary code, with one token that only exists inside an
@@ -1021,6 +1122,7 @@ fn heredoc(c: &mut Cursor) -> Kind {
     }
     c.bump_n(at);
     HEREDOC_MARKERS.with(|markers| markers.borrow_mut().push(marker));
+    tail_push();
     HEREDOC_START
 }
 
@@ -1304,5 +1406,166 @@ mod real_world {
     #[test]
     fn the_census_reads_an_empty_directory_as_zero() {
         assert_eq!(census(Path::new("/nonexistent/php")).1, 0);
+    }
+}
+
+#[cfg(test)]
+mod fixtures {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::PHP;
+    use crate::deep::syntax::ERROR;
+    use crate::deep::tree::{HAS_ERROR, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    fn read(name: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name);
+        fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"))
+    }
+
+    /// The text of every node of `kind`, in tree order.
+    fn spans<'s>(src: &'s str, kind: &str) -> Vec<&'s str> {
+        let mut workspace = Workspace::default();
+        workspace.parse(src.as_bytes(), &PHP, &Budget::default()).unwrap();
+        let nodes = &workspace.tree.nodes;
+        (0..nodes.len())
+            .filter(|&index| nodes[index].flags & TOKEN == 0 && PHP.name(nodes[index].kind) == kind)
+            .map(|index| &src[nodes[index].start as usize..nodes[index].end as usize])
+            .collect()
+    }
+
+    /// The text of every token of `kind`, in lexer order: the leaves a rule
+    /// keeps for themselves, such as a heredoc's terminator or inline HTML.
+    fn tokens<'s>(src: &'s str, kind: &str) -> Vec<&'s str> {
+        let mut workspace = Workspace::default();
+        workspace.parse(src.as_bytes(), &PHP, &Budget::default()).unwrap();
+        let nodes = &workspace.tree.nodes;
+        (0..nodes.len())
+            .filter(|&index| nodes[index].flags & TOKEN != 0 && PHP.name(nodes[index].kind) == kind)
+            .map(|index| &src[nodes[index].start as usize..nodes[index].end as usize])
+            .collect()
+    }
+
+    /// Every error node and bad-token leaf, as its text.
+    fn errors(src: &str) -> Vec<String> {
+        let mut workspace = Workspace::default();
+        workspace.parse(src.as_bytes(), &PHP, &Budget::default()).unwrap();
+        let nodes = &workspace.tree.nodes;
+        (0..nodes.len())
+            .filter(|&index| nodes[index].kind == ERROR || nodes[index].flags & HAS_ERROR != 0 && nodes[index].flags & TOKEN != 0)
+            .map(|index| src[nodes[index].start as usize..nodes[index].end as usize].to_string())
+            .collect()
+    }
+
+    /// An interpolated string is a tree: the literal, its text and one
+    /// `interpolation` per field, with a call inside a field parsed as a call
+    /// and the escaped `$` left as text.
+    #[test]
+    fn interpolation_is_a_tree_not_a_token() {
+        let src = read("php_interpolation.php");
+        assert_eq!(errors(&src), Vec::<String>::new(), "a valid file has no error node");
+        assert_eq!(
+            spans(&src, "interpolation"),
+            ["{$obj->m()}", "{$row['k']}", "{$price}", "${name}"],
+            "one node per field, braces included"
+        );
+        assert_eq!(spans(&src, "function_call_expression"), ["$obj->m()"], "a call in a field is a call");
+        assert_eq!(spans(&src, "member_access_expression"), ["$obj->m"], "the receiver of that call is a member");
+        assert_eq!(
+            spans(&src, "interpolated_variable"),
+            ["$name", "$obj->label", "$row[0]"],
+            "the simple forms name a variable and do not run code"
+        );
+        assert!(
+            spans(&src, "double_quoted_string").contains(&"\"call: {$obj->m()}\""),
+            "the whole literal is one string node"
+        );
+        assert!(!spans(&src, "string_content").iter().any(|text| text.contains("{$")), "the braces are not text");
+    }
+
+    /// A heredoc body is parts; a nowdoc is one token, because nothing in it is
+    /// code. The terminator keeps its own span.
+    #[test]
+    fn a_heredoc_is_a_tree_and_a_nowdoc_is_one_token() {
+        let src = read("php_heredoc.php");
+        assert_eq!(errors(&src), Vec::<String>::new(), "a valid file has no error node");
+        assert_eq!(
+            spans(&src, "heredoc_string"),
+            [
+                "<<<SQL\nSELECT * FROM t WHERE id = {$id}\nSQL",
+                "<<<EOT\nhello {$user->name()}\nEOT",
+                "<<<IND\n  body {$value}\n  IND",
+            ],
+            "the node spans the marker line to the terminator's own last byte"
+        );
+        assert_eq!(
+            tokens(&src, "heredoc_end"),
+            ["SQL", "EOT", "  IND"],
+            "the terminator is a token, indentation and marker, and the `;` stays outside it"
+        );
+        assert_eq!(spans(&src, "interpolation"), ["{$id}", "{$user->name()}", "{$value}"]);
+        assert_eq!(spans(&src, "function_call_expression"), ["$user->name()"]);
+        let nowdoc = tokens(&src, "string");
+        assert_eq!(nowdoc.len(), 1, "a nowdoc is one token: {nowdoc:?}");
+        assert!(nowdoc[0].starts_with("<<<'TXT'") && nowdoc[0].ends_with("TXT"), "{:?}", nowdoc[0]);
+    }
+
+    /// The constructs that made real files parse: attributes, group use, trait
+    /// adaptation, promoted parameters, match, arrow functions, `?>` and
+    /// inline HTML.
+    #[test]
+    fn the_modern_syntax_fixture_keeps_its_constructs() {
+        let src = read("php_modern_syntax.php");
+        assert_eq!(errors(&src), Vec::<String>::new(), "a valid file has no error node");
+        assert_eq!(spans(&src, "attribute_group"), ["#[Attribute(Attribute::TARGET_CLASS)]"]);
+        assert_eq!(spans(&src, "use_group"), ["{User, Post as BlogPost}"]);
+        assert_eq!(spans(&src, "trait_adaptations"), ["{\n        LogsActivity::log insteadof FormatsOutput;\n        FormatsOutput::log as public formatted;\n    }"]);
+        assert_eq!(spans(&src, "match_expression").len(), 1);
+        assert_eq!(spans(&src, "arrow_function"), ["fn(string $value): string => trim($value)"]);
+        assert_eq!(spans(&src, "anonymous_function").len(), 1);
+        assert_eq!(spans(&src, "enum_declaration"), Vec::<String>::new());
+        assert_eq!(tokens(&src, "inline_html"), ["\n<p class=\"note\">", "</p>\n"]);
+        assert_eq!(spans(&src, "echo_statement"), ["<?= $slug(\"Hello\") ?>"]);
+    }
+
+    /// Malformed input is a tree with the error inside it, never a panic and
+    /// never a hang: every prefix of every fixture, and every fixture with one
+    /// byte removed, still yields the language's root.
+    #[test]
+    fn every_truncation_and_byte_loss_still_yields_a_tree() {
+        for name in ["php_interpolation.php", "php_heredoc.php", "php_modern_syntax.php"] {
+            let src = read(name);
+            let bytes = src.as_bytes();
+            let mut inputs: Vec<Vec<u8>> = Vec::new();
+            for at in (0..bytes.len()).step_by(7) {
+                inputs.push(bytes[..at].to_vec());
+            }
+            for at in (0..bytes.len()).step_by(11) {
+                let mut cut = bytes.to_vec();
+                cut.remove(at);
+                inputs.push(cut);
+            }
+            for input in inputs {
+                let mut workspace = Workspace::default();
+                let outcome = workspace.parse(&input, &PHP, &Budget::default()).unwrap_or_else(|_| panic!("{name}: the parse was refused"));
+                assert!(outcome.complete(), "{name}: the parse did not finish on {:?}", String::from_utf8_lossy(&input));
+                assert_eq!(PHP.name(workspace.tree.root().kind), "program", "{name}: the root did not survive");
+            }
+        }
+    }
+
+    /// The two shapes a truncation must report rather than absorb: a string
+    /// that cannot close and a field that cannot close.
+    #[test]
+    fn an_unclosed_string_and_an_unclosed_field_report_inside_the_root() {
+        for src in ["<?php\n$a = \"never closed;\n", "<?php\n$a = \"a{$b;\n", "<?php\n$a = <<<EOT\nno terminator\n"] {
+            let mut workspace = Workspace::default();
+            workspace.parse(src.as_bytes(), &PHP, &Budget::default()).unwrap();
+            assert_eq!(PHP.name(workspace.tree.root().kind), "program");
+            let nodes = &workspace.tree.nodes;
+            let errors = (0..nodes.len()).filter(|&index| nodes[index].kind == ERROR || nodes[index].flags & HAS_ERROR != 0 && nodes[index].flags & TOKEN != 0).count();
+            assert!(errors > 0, "no error reported for {src:?}");
+        }
     }
 }
