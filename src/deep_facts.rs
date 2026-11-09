@@ -653,16 +653,27 @@ impl<'a> Walker<'a> {
                     self.event("[\"f\"]");
                 }
             }
-            "with_statement" => match self.loop_binding(id) {
-                Some((targets, value)) => {
-                    self.event("[\"b\"]");
+            "with_statement" => {
+                // `with A(), B() as f:` has one value per context manager. The
+                // bound one carries the assignment event; every other is still
+                // an expression whose calls are facts, and reading only the
+                // first dropped `open()` from `with nullcontext(), open(p)`.
+                self.event("[\"b\"]");
+                let bound = self.loop_binding(id);
+                let bound_value = bound.as_ref().map(|(_, value)| *value);
+                if let Some((targets, value)) = bound {
                     self.assignment_event(targets, value, self.line(id), false);
                 }
-                None => {
-                    self.condition_before(id);
-                    self.event("[\"b\"]");
+                for child in self.children(id) {
+                    if Some(child) == bound_value
+                        || self.is_layout(child)
+                        || matches!(self.kind(child), "block" | "statement_block")
+                    {
+                        continue;
+                    }
+                    self.form(child);
                 }
-            },
+            }
             "for_statement" | "for_in_statement" => {
                 self.event("[\"b\"]");
                 if let Some((target, value)) = self.loop_binding(id) {
