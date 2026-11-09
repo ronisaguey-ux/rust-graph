@@ -5,11 +5,22 @@
 //! `_gt: ">" | GT_JOINED` closes both lists in `vector<vector<int>>`, and the
 //! shift row spells `>>` as the same pair, so `a >> b` is a shift.
 //!
-//! Not modelled: operator overloads, conversion operators, out-of-line member
-//! definitions (`Foo::bar() {}`), user-defined literals, attributes,
-//! `consteval`/`concept`/`requires`/`co_await` (the C++20 surface). A cast to
-//! a bare user type (`(Foo)x`) is not a cast here: with no symbol table it
-//! stays a parenthesized expression, which is also a legal reading.
+//! Real declarations are decided by shape, not by a symbol table:
+//!
+//! - **A typedef name is a type.** `PyObject *f(void)` is a definition, `Foo x;`
+//!   a declaration, and `const Foo *p;` a qualified declaration.
+//! - **A macro before a declaration is a qualifier**, matched only when a whole
+//!   declaration follows it, so a macro *call* at file scope stays a call.
+//! - **A parenthesised typedef name is a cast** only when an operand that cannot
+//!   be a binary operator follows it, so `(a) * b` remains a multiplication.
+//! - **Out-of-line members are their own rules**: `Foo::Foo(...) : base(...) { }`,
+//!   `Foo::~Foo() { }` and `int Foo::bar() const { }`.
+//!
+//! Not modelled: operator overloads (`operator+`, `operator new`), conversion
+//! operators, user-defined literals, `consteval`/`concept`/`requires`/
+//! `co_await` (the C++20 surface), and a field macro inside a class body (which
+//! is ambiguous with a member function declaration within the three-token
+//! lookahead the runtime allows).
 
 use crate::batch_c::{directive, is_word_byte, is_word_start, number, quoted, trivia};
 use crate::deep::lexer::Cursor;

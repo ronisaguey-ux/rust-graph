@@ -3,10 +3,26 @@
 //! `mod.rs`); braces are plain tokens so a predicate can find the `{` that
 //! makes a definition.
 //!
-//! Not modelled: typedef names (a bare typedef type reads as an expression
-//! statement), `_Generic`, compound literals, K&R parameter declarations, and
-//! attributes. Everything listed in the module docs as "modelled" has a
-//! fixture or a test.
+//! What real translation units need, and how it is decided without a symbol
+//! table:
+//!
+//! - **A typedef name is a type by shape.** `Foo x;` is two names in a row and
+//!   no expression can be that, so it is a declaration (`bare_user_declaration`);
+//!   `Foo *x;` is a declaration only at file scope (`user_pointer_declaration`),
+//!   because inside a function it must stay the multiplication `x * y`. A
+//!   keyword in front settles it: `const Foo *p;` is a declaration.
+//! - **A macro before a declaration is a qualifier.** `NPY_NO_EXPORT int f(void);`
+//!   and `XMLPUBFUN xmlRegexpPtr f(...)` are read as `macro_qualified_item`,
+//!   which only matches when a whole declaration follows the name.
+//! - **A macro with no declarator is a field.** `PyObject_HEAD` inside a struct
+//!   is `macro_field`; the predicate above it claims every name that does have
+//!   a declarator, so the two cannot be confused.
+//!
+//! Not modelled: `_Generic`, compound literals, K&R parameter declarations, a
+//! pointer declarator of a typedef name inside a function body (it reads as a
+//! multiplication, which is the older and still legal reading), and operator
+//! spelling other than the punctuation forms. Everything listed here as
+//! modelled has a fixture or a test.
 
 use crate::batch_c::{directive, is_word_byte, is_word_start, literal_prefix, number, quoted, trivia};
 use crate::deep::lexer::Cursor;
