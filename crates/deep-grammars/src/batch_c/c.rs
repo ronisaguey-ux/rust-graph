@@ -702,7 +702,7 @@ mod kinds {
     use std::fs;
     use std::path::PathBuf;
 
-    use crate::batch_c::c::C;
+    use super::C;
     use crate::deep::syntax::{Kind, Language, ERROR, FIRST_LANGUAGE_KIND};
     use crate::deep::tree::{HAS_ERROR, TOKEN};
     use crate::deep::{Budget, Workspace};
@@ -768,7 +768,16 @@ mod kinds {
     ];
 
     fn fixtures() -> PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+        // The grammar is compiled twice: in its own crate and, by path, inside
+        // rust-graph for the shipped `--deep` path. The manifest dir differs, so
+        // both layouts are tried rather than assuming one.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for candidate in [root.join("fixtures"), root.join("crates/deep-grammars/fixtures")] {
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+        root.join("fixtures")
     }
 
     fn kind_of(language: &'static Language, name: &str) -> Kind {
