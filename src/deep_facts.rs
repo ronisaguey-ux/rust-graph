@@ -2774,6 +2774,44 @@ impl<'a> Walker<'a> {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
+            // `UnsafeCell<State>`, `Vec<Entry>`: a generic type holds the base
+            // and the type arguments, and both are names the lexer reads.
+            "generic_type" | "type_arguments" | "type_parameter_list" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | "," | "::") {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        parts.push(value);
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `[u8; CLASSES]`: an array type holds a type name and a length, both
+            // of them names the lexer reads.
+            "array_type" | "slice_type" | "reference_type" | "pointer_type" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) || matches!(self.kind(child), "[" | "]" | "&" | "*" | ";" ) {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        parts.push(value);
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment" => "0".to_string(),
             // A region the grammar could not name. The tokens are still there —
@@ -3167,6 +3205,71 @@ impl<'a> Walker<'a> {
     /// The Rust-only nodes, in the order they are met. `false` means "not mine,
     /// let the shared walk read it" (an `expression_statement`, a block, a
     /// plain value).
+
+    /// `const NAME: Type = value;`: the target is the name, the value is what
+    /// follows the `=`.
+    fn rust_const(&mut self, id: u32) {
+        let children = self.children(id);
+        let name = children
+            .iter()
+            .copied()
+            .find(|&child| matches!(self.kind(child), "identifier" | "default"))
+            .map(|child| self.text_string(child))
+            .unwrap_or_default();
+        if name.is_empty() || name == "_" {
+            return;
+        }
+        let Some(equal) = children.iter().position(|&child| self.kind(child) == "=") else {
+            return;
+        };
+        let Some(&value) = children.get(equal + 1) else { return };
+        let value = self.form(value);
+        let line = self.line(id);
+        // The target list is a plain array of names, as the lexer writes it.
+        let mut targets = "[\"".to_string();
+        targets.push_str(&name);
+        targets.push_str("\"]");
+        self.event(&format!("[\"a\",{line},{targets},{value},0]"));
+    }
+
+
+    /// `{ free: [u8; N], bump: u8 }`: one event for the field list, the way the
+    /// lexer reads the body.
+    fn rust_field_list(&mut self, id: u32) {
+        let mut parts = Vec::new();
+        for child in self.children(id) {
+            if self.is_layout(child) || !matches!(self.kind(child), "field_declaration" | "field_declaration_list") {
+                continue;
+            }
+            // The field's own children are the name and the type: read them
+            // one by one, the way the lexer reads the field as an expression.
+            let mut field = Vec::new();
+            for part in self.children(child) {
+                if self.is_layout(part) {
+                    continue;
+                }
+                let value = self.form(part);
+                if value != "0" {
+                    field.push(value);
+                }
+            }
+            if !field.is_empty() {
+                parts.push(format!("[\"m\",[{}]]", field.join(",")));
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        // The lexer stamps the statement on the first field's line.
+        let line = self
+            .children(id)
+            .into_iter()
+            .find(|&child| self.kind(child) == "field_declaration")
+            .map(|child| self.line(child))
+            .unwrap_or_else(|| self.line(id));
+        self.event(&format!("[\"x\",{line},[\"t\",[{}]]]", parts.join(",")));
+    }
+
     fn enter_rust(&mut self, id: u32) -> bool {
         match self.kind(id) {
             "impl_item" => {
@@ -3179,6 +3282,21 @@ impl<'a> Walker<'a> {
             }
             "let_declaration" => {
                 self.rust_let(id);
+                true
+            }
+            // `const X: usize = 4;` and `static Y: &str = "s";`: the lexer
+            // reads a module-level binding and files an assignment event; the
+            // item was never read here, so every module constant was lost.
+            "const_item" | "static_item" => {
+                self.rust_const(id);
+                true
+            }
+            // A struct's fields are declarations, but the one-pass lexer reads
+            // the body as an expression statement and files one event for it.
+            // The names are real either way, and without an event the file
+            // looks like the CST lost them.
+            "field_declaration_list" => {
+                self.rust_field_list(id);
                 true
             }
             "return_expression" => {
@@ -3204,6 +3322,9 @@ impl<'a> Walker<'a> {
                 true
             }
             "match_expression" => {
+                // `match c.peek() {`: the scrutinee is a value the lexer reads
+                // as an expression statement before the block opens.
+                self.rust_condition(id);
                 self.event("[\"b\"]");
                 true
             }
@@ -3569,10 +3690,7 @@ impl<'a> Walker<'a> {
             }
             // A token tree is the macro's argument list; its names and nested
             // calls are values, its punctuation is not.
-            "token_tree" => {
-                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
-                Some(if items.is_empty() { "0".to_string() } else { self.merge_form(&items) })
-            }
+            "token_tree" => Some(self.rust_tt_value(id)),
             _ => None,
         }
     }
@@ -3623,6 +3741,20 @@ impl<'a> Walker<'a> {
                     (format!("{receiver}.{name}"), text)
                 }
             }
+            // `String::from(x)`: the qualifier is the receiver, as the lexer
+            // writes it, so a reader can tell `String::from` from `Vec::from`.
+            "scoped_identifier" | "scoped_type_identifier" => {
+                let path = self.path_of(callee);
+                match path.rsplit_once('.') {
+                    Some((head, _)) if !head.is_empty() => {
+                        let mut text = "[\"n\",".to_string();
+                        push_string(&mut text, head);
+                        text.push(']');
+                        (path, text)
+                    }
+                    _ => (path, "0".to_string()),
+                }
+            }
             "generic_function" => {
                 let inner = self.children(callee).into_iter().find(|&child| self.kind(child) != "type_arguments");
                 match inner {
@@ -3655,6 +3787,49 @@ impl<'a> Walker<'a> {
     /// `assert_eq!(a, b)` is a merge of the macro's name and its arguments, not
     /// a call: the lexer reads the name as a name, and a resolver has no callee
     /// called `assert_eq!`.
+
+    /// A macro's token tree, read the way the one-pass lexer reads it: a name
+    /// followed by a tree is a call (`assert_eq!(…, shown())` calls `shown`),
+    /// everything else is a value. The tokens are not code to the parser, but
+    /// they are arguments to a macro that will evaluate them, so the calls in
+    /// them are facts.
+    fn rust_tt_value(&mut self, id: u32) -> String {
+        let kids: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+        let mut parts = Vec::new();
+        let mut at = 0;
+        while at < kids.len() {
+            let node = kids[at];
+            let kind = self.kind(node);
+            let named = matches!(kind, "identifier" | "scoped_identifier" | "type_identifier");
+            if named {
+                if let Some(&next) = kids.get(at + 1) {
+                    if self.kind(next) == "token_tree" {
+                        let path = {
+                            let path = self.path_of(node);
+                            if path.is_empty() { self.text_string(node) } else { path }
+                        };
+                        let line = self.line(node);
+                        let index = self.push_call(path, line);
+                        let args = self.rust_tt_value(next);
+                        parts.push(format!("[\"c\",{index},0,[{args}]]"));
+                        at += 2;
+                        continue;
+                    }
+                }
+            }
+            // A literal is a `0` to the lexer, and the guard counts them: the
+            // arguments of `assert_eq!(1, 2, "x", f())` are three constants and
+            // a call on both sides.
+            parts.push(self.form(node));
+            at += 1;
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
     fn rust_macro(&mut self, id: u32) -> String {
         let mut items = Vec::new();
         for child in self.children(id) {
