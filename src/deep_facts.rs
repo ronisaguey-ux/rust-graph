@@ -761,6 +761,9 @@ impl<'a> Walker<'a> {
             | "expression_list" => {
                 self.children(id).into_iter().filter_map(|child| self.value_path(child)).collect()
             }
+            // `NAME: Set[str] = {...}` binds `NAME`; the annotation is a type,
+            // not a value, so the target is the name before it.
+            "annotated" => self.children(id).into_iter().find_map(|child| self.value_path(child)).into_iter().collect(),
             _ => self.value_path(id).into_iter().collect(),
         }
     }
