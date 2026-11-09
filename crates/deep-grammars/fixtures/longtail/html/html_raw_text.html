@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset=utf-8>
+  <title>Raw text &amp; attributes</title>
+  <style>
+    .card > h2 { color: #333; }
+    .card[data-kind="a>b"]::before { content: "<"; }
+  </style>
+  <script type="module">
+    const a = 1 < 2 && 3 > 2;
+    if (a) { document.write("</div>"); }
+  </script>
+</head>
+<body class=page data-role=main>
+  <!-- a comment with <tags> and -- inside -->
+  <template id=row>
+    <div class=card>
+      <img src=logo.png width=120 height=24 alt="a logo" />
+      <p>Cards render <code>&lt;div&gt;</code> markup.</p>
+    </div>
+  </template>
+  <input type=text value="quoted" disabled>
+</body>
+</html>
