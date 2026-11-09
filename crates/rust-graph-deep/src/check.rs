@@ -309,7 +309,7 @@ fn check_modes(grammar: &Grammar) -> Result<(), Error> {
         if grammar.switches[..index].iter().any(|earlier| earlier.token == switch.token) {
             return Err(Error::at(switch.spot, format!("`{}` switches twice: one switch per token, the rest belongs in the step function", switch.token)));
         }
-        if let Action::Set(mode) | Action::Push(mode) = &switch.action {
+        if let Action::Set(mode) | Action::Push(mode) | Action::PopTo(mode) = &switch.action {
             if !grammar.modes.iter().any(|def| def.name == *mode) {
                 return Err(Error::at(switch.spot, format!("`{mode}` is not a mode: declare it in `modes {{ ... }}`")));
             }
@@ -1030,6 +1030,10 @@ mod tests {
         assert!(error.contains("`NOPE` is not a token"), "{error}");
         let error = check_src(r#"modes { X = l, }"#, "switch A => X; switch A => pop;").unwrap();
         assert!(error.contains("switches twice"), "{error}");
+        // `pop MODE` names a mode like the other two do.
+        let error = check_src(r#"modes { X = l, }"#, "switch A => pop Y;").unwrap();
+        assert!(error.contains("`Y` is not a mode"), "{error}");
+        assert!(check_src(r#"modes { X = l, }"#, "switch A => pop X;").is_none());
         // A mode no switch enters is unused but harmless: the step function may
         // still be reached, and a later switch can be added without reordering.
         assert!(check_src(r#"modes { X = l, }"#, "").is_none());

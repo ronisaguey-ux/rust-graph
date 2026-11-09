@@ -49,6 +49,9 @@ pub enum Action {
     Push(String),
     /// Leave the current mode.
     Pop,
+    /// Leave modes until `mode` has been left too: a broken f-string field
+    /// ends both the field's frame and the string's in one token.
+    PopTo(String),
 }
 
 /// How the macro compiles a grammar.
@@ -275,10 +278,11 @@ pub fn grammar(input: Vec<Tok>) -> Result<Grammar, Error> {
                 let arrow = rest.iter().position(|tok| matches!(tok.tree, Tree::Punct('=', true)))
                     .filter(|at| matches!(rest.get(at + 1).map(|tok| &tok.tree), Some(Tree::Punct('>', _))));
                 let Some(arrow) = arrow else {
-                    return Err(Error::at(spot, "a switch is `switch TOKEN => MODE;`, `=> push MODE;` or `=> pop;`"));
+                    return Err(Error::at(spot, "a switch is `switch TOKEN => MODE;`, `=> push MODE;`, `=> pop;` or `=> pop MODE;`"));
                 };
                 let action = match &rest[arrow + 2..] {
                     [Tok { tree: Tree::Ident(word), .. }] if word == "pop" => Action::Pop,
+                    [Tok { tree: Tree::Ident(word), .. }, Tok { tree: Tree::Ident(mode), .. }] if word == "pop" => Action::PopTo(mode.clone()),
                     [Tok { tree: Tree::Ident(word), .. }, Tok { tree: Tree::Ident(mode), .. }] if word == "push" => Action::Push(mode.clone()),
                     [Tok { tree: Tree::Ident(mode), .. }] => Action::Set(mode.clone()),
                     _ => return Err(Error::at(spot, "a switch is `switch TOKEN => MODE;`, `=> push MODE;` or `=> pop;`")),
@@ -738,6 +742,7 @@ mod tests {
                switch HEREDOC_START => HEREDOC;
                switch FIELD_OPEN => push STRING;
                switch FIELD_CLOSE => pop;
+               switch FIELD_BAD => pop HEREDOC;
                tokens { A = "a", B = "b", } a: A, }"#,
         )
         .unwrap();
@@ -752,9 +757,13 @@ mod tests {
                 Action::Set(mode) => format!("{} => {mode}", switch.token),
                 Action::Push(mode) => format!("{} => push {mode}", switch.token),
                 Action::Pop => format!("{} => pop", switch.token),
+                Action::PopTo(mode) => format!("{} => pop {mode}", switch.token),
             })
             .collect();
-        assert_eq!(actions, ["HEREDOC_START => HEREDOC", "FIELD_OPEN => push STRING", "FIELD_CLOSE => pop"]);
+        assert_eq!(
+            actions,
+            ["HEREDOC_START => HEREDOC", "FIELD_OPEN => push STRING", "FIELD_CLOSE => pop", "FIELD_BAD => pop HEREDOC"]
+        );
         for (src, want) in [
             (r#"G { lex = l; modes { X = l, X = l, } tokens { A = "a", } a: A, }"#, "declared twice"),
             (r#"G { lex = l; switch A; tokens { A = "a", } a: A, }"#, "a switch is"),
