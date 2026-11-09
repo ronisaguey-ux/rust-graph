@@ -18,9 +18,13 @@
 //! - **A brace after an operand is an argument block.** `xs.map { x => ... }`
 //!   and `xs.map { case ... }` are a postfix `block` row, which is safe in
 //!   Scala because `if`, `for` and `while` all parenthesise their headers.
-//! - **Strings are single tokens.** `s"..."` and `f"..."` interpolations,
-//!   `${...}` fields, `"""..."""` blocks and a raw string's body are all one
-//!   `string` token scanned with its braces and inner strings balanced.
+//! - **Strings are code at their fields.** A plain `"..."` is text, but
+//!   `s"$name ${f(x)}"` is a `string_literal` over a start token, its text, one
+//!   `interpolation` per `${...}` field and an end token: the mode stack
+//!   (`modes`/`switch`) hands the bytes after the opening quote to the string
+//!   step and the bytes inside a field back to code, so a call written in a
+//!   field is an ordinary subtree. `$name` stays one `template_name` token, and
+//!   `raw"..."` never opens a field.
 //! - **`>` before `>` is `GT_JOINED`**, as in the four other grammars, so
 //!   `Map[String, List[Int]]` closes both lists and `a >> b` and `a >>> b` are
 //!   `GT_JOINED` runs.
@@ -35,9 +39,6 @@
 //!   operator out of punctuation. A grammar cannot enumerate that set, so the
 //!   lexer takes the standard operators and the common assignments; an unknown
 //!   run becomes `UNKNOWN`, which is an error, not a crash.
-//! - **A string's interpolation is a mode switch.** `${...}` returns to code
-//!   and the matching `}` returns to the string; the step lexer scans the whole
-//!   literal instead, so a field's expression is not parsed.
 //! - **Identifier infix calls are not modelled.** `0 until 3` and `xs map f`
 //!   put a *name* where the table expects an operator, and a name after an
 //!   operand is also how the next statement starts, so no row is possible; the
@@ -52,12 +53,41 @@
 //! - **One kind per rule**, so `class_definition`, `trait_definition`,
 //!   `object_definition` and `enum_definition` are four rules.
 
+use std::cell::RefCell;
+
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
+
+thread_local! {
+    /// The quote of each string the `STRING` mode is inside, innermost last,
+    /// with whether it is triple-quoted and whether its fields are code (an
+    /// `s"..."`/`f"..."` interpolator) or text (a plain or `raw"..."` string).
+    static QUOTES: RefCell<Vec<(bool, bool)>> = const { RefCell::new(Vec::new()) };
+    /// Open brackets inside each `${...}` field, innermost last, so the `}`
+    /// that closes a field is the one at its own depth.
+    static FIELDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
 
 rust_graph_deep::grammar! { SCALA {
     name = "scala";
     lex = lex;
+
+    /// After an interpolator's opening quote the step lexer runs in `STRING`:
+    /// the bytes are text until the closing quote or a `$`.
+    ///
+    /// `TEMPLATE` is the opposite frame: the lexer pushed it at a `${`, so the
+    /// bytes are code again until the `}` that matches that brace at the
+    /// field's own bracket depth pops it. A plain string never opens a field,
+    /// and `raw"..."` keeps its dollars as text.
+    modes {
+        STRING = lex_string_text,
+        TEMPLATE = lex_template_field,
+    }
+    switch STRING_START => push STRING;
+    switch STRING_END => pop;
+    switch STRING_BAD => pop STRING;
+    switch TEMPLATE_OPEN => push TEMPLATE;
+    switch TEMPLATE_CLOSE => pop;
 
     tokens {
         LPAREN = "(" open parens,
@@ -69,7 +99,20 @@ rust_graph_deep::grammar! { SCALA {
         IDENT = "identifier",
         NUMBER = "integer",
         FLOAT = "float",
-        STRING = "string",
+        /// The opening quotes of a string, `"` or `"""`.
+        STRING_START = "string_start",
+        /// The bytes of a string between a template and the next one.
+        STRING_TEXT = "string_text",
+        /// The `${` of an interpolated field: code again until the matching `}`.
+        TEMPLATE_OPEN = "template_open" open field,
+        /// The `}` that closes a template field at its own bracket depth.
+        TEMPLATE_CLOSE = "template_close" close field,
+        /// `$name`, which is one token: there is nothing to recurse into.
+        SIMPLE_TEMPLATE = "template_name",
+        /// The closing quotes of a string.
+        STRING_END = "string_end",
+        /// A literal that does not close on its line.
+        STRING_BAD = "bad_string" bad,
         CHAR = "character",
         SYMBOL = "symbol",
         /// A string, character or symbol literal with no end.
@@ -130,6 +173,7 @@ rust_graph_deep::grammar! { SCALA {
         ASSIGN = "=",
         ARROW = "=>",
         LARROW = "<-",
+        RIGHT_ARROW = "->",
         AT = "@",
         UNDERSCORE_DOT = "_.",
         PLUS_EQ = "+=",
@@ -176,7 +220,14 @@ rust_graph_deep::grammar! { SCALA {
 
     package_clause: "package" _qualified_name,
     import_declaration: "import" (_import_expr % ","),
-    _import_expr: _qualified_name ["." "*"],
+    /// An import path is segments to a name, or to `*`, or to a `{...}` group of
+    /// selectors. The loop is the same shape as `_qualified_name`'s, because an
+    /// optional bracket after a dotted name is not taken.
+    _import_expr: _name ("." (_name | "*" | import_selectors))*,
+    /// `import scala.util.{Failure, Success, Try}` and the rename form
+    /// `{Failure => Bad}`.
+    import_selectors: "{" (_import_selector %? ",") "}",
+    _import_selector: _name ["=>" _name],
     _qualified_name: _name ("." _name)*,
 
     _member: _definition | _statement,
@@ -197,6 +248,7 @@ rust_graph_deep::grammar! { SCALA {
         | &([definition_modifiers] "enum") enum_definition
         | &([definition_modifiers] "def") def_definition
         | &([definition_modifiers] ("val" | "var")) val_definition
+        | &([definition_modifiers] "given") given_definition
         | &([definition_modifiers] "type") type_definition,
 
     class_definition: [definition_modifiers] "class" _name [type_parameters] [class_parameters] [extends_clause] [template_body],
@@ -207,6 +259,20 @@ rust_graph_deep::grammar! { SCALA {
     def_body: "=" (block | _expression) | block,
     val_definition: [definition_modifiers] ("val" | "var") (_binding % ","),
     _binding: _name [":" _type] ["=" _expression],
+    /// Scala 3's `given`: a named instance (`given intShow: Show[Int] with
+    /// {...}`) or an anonymous one (`given Show[String] = ...`). The two start
+    /// the same way — a name or a type — so the named form is entered through
+    /// the predicate that sees the `:` after its head.
+    given_definition: [definition_modifiers] "given" _given_head,
+    _given_head:
+        &(_given_named ":") _given_named ":" _given_type ["with" template_body] ["=" _expression]
+        | _given_anonymous,
+    _given_named: _name [type_parameters] [parameter_clause],
+    _given_anonymous: _given_type ["with" template_body] ["=" _expression],
+    /// A `given`'s type stops before `with`: that keyword starts the instance's
+    /// body here, not a compound type, so this is `_type` without the `with`
+    /// suffix.
+    _given_type: _type_atom (type_arguments | "*" | "=>" _type | "&" _type | "|" _type)*,
     type_definition: [definition_modifiers] "type" _name [type_parameters] "=" _type,
 
     class_parameters: "(" (class_parameter %? ",") ")",
@@ -223,12 +289,11 @@ rust_graph_deep::grammar! { SCALA {
 
     // ---- statements ----
 
+    /// `if`, `for`, `while` and `try` are expressions here, so a statement that
+    /// is one is reached through `expression_statement`: two alternatives that
+    /// start the same way cannot be told apart.
     _statement:
-        if_statement
-        | while_statement
-        | do_statement
-        | for_statement
-        | try_statement
+        do_statement
         | return_statement
         | throw_statement
         | block
@@ -236,17 +301,20 @@ rust_graph_deep::grammar! { SCALA {
         | expression_statement,
 
     /// A block may hold definitions too: local `val`s and nested `def`s are
-    /// ordinary Scala.
-    block: "{" _member* "}",
+    /// ordinary Scala, and `f { case ... }` is a partial-function literal.
+    block: "{" (_member | case_clause)* "}",
     expression_statement: _expression,
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
     while_statement: "while" parenthesized_expression _statement,
     do_statement: "do" _statement "while" parenthesized_expression,
-    for_statement: "for" for_header _statement,
+    for_statement: "for" for_header ["yield"] _statement,
     for_header: "(" _enumerators ")",
     _enumerators: _enumerator (";" _enumerator)*,
     _enumerator: generator | _expression@lambda,
-    generator: _name "<-" _expression@assign,
+    /// A guard binds to the generator it follows (`x <- xs if p`), so it is a
+    /// suffix of the generator and not an enumerator of its own: a leading
+    /// `if` would start an `if` expression and the two could not be told apart.
+    generator: _name "<-" _expression@assign ("if" _expression@or)*,
     try_statement: "try" try_body catch_clause* [finally_clause],
     try_body: block | _expression,
     catch_clause: "catch" catch_block,
@@ -255,7 +323,15 @@ rust_graph_deep::grammar! { SCALA {
     return_statement: "return" [_expression],
     throw_statement: "throw" _expression,
 
-    case_clause: "case" _pattern ["if" _expression@or] "=>" _statement*,
+    /// A case body holds statements and local definitions. `_member*` cannot be
+    /// used: `case` is also a declaration modifier (`case class`), so the list
+    /// would swallow the next `case` clause as a broken definition. The local
+    /// definitions that a case body really holds are named instead.
+    case_clause: "case" _pattern ["if" _expression@or] "=>" (_statement | _local_definition)*,
+    _local_definition:
+        &("val") _definition | &("var") _definition | &("def") _definition
+        | &("type") _definition | &("class") _definition | &("object") _definition
+        | &("trait") _definition,
     _pattern: &(_name ":") typed_pattern | _expression@or,
     typed_pattern: _name ":" _pattern_type,
     /// A typed pattern's type, without the `=>` suffix: the case arrow is not a
@@ -277,6 +353,7 @@ rust_graph_deep::grammar! { SCALA {
         eq: left "==" | "!=" => binary,
         cmp: left "<" | ">" | "<=" | ">=" => binary,
         cons: right "::" => binary,
+        pair: right "->" => pair_expression,
         concat: right "++" | "--" => binary,
         shift: left "<<" | GT_JOINED ">" | GT_JOINED GT_JOINED ">" => binary,
         add: left "+" | "-" => binary,
@@ -289,21 +366,34 @@ rust_graph_deep::grammar! { SCALA {
     },
 
     _primary:
-        NUMBER | FLOAT | STRING | CHAR | SYMBOL
+        NUMBER | FLOAT | CHAR | SYMBOL
+        | string_literal
         | "true" | "false" | "null"
         | "this" | "super"
         | _name
         | parenthesized_expression
         | collection_literal
-        | new_expression,
+        | new_expression
+        | if_statement
+        | try_statement
+        | for_statement
+        | while_statement,
+
+    string_literal: STRING_START _string_part* STRING_END,
+    _string_part: STRING_TEXT | interpolation | SIMPLE_TEMPLATE,
+    interpolation: TEMPLATE_OPEN _expression TEMPLATE_CLOSE,
 
     _name: IDENT,
-    /// `(x)` or `(a, b)`: a parenthesised expression or a tuple.
-    parenthesized_expression: "(" (_expression %? ",") ")",
+    /// `(x)` or `(a, b)`: a parenthesised expression or a tuple, and a typed
+    /// lambda parameter list (`(value: String) => ...`), which is the same
+    /// brackets with a binding after the name.
+    parenthesized_expression: "(" (_paren_item %? ",") ")",
+    _paren_item: &(_name ":") typed_binding | _expression@assign,
+    typed_binding: _name ":" _type,
     arguments: "(" (_argument %? ",") ")",
     _argument: &(_name "=") named_argument | _expression@assign,
     named_argument: _name "=" _expression@assign,
-    subscript: "[" _expression "]",
+    subscript: "[" (_expression %? ",") "]",
     collection_literal: "[" (_expression %? ",") "]",
     new_expression: "new" _type,
 
@@ -318,6 +408,10 @@ rust_graph_deep::grammar! { SCALA {
 
 /// One token at the cursor.
 pub fn lex(c: &mut Cursor) -> Kind {
+    if c.pos() == 0 {
+        QUOTES.with(|quotes| quotes.borrow_mut().clear());
+        FIELDS.with(|fields| fields.borrow_mut().clear());
+    }
     match c.peek() {
         b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
             c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
@@ -335,7 +429,7 @@ pub fn lex(c: &mut Cursor) -> Kind {
             block_comment(c);
             COMMENT
         }
-        b'"' => string(c),
+        b'"' => start_string(c, false),
         b'\'' => quoted_single(c),
         b'`' => {
             c.bump();
@@ -364,9 +458,10 @@ fn word(c: &mut Cursor) -> Kind {
     let start = c.rest();
     let length = c.eat_while(is_word_byte);
     let text = &start[..length];
-    // `s"..."`, `f"..."` and `raw"..."` are interpolators, not names.
+    // `s"..."`, `f"..."` and `raw"..."` are interpolators, not names: the
+    // first two make their fields code, `raw` keeps its dollars as text.
     if matches!(text, b"s" | b"f" | b"raw") && c.peek() == b'"' {
-        return string(c);
+        return start_string(c, !matches!(text, b"raw"));
     }
     keyword(text)
 }
@@ -440,63 +535,137 @@ fn block_comment(c: &mut Cursor) {
     }
 }
 
-/// A string from its quote, or from the interpolator name just consumed: plain,
-/// triple-quoted, and with `${...}` and `$name` interpolations scanned whole.
-fn string(c: &mut Cursor) -> Kind {
+/// An opening quote (an interpolator's prefix is already consumed): remember
+/// how the body closes and whether its fields are code, and emit the start.
+fn start_string(c: &mut Cursor, code: bool) -> Kind {
     if c.peek() != b'"' {
         return BAD_LITERAL;
     }
     let triple = c.peek_at(1) == b'"' && c.peek_at(2) == b'"';
-    let open = if triple { 3 } else { 1 };
-    c.bump_n(open);
-    loop {
-        match c.peek() {
-            0 if c.at_end() => return BAD_LITERAL,
-            b'\\' => c.bump_n(2),
-            b'$' if c.peek_at(1) == b'{' => {
-                c.bump_n(2);
-                braces(c);
-            }
-            b'$' if is_word_start(c.peek_at(1)) => {
-                c.bump();
-                c.eat_while(is_word_byte);
-            }
-            b'"' if triple && c.peek_at(1) == b'"' && c.peek_at(2) == b'"' => {
-                c.bump_n(3);
-                return STRING;
-            }
-            b'"' if !triple => {
-                c.bump();
-                return STRING;
-            }
-            _ => c.bump(),
-        }
-    }
+    c.bump_n(if triple { 3 } else { 1 });
+    QUOTES.with(|quotes| quotes.borrow_mut().push((triple, code)));
+    STRING_START
 }
 
-/// The code of a `${...}` field, up to its matching `}`, with strings and
-/// nested braces balanced.
-fn braces(c: &mut Cursor) {
-    let mut depth = 1u32;
+/// The innermost string's (triple, code), if the mode stack and this state
+/// still agree.
+fn quotes() -> Option<(bool, bool)> {
+    QUOTES.with(|quotes| quotes.borrow().last().copied())
+}
+
+fn pop_string() {
+    QUOTES.with(|quotes| {
+        quotes.borrow_mut().pop();
+    });
+}
+
+/// The `STRING` mode's step: the bytes between fields, the `$` that starts one
+/// (in an interpolator), or the closing quotes. A one-line string that reaches
+/// its line end is `STRING_BAD`, which costs its line and pops the mode.
+pub fn lex_string_text(c: &mut Cursor) -> Kind {
+    let Some((triple, code)) = quotes() else {
+        // The mode stack and this state disagree: lexing code cannot lose a
+        // token, and the parser still gets a tree.
+        return lex(c);
+    };
+    if c.at_end() {
+        pop_string();
+        return STRING_BAD;
+    }
+    if triple {
+        if c.starts_with(b"\"\"\"") {
+            c.bump_n(3);
+            pop_string();
+            return STRING_END;
+        }
+    } else if c.peek() == b'"' {
+        c.bump();
+        pop_string();
+        return STRING_END;
+    }
+    if !triple && matches!(c.peek(), b'\n' | b'\r') {
+        c.eat(b'\r');
+        c.bump();
+        pop_string();
+        return STRING_BAD;
+    }
+    if code && c.peek() == b'$' && c.peek_at(1) == b'{' {
+        c.bump_n(2);
+        // The field's expression is code: the mode stack returns to code here
+        // and `lex_template_field` closes it at the brace matching this one.
+        FIELDS.with(|fields| fields.borrow_mut().push(0));
+        return TEMPLATE_OPEN;
+    }
+    if code && c.peek() == b'$' && is_word_start(c.peek_at(1)) {
+        c.bump();
+        c.eat_while(is_word_byte);
+        return SIMPLE_TEMPLATE;
+    }
+    // Text up to a field, the closing quotes, or a line end in a one-line
+    // string. `$$` is an escaped dollar and stays text.
+    let start = c.pos();
     while !c.at_end() {
-        match c.peek() {
-            b'{' => {
-                depth += 1;
-                c.bump();
+        let byte = c.peek();
+        if triple {
+            if c.starts_with(b"\"\"\"") {
+                break;
             }
-            b'}' => {
-                depth -= 1;
-                c.bump();
-                if depth == 0 {
-                    return;
-                }
+        } else if byte == b'"' || matches!(byte, b'\n' | b'\r') {
+            break;
+        }
+        if code && byte == b'$' {
+            if c.peek_at(1) == b'$' {
+                c.bump_n(2);
+                continue;
             }
-            b'"' => {
-                string(c);
-            }
-            _ => c.bump(),
+            break;
+        }
+        if byte == b'\\' {
+            c.bump_n(2);
+        } else {
+            c.bump();
         }
     }
+    if c.pos() == start {
+        // A byte the checks above did not take: consume it so every step
+        // advances.
+        c.bump();
+    }
+    STRING_TEXT
+}
+
+/// The `TEMPLATE` mode's step: ordinary code, except that the `}` matching the
+/// field's own `${` closes it, and a one-line string's field cannot outlive its
+/// line.
+pub fn lex_template_field(c: &mut Cursor) -> Kind {
+    let Some(depth) = FIELDS.with(|fields| fields.borrow().last().copied()) else {
+        return lex(c);
+    };
+    if c.at_end() {
+        pop_string();
+        FIELDS.with(|fields| fields.borrow_mut().pop());
+        return STRING_BAD;
+    }
+    if depth == 0 && c.peek() == b'}' {
+        c.bump();
+        FIELDS.with(|fields| fields.borrow_mut().pop());
+        return TEMPLATE_CLOSE;
+    }
+    let kind = lex(c);
+    match kind {
+        LPAREN | LBRACKET | LBRACE => FIELDS.with(|fields| {
+            if let Some(depth) = fields.borrow_mut().last_mut() {
+                *depth += 1;
+            }
+        }),
+        RPAREN | RBRACKET | RBRACE => FIELDS.with(|fields| {
+            if let Some(depth) = fields.borrow_mut().last_mut() {
+                *depth = depth.saturating_sub(1);
+            }
+        }),
+        _ => {}
+    }
+    kind
 }
 
 /// A character literal (`'a'`) or a symbol (`'name`).
@@ -563,6 +732,7 @@ fn operator(c: &mut Cursor) -> Kind {
     let (kind, width) = match (a, b, d) {
         (b'<', b'-', _) => (LARROW, 2),
         (b'=', b'>', _) => (ARROW, 2),
+        (b'-', b'>', _) => (RIGHT_ARROW, 2),
         (b'<', b':', _) => (BOUND, 2),
         (b'>', b':', _) => (LOWER_BOUND, 2),
         (b':', b':', _) => (COLONCOLON, 2),
