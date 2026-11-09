@@ -12,49 +12,65 @@
 //!   a statement, which is exactly the closing keyword, so `def`, `class` and
 //!   `if` bodies are plain sequences of statements. `begin ... rescue ...
 //!   ensure ... end` and `case ... when ... else ... end` are ordinary rules
-//!   with optional clauses.
+//!   with optional clauses, and a block is its own `begin` (`do ... rescue ...
+//!   end`).
 //! - **Expression statements do the assignment.** Assignment is the loosest
 //!   row of one precedence table and postfix calls, members, indexes and
 //!   blocks are the tightest, so `a = b = 1`, `a += 1`, `x.y = 1` and
 //!   `xs.each { |x| ... }` all parse without special statement forms.
+//!   Multiple assignment (`a, b = 1, 2`, `target, *rest = xs`, `encoding, =`)
+//!   is its own statement rule, because its left side is a list.
 //! - **Blocks are postfix operators.** `xs.each { |x| ... }` and `xs.each do
 //!   |x| ... end` are `call_with_block` rows, because a `{` after an operand
 //!   is a block and at the start of a statement it is a hash.
-//! - **A call is `arguments`; a command call is not.** `foo(1, a: 2)` is a
-//!   `call` node. Bare `puts x` (Ruby's command call) has no separate node
-//!   here: `puts x` would read as the expression `puts` followed by the
-//!   expression `x`, which is the one form this grammar does not model (see
-//!   the gaps below).
-//! - **Strings are single tokens.** A double-quoted string's `#{...}` is
-//!   scanned with its braces and inner strings balanced and stays opaque, so a
-//!   field holding code is not parsed; the same holds for `%Q(...)`,
-//!   `%w[...]`, backticks, `//`, and heredocs.
+//! - **A call is `arguments`; a command call is a statement.** `foo(1, a: 2)`
+//!   is a `call` node. A command call (`raise ArgumentError, "no"`,
+//!   `FileUtils.mv a, b, **opts`) is also a `call`, taken when a comma proves
+//!   the list is arguments. A single literal argument (`raise "no"`,
+//!   `foo :sym`, `rand 1000`) is a postfix row, so `print ' ' * w` stays a
+//!   product of a call and `w`. A bare name argument (`puts x`) is still two
+//!   statements: no token tells "a name, then a statement" from "a name, then
+//!   an argument".
+//! - **A string's fields are code.** A double-quoted string or a backtick is
+//!   an `interpolated_string` over `string_start`, its text and one
+//!   `interpolation` per `#{...}` field, and a field is ordinary code again --
+//!   so a call written in a field is an ordinary `call` node, a brace closes
+//!   at its own depth, and a nested string opens its own frames. `%q(...)`,
+//!   `%w[...]` and heredocs stay one token each.
 //!
 //! What the DSL cannot express, and how it is handled here instead:
 //!
+//! - **Line breaks are lexer state.** Ruby decides by the line break alone
+//!   whether `if` opens a statement or modifies one, and whether a `(` after a
+//!   method name is a parameter list or the body's own parenthesis. The step
+//!   lexer keeps a line-start flag and a def-header flag and hands the parser
+//!   two different tokens, so no grammar rule has to guess: `if` after an
+//!   operand is `if_modifier`, at a line start it is `if`, and after `=` it is
+//!   `if_value` (the same statement shape, used as a value).
 //! - **Heredocs are a lexer state.** The terminator is a line that equals the
 //!   delimiter, and it arrives after the token that started the heredoc. The
-//!   DSL has no external scanner, so `<<~EOS` is scanned to its terminator by
-//!   the step lexer, which decides heredoc against `<<` from
-//!   [`Cursor::previous`]: after an operand `<<` shifts, elsewhere it starts a
-//!   heredoc. That is the same trick the JavaScript grammar uses for `/`.
-//! - **Regex against division.** Same problem, same answer: `/` starts a
-//!   regex where an operand cannot end, and divides elsewhere. One regex is
-//!   one token; its groups are not a tree.
-//! - **A symbol and a label share `:`.** `:name` (no space after the colon)
-//!   is one `symbol` token, while `key: value` (space or a non-name after the
-//!   colon) is a label. `{a:b}` therefore reads as a symbol rather than a
-//!   label, which is the one place the lexer's rule bites; Ruby's own rules
-//!   here need the lexer state this DSL does not have.
-//! - **Command calls.** `puts x` is a call with no parentheses; a rule for it
-//!   would have to decide between "a name, then a statement" and "a name, then
-//!   an argument" with no token to tell them apart, so the grammar does not
-//!   have one and fixtures call with parentheses (`puts(x)`).
-//! - **A decision sees three tokens.** `&(...)` predicates start the two
+//!   step lexer scans `<<~EOS` to its terminator, deciding heredoc against
+//!   `<<` from the delimiter's shape and from [`Cursor::previous`]: after an
+//!   operand it is a heredoc only when the rest of the line is blank
+//!   (`abort <<MESSAGE`), and otherwise it shifts.
+//! - **Regex against division.** `/` starts a regex where an operand cannot
+//!   end or a line starts, and divides elsewhere. A regex whose closing slash
+//!   exists anywhere in the file may hold line breaks, which is what an
+//!   extended `/x` pattern needs and what keeps a division from running away.
+//!   One regex is one token; its groups are not a tree.
+//! - **A symbol and a label share `:`.** `:name` is one `symbol` token, and
+//!   `key: value` is a label. The lexer tells them apart by the space before
+//!   the colon, so `attr_reader :name` is a symbol while `{a: 1}` is a label.
+//! - **A constant is its own token.** The lexer separates `Foo` from `foo`,
+//!   which is what makes `rescue Foo` an exception list and `rescue` followed
+//!   by a body starting with a name an empty list.
+//! - **A decision sees three tokens.** `&(...)` predicates start the
 //!   alternatives that share a prefix: a hash/argument label (`&(_name ":")`)
-//!   against an expression.
+//!   against an expression, and a multiple assignment or command call against
+//!   a plain expression statement.
 //! - **One kind per rule**, so `if` and `unless` are two rules, not one
-//!   labelled alternative.
+//!   labelled alternative, and an operator row names a kind no rule already
+//!   owns.
 
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
@@ -80,12 +96,21 @@ rust_graph_deep::grammar! { RUBY {
 
     tokens {
         LPAREN = "(" open parens,
+        /// The `(` of a `def` header: a `(` on the def's own line and after its
+        /// name is the parameter list, while one on a later line belongs to the
+        /// body. Ruby decides this question by the line break, and so does the
+        /// lexer, which keeps the two apart as two tokens.
+        PARAMETERS_OPEN = "parameters_paren",
         RPAREN = ")" close parens,
         LBRACKET = "[" open brackets,
         RBRACKET = "]" close brackets,
         LBRACE = "{" open braces,
         RBRACE = "}" close braces,
         IDENT = "identifier",
+        /// A name that starts uppercase: a constant, and the only thing that can
+        /// name an exception in `rescue Foo`. The lexer tells the two apart, so
+        /// `rescue` followed by `raise` is a body, not an exception list.
+        CONST = "constant",
         NUMBER = "number",
         STRING = "string",
         SYMBOL = "simple_symbol",
@@ -117,6 +142,8 @@ rust_graph_deep::grammar! { RUBY {
         KW_CLASS = "class",
         KW_DEF = "def",
         KW_DO = "do",
+        /// `defined?` is a keyword operator, not a method called `defined`.
+        KW_DEFINED = "defined?",
         KW_ELSE = "else",
         KW_ELSIF = "elsif",
         KW_END = "end",
@@ -129,10 +156,18 @@ rust_graph_deep::grammar! { RUBY {
         /// because a Ruby line break ends the statement unless a modifier
         /// follows it.
         MOD_IF = "if_modifier",
+        /// `if` where a value is wanted: `x = if cond ... end`, `f(if a then b end)`.
+        IF_VALUE = "if_value",
         MOD_UNLESS = "unless_modifier",
         MOD_WHILE = "while_modifier",
         MOD_UNTIL = "until_modifier",
         MOD_RESCUE = "rescue_modifier",
+        /// `begin ... end` as a value: `x = begin ... end`.
+        MOD_BEGIN = "begin_modifier",
+        /// `or return`, `and next`: a jump in operand position.
+        MOD_RETURN = "return_modifier",
+        MOD_BREAK = "break_modifier",
+        MOD_NEXT = "next_modifier",
         KW_IN = "in",
         KW_MODULE = "module",
         KW_NEXT = "next",
@@ -156,6 +191,8 @@ rust_graph_deep::grammar! { RUBY {
         /// Methods that take a path: `require`, `load`, `include`.
         KW_REQUIRE = "require",
         KW_REQUIRE_RELATIVE = "require_relative",
+        /// `load` only where a statement starts: `x = load(...)` and
+        /// `load.setup` are method calls, and `load "f.rb"` is a require.
         KW_LOAD = "load",
         KW_INCLUDE = "include",
         KW_EXTEND = "extend",
@@ -217,7 +254,8 @@ rust_graph_deep::grammar! { RUBY {
 
     _statement:
         &(_left_target ",") multiple_assignment
-        | &(_name _command_argument ",") command_call
+        | &("*" _name "=") splat_assignment
+        | &(_callable _command_argument ",") command_call
         | require_statement
         | alias_statement
         | undef_statement
@@ -244,36 +282,43 @@ rust_graph_deep::grammar! { RUBY {
     require_statement: ("require" | "require_relative" | "load") _expression _modifier*,
     /// `alias new old`, with both sides a name, a symbol or a global.
     alias_statement: "alias" _alias_target _alias_target,
-    _alias_target: SYMBOL | GLOBAL_VAR | INSTANCE_VAR | IDENT,
+    _alias_target: SYMBOL | GLOBAL_VAR | INSTANCE_VAR | setter_name | _method_ident,
     undef_statement: "undef" (_alias_target % ","),
-    include_statement: ("include" | "extend" | "prepend") _constant_path ("," _constant_path)*,
+    include_statement: ("include" | "extend" | "prepend") (_constant_path | parenthesized_expression) ("," _constant_path)*,
 
     /// `class << self`: reopening the singleton class.
     singleton_class_definition: "class" "<<" _expression body "end" _modifier*,
     module_definition: "module" _constant_path body "end" _modifier*,
-    class_definition: "class" _constant_path ["<" _constant_path] body "end" _modifier*,
+    class_definition: "class" _constant_path ["<" _expression] body "end" _modifier*,
     method_definition: "def" method_name [parameters] body rescue_clause* [else_clause] [ensure_clause] "end" _modifier*,
-    method_name: ["self" ("." | "::")] (setter_name | index_method_name | _method_ident),
+    /// `def foo`, `def self.foo` and `def IRB.start`: the receiver is taken only
+    /// when a dot really follows it, so a plain `def foo` never reads the body
+    /// as a receiver.
+    method_name:
+        "self" ("." | "::") _method_name_tail
+        | &(_name ("." | "::")) _name ("." | "::") _method_name_tail
+        | _method_name_tail,
+    _method_name_tail: setter_name | index_method_name | _method_ident,
     setter_name: IDENT "=",
     index_method_name: "[]" ["="],
     /// `def +(other)`, `def <=>(other)`, `def ~`: an operator is a method name.
-    _method_ident: IDENT | "~" | "+" | "-" | "*" | "/" | "%" | "**" | "==" | "===" | "!=" | "!"
+    _method_ident: IDENT | CONST | "~" | "+" | "-" | "*" | "/" | "%" | "**" | "==" | "===" | "!=" | "!"
         | "<" | ">" | "<=" | ">=" | "<=>" | "=~" | "!~" | "<<" | ">>" | "&" | "|" | "^",
-    parameters: "(" [_parameter_list] ")",
+    parameters: PARAMETERS_OPEN [_parameter_list] ")",
     _parameter_list: _parameter %? ",",
     _parameter:
-        splat_parameter
-        | double_splat_parameter
+        double_splat_parameter
+        | splat_parameter
         | block_parameter
         | destructured_parameter
         | keyword_parameter
         | _name ["=" _expression@assign],
     splat_parameter: "*" [_name],
-    double_splat_parameter: "**" [_name],
+    double_splat_parameter: "**" [_name | "nil"],
     block_parameter: "&" _name,
     keyword_parameter: _name ":" [_expression],
     destructured_parameter: "(" [_parameter_list] ")",
-    _constant_path: _name ("::" _name)*,
+    _constant_path: CONST ("::" _name)*,
 
     /// Statements up to whatever closes the construct: a keyword such as `end`,
     /// or the bracket of a block.
@@ -296,7 +341,9 @@ rust_graph_deep::grammar! { RUBY {
     _exception_list: _constant_path ("," _constant_path)*,
     ensure_clause: "ensure" body,
 
-    return_statement: "return" [_expression ("," _expression)*] _modifier*,
+    return_statement: "return" [_return_arguments] _modifier*,
+    _return_arguments: (_return_argument ("," _return_argument)*),
+    _return_argument: splat_argument | _expression,
     break_statement: "break" _modifier*,
     next_statement: "next" _modifier*,
     expression_statement: _expression _modifier*,
@@ -304,8 +351,12 @@ rust_graph_deep::grammar! { RUBY {
     /// `a, b = 1, 2`, `a, *rest = xs`, `encoding, = split(:)`: one `=` with a
     /// list on each side. The comma in the left list is what tells it apart
     /// from a plain assignment, so the two rules cannot both match.
-    multiple_assignment: _left_list "=" _expression ("," _expression)*,
-    _left_list: _left_target ("," [_left_target])+,
+    multiple_assignment: _left_list "=" _right_list,
+    splat_assignment: splat_argument "=" _right_list,
+    _right_list: (splat_argument | _expression) ("," (splat_argument | _expression))*,
+    splat_argument: "*" _expression,
+    _left_list: _left_target ("," [_left_target | splat_target])+,
+    splat_target: "*" [_left_target],
     _left_target: precedence _primary {
         index: postfix subscript => element_reference,
         member: postfix "." _property => member,
@@ -318,11 +369,13 @@ rust_graph_deep::grammar! { RUBY {
     /// from two statements on one line; a single argument stays an ordinary
     /// expression statement, which costs the tree a `call` node and no error.
     command_call: _callable _command_arguments _modifier*,
+    /// A call with one literal argument and no comma: `raise "no"`, `foo :sym`.
+    _bare_argument: STRING | interpolated_string | SYMBOL | NUMBER,
     _callable: _name ("." _property | "::" _property)*,
     _command_arguments: _command_argument ("," _command_argument)+,
     _command_argument:
-        splat_argument
-        | double_splat_argument
+        double_splat_argument
+        | splat_argument
         | block_argument
         | &(_expression@bor "=>") arrow_pair
         | &(_name ":") label_argument
@@ -339,8 +392,10 @@ rust_graph_deep::grammar! { RUBY {
 
     // ---- blocks ----
 
-    brace_block: "{" [block_parameters] _statement* "}",
-    do_block: "do" [block_parameters] _statement* "end",
+    brace_block: "{" [block_parameters] _block_body "}",
+    do_block: "do" [block_parameters] _block_body "end",
+    /// A block is its own `begin`: `do ... rescue ... ensure ... end`.
+    _block_body: _statement* rescue_clause* [else_clause] [ensure_clause],
     block_parameters: "|" [_parameter_list] "|",
 
     // ---- expressions ----
@@ -367,6 +422,8 @@ rust_graph_deep::grammar! { RUBY {
         block: postfix brace_block => call_with_block,
         do_block: postfix do_block => call_with_block,
         call: postfix arguments => call,
+        call_through: postfix "." arguments => call,
+        bare_call: postfix _bare_argument => call,
         index: postfix subscript => element_reference,
         member: postfix "." _property => member,
         safe_member: postfix "&." _property => member,
@@ -386,19 +443,34 @@ rust_graph_deep::grammar! { RUBY {
         | lambda
         | absolute_constant
         | interpolated_string
+        | conditional_value
+        | begin_value
+        | jump_expression
+        | defined_expression
         | "[]",
 
     _literal: NUMBER | STRING | SYMBOL | REGEX | "nil" | "true" | "false",
+    /// `x = begin ... end`: the same clauses as `begin`, in operand position.
+    begin_value: "begin_modifier" body rescue_clause* [else_clause] [ensure_clause] "end",
+    /// `block_given? or return enum_for(...)`: a jump where a value is wanted.
+    jump_expression: "return_modifier" [_return_arguments] | "break_modifier" | "next_modifier",
+    /// `defined?(x)` and `defined? x`, which are keywords in Ruby.
+    defined_expression: "defined?" [defined_parentheses] [_expression],
+    defined_parentheses: "(" _expression ")",
+    /// `x = if cond then 1 else 2 end`: an `if` that is not at a line start is
+    /// a value, and its `end` closes it rather than a statement.
+    conditional_value: "if_value" _expression [then_token] body elsif_clause* [else_clause] "end",
     /// A double-quoted string or a backtick: its fields are expressions.
     interpolated_string: STRING_START _string_body STRING_END,
     _string_body: (STRING_CONTENT | interpolation)*,
-    interpolation: "#{" _expression INTERPOLATION_END,
-    _name: IDENT,
+    interpolation: "#{" _expression _modifier* INTERPOLATION_END,
+    _name: IDENT | CONST,
     _variable: INSTANCE_VAR | CLASS_VAR | GLOBAL_VAR,
     super_call: "super" [arguments],
     yield_expression: "yield" [arguments],
-    parenthesized_expression: "(" _expression ")",
-    lambda: "->" [parameters] (brace_block | do_block),
+    parenthesized_expression: "(" _expression _modifier* ")",
+    lambda: "->" [lambda_parameters | parameters] (brace_block | do_block),
+    lambda_parameters: "(" [_parameter_list] ")",
     absolute_constant: "::" _constant_path,
     array: "[" [_argument %? ","] "]",
     hash: "{" [_hash_entry %? ","] "}",
@@ -408,13 +480,12 @@ rust_graph_deep::grammar! { RUBY {
     double_splat_hash: "**" _expression,
     arguments: "(" [_argument %? ","] ")",
     _argument:
-        splat_argument
-        | double_splat_argument
+        double_splat_argument
+        | splat_argument
         | block_argument
         | &(_expression@bor "=>") arrow_pair
         | &(_name ":") label_argument
         | _expression,
-    splat_argument: "*" _expression,
     double_splat_argument: "**" _expression,
     block_argument: "&" _expression,
     label_argument: _name ":" _expression,
@@ -422,10 +493,14 @@ rust_graph_deep::grammar! { RUBY {
 
     /// After `.` and `::` every keyword is a method name too: `x.class`.
     _property:
-        IDENT | "class" | "then" | "begin" | "end" | "nil" | "self" | "true" | "false"
+        IDENT | CONST | "class" | "then" | "begin" | "end" | "nil" | "self" | "true" | "false"
         | "not" | "and" | "or" | "in" | "do" | "case" | "when" | "if" | "unless" | "while"
         | "return" | "yield" | "def" | "module" | "require" | "super" | "alias" | "undef"
-        | "break" | "next" | "rescue" | "ensure" | "for" | "else",
+        | "break" | "next" | "rescue" | "ensure" | "for" | "else" | "elsif"
+        | "begin_modifier" | "return_modifier" | "break_modifier" | "next_modifier"
+        | "if_modifier" | "unless_modifier" | "while_modifier" | "until_modifier" | "rescue_modifier"
+        | "==" | "===" | "!=" | "=~" | "!~" | "<=>" | "<" | ">" | "<=" | ">=" | "+" | "-"
+        | "*" | "/" | "%" | "**" | "<<" | ">>" | "&" | "|" | "^" | "~" | "!" | "[]",
 } }
 
 thread_local! {
@@ -434,6 +509,9 @@ thread_local! {
     /// same line modifies it. The lexer tracks the line break, so the grammar
     /// sees two different tokens and no rule has to guess.
     static LINE_START: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Whether the tokens so far belong to a `def` header on one line, which
+    /// is what makes a `(` the parameter list rather than a body's.
+    static IN_DEF_HEADER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// One token at the cursor, with the line-start flag the keyword choice needs.
@@ -441,11 +519,31 @@ pub fn lex(c: &mut Cursor) -> Kind {
     if c.pos() == 0 {
         LINE_START.with(|flag| flag.set(true));
     }
-    let kind = step(c);
+    let mut kind = step(c);
+    let line_start = LINE_START.with(|flag| flag.get());
     match kind {
-        WHITESPACE | COMMENT => {}
-        _ => LINE_START.with(|flag| flag.set(kind == SEMI)),
+        WHITESPACE | COMMENT => return kind,
+        KW_DEF => IN_DEF_HEADER.with(|flag| flag.set(true)),
+        LPAREN if IN_DEF_HEADER.with(|flag| flag.get()) && !line_start => {
+            IN_DEF_HEADER.with(|flag| flag.set(false));
+            kind = PARAMETERS_OPEN;
+        }
+        SEMI => IN_DEF_HEADER.with(|flag| flag.set(false)),
+        _ => {
+            // The header lives only on the `def` line: a token that starts a
+            // later line belongs to the body.
+            if line_start {
+                IN_DEF_HEADER.with(|flag| flag.set(false));
+            }
+        }
     }
+    // `if` has three positions: a statement at a line start, a modifier after
+    // an operand, and a value after `=`, `(` or `,`. `return if x` is the
+    // modifier, so a jump keyword counts as the end of an operand here.
+    if kind == MOD_IF && !ends_operand(c.previous()) && !matches!(c.previous(), KW_RETURN | KW_BREAK | KW_NEXT) {
+        kind = IF_VALUE;
+    }
+    LINE_START.with(|flag| flag.set(kind == SEMI));
     kind
 }
 
@@ -458,6 +556,8 @@ fn step(c: &mut Cursor) -> Kind {
             let blank = c.since(start);
             if blank.iter().any(|&byte| byte == b'\n') {
                 LINE_START.with(|flag| flag.set(true));
+                // A def header never outlives its line.
+                IN_DEF_HEADER.with(|flag| flag.set(false));
             }
             WHITESPACE
         }
@@ -485,17 +585,17 @@ fn step(c: &mut Cursor) -> Kind {
         }
         b'"' | b'`' => string_start(c),
         b'\'' => string(c),
-        b'%' if !ends_operand(c.previous()) && percent_delimiter(c.peek_at(1)) => percent_literal(c),
-        b'<' if c.peek_at(1) == b'<' && !ends_operand(c.previous()) && heredoc_start(c) => heredoc(c),
-        b'/' if c.peek_at(1) != b'=' && !ends_operand(c.previous()) => {
+        b'%' if !after_operand(c) && (percent_delimiter(c.peek_at(1)) || percent_open(c.peek_at(1))) => percent_literal(c),
+        b'<' if c.peek_at(1) == b'<' && heredoc_start(c) && (!after_operand(c) || heredoc_tail_blank(c)) => heredoc(c),
+        b'/' if !after_operand(c) => {
             if regex(c) {
                 REGEX
             } else {
                 operator(c)
             }
         }
-        b':' if c.peek_at(1) != b':' && is_symbol_start(c.peek_at(1)) && (!ends_operand(c.previous()) || c.behind(1) == b' ') => symbol(c),
-        b'?' if !ends_operand(c.previous()) && is_char_literal(c) => char_literal(c),
+        b':' if c.peek_at(1) != b':' && is_symbol_start(c.peek_at(1)) && (!after_operand(c) || c.behind(1) == b' ') => symbol(c),
+        b'?' if !after_operand(c) && is_char_literal(c) => char_literal(c),
         b'@' if is_word_start(c.peek_at(1)) => variable(c),
         b'@' if c.peek_at(1) == b'@' && is_word_start(c.peek_at(2)) => variable(c),
         b'$' if is_special_global(c.peek_at(1)) => variable(c),
@@ -543,7 +643,7 @@ fn char_literal(c: &mut Cursor) -> Kind {
 fn is_special_global(byte: u8) -> bool {
     matches!(
         byte,
-        b'!' | b'@' | b';' | b',' | b'/' | b'\\' | b'*' | b'&' | b'?' | b'~' | b'+' | b'=' | b'<' | b'>'
+        b'!' | b'@' | b'$' | b';' | b',' | b'/' | b'\\' | b'*' | b'&' | b'?' | b'~' | b'+' | b'=' | b'<' | b'>'
             | b'"' | b'\'' | b'`' | b'.' | b':' | b'-' | b'0'..=b'9'
     )
 }
@@ -581,12 +681,25 @@ fn variable(c: &mut Cursor) -> Kind {
 fn word(c: &mut Cursor) -> Kind {
     let start = c.rest();
     let length = c.eat_while(is_word_byte);
+    let text = &start[..length];
+    if text == b"defined" && c.peek() == b'?' {
+        c.bump();
+        return KW_DEFINED;
+    }
     let suffix = matches!(c.peek(), b'?' | b'!') && c.peek_at(1) != b'=' && !is_word_byte(c.peek_at(1));
     if suffix {
         c.bump();
         return IDENT;
     }
-    keyword(&start[..length])
+    let kind = keyword(text);
+    // `load.setup` and `load: x` are not the statement keyword.
+    if kind == KW_LOAD && matches!(c.peek(), b'.' | b':') {
+        return IDENT;
+    }
+    match kind {
+        IDENT if text.first().is_some_and(|byte| byte.is_ascii_uppercase()) => CONST,
+        _ => kind,
+    }
 }
 
 /// The modifier form of a keyword, or the plain one at a line start.
@@ -595,15 +708,21 @@ fn mundane(kind: Kind, modifier: Kind) -> Kind {
 }
 
 fn keyword(text: &[u8]) -> Kind {
+    // `def load`, `def require`: after `def` every word is a method name.
+    if IN_DEF_HEADER.with(|flag| flag.get()) {
+        return IDENT;
+    }
     match text {
         b"if" => mundane(KW_IF, MOD_IF),
         b"unless" => mundane(KW_UNLESS, MOD_UNLESS),
         b"while" => mundane(KW_WHILE, MOD_WHILE),
         b"until" => mundane(KW_UNTIL, MOD_UNTIL),
         b"rescue" => mundane(KW_RESCUE, MOD_RESCUE),
+        b"begin" => mundane(KW_BEGIN, MOD_BEGIN),
+        b"return" => mundane(KW_RETURN, MOD_RETURN),
+        b"break" => mundane(KW_BREAK, MOD_BREAK),
+        b"next" => mundane(KW_NEXT, MOD_NEXT),
         b"alias" => KW_ALIAS,
-        b"begin" => KW_BEGIN,
-        b"break" => KW_BREAK,
         b"case" => KW_CASE,
         b"class" => KW_CLASS,
         b"def" => KW_DEF,
@@ -616,9 +735,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"for" => KW_FOR,
         b"in" => KW_IN,
         b"module" => KW_MODULE,
-        b"next" => KW_NEXT,
         b"nil" => KW_NIL,
-        b"return" => KW_RETURN,
         b"self" => KW_SELF,
         b"super" => KW_SUPER,
         b"then" => KW_THEN,
@@ -629,9 +746,9 @@ fn keyword(text: &[u8]) -> Kind {
         b"and" => KW_AND,
         b"or" => KW_OR,
         b"not" => KW_NOT,
+        b"load" => mundane(KW_LOAD, IDENT),
         b"require" => KW_REQUIRE,
         b"require_relative" => KW_REQUIRE_RELATIVE,
-        b"load" => KW_LOAD,
         b"include" => KW_INCLUDE,
         b"extend" => KW_EXTEND,
         b"prepend" => KW_PREPEND,
@@ -639,13 +756,42 @@ fn keyword(text: &[u8]) -> Kind {
     }
 }
 
+/// Whether the cursor sits right after an operand on the same line: there a
+/// `/` divides, a `%` is a modulo, a `:` is a label and a `<<` shifts. A line
+/// break starts a fresh statement, so none of those hold there.
+fn after_operand(c: &Cursor) -> bool {
+    ends_operand(c.previous()) && !LINE_START.with(|flag| flag.get())
+}
+
+/// Whether the heredoc's opening line ends right after its delimiter, which is
+/// what `abort <<MESSAGE` looks like; a shift takes an operand after it.
+fn heredoc_tail_blank(c: &Cursor) -> bool {
+    let mut at = 2;
+    if matches!(c.peek_at(at), b'~' | b'-') {
+        at += 1;
+    }
+    let quote = c.peek_at(at);
+    if matches!(quote, b'"' | b'\'') {
+        at += 1;
+    }
+    while is_word_byte(c.peek_at(at)) {
+        at += 1;
+    }
+    if matches!(quote, b'"' | b'\'') && c.peek_at(at) == quote {
+        at += 1;
+    }
+    let rest = c.rest();
+    let tail = &rest[at.min(rest.len())..];
+    tail.iter().take_while(|&&byte| byte != b'\n').all(|&byte| matches!(byte, b' ' | b'\t' | b'\r'))
+}
+
 /// Whether a token of this kind can end an operand, so that `/` divides, `<<`
 /// shifts, `%` is a modulo and `:x` cannot start a symbol.
 fn ends_operand(kind: Kind) -> bool {
     matches!(
         kind,
-        IDENT | NUMBER | STRING | SYMBOL | REGEX | INDEX_NAME | RPAREN | RBRACKET | RBRACE | KW_SELF
-            | KW_NIL | KW_TRUE | KW_FALSE | KW_END
+        IDENT | CONST | NUMBER | STRING | SYMBOL | REGEX | INDEX_NAME | RPAREN | RBRACKET | RBRACE
+            | STRING_END | INTERPOLATION_END | KW_SELF | KW_NIL | KW_TRUE | KW_FALSE | KW_END
     )
 }
 
@@ -831,6 +977,36 @@ pub fn lex_interpolation(c: &mut Cursor) -> Kind {
     kind
 }
 
+/// A quoted name from its quote to its closing quote, with `#{...}` fields and
+/// nested strings skipped: a symbol's name is one token, not a subtree.
+fn skip_quoted(c: &mut Cursor, quote: u8) {
+    c.bump();
+    let mut depth = 0u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'\\' => c.bump_n(2),
+            b'#' if c.peek_at(1) == b'{' => {
+                c.bump_n(2);
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                c.bump();
+            }
+            byte if byte == quote && depth == 0 => {
+                c.bump();
+                return;
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// Whether a byte can open a `%` literal directly: `%{`, `%(`, `%[`, `%<`.
+fn percent_open(byte: u8) -> bool {
+    matches!(byte, b'{' | b'(' | b'[' | b'<' | b'|' | b'!' | b'/' | b'^' | b'~')
+}
+
 fn percent_delimiter(byte: u8) -> bool {
     matches!(byte, b'q' | b'Q' | b'w' | b'W' | b'i' | b'I' | b'r' | b's' | b'x')
 }
@@ -839,8 +1015,11 @@ fn percent_delimiter(byte: u8) -> bool {
 /// with its close, and bracket delimiters nest.
 fn percent_literal(c: &mut Cursor) -> Kind {
     c.bump();
+    // `%{...}` and `%(...)` are `%Q` without the letter.
     let letter = c.peek().to_ascii_lowercase();
-    c.bump();
+    if percent_delimiter(c.peek()) {
+        c.bump();
+    }
     let open = c.peek();
     let close = match open {
         b'(' => b')',
@@ -961,14 +1140,24 @@ fn trim_end(mut bytes: &[u8]) -> &[u8] {
 /// Whether a `:` starts a symbol: a name right after it, or one of the operator
 /// symbols Ruby allows (`:+`, `:[]`, `:<=>`).
 fn is_symbol_start(byte: u8) -> bool {
-    is_word_start(byte) || matches!(byte, b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'=' | b'!' | b'~' | b'&' | b'|' | b'^' | b'[' | b'@' | b'$')
+    is_word_start(byte) || matches!(byte, b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'=' | b'!' | b'~' | b'&' | b'|' | b'^' | b'[' | b'@' | b'$' | b'"' | b'\'')
 }
 
 fn symbol(c: &mut Cursor) -> Kind {
     c.bump();
+    // `:"#{name}"`: a symbol whose name is a quoted string, fields and all.
+    if matches!(c.peek(), b'"' | b'\'') {
+        skip_quoted(c, c.peek());
+        return SYMBOL;
+    }
     // `:@name` and `:$name`: a symbol for a variable.
     if matches!(c.peek(), b'@' | b'$') {
         variable(c);
+        return SYMBOL;
+    }
+    if c.peek() == b'[' && c.peek_at(1) == b']' {
+        c.bump_n(2);
+        c.eat(b'=');
         return SYMBOL;
     }
     if is_word_start(c.peek()) {
@@ -996,12 +1185,15 @@ fn operator_width(c: &Cursor) -> usize {
 /// A regular expression from its `/`, to its closing `/` plus flags. False if
 /// the line ends first, so a division is not swallowed.
 fn regex(c: &mut Cursor) -> bool {
+    // An extended regex spans lines, so a line break only ends it when the
+    // rest of the file holds no closing slash: a division cannot run away.
+    let multiline = closes_later(c, b'/');
     c.bump();
     let mut class = false;
     loop {
         match c.peek() {
             0 if c.at_end() => return false,
-            b'\n' | b'\r' => return false,
+            b'\n' | b'\r' if !multiline => return false,
             b'\\' => c.bump_n(2),
             b'[' => {
                 class = true;
