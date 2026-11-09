@@ -6,18 +6,33 @@
 //! token. Quoted identifiers keep their case; `"user"` is an identifier, not
 //! the keyword `USER`.
 //!
+//! Modelled: `WITH` (plain and recursive, several CTEs, a CTE whose body is a
+//! `SELECT` or an `INSERT`/`UPDATE`/`DELETE ... RETURNING`), set operations,
+//! joins with aliases and `ON`/`USING`, `CASE`, window functions (`OVER (...)`
+//! with `PARTITION BY`, `ORDER BY`, named windows, `ROWS`/`RANGE`/`GROUPS`
+//! frames), `FILTER (WHERE ...)`, `RETURNING`, `ON CONFLICT ... DO NOTHING` /
+//! `DO UPDATE SET`, `CAST` and the `::` cast, `BETWEEN ... AND`, `IN (...)`,
+//! `LIKE`/`ILIKE`, `IS [NOT] NULL`/`DISTINCT FROM`, `INTERVAL`, `EXISTS`,
+//! subqueries, table and column constraints (`PRIMARY KEY`, `UNIQUE`,
+//! `FOREIGN KEY ... REFERENCES ... ON DELETE CASCADE`, `CHECK`, `DEFAULT`,
+//! `NOT NULL`, named `CONSTRAINT`s), `CREATE TABLE`/`VIEW`/`INDEX`/`SCHEMA`/
+//! `SEQUENCE`/`TYPE ... AS ENUM`/`EXTENSION`/`FUNCTION`, `ALTER TABLE`,
+//! `DROP`, `TRUNCATE`, `COMMENT ON`, `SET`, and the transaction statements.
+//!
+//! The lexer handles both comment styles, `''` doubling inside a string
+//! literal, `$tag$ ... $tag$` strings (so a function body is one token) and
+//! `$1`/`?`/`:name` placeholders.
+//!
 //! What is missing, named here rather than accepted silently:
 //!
-//! - **Dialect syntax.** No `RETURNING`, no `ON CONFLICT`, no window frames, no
-//!   `MERGE`, no procedural bodies (`BEGIN ... END`, `$$ ... $$` is one string
-//!   token). A statement outside this common subset is an error inside its own
-//!   subtree, not a silently shortened tree.
-//! - **Types are words.** `VARCHAR(255)`, `NUMERIC(10, 2)` and `TIMESTAMP WITH
-//!   TIME ZONE` are modelled as a name with optional parenthesised arguments
-//!   plus the standard suffix words; an arbitrary dialect type is not.
-//! - **A subquery is an expression only where a parenthesised `SELECT` is.**
-//!   `IN (SELECT ...)` and `(SELECT ...) AS x` are modelled; a bare `SELECT`
-//!   inside an expression is not.
+//! - **Procedural bodies.** A `BEGIN ... END` block of a MySQL or T-SQL
+//!   procedure is not a statement list here; only a dollar-quoted body is
+//!   accepted, as one string token.
+//! - **Types are names plus standard words.** `VARCHAR(255)`, `NUMERIC(10, 2)`,
+//!   `DOUBLE PRECISION`, `TIMESTAMP WITH TIME ZONE` and `text[]` are modelled;
+//!   an arbitrary dialect type is not.
+//! - **`MERGE` and `UPSERT` variants other than `ON CONFLICT`** are not
+//!   modelled.
 
 use crate::batch_d::lex;
 use crate::deep::lexer::Cursor;
@@ -46,12 +61,19 @@ rust_graph_deep::grammar! { SQL {
         SLASH = "/",
         PERCENT = "%",
         CONCAT = "||",
+        COLON2 = "::",
+        ARROW = "->",
+        ARROW2 = "->>",
         IDENT = "identifier",
         NUMBER = "number",
         STRING = "string",
         BAD_STRING = "bad_string" bad,
+        /// `$1`, `?` or `:name`.
+        PLACEHOLDER = "placeholder",
         /// A quoted identifier: `"users"`, `` `users` ``, `[users]`.
         QUOTED_IDENT = "quoted_identifier",
+        /// `[]` after a type name.
+        ARRAY_SUFFIX = "[]",
 
         KW_SELECT = "SELECT",
         KW_DISTINCT = "DISTINCT",
@@ -74,6 +96,8 @@ rust_graph_deep::grammar! { SQL {
         KW_FULL = "FULL",
         KW_OUTER = "OUTER",
         KW_CROSS = "CROSS",
+        KW_NATURAL = "NATURAL",
+        KW_LATERAL = "LATERAL",
         KW_ON = "ON",
         KW_USING = "USING",
         KW_UNION = "UNION",
@@ -95,6 +119,7 @@ rust_graph_deep::grammar! { SQL {
         KW_COLUMN = "COLUMN",
         KW_RENAME = "RENAME",
         KW_TO = "TO",
+        KW_CONCURRENTLY = "CONCURRENTLY",
         KW_PRIMARY = "PRIMARY",
         KW_KEY = "KEY",
         KW_FOREIGN = "FOREIGN",
@@ -110,6 +135,7 @@ rust_graph_deep::grammar! { SQL {
         KW_IN = "IN",
         KW_IS = "IS",
         KW_LIKE = "LIKE",
+        KW_ILIKE = "ILIKE",
         KW_BETWEEN = "BETWEEN",
         KW_EXISTS = "EXISTS",
         KW_CASE = "CASE",
@@ -123,9 +149,90 @@ rust_graph_deep::grammar! { SQL {
         KW_RECURSIVE = "RECURSIVE",
         KW_IF = "IF",
         KW_CASCADE = "CASCADE",
+        KW_RESTRICT = "RESTRICT",
         KW_TEXT = "TEXT",
         KW_TIME = "TIME",
         KW_ZONE = "ZONE",
+        KW_RETURNING = "RETURNING",
+        KW_CONFLICT = "CONFLICT",
+        KW_DO = "DO",
+        KW_NOTHING = "NOTHING",
+        KW_OVER = "OVER",
+        KW_PARTITION = "PARTITION",
+        KW_WINDOW = "WINDOW",
+        KW_FILTER = "FILTER",
+        KW_ROWS = "ROWS",
+        KW_RANGE = "RANGE",
+        KW_GROUPS = "GROUPS",
+        KW_PRECEDING = "PRECEDING",
+        KW_FOLLOWING = "FOLLOWING",
+        KW_UNBOUNDED = "UNBOUNDED",
+        KW_CURRENT = "CURRENT",
+        KW_ROW = "ROW",
+        KW_NULLS = "NULLS",
+        KW_FIRST = "FIRST",
+        KW_LAST = "LAST",
+        KW_TRUE = "TRUE",
+        KW_FALSE = "FALSE",
+        KW_ESCAPE = "ESCAPE",
+        KW_ANY = "ANY",
+        KW_SOME = "SOME",
+        KW_EXTRACT = "EXTRACT",
+        KW_ENUM = "ENUM",
+        KW_SCHEMA = "SCHEMA",
+        KW_SEQUENCE = "SEQUENCE",
+        KW_EXTENSION = "EXTENSION",
+        KW_TYPE = "TYPE",
+        KW_FUNCTION = "FUNCTION",
+        KW_PROCEDURE = "PROCEDURE",
+        KW_RETURNS = "RETURNS",
+        KW_LANGUAGE = "LANGUAGE",
+        KW_REPLACE = "REPLACE",
+        /// `OR REPLACE` folded into one token, so `CREATE OR REPLACE VIEW` and
+        /// `CREATE OR REPLACE FUNCTION` are told apart by their next word.
+        OR_REPLACE = "OR REPLACE",
+        KW_TRUNCATE = "TRUNCATE",
+        KW_COMMENT = "COMMENT",
+        KW_BEGIN = "BEGIN",
+        KW_COMMIT = "COMMIT",
+        KW_ROLLBACK = "ROLLBACK",
+        KW_START = "START",
+        KW_TRANSACTION = "TRANSACTION",
+        KW_PRECISION = "PRECISION",
+        KW_VARYING = "VARYING",
+        KW_UNSIGNED = "UNSIGNED",
+        KW_SIGNED = "SIGNED",
+        KW_AUTOINCREMENT = "AUTOINCREMENT",
+        KW_COLLATE = "COLLATE",
+        KW_STORED = "STORED",
+        KW_GENERATED = "GENERATED",
+        KW_ALWAYS = "ALWAYS",
+        KW_IDENTITY = "IDENTITY",
+        KW_NO = "NO",
+        KW_DEFINER = "DEFINER",
+        KW_INVOKER = "INVOKER",
+        KW_IMMUTABLE = "IMMUTABLE",
+        KW_STABLE = "STABLE",
+        KW_VOLATILE = "VOLATILE",
+        KW_STRICT = "STRICT",
+        KW_SECURITY = "SECURITY",
+        KW_COST = "COST",
+        KW_LOGGED = "LOGGED",
+        KW_UNLOGGED = "UNLOGGED",
+        KW_TEMP = "TEMP",
+        KW_TEMPORARY = "TEMPORARY",
+        KW_SESSION = "SESSION",
+        KW_LOCAL = "LOCAL",
+        KW_OWNED = "OWNED",
+        KW_CACHE = "CACHE",
+        KW_CYCLE = "CYCLE",
+        KW_INCREMENT = "INCREMENT",
+        KW_ZEROFILL = "ZEROFILL",
+        KW_ACTION = "ACTION",
+        KW_STATISTICS = "STATISTICS",
+        KW_TABLESPACE = "TABLESPACE",
+        KW_AUTHORIZATION = "AUTHORIZATION",
+        KW_MATERIALIZED = "MATERIALIZED",
     }
 
     program: _statement*,
@@ -243,7 +350,7 @@ pub fn lex_sql(c: &mut Cursor) -> Kind {
             COMMENT
         }
         b'\'' => {
-            if lex::quoted(c, b'\'') {
+            if sql_string(c) {
                 STRING
             } else {
                 BAD_STRING
@@ -254,11 +361,40 @@ pub fn lex_sql(c: &mut Cursor) -> Kind {
             c.quoted(byte, true);
             QUOTED_IDENT
         }
+        b'[' if c.peek_at(1) == b']' => {
+            c.bump_n(2);
+            ARRAY_SUFFIX
+        }
         b'[' => {
             c.bump();
             c.eat_while(|byte| byte != b']' && byte != b'\n');
             c.eat(b']');
             QUOTED_IDENT
+        }
+        b'$' if sql_dollar_tag(c) => {
+            if sql_dollar_string(c) {
+                STRING
+            } else {
+                BAD_STRING
+            }
+        }
+        b'$' if c.peek_at(1).is_ascii_digit() => {
+            c.bump();
+            c.eat_while(|byte| byte.is_ascii_digit());
+            PLACEHOLDER
+        }
+        b'?' => {
+            c.bump();
+            PLACEHOLDER
+        }
+        b':' if c.peek_at(1).is_ascii_alphabetic() || c.peek_at(1) == b'_' => {
+            c.bump();
+            c.eat_while(lex::is_word_byte);
+            PLACEHOLDER
+        }
+        b':' if c.peek_at(1) == b':' => {
+            c.bump_n(2);
+            COLON2
         }
         b'0'..=b'9' => {
             lex::number(c);
@@ -320,6 +456,14 @@ pub fn lex_sql(c: &mut Cursor) -> Kind {
             c.bump();
             PLUS
         }
+        b'-' if c.peek_at(1) == b'>' && c.peek_at(2) == b'>' => {
+            c.bump_n(3);
+            ARROW2
+        }
+        b'-' if c.peek_at(1) == b'>' => {
+            c.bump_n(2);
+            ARROW
+        }
         b'-' => {
             c.bump();
             MINUS
@@ -339,10 +483,80 @@ pub fn lex_sql(c: &mut Cursor) -> Kind {
         b'A'..=b'Z' | b'a'..=b'z' | b'_' => {
             let start = c.rest();
             let length = c.eat_while(lex::is_word_byte);
-            keyword(&lex::upper(&start[..length]))
+            let upper = lex::upper(&start[..length]);
+            // `OR REPLACE` is one token: two boolean words in a row are not a
+            // construct, and folding them keeps `CREATE OR REPLACE VIEW`
+            // distinguishable from `CREATE OR REPLACE FUNCTION` earlier.
+            if upper == b"OR" {
+                let rest = c.rest();
+                let mut index = 0;
+                while index < rest.len() && matches!(rest[index], b' ' | b'\t' | b'\r' | b'\n') {
+                    index += 1;
+                }
+                let word = &rest[index..];
+                if word.len() >= 7 && word[..7].eq_ignore_ascii_case(b"REPLACE") && !word.get(7).is_some_and(|byte| lex::is_word_byte(*byte)) {
+                    c.bump_n(index + 7);
+                    return OR_REPLACE;
+                }
+            }
+            keyword(&upper)
         }
         _ => UNKNOWN,
     }
+}
+
+/// A `'...'` literal with `''` as the escape for one quote, and a backslash
+/// escape where the dialect uses one.
+fn sql_string(c: &mut Cursor) -> bool {
+    c.bump();
+    while !c.at_end() {
+        match c.peek() {
+            b'\\' => c.bump_n(2),
+            b'\'' if c.peek_at(1) == b'\'' => c.bump_n(2),
+            b'\'' => {
+                c.bump();
+                return true;
+            }
+            _ => c.bump_char(),
+        }
+    }
+    false
+}
+
+/// Whether a `$tag$` opener is at the cursor: `$$` or `$name$`.
+fn sql_dollar_tag(c: &Cursor) -> bool {
+    let rest = c.rest();
+    if rest.len() < 2 || rest[0] != b'$' {
+        return false;
+    }
+    let mut index = 1;
+    while index < rest.len() && (rest[index].is_ascii_alphanumeric() || rest[index] == b'_') {
+        index += 1;
+    }
+    rest.get(index) == Some(&b'$')
+}
+
+/// A `$tag$ ... $tag$` string: the body may hold anything, including `'` and
+/// newlines, up to the matching tag.
+fn sql_dollar_string(c: &mut Cursor) -> bool {
+    let rest = c.rest();
+    let mut tag_end = 1;
+    while tag_end < rest.len() && rest[tag_end] != b'$' {
+        tag_end += 1;
+    }
+    if tag_end >= rest.len() {
+        return false;
+    }
+    let tag = rest[..=tag_end].to_vec();
+    c.bump_n(tag.len());
+    while !c.at_end() {
+        if c.starts_with(&tag) {
+            c.bump_n(tag.len());
+            return true;
+        }
+        c.bump_char();
+    }
+    false
 }
 
 fn keyword(upper: &[u8]) -> Kind {
@@ -354,6 +568,7 @@ fn keyword(upper: &[u8]) -> Kind {
         b"OFFSET" => KW_OFFSET, b"AS" => KW_AS, b"JOIN" => KW_JOIN,
         b"INNER" => KW_INNER, b"LEFT" => KW_LEFT, b"RIGHT" => KW_RIGHT,
         b"FULL" => KW_FULL, b"OUTER" => KW_OUTER, b"CROSS" => KW_CROSS,
+        b"NATURAL" => KW_NATURAL, b"LATERAL" => KW_LATERAL,
         b"ON" => KW_ON, b"USING" => KW_USING, b"UNION" => KW_UNION,
         b"INTERSECT" => KW_INTERSECT, b"EXCEPT" => KW_EXCEPT, b"INSERT" => KW_INSERT,
         b"INTO" => KW_INTO, b"VALUES" => KW_VALUES, b"UPDATE" => KW_UPDATE,
@@ -361,17 +576,49 @@ fn keyword(upper: &[u8]) -> Kind {
         b"TABLE" => KW_TABLE, b"VIEW" => KW_VIEW, b"INDEX" => KW_INDEX,
         b"ALTER" => KW_ALTER, b"DROP" => KW_DROP, b"ADD" => KW_ADD,
         b"COLUMN" => KW_COLUMN, b"RENAME" => KW_RENAME, b"TO" => KW_TO,
+        b"CONCURRENTLY" => KW_CONCURRENTLY,
         b"PRIMARY" => KW_PRIMARY, b"KEY" => KW_KEY, b"FOREIGN" => KW_FOREIGN,
         b"REFERENCES" => KW_REFERENCES, b"UNIQUE" => KW_UNIQUE, b"NOT" => KW_NOT,
         b"NULL" => KW_NULL, b"DEFAULT" => KW_DEFAULT, b"CHECK" => KW_CHECK,
         b"CONSTRAINT" => KW_CONSTRAINT, b"AND" => KW_AND, b"OR" => KW_OR,
-        b"IN" => KW_IN, b"IS" => KW_IS, b"LIKE" => KW_LIKE,
+        b"IN" => KW_IN, b"IS" => KW_IS, b"LIKE" => KW_LIKE, b"ILIKE" => KW_ILIKE,
         b"BETWEEN" => KW_BETWEEN, b"EXISTS" => KW_EXISTS, b"CASE" => KW_CASE,
         b"WHEN" => KW_WHEN, b"THEN" => KW_THEN, b"ELSE" => KW_ELSE,
         b"END" => KW_END, b"CAST" => KW_CAST, b"INTERVAL" => KW_INTERVAL,
         b"WITH" => KW_WITH, b"RECURSIVE" => KW_RECURSIVE, b"IF" => KW_IF,
-        b"CASCADE" => KW_CASCADE, b"TEXT" => KW_TEXT, b"TIME" => KW_TIME,
-        b"ZONE" => KW_ZONE,
+        b"CASCADE" => KW_CASCADE, b"RESTRICT" => KW_RESTRICT,
+        b"TEXT" => KW_TEXT, b"TIME" => KW_TIME, b"ZONE" => KW_ZONE,
+        b"RETURNING" => KW_RETURNING, b"CONFLICT" => KW_CONFLICT, b"DO" => KW_DO,
+        b"NOTHING" => KW_NOTHING, b"OVER" => KW_OVER, b"PARTITION" => KW_PARTITION,
+        b"WINDOW" => KW_WINDOW, b"FILTER" => KW_FILTER, b"ROWS" => KW_ROWS,
+        b"RANGE" => KW_RANGE, b"GROUPS" => KW_GROUPS,
+        b"PRECEDING" => KW_PRECEDING, b"FOLLOWING" => KW_FOLLOWING,
+        b"UNBOUNDED" => KW_UNBOUNDED, b"CURRENT" => KW_CURRENT, b"ROW" => KW_ROW,
+        b"NULLS" => KW_NULLS, b"FIRST" => KW_FIRST, b"LAST" => KW_LAST,
+        b"TRUE" => KW_TRUE, b"FALSE" => KW_FALSE, b"ESCAPE" => KW_ESCAPE,
+        b"ANY" => KW_ANY, b"SOME" => KW_SOME, b"EXTRACT" => KW_EXTRACT,
+        b"ENUM" => KW_ENUM, b"SCHEMA" => KW_SCHEMA, b"SEQUENCE" => KW_SEQUENCE,
+        b"EXTENSION" => KW_EXTENSION, b"TYPE" => KW_TYPE,
+        b"FUNCTION" => KW_FUNCTION, b"PROCEDURE" => KW_PROCEDURE,
+        b"RETURNS" => KW_RETURNS, b"LANGUAGE" => KW_LANGUAGE,
+        b"REPLACE" => KW_REPLACE, b"TRUNCATE" => KW_TRUNCATE,
+        b"COMMENT" => KW_COMMENT, b"BEGIN" => KW_BEGIN, b"COMMIT" => KW_COMMIT,
+        b"ROLLBACK" => KW_ROLLBACK, b"START" => KW_START,
+        b"TRANSACTION" => KW_TRANSACTION, b"PRECISION" => KW_PRECISION,
+        b"VARYING" => KW_VARYING, b"UNSIGNED" => KW_UNSIGNED,
+        b"SIGNED" => KW_SIGNED, b"AUTOINCREMENT" => KW_AUTOINCREMENT,
+        b"COLLATE" => KW_COLLATE, b"STORED" => KW_STORED,
+        b"GENERATED" => KW_GENERATED, b"ALWAYS" => KW_ALWAYS,
+        b"IDENTITY" => KW_IDENTITY, b"NO" => KW_NO, b"DEFINER" => KW_DEFINER,
+        b"INVOKER" => KW_INVOKER, b"IMMUTABLE" => KW_IMMUTABLE, b"STABLE" => KW_STABLE,
+        b"VOLATILE" => KW_VOLATILE, b"STRICT" => KW_STRICT, b"SECURITY" => KW_SECURITY,
+        b"COST" => KW_COST, b"LOGGED" => KW_LOGGED, b"UNLOGGED" => KW_UNLOGGED,
+        b"TEMP" => KW_TEMP, b"TEMPORARY" => KW_TEMPORARY, b"SESSION" => KW_SESSION,
+        b"LOCAL" => KW_LOCAL, b"OWNED" => KW_OWNED, b"CACHE" => KW_CACHE,
+        b"CYCLE" => KW_CYCLE, b"INCREMENT" => KW_INCREMENT, b"ZEROFILL" => KW_ZEROFILL, b"ACTION" => KW_ACTION, b"STATISTICS" => KW_STATISTICS,
+        b"TABLESPACE" => KW_TABLESPACE,
+        b"AUTHORIZATION" => KW_AUTHORIZATION, b"MATERIALIZED" => KW_MATERIALIZED,
         _ => IDENT,
     }
 }
+
