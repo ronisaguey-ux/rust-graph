@@ -325,3 +325,267 @@ rust_graph_deep::grammar! { POWERSHELL {
     expanding_string: STRING_OPEN (_string_part)* (STRING_CLOSE | STRING_BAD),
     _string_part: STRING_TEXT | VARIABLE | subexpression,
 } }
+
+/// What one open frame is: a string's mode state, or a `$( ... )` whose `)`
+/// closes it at its own bracket depth.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FrameKind {
+    String,
+    Subexpression,
+}
+
+struct Frame {
+    kind: FrameKind,
+    /// Openers minus closers inside a subexpression.
+    depth: u32,
+}
+
+thread_local! {
+    static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+}
+
+fn with_frames<T>(action: impl FnOnce(&mut Vec<Frame>) -> T) -> T {
+    FRAMES.with(|frames| action(&mut frames.borrow_mut()))
+}
+
+fn push_frame(kind: FrameKind) {
+    with_frames(|frames| frames.push(Frame { kind, depth: 0 }));
+}
+
+fn pop_frame() {
+    with_frames(|frames| {
+        frames.pop();
+    });
+}
+
+fn top_kind() -> Option<FrameKind> {
+    with_frames(|frames| frames.last().map(|frame| frame.kind))
+}
+
+fn adjust_depth(change: i32) {
+    with_frames(|frames| {
+        if let Some(frame) = frames.last_mut() {
+            if frame.kind == FrameKind::Subexpression {
+                frame.depth = if change < 0 { frame.depth.saturating_sub(1) } else { frame.depth + 1 };
+            }
+        }
+    });
+}
+
+pub fn lex_powershell(c: &mut Cursor) -> Kind {
+    use crate::batch_d::lex;
+    if c.pos() == 0 {
+        with_frames(|frames| frames.clear());
+    }
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\x0c'));
+            WHITESPACE
+        }
+        b'\r' => {
+            c.bump();
+            c.eat(b'\n');
+            NEWLINE
+        }
+        b'\n' => {
+            c.bump();
+            NEWLINE
+        }
+        b'`' if matches!(c.peek_at(1), b'\n' | b'\r') => {
+            c.bump();
+            c.eat(b'\r');
+            c.eat(b'\n');
+            WHITESPACE
+        }
+        b'#' => {
+            lex::line_comment(c);
+            COMMENT
+        }
+        b'<' if c.peek_at(1) == b'#' => {
+            lex::block_comment(c, b"<#", b"#>", false);
+            COMMENT
+        }
+        b'\'' => single_quoted(c),
+        b'"' => expanding_string(c),
+        b'@' if matches!(c.peek_at(1), b'"' | b'\'') && matches!(c.peek_at(2), b'\n' | b'\r') => here_string(c),
+        b'@' if c.peek_at(1) == b'(' => {
+            c.bump_n(2);
+            AT_PAREN
+        }
+        b'@' if c.peek_at(1) == b'{' => {
+            c.bump_n(2);
+            AT_BRACE
+        }
+        b'@' if is_word_start(c.peek_at(1)) => {
+            c.bump();
+            c.eat_while(is_name_byte);
+            SPLAT
+        }
+        b'$' => variable(c),
+        b'(' => {
+            c.bump();
+            adjust_depth(1);
+            LPAREN
+        }
+        b')' => {
+            if top_kind() == Some(FrameKind::Subexpression) && frame_depth() == 0 {
+                c.bump();
+                pop_frame();
+                SUBEXP_CLOSE
+            } else {
+                c.bump();
+                adjust_depth(-1);
+                RPAREN
+            }
+        }
+        b'0'..=b'9' => {
+            lex::number(c);
+            NUMBER
+        }
+        b'a'..=b'z' | b'A'..=b'Z' | b'_' => word(c),
+        b'[' => {
+            // `[Severity]::Low`: a bracketed type immediately followed by `::`
+            // is one token, so a declaration's `[` stays distinct from it.
+            if type_before_static(c) {
+                while !c.at_end() && c.peek() != b']' && c.peek() != b'\n' {
+                    c.bump_char();
+                }
+                c.eat(b']');
+                return TYPE_NAME;
+            }
+            c.bump();
+            LBRACKET
+        }
+        b']' => {
+            c.bump();
+            RBRACKET
+        }
+        b'{' => {
+            c.bump();
+            LBRACE
+        }
+        b'}' => {
+            c.bump();
+            RBRACE
+        }
+        b',' => {
+            c.bump();
+            COMMA
+        }
+        b';' => {
+            c.bump();
+            SEMI
+        }
+        b'.' if c.peek_at(1) == b'.' => {
+            c.bump_n(2);
+            RANGE
+        }
+        b'.' => {
+            c.bump();
+            DOT
+        }
+        b'|' => {
+            c.bump();
+            PIPE
+        }
+        b'&' if c.peek_at(1) == b'&' => {
+            c.bump_n(2);
+            AND
+        }
+        b'+' if c.peek_at(1) == b'=' => {
+            c.bump_n(2);
+            PLUS_ASSIGN
+        }
+        b'+' if c.peek_at(1) == b'+' => {
+            c.bump_n(2);
+            INCR
+        }
+        b'+' => {
+            c.bump();
+            PLUS
+        }
+        b'-' if c.peek_at(1) == b'=' => {
+            c.bump_n(2);
+            MINUS_ASSIGN
+        }
+        b'-' if c.peek_at(1) == b'-' => {
+            c.bump_n(2);
+            DECR
+        }
+        b'-' => dash_word(c),
+        b'=' => {
+            c.bump();
+            ASSIGN
+        }
+        b'*' | b'?' if wildcard(c) => wildcard_word(c),
+        b'*' => {
+            c.bump();
+            STAR
+        }
+        b'/' => {
+            c.bump();
+            SLASH
+        }
+        b'%' => {
+            c.bump();
+            PERCENT
+        }
+        b'!' => {
+            c.bump();
+            BANG
+        }
+        b':' if c.peek_at(1) == b':' => {
+            c.bump_n(2);
+            DOUBLE_COLON
+        }
+        _ => UNKNOWN,
+    }
+}
+
+fn frame_depth() -> u32 {
+    with_frames(|frames| frames.last().map_or(0, |frame| frame.depth))
+}
+
+fn is_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn is_word_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+/// `*.ps1` and `?.txt` are bare arguments, not operators: a wildcard after a
+/// parameter (`-Filter *.cs`) or a command name starts a word.
+fn wildcard(c: &Cursor) -> bool {
+    let next = c.peek_at(1);
+    let word_shaped = matches!(next, b'.' | b'*' | b'?') || is_name_byte(next);
+    word_shaped && matches!(c.previous(), PARAM | IDENT | LITERAL_STRING | STRING | VARIABLE | COMMA | LPAREN)
+}
+
+fn wildcard_word(c: &mut Cursor) -> Kind {
+    while !c.at_end() {
+        match c.peek() {
+            b' ' | b'\t' | b'\r' | b'\n' | b';' | b'|' | b')' | b'}' | b',' => break,
+            _ => c.bump_char(),
+        }
+    }
+    IDENT
+}
+
+/// Whether the `[` at the cursor opens a type name that is immediately followed
+/// by `::` — `[Severity]::Low` — rather than a declaration's annotation.
+fn type_before_static(c: &Cursor) -> bool {
+    let mut at = 1;
+    while at < 128 {
+        match c.peek_at(at) {
+            b']' => return c.peek_at(at + 1) == b':' && c.peek_at(at + 2) == b':',
+            b'\n' | b'\r' | b' ' | b'\t' | b'(' | b'[' | 0 => return false,
+            _ => at += 1,
+        }
+    }
+    false
+}
+
+/// `-eq`, `-and`, or a parameter `-Path`. The operator table is checked first,
+/// so an operator name is never a parameter.
