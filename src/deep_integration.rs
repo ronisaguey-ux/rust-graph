@@ -72,6 +72,9 @@ pub enum Lang {
     Tsx,
     Go,
     Java,
+    C,
+    /// C++, whose `Lang::tag` spelling is the lexer's `CPP`.
+    Cpp,
 }
 
 impl Lang {
@@ -87,6 +90,8 @@ impl Lang {
             Lang::Tsx => &deep::javascript::TSX,
             Lang::Go => &deep::go::GO,
             Lang::Java => &deep::java::JAVA,
+            Lang::C => &deep::batch_c::c::C,
+            Lang::Cpp => &deep::batch_c::cpp::CPP,
         }
     }
 }

@@ -11,6 +11,12 @@
 //! of later slices and by the tests here.
 #![allow(dead_code)]
 
+// The C, C++ and Objective-C grammars, included by path for the same reason as
+// Python and JavaScript: `deep-grammars` compiles the one copy, and a second
+// copy here would be a fork. Their `batch_c` helpers are reached through
+// `super`, so the files keep working in either crate.
+#[path = "../../crates/deep-grammars/src/batch_c/mod.rs"]
+pub mod batch_c;
 pub mod budget;
 pub mod go;
 pub mod java;
