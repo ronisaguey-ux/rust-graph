@@ -1565,6 +1565,11 @@ impl<'a> Walker<'a> {
                 .map(|list| self.arguments(list))
                 .unwrap_or_else(|| "[]".to_string());
             let callee = self.decl_callee(id);
+            // `ts.Listener.Addr().String()`: the receiver is a call of its own,
+            // and the lexer records it as one. Reading only the outer call lost
+            // every chained call in Go (57 of the 96 remaining fallbacks on
+            // net/http were exactly this shape).
+            self.record_receiver_calls(callee);
             let path = self.decl_path(callee);
             let receiver = match path.rsplit_once('.') {
                 Some((head, _)) if !head.is_empty() => {
@@ -1614,6 +1619,26 @@ impl<'a> Walker<'a> {
         let path = self.decl_path(callee);
         let line = self.line(callee);
         self.push_call(path, line)
+    }
+
+
+    /// Record every call that sits in a callee's receiver chain.
+    fn record_receiver_calls(&mut self, callee: u32) {
+        let mut node = callee;
+        for _ in 0..8 {
+            if !matches!(self.kind(node), "selector_expression" | "member_expression" | "field_access") {
+                return;
+            }
+            let Some(object) = self.children(node).into_iter().find(|&child| !self.is_layout(child)) else {
+                return;
+            };
+            if matches!(self.kind(object), "call_expression" | "method_invocation") {
+                self.decl_call(object);
+                node = object;
+                continue;
+            }
+            node = object;
+        }
     }
 
     /// The callee of a call node: the expression before the argument list.

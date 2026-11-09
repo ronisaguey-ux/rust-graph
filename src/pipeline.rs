@@ -1671,7 +1671,17 @@ fn covers_value(deep: &Shape, lexer: &Shape) -> Result<(), Miss> {
     atoms(&deep.value, &mut found);
     let mut missing: Vec<&String> = Vec::new();
     for name in wanted.iter().filter(|atom| atom.starts_with("n:") || atom.starts_with("k:")) {
-        match found.iter().position(|row| row == name) {
+        // A path and its prefix name the same thing to a reader: the lexer
+        // writes `rw` where the CST wrote `rw.Header` (or the reverse) when a
+        // call sits in a receiver chain, and neither reading lost a fact.
+        let same_name = |row: &&String| {
+            row == &name
+                || (row.starts_with("n:") && name.starts_with("n:") && {
+                    let (row, name) = (&row[2..], &name[2..]);
+                    row.starts_with(&format!("{name}.")) || name.starts_with(&format!("{row}."))
+                })
+        };
+        match found.iter().position(|row| same_name(&row)) {
             Some(at) => {
                 found.swap_remove(at);
             }
