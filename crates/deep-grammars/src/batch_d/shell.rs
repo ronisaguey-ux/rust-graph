@@ -307,3 +307,126 @@ rust_graph_deep::grammar! { SHELL {
     _nl: NEWLINE*,
     _array_item: WORD | VARIABLE | ASSIGNMENT | REDIRECT | string_literal | command_substitution | backtick_substitution | parameter_expansion | arithmetic,
 } }
+
+/// What one open frame is: a code context that a `)` or a backtick closes, or a
+/// mode's own state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FrameKind {
+    /// `$( ... )`: the `)` at depth 0 closes it.
+    Substitution,
+    /// `` ` ... ` ``: the closing backtick closes it.
+    Backtick,
+    /// `<( ... )` / `>( ... )`.
+    Process,
+    Heredoc,
+    Test,
+    Arithmetic,
+    Parameter,
+    /// A double-quoted string.
+    String,
+}
+
+impl FrameKind {
+    fn is_code(self) -> bool {
+        matches!(self, FrameKind::Substitution | FrameKind::Backtick | FrameKind::Process)
+    }
+}
+
+/// One frame of the lexer's own stack. The mode stack the macro maintains says
+/// *which step function* runs; this says what the bytes mean to it: the depth a
+/// `$(` closes at, or a heredoc's delimiter.
+struct Frame {
+    kind: FrameKind,
+    /// Openers minus closers inside a code frame.
+    depth: u32,
+    /// A heredoc's delimiter line, and whether `<<-` allows leading tabs and
+    /// whether the body expands (`<<EOF` does, `<<'EOF'` does not).
+    delimiter: Vec<u8>,
+    strip_tabs: bool,
+    expand: bool,
+}
+
+impl Frame {
+    fn new(kind: FrameKind) -> Self {
+        Frame { kind, depth: 0, delimiter: Vec::new(), strip_tabs: false, expand: true }
+    }
+}
+
+thread_local! {
+    /// The open frames, innermost last. Cleared at byte 0 of every file, like
+    /// the macro's mode stack, because a parse that stopped inside a heredoc
+    /// must not lend its state to the next file.
+    static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+    /// Here-documents opened on the current line whose bodies have not started.
+    /// One line can open several (`cat <<A <<B`), and the bodies come in order
+    /// after the line's newline.
+    static PENDING: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+}
+
+fn with_frames<T>(action: impl FnOnce(&mut Vec<Frame>) -> T) -> T {
+    FRAMES.with(|frames| action(&mut frames.borrow_mut()))
+}
+
+fn push_frame(kind: FrameKind) {
+    with_frames(|frames| frames.push(Frame::new(kind)));
+}
+
+fn pop_frame() {
+    with_frames(|frames| {
+        frames.pop();
+    });
+}
+
+fn top_kind() -> Option<FrameKind> {
+    with_frames(|frames| frames.last().map(|frame| frame.kind))
+}
+
+fn top_depth() -> u32 {
+    with_frames(|frames| frames.last().map_or(0, |frame| frame.depth))
+}
+
+/// An opener or closer inside a `$( ... )` counts only for that frame.
+fn adjust_depth(change: i32) {
+    with_frames(|frames| {
+        if let Some(frame) = frames.last_mut() {
+            if frame.kind.is_code() {
+                frame.depth = if change < 0 { frame.depth.saturating_sub(1) } else { frame.depth + 1 };
+            }
+        }
+    });
+}
+
+/// The tokens after which a word is in command position, and so a keyword.
+fn command_start(previous: Kind) -> bool {
+    matches!(
+        previous,
+        crate::deep::syntax::UNKNOWN
+            | NEWLINE
+            | SEMI
+            | PIPE
+            | OR
+            | AND
+            | AMP
+            | LPAREN
+            | RPAREN
+            | LBRACE
+            | KW_THEN
+            | KW_DO
+            | KW_ELSE
+            | KW_ELIF
+            | KW_FUNCTION
+            | DBL_SEMI
+            | HEREDOC_BEGIN
+            | HEREDOC_END
+            | HEREDOC_END_MORE
+            | SUBST_OPEN
+            | BACKTICK_OPEN
+            | PROCESS_OPEN
+    )
+}
+
+/// The tokens a `for`/`case` head can end with, after which `in` is reserved.
+fn head_end(previous: Kind) -> bool {
+    matches!(previous, WORD | VARIABLE | STRING | ASSIGNMENT | STRING_CLOSE | SUBST_END | BACKTICK_END | PARAMETER_CLOSE)
+}
+
