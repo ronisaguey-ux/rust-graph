@@ -173,7 +173,7 @@ fn an_f_string_keeps_each_field_with_its_own_span() {
     let parsed = parse("fstring_fields.py");
     assert_eq!(parsed.error_nodes(), 0, "{}", parsed.workspace.tree.sexp(&PYTHON, true));
     let strings = parsed.of_kind("f_string");
-    assert_eq!(strings.len(), 4, "`message`, `padded`, `braces`, `document`:\n{}", parsed.workspace.tree.sexp(&PYTHON, true));
+    assert_eq!(strings.len(), 5, "`message`, `padded`, `braces`, `total`, `document`:\n{}", parsed.workspace.tree.sexp(&PYTHON, true));
 
     let find = |needle: &str| parsed.src.windows(needle.len()).position(|window| window == needle.as_bytes()).expect("the construct is in the fixture");
 
@@ -187,12 +187,31 @@ fn an_f_string_keeps_each_field_with_its_own_span() {
     let field_start = find("{name}");
     assert_eq!((parsed.node(field).start, parsed.node(field).end), (field_start as u32, (field_start + 6) as u32), "the field's bytes");
     assert_eq!(parsed.text(field), "{name}");
-    assert_eq!(parsed.kind(parsed.children(field)[0]), "fstring_field", "the field is a token, so its bytes can be sliced");
+    let inner = parsed.children(field);
+    assert_eq!(parsed.kind(inner[0]), "fstring_field_open", "the field's own opening brace");
+    assert_eq!(parsed.kind(inner[inner.len() - 1]), "fstring_field_close", "the closer that matches it");
+    assert_eq!(parsed.kind(inner[1]), "identifier", "the expression is a node, not part of a span");
 
     // `padded = f"{name!r:>10}"`: conversion and format spec are inside the
     // field's one span, so the expression `name` is still addressable.
     let padded = parsed.of_kind("interpolation").into_iter().find(|&node| parsed.text(node).contains("!r:>10")).expect("the conversion field");
     assert_eq!(parsed.text(padded), "{name!r:>10}");
+
+    // `total = f"{len(name)} characters"`: the field is code, so the call in
+    // it is a `call` node like any other and a reader gets the argument too.
+    let total = strings[3];
+    let mut call = None;
+    for field in parsed.of_kind("interpolation") {
+        for candidate in parsed.of_kind("call") {
+            let (field, inner) = (parsed.node(field), parsed.node(candidate));
+            if inner.start > field.start && inner.end < field.end && parsed.text(candidate) == "len(name)" {
+                call = Some(candidate);
+            }
+        }
+    }
+    let call = call.expect("the call inside the field");
+    assert_eq!(parsed.text(call), "len(name)", "the callee and its argument are both in the tree");
+    assert!((parsed.node(total).start..parsed.node(total).end).contains(&parsed.node(call).start));
 
     // `braces = f"{{literal}} {name}"`: the escaped braces stay text and only
     // the real field is an interpolation.
@@ -202,15 +221,47 @@ fn an_f_string_keeps_each_field_with_its_own_span() {
 
     // A triple-quoted f-string keeps its text across the line break and still
     // ends at its closing quotes.
-    let document = strings[3];
+    let document = strings[4];
     let span = (parsed.node(document).start, parsed.node(document).end);
     let start = find("f\"\"\"multi");
     assert_eq!(span, (start as u32, (start + 24) as u32), "the triple string's bytes");
 }
 
 #[test]
+fn an_f_string_field_holds_ordinary_code() {
+    // The field is code again, so every construct that nests braces, strings
+    // or calls inside it is a node the grammar already knows.
+    let parsed = parse("fstring_nested.py");
+    assert_eq!(parsed.error_nodes(), 0, "{}", parsed.workspace.tree.sexp(&PYTHON, true));
+
+    let text_of = |kind: &str| -> Vec<String> { parsed.of_kind(kind).into_iter().map(|node| parsed.text(node).to_string()).collect() };
+
+    // `f"{ {'a': 1}['a'] }"`: a dict literal inside the field keeps its own
+    // braces, and the field ends at the brace that matches its own.
+    assert!(text_of("dictionary").iter().any(|text| text == "{'a': 1}"), "a dict literal in a field: {:?}", text_of("dictionary"));
+    // `f"{f'{len(inner)}'}"`: the nested string is an f-string of its own, and
+    // the outer field still closes at the right brace.
+    let strings = parsed.of_kind("f_string");
+    assert!(strings.len() >= 3, "an f-string inside a field is a node, not text");
+    // `f"{value:{width}.{precision}f}"`: the spec is text and its two fields
+    // are interpolations of the same node kind, inside the outer field.
+    let spec = parsed.of_kind("interpolation").into_iter().find(|&node| parsed.text(node).starts_with("{value:")).expect("the spec field");
+    let kids = parsed.children(spec);
+    assert_eq!(kids.iter().filter(|&&kid| parsed.kind(kid) == "interpolation").count(), 2, "both spec fields: {}", parsed.workspace.tree.sexp(&PYTHON, true));
+    assert!(kids.iter().any(|&kid| parsed.kind(kid) == "fstring_spec_text" && parsed.text(kid) == "."), "the spec keeps its own text");
+    // A call written in a field is a call, arguments and all.
+    let calls = text_of("call");
+    for want in ["len(inner)", "map(str, items)", "sum(values)", "join"] {
+        assert!(calls.iter().any(|call| call.starts_with(want) || call.contains(want)), "{want} is not a call node: {calls:?}");
+    }
+    // The debug form keeps the expression it prints.
+    let debug = parsed.of_kind("interpolation").into_iter().find(|&node| parsed.text(node) == "{total=}").expect("the `{total=}` field");
+    assert!(parsed.children(debug).iter().any(|&child| parsed.kind(child) == "identifier" && parsed.text(child) == "total"));
+}
+
+#[test]
 fn the_gap_fixtures_are_the_shipped_files() {
-    for name in ["star_import.py", "tuple_assignment.py", "fstring_fields.py", "assigned_lambda.py"] {
+    for name in ["star_import.py", "tuple_assignment.py", "fstring_fields.py", "fstring_nested.py", "assigned_lambda.py"] {
         assert!(fixture(name).is_file(), "{name} is a fixture, not an inline string");
     }
 }
