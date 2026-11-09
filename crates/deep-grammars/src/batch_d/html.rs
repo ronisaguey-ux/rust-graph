@@ -102,17 +102,59 @@ rust_graph_deep::grammar! { HTML {
 
     document: _node*,
 
-    _node: element | void_element | text_node | comment_node | doctype_node,
+    _node:
+        element
+        | void_element
+        | optional_element
+        | text_node
+        | comment_node
+        | doctype_node,
 
-    element: "<" tag _attribute* (empty_tag | start_tag),
+    element: "<" tag _attribute* (empty_tag | start_tag | raw_element_body),
     empty_tag: "/>",
     start_tag: ">" _node* closing_tag,
-    closing_tag: "</" tag ">",
+    closing_tag: ("</" | RAW_END) tag ">",
+
+    /// `<script>` and `<style>`: the body is raw text up to the closing tag,
+    /// so a `<` inside the script is not markup.
+    raw_element_body: RAW_GT raw_text* closing_tag,
+    raw_text: RAW_BODY,
 
     void_element: "<" VOID_NAME _attribute* [">" | "/>"],
 
     _attribute: tag ["=" attribute_value],
-    attribute_value: STRING | tag,
+    attribute_value: STRING | UNQUOTED | tag,
+
+    /// The thirteen elements whose end tag may be left out. `</div>` then ends
+    /// a `p` that has no closer, while `</p>` is the p token itself.
+    optional_element:
+        p_element
+        | li_element
+        | dt_element
+        | dd_element
+        | td_element
+        | th_element
+        | tr_element
+        | option_element
+        | optgroup_element
+        | thead_element
+        | tbody_element
+        | tfoot_element
+        | colgroup_element,
+
+    p_element: "<" P_NAME _attribute* ">" _node* [P_CLOSE],
+    li_element: "<" LI_NAME _attribute* ">" _node* [LI_CLOSE],
+    dt_element: "<" DT_NAME _attribute* ">" _node* [DT_CLOSE],
+    dd_element: "<" DD_NAME _attribute* ">" _node* [DD_CLOSE],
+    td_element: "<" TD_NAME _attribute* ">" _node* [TD_CLOSE],
+    th_element: "<" TH_NAME _attribute* ">" _node* [TH_CLOSE],
+    tr_element: "<" TR_NAME _attribute* ">" _node* [TR_CLOSE],
+    option_element: "<" OPTION_NAME _attribute* ">" _node* [OPTION_CLOSE],
+    optgroup_element: "<" OPTGROUP_NAME _attribute* ">" _node* [OPTGROUP_CLOSE],
+    thead_element: "<" THEAD_NAME _attribute* ">" _node* [THEAD_CLOSE],
+    tbody_element: "<" TBODY_NAME _attribute* ">" _node* [TBODY_CLOSE],
+    tfoot_element: "<" TFOOT_NAME _attribute* ">" _node* [TFOOT_CLOSE],
+    colgroup_element: "<" COLGROUP_NAME _attribute* ">" _node* [COLGROUP_CLOSE],
 
     tag: NAME,
     text_node: TEXT,
@@ -379,3 +421,159 @@ pub fn lex_raw(c: &mut Cursor) -> Kind {
     RAW_BODY
 }
 
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use crate::deep::tree::{Node, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    struct Parsed {
+        src: Vec<u8>,
+        workspace: Workspace,
+    }
+
+    impl Parsed {
+        fn fixture(name: &str) -> Parsed {
+            let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/longtail/html").join(name);
+            let src = std::fs::read(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+            let mut workspace = Workspace::default();
+            workspace.parse(&src, &super::HTML, &Budget::default()).unwrap();
+            Parsed { src, workspace }
+        }
+
+        fn node(&self, index: usize) -> Node {
+            self.workspace.tree.nodes[index]
+        }
+
+        fn kind(&self, index: usize) -> &'static str {
+            super::HTML.name(self.node(index).kind)
+        }
+
+        fn is_token(&self, index: usize) -> bool {
+            self.node(index).flags & TOKEN != 0
+        }
+
+        fn text(&self, index: usize) -> &str {
+            let node = self.node(index);
+            std::str::from_utf8(&self.src[node.start as usize..node.end as usize]).expect("utf8 fixture")
+        }
+
+        fn of_kind(&self, kind: &str) -> Vec<usize> {
+            (1..self.workspace.tree.nodes.len())
+                .filter(|&index| !self.is_token(index) && self.kind(index) == kind)
+                .collect()
+        }
+
+        fn leaves_of_kind(&self, kind: &str) -> Vec<usize> {
+            (1..self.workspace.tree.nodes.len())
+                .filter(|&index| self.is_token(index) && self.kind(index) == kind)
+                .collect()
+        }
+
+        fn errors(&self) -> usize {
+            use crate::deep::syntax::ERROR;
+            use crate::deep::tree::HAS_ERROR;
+            (0..self.workspace.tree.nodes.len())
+                .filter(|&index| self.node(index).kind == ERROR || (self.is_token(index) && self.node(index).flags & HAS_ERROR != 0))
+                .count()
+        }
+    }
+
+    #[test]
+    fn a_script_body_is_raw_text_and_not_markup() {
+        let parsed = Parsed::fixture("html_raw_text.html");
+        assert_eq!(parsed.errors(), 0, "the fixture must parse cleanly");
+        let bodies = parsed.of_kind("raw_text");
+        assert_eq!(bodies.len(), 2, "one style body and one script body");
+        let texts: Vec<&[u8]> = bodies
+            .iter()
+            .map(|&index| {
+                let node = parsed.node(index);
+                &parsed.src[node.start as usize..node.end as usize]
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.windows(6).any(|window| window == b"</div>")),
+            "the `</div>` inside the script is text: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.windows(3).any(|window| window == b"a>b")),
+            "the `>` inside the style attribute selector is text: {texts:?}"
+        );
+        // No element starts inside either raw body: the `<` never began a tag.
+        for index in 1..parsed.workspace.tree.nodes.len() {
+            if parsed.kind(index) == "element" && !parsed.is_token(index) {
+                let node = parsed.node(index);
+                for &body in &bodies {
+                    let span = parsed.node(body);
+                    assert!(
+                        node.start <= span.start || node.start >= span.end,
+                        "an element at {} would be inside the raw body at {}..{}",
+                        node.start,
+                        span.start,
+                        span.end
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_doctype_and_an_unquoted_attribute_keep_their_spans() {
+        let parsed = Parsed::fixture("html_raw_text.html");
+        let doctype = &parsed.workspace.tree.nodes[parsed.of_kind("doctype_node")[0]];
+        assert_eq!((doctype.start, doctype.end), (0, 15), "<!DOCTYPE html>");
+        let unquoted: Vec<&str> = parsed.leaves_of_kind("unquoted_attribute_value").iter().map(|&index| parsed.text(index)).collect();
+        assert!(unquoted.contains(&"utf-8"), "{unquoted:?}");
+        assert!(unquoted.contains(&"page"), "{unquoted:?}");
+    }
+
+    #[test]
+    fn an_omitted_end_tag_still_closes_its_element() {
+        let parsed = Parsed::fixture("html_optional_tags.html");
+        assert_eq!(parsed.errors(), 0);
+        let items = parsed.of_kind("li_element");
+        assert_eq!(items.len(), 3, "three list items, none with `</li>`");
+        let cells = parsed.of_kind("td_element");
+        assert_eq!(cells.len(), 4, "two rows of two cells, none with `</td>`");
+        assert_eq!(parsed.of_kind("p_element").len(), 2);
+        assert_eq!(parsed.of_kind("option_element").len(), 2);
+        assert_eq!(parsed.of_kind("dt_element").len(), 2);
+        assert_eq!(parsed.of_kind("dd_element").len(), 2);
+        for &index in &items {
+            assert!(
+                !parsed.workspace.tree.children(index as u32).any(|child| parsed.kind(child as usize) == "closing_tag"),
+                "an omitted end tag leaves no closing_tag child"
+            );
+        }
+        // The third item's span ends where the next item begins, not at the
+        // closing tag of the list.
+        let third = &parsed.workspace.tree.nodes[items[2]];
+        let text = &parsed.src[third.start as usize..third.end as usize];
+        assert_eq!(text, b"<li>third\n");
+    }
+
+    #[test]
+    fn a_mismatched_tag_costs_its_subtree_and_not_the_file() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/longtail/malformed/html_broken.html");
+        let src = std::fs::read(&path).unwrap();
+        let mut workspace = Workspace::default();
+        workspace.parse(&src, &super::HTML, &Budget::default()).unwrap();
+        assert!(workspace.tree.nodes.iter().skip(1).any(|node| node.kind == crate::deep::syntax::ERROR));
+        assert_eq!(super::HTML.name(workspace.tree.root().kind), "document");
+        assert_eq!((workspace.tree.root().start, workspace.tree.root().end), (0, src.len() as u32));
+    }
+
+    #[test]
+    fn every_prefix_of_the_fixtures_parses_or_errors_without_panicking() {
+        for name in ["html_raw_text.html", "html_optional_tags.html"] {
+            let parsed = Parsed::fixture(name);
+            for end in (0..parsed.src.len()).step_by(11).chain(std::iter::once(parsed.src.len())) {
+                let mut workspace = Workspace::default();
+                workspace.parse(&parsed.src[..end], &super::HTML, &Budget::default()).unwrap();
+            }
+        }
+    }
+}
