@@ -1,0 +1,6 @@
+.card {
+  color: ;
+  width: calc(100% - );
+}
+@media print {
+  .hidden { display: none;
