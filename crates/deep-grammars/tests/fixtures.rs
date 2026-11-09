@@ -22,6 +22,7 @@ use deep_grammars::python::PYTHON;
 
 /// `(file, top-level node kinds)` for every valid fixture, in order.
 const PYTHON_VALID: &[(&str, &str)] = &[
+    ("assigned_lambda.py", "expression_statement expression_statement function_definition"),
     (
         "async_worker.py",
         "import_statement import_from_statement decorated_definition function_definition function_definition function_definition if_statement",
@@ -42,13 +43,16 @@ const PYTHON_VALID: &[(&str, &str)] = &[
         "flask_api.py",
         "import_statement import_statement import_from_statement expression_statement expression_statement expression_statement expression_statement function_definition decorated_definition decorated_definition decorated_definition",
     ),
+    ("fstring_fields.py", "expression_statement expression_statement expression_statement expression_statement expression_statement"),
     ("matrix_math.py", "import_from_statement class_definition function_definition"),
     ("models.py", "import_from_statement import_from_statement import_from_statement import_from_statement class_definition class_definition class_definition"),
     (
         "scraper.py",
         "expression_statement import_statement import_from_statement import_statement import_from_statement expression_statement function_definition function_definition function_definition if_statement",
     ),
+    ("star_import.py", "import_from_statement import_from_statement function_definition"),
     ("test_units.py", "import_statement import_from_statement import_from_statement class_definition if_statement"),
+    ("tuple_assignment.py", "expression_statement expression_statement expression_statement expression_statement function_definition"),
     (
         "type_utils.py",
         "import_from_statement expression_statement expression_statement expression_statement expression_statement class_definition function_definition function_definition function_definition function_definition type_alias_statement type_alias_statement",
