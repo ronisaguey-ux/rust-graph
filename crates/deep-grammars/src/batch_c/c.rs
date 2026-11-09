@@ -291,9 +291,10 @@ rust_graph_deep::grammar! { C {
     user_parameter: user_type_name _declarator_or_abstract,
     _declarator_or_abstract: pointer* [direct_declarator] abstract_suffix*,
 
-    /// `*`, `**`, `(*)`, `*(*)(void)`: pointers, an optional parenthesised part
-    /// and suffixes, in the order a type id spells them.
-    _abstract_declarator: pointer* [parenthesized_abstract] abstract_suffix*,
+    /// `*`, `**`, `*(*)(void)`: pointers, an optional parenthesised part and
+    /// suffixes. It always starts with a `*`, so a `(` after a type id is still
+    /// an argument list (`new T(5)`, `int f(void)`).
+    _abstract_declarator: pointer+ [parenthesized_abstract] abstract_suffix*,
     parenthesized_abstract: "(" _abstract_declarator ")",
     abstract_suffix: array_suffix | parameter_list,
     type_name: declaration_specifiers [user_type_name] [_abstract_declarator],
