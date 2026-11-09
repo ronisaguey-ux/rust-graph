@@ -719,10 +719,22 @@ fn the_delimiter_pass_is_linear_on_hostile_input() {
     assert!(found.is_empty());
     assert_eq!(pairs.stray, MILLION as u32 / 2);
     assert!(start.elapsed() < Duration::from_secs(20));
-    let many_ifs = format!("{}{}", "{".repeat(2000), "ixen".repeat(100_000));
+    // Deep nesting is skipped whole, so the work stays linear in the input size.
+    // Measured as a ratio rather than a wall clock: a loaded machine inflates both
+    // runs together, so the ratio still decides whether the pass is linear, while
+    // an absolute deadline would only say how busy the box was.
+    let many_ifs = format!("{}{}", "{".repeat(2000), "ixen".repeat(50_000));
+    let twice = format!("{}{}", "{".repeat(2000), "ixen".repeat(100_000));
     let start = Instant::now();
     pairs_of(&many_ifs);
-    assert!(start.elapsed() < Duration::from_secs(20), "snapshots over the depth cap are skipped");
+    let small = start.elapsed().max(Duration::from_micros(1));
+    let start = Instant::now();
+    pairs_of(&twice);
+    let large = start.elapsed();
+    assert!(
+        large.as_secs_f64() < small.as_secs_f64() * 4.0,
+        "snapshots over the depth cap are skipped: doubling the input took {large:?} against {small:?}"
+    );
 }
 
 // ---- Events: precede, abandon, rewind -------------------------------------------

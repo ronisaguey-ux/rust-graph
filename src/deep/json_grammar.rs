@@ -162,7 +162,11 @@ mod gate {
                 "]".repeat(MILLION),
                 format!("{}1{}", r#"{"a":"#.repeat(MILLION), "}".repeat(MILLION)),
             ] {
-                same_default(src.as_bytes());
+                // One budget with no wall clock: this test is about the two parsers
+                // producing the same events, and a wall-clock cap turns a loaded
+                // machine into a failure that says nothing about the code.
+                let budget = Budget { time: None, ..Budget::default() };
+                same(&mut Workspace::default(), &mut Workspace::default(), src.as_bytes(), &budget);
             }
         });
     }
