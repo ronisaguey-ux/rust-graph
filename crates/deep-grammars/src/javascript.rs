@@ -1223,69 +1223,205 @@ pub fn lex_template_code(c: &mut Cursor) -> Kind {
     kind
 }
 
-/// Code from a `{` to its `}`, as in `${...}` and JSX's `{...}`, with strings,
-/// templates, comments and JSX inside skipped whole. False if it never closes.
-fn code_in_braces(c: &mut Cursor) -> bool {
+/// One token in code that may be JSX: the `<` that opens an element or a
+/// fragment is a token of its own, and the frames above say what follows.
+fn jsx_open(c: &mut Cursor) -> Kind {
+    if c.peek_at(1) == b'>' {
+        c.bump_n(2);
+        jsx_push(JsxState::Children);
+        JSX_FRAGMENT_OPEN
+    } else {
+        c.bump();
+        jsx_push(JsxState::Tag);
+        JSX_TAG_OPEN
+    }
+}
+
+/// The step when a JSX construct is open. While an `Expression` frame is on
+/// top the bytes are ordinary code again, with the `}` that matches its brace
+/// as the one token only this state has; a tag and its children read their own
+/// bytes. Outside every construct it is `lex`, so a mode frame that asks for
+/// code in the middle of a JSX expression still gets code.
+fn jsx_step(c: &mut Cursor, jsx: bool) -> Kind {
+    if c.pos() == 0 {
+        JSX.with(|stack| stack.borrow_mut().clear());
+        SERIAL.with(|serial| serial.set(0));
+    }
+    match jsx_state() {
+        Some(JsxState::Tag) | Some(JsxState::ClosingTag) => lex_jsx_tag(c),
+        Some(JsxState::Children) => lex_jsx_children(c),
+        Some(JsxState::Expression) => lex_jsx_expression(c, jsx),
+        None => lex(c, jsx),
+    }
+}
+
+/// A tag: its name and attributes on the way in, just a name on the way out.
+/// `>` moves an opening tag to its children and pops a closing tag; `/>` pops
+/// the element. A `{` opens an expression and pushes it above the tag.
+fn lex_jsx_tag(c: &mut Cursor) -> Kind {
+    let closing = jsx_state() == Some(JsxState::ClosingTag);
+    let (angles, index) = jsx_angles();
+    if angles > 0 {
+        // Inside `<Select<T | false>`, the bytes are a TypeScript type: lex
+        // them as code, and count the angle brackets so the `>` that closes
+        // the list is not read as the tag's own end.
+        let kind = lex(c, false);
+        match kind {
+            LT => jsx_update(index, |frame| frame.angles += 1),
+            GT | GT_JOINED => jsx_update(index, |frame| frame.angles = frame.angles.saturating_sub(1)),
+            LINE_END => return WHITESPACE,
+            _ => {}
+        }
+        return kind;
+    }
+    match c.peek() {
+        b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c'));
+            WHITESPACE
+        }
+        b'/' if c.peek_at(1) == b'>' => {
+            c.bump_n(2);
+            jsx_pop();
+            JSX_SELF_CLOSING
+        }
+        b'>' => {
+            c.bump();
+            if closing {
+                jsx_pop();
+            } else {
+                jsx_set(JsxState::Children);
+            }
+            JSX_TAG_END
+        }
+        b'"' | b'\'' => {
+            jsx_string(c);
+            JSX_STRING
+        }
+        b'{' => {
+            c.bump();
+            jsx_push(JsxState::Expression);
+            JSX_EXPR_OPEN
+        }
+        b'=' => {
+            c.bump();
+            ASSIGN
+        }
+        b'.' => {
+            c.bump();
+            DOT
+        }
+        b':' => {
+            c.bump();
+            COLON
+        }
+        b'/' => {
+            c.bump();
+            SLASH
+        }
+        b'<' => {
+            // After the tag's name a `<` opens a type-argument list.
+            c.bump();
+            jsx_update(index, |frame| frame.angles = 1);
+            LT
+        }
+        b if is_word_start(b) => {
+            c.bump();
+            c.eat_while(jsx_name_byte);
+            JSX_IDENT
+        }
+        _ => {
+            c.bump_char();
+            UNKNOWN
+        }
+    }
+}
+
+/// A quoted attribute value: the bytes up to the matching quote, newlines
+/// allowed and backslashes not special. Entities are not decoded, as JSX
+/// leaves them to the reader.
+fn jsx_string(c: &mut Cursor) {
+    let quote = c.peek();
     c.bump();
-    let mut depth = 1u32;
-    // Whether the last significant byte can end an operand: then `/` divides
-    // and `<` compares, else they start a regular expression or JSX.
-    let mut operand = false;
-    while !c.at_end() {
-        let byte = c.peek();
-        match byte {
-            b'{' => {
-                depth += 1;
-                c.bump();
-                operand = false;
+    while !c.at_end() && c.peek() != quote {
+        c.bump();
+    }
+    c.bump();
+}
+
+/// A tag or attribute name segment. `-` is part of it, so `data-id` is one
+/// name; `.` and `:` stay separate tokens so the grammar can name a member or a
+/// namespace.
+fn jsx_name_byte(byte: u8) -> bool {
+    is_word_byte(byte) || byte == b'-'
+}
+
+/// Between an element's tags: text, a `{...}` expression, a nested element, or
+/// the tags that close this element. Text runs to the next `<` or `{` and is
+/// one token, entities undecoded; no byte in it ends a statement.
+fn lex_jsx_children(c: &mut Cursor) -> Kind {
+    match c.peek() {
+        b'{' => {
+            c.bump();
+            jsx_push(JsxState::Expression);
+            JSX_EXPR_OPEN
+        }
+        b'<' => match (c.peek_at(1), c.peek_at(2)) {
+            (b'>', _) => {
+                c.bump_n(2);
+                jsx_push(JsxState::Children);
+                JSX_FRAGMENT_OPEN
             }
-            b'}' => {
-                depth -= 1;
-                c.bump();
-                if depth == 0 {
-                    return true;
-                }
-                operand = true;
+            (b'/', b'>') => {
+                c.bump_n(3);
+                jsx_pop();
+                JSX_FRAGMENT_CLOSE
             }
-            b'"' | b'\'' => {
-                c.bump();
-                c.quoted(byte, true);
-                operand = true;
-            }
-            b'`' => {
-                skip_template(c);
-                operand = true;
-            }
-            b'/' if c.peek_at(1) == b'/' => {
-                c.eat_while(|byte| byte != b'\n');
-            }
-            b'/' if c.peek_at(1) == b'*' => block_comment(c),
-            b'/' if !operand => {
-                regex(c);
-                operand = true;
-            }
-            b'<' if !operand && (is_word_start(c.peek_at(1)) || c.peek_at(1) == b'>') => {
-                jsx_element(c);
-                operand = true;
-            }
-            b' ' | b'\t' | b'\n' | b'\r' => c.bump(),
-            _ if is_word_byte(byte) => {
-                let start = c.rest();
-                let length = c.eat_while(is_word_byte);
-                // After a keyword such as `return`, an operand starts.
-                operand = !matches!(&start[..length], b"return" | b"typeof" | b"case" | b"do" | b"else" | b"in" | b"of" | b"new" | b"delete" | b"void" | b"throw" | b"yield" | b"await");
-            }
-            b')' | b']' => {
-                c.bump();
-                operand = true;
+            (b'/', _) => {
+                c.bump_n(2);
+                jsx_set(JsxState::ClosingTag);
+                JSX_TAG_CLOSE_OPEN
             }
             _ => {
                 c.bump();
-                operand = false;
+                jsx_push(JsxState::Tag);
+                JSX_TAG_OPEN
             }
+        },
+        _ => {
+            while !c.at_end() && !matches!(c.peek(), b'<' | b'{') {
+                c.bump_char();
+            }
+            JSX_TEXT
         }
     }
-    false
+}
+
+/// The step inside an attribute value, a spread or a child `{...}`: ordinary
+/// code, with the one token that only this state has. At the frame's own depth
+/// a `}` closes it; deeper, `}` is a dict's or a block's brace and `lex` hands
+/// it back as `RBRACE`. A template started here pushes its own mode frames
+/// above it, so the parser-driven modes and the JSX frames interleave.
+fn lex_jsx_expression(c: &mut Cursor, jsx: bool) -> Kind {
+    let Some(index) = JSX.with(|stack| stack.borrow().len().checked_sub(1)) else {
+        return lex(c, jsx);
+    };
+    let depth = JSX.with(|stack| stack.borrow().get(index).map_or(0, |frame| frame.depth));
+    if c.at_end() {
+        jsx_pop();
+        return BAD_LITERAL;
+    }
+    if depth == 0 && c.peek() == b'}' {
+        c.bump();
+        jsx_pop();
+        return JSX_EXPR_CLOSE;
+    }
+    let kind = lex(c, jsx);
+    match kind {
+        LPAREN | LBRACKET | LBRACE => jsx_update(index, |frame| frame.depth += 1),
+        RPAREN | RBRACKET | RBRACE => jsx_update(index, |frame| frame.depth = frame.depth.saturating_sub(1)),
+        _ => {}
+    }
+    kind
 }
 
 /// A regular expression from its `/`: false if the line ends first.
@@ -1325,77 +1461,6 @@ fn generic_arrow(rest: &[u8]) -> bool {
         at += 1;
     }
     rest.get(at) == Some(&b',') || rest[at.min(rest.len())..].starts_with(b"extends ")
-}
-
-/// A JSX element or fragment from its `<`, to the end of its closing tag:
-/// tags nest, attributes and children may hold `{...}` code. False if it
-/// never closes.
-fn jsx_element(c: &mut Cursor) -> bool {
-    let mut depth = 0u32;
-    loop {
-        // At a `<`: a tag.
-        c.bump();
-        let closing = c.eat(b'/');
-        // Type arguments after a tag's name, `<Select<T | false> ...>`, nest.
-        let mut angles = 0u32;
-        // The tag: name, attributes, up to `>` or `/>`.
-        loop {
-            match c.peek() {
-                0 if c.at_end() => return false,
-                b'<' => {
-                    angles += 1;
-                    c.bump();
-                }
-                b'>' if angles > 0 => {
-                    angles -= 1;
-                    c.bump();
-                }
-                b'"' | b'\'' => {
-                    let quote = c.peek();
-                    c.bump();
-                    c.quoted(quote, false);
-                }
-                b'{' => {
-                    if !code_in_braces(c) {
-                        return false;
-                    }
-                }
-                b'/' if c.peek_at(1) == b'>' => {
-                    c.bump_n(2);
-                    if depth == 0 {
-                        return true;
-                    }
-                    break;
-                }
-                b'>' => {
-                    c.bump();
-                    if closing {
-                        depth -= 1;
-                        if depth == 0 {
-                            return true;
-                        }
-                    } else {
-                        depth += 1;
-                    }
-                    break;
-                }
-                _ => c.bump(),
-            }
-        }
-        // Children: text and `{...}` up to the next tag.
-        loop {
-            match c.peek() {
-                0 if c.at_end() => return false,
-                b'{' => {
-                    if !code_in_braces(c) {
-                        return false;
-                    }
-                }
-                b'<' => break,
-                _ => c.bump(),
-            }
-        }
-    }
 }
 
 fn operator(c: &mut Cursor) -> Kind {
