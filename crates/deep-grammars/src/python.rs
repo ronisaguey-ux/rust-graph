@@ -5,9 +5,10 @@
 //! The tree is close to Tree-sitter's Python where that costs nothing, but it
 //! is not the same tree: a plain string is one token, and a few rarely seen
 //! forms nest differently. An f-string is a `f_string` node over a start token,
-//! its text, one `{...}` field per replacement field and an end token: the
-//! lexer mode stack (`modes`/`switch`) says when the bytes after `f"` are text
-//! and when they are a field, so every field keeps its own byte span.
+//! its text, one `interpolation` per replacement field and an end token, and
+//! the mode stack (`modes`/`switch`) hands the bytes after `f"` to the text
+//! step and the bytes inside a field back to code, so a field's expression is
+//! a subtree and the field's `{` and `}` are tokens with a span each.
 //!
 //! What the DSL cannot express, and how it is handled here instead:
 //!
@@ -16,13 +17,16 @@
 //!   three inferred tokens to the runtime lexer, and the rules consume them
 //!   like any other token (`block: INDENT _statement* DEDENT`). A grammar that
 //!   needed layout without a runtime that infers it could not be written.
-//! - **An f-string's field is a span, not a parse.** `modes { FSTRING = ... }`
-//!   lets the lexer leave code mode at the start token and return at the end,
-//!   and `lex_fstring_text` scans a whole `{...}` (nested braces, a format spec,
-//!   a conversion) as one `fstring_field` token. The expression inside is not
-//!   turned into grammar nodes — that would need the mode to return to code
-//!   *inside* the field and back at its own brace depth — but the token's byte
-//!   span is the exact source of the field, so a reader can slice it.
+//! - **An f-string's field is code again.** `modes { FSTRING = ..., FIELD =
+//!   ... }` gives the mode stack a second frame: the `{` of a replacement field
+//!   is `FSTRING_FIELD_OPEN`, which pushes `FIELD` (ordinary code), and the
+//!   `}` that matches it at the field's own bracket depth is
+//!   `FSTRING_FIELD_CLOSE`, which pops back to the text. `lex_field` keeps one
+//!   `(depth, spec)` frame per open field so `f"{ {'a': 1}['a'] }"` closes at
+//!   its own brace and a nested f-string or lambda cannot unbalance it; at
+//!   depth 0 a `:` starts the format spec, which is text again until its `}`
+//!   or a nested `{...}` field. The expression is therefore ordinary grammar
+//!   nodes, and a call written in a field is an ordinary `call`.
 //! - **No negative lookahead and no token beyond the third.** A choice is
 //!   decided by the next one to three tokens, so `match`/`case`/`type` as soft
 //!   keywords are resolved with a leading predicate (`&(...)`), not by a
@@ -37,7 +41,7 @@
 //!   therefore carries the name as the definition's own child, not as a second
 //!   node kind.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
@@ -50,12 +54,20 @@ rust_graph_deep::grammar! { PYTHON {
     /// After an f-string's opening quote the step lexer runs in `FSTRING`: the
     /// bytes are text, not code, until the closing quote. The start pushes the
     /// mode and the end (or a line that cannot close the string) pops it.
+    ///
+    /// `FIELD` is the opposite frame: the lexer pushed it at the field's `{`,
+    /// so the bytes are code again until the `}` that matches that brace at
+    /// its own bracket depth pops it. One switch token per transition is all
+    /// the mode stack needs; the depth lives in `lex_field`'s own state.
     modes {
         FSTRING = lex_fstring_text,
+        FIELD = lex_field,
     }
     switch FSTRING_START => push FSTRING;
     switch FSTRING_END => pop;
-    switch FSTRING_BAD => pop;
+    switch FSTRING_BAD => pop FSTRING;
+    switch FSTRING_FIELD_OPEN => push FIELD;
+    switch FSTRING_FIELD_CLOSE => pop;
 
     tokens {
         /// A line break; the runtime turns these into logical line ends.
@@ -77,8 +89,12 @@ rust_graph_deep::grammar! { PYTHON {
         FSTRING_START = "fstring_start",
         /// The bytes between fields.
         FSTRING_TEXT = "fstring_text",
-        /// One `{...}` replacement field, braces included.
-        FSTRING_FIELD = "fstring_field",
+        /// The `{` of a replacement field: code again until its own `}`.
+        FSTRING_FIELD_OPEN = "fstring_field_open" open field,
+        /// The `}` that closes a replacement field at the field's own depth.
+        FSTRING_FIELD_CLOSE = "fstring_field_close" close field,
+        /// The bytes of a format spec between its nested fields.
+        FSTRING_SPEC_TEXT = "fstring_spec_text",
         /// The closing quotes of an f-string.
         FSTRING_END = "fstring_end",
         /// An f-string that cannot close on its line.
@@ -319,13 +335,17 @@ rust_graph_deep::grammar! { PYTHON {
     _name: IDENT | "match" | "case" | "type",
     string: (STR | BAD_STR)+,
     /// `f"a{x!r:>{w}}b"`: the opening quotes, the text between fields, one
-    /// node per replacement field and the closing quotes. A field node's span
-    /// is the source text of the expression (`{x!r:>{w}}`), so a reader that
-    /// wants the expression can slice it.
+    /// node per replacement field and the closing quotes.
     f_string: FSTRING_START (_fstring_part)* FSTRING_END,
     _fstring_part: string_content | interpolation,
     string_content: FSTRING_TEXT,
-    interpolation: FSTRING_FIELD,
+    /// `{x!r:>{w}}`: the braces keep their own tokens, and what is between
+    /// them is ordinary Python — a call in a field is a `call` node like any
+    /// other. `=` is the debug form (`{x=}`), `!r` the conversion, and the
+    /// format spec is text with fields of its own.
+    interpolation: FSTRING_FIELD_OPEN [_expressions] [_fstring_debug] [BANG _name] [COLON [_fstring_spec]] FSTRING_FIELD_CLOSE,
+    _fstring_debug: ASSIGN [_expression],
+    _fstring_spec: (FSTRING_SPEC_TEXT | interpolation)+,
     parenthesized_expression: "(" (_list_item %? ",") ")",
     list: "[" (_list_item %? ",") "]",
     dictionary: "{" (_dictionary_item %? ",") "}",
@@ -354,6 +374,12 @@ rust_graph_deep::grammar! { PYTHON {
 
 /// One token at the cursor.
 pub fn lex(c: &mut Cursor) -> Kind {
+    if c.pos() == 0 {
+        // A new file starts outside every mode, and whatever state a parse
+        // that stopped inside an f-string left behind is not this file's.
+        FIELDS.with(|fields| fields.borrow_mut().clear());
+        FSTRING_QUOTES.with(|quotes| quotes.borrow_mut().clear());
+    }
     let byte = c.peek();
     match byte {
         b' ' | b'\t' | b'\x0c' => {
@@ -384,7 +410,7 @@ pub fn lex(c: &mut Cursor) -> Kind {
             c.bump_n(3);
             WHITESPACE
         }
-        b'\'' | b'"' => string(c, false),
+        b'\'' | b'"' => string(c),
         b'a'..=b'z' | b'A'..=b'Z' | b'_' | 0x80..=0xff => word(c),
         b'0'..=b'9' => number(c),
         b'.' if c.peek_at(1).is_ascii_digit() => number(c),
@@ -435,7 +461,7 @@ fn word(c: &mut Cursor) -> Kind {
     if matches!(c.peek(), b'\'' | b'"') {
         match string_prefix(text) {
             Some(true) => return fstring_start(c),
-            Some(false) => return string(c, false),
+            Some(false) => return string(c),
             None => {}
         }
     }
@@ -443,11 +469,27 @@ fn word(c: &mut Cursor) -> Kind {
 }
 
 thread_local! {
-    /// The quote byte and whether it is tripled, for the string body the
-    /// `FSTRING` mode is inside. The step function that sees `f"` writes it,
-    /// and the mode's own step function reads it, as the heredoc's delimiter
-    /// lives in its step function.
-    static FSTRING: Cell<(u8, bool)> = const { Cell::new((0, false)) };
+    /// The quotes of every f-string the `FSTRING` mode is inside, innermost
+    /// last: a nested f-string restores the outer one's quote on the way out,
+    /// as the heredoc's delimiter lives in its own step function.
+    static FSTRING_QUOTES: RefCell<Vec<(u8, bool)>> = const { RefCell::new(Vec::new()) };
+    /// One frame per open replacement field: the brackets opened inside it
+    /// and whether its format spec has started. The frame is pushed when the
+    /// lexer emits `FSTRING_FIELD_OPEN` and popped on the matching close, so
+    /// `f"{ {'a': 1}['a'] }"` closes at its own brace.
+    static FIELDS: RefCell<Vec<Field>> = const { RefCell::new(Vec::new()) };
+}
+
+/// What one open replacement field holds.
+#[derive(Clone, Copy)]
+struct Field {
+    /// Openers minus closers inside the field.
+    depth: u32,
+    /// A `:` at depth 0 began the format spec: the bytes are text again.
+    spec: bool,
+    /// The f-string the field was opened in, as the quote stack's depth. A
+    /// broken string abandons every field opened at that depth, however many.
+    string: usize,
 }
 
 /// `f"`, `rf'''`, `t"`: the prefix was consumed by `word`; this takes the
@@ -456,35 +498,51 @@ fn fstring_start(c: &mut Cursor) -> Kind {
     let quote = c.peek();
     let triple = c.peek_at(1) == quote && c.peek_at(2) == quote;
     c.bump_n(if triple { 3 } else { 1 });
-    FSTRING.with(|state| state.set((quote, triple)));
+    FSTRING_QUOTES.with(|quotes| quotes.borrow_mut().push((quote, triple)));
     FSTRING_START
 }
 
-/// The `FSTRING` mode's step: text between fields, one `{...}` field, or the
-/// closing quotes. In a one-line string a line break ends it badly, so a
-/// broken string costs its line and the mode pops.
+/// The quotes of the innermost f-string, if the mode stack and this state
+/// still agree.
+fn fstring_quotes() -> Option<(u8, bool)> {
+    FSTRING_QUOTES.with(|quotes| quotes.borrow().last().copied())
+}
+
+fn pop_fstring() {
+    FSTRING_QUOTES.with(|quotes| {
+        quotes.borrow_mut().pop();
+    });
+}
+
+/// The `FSTRING` mode's step: text between fields, one `{` that opens a
+/// replacement field, or the closing quotes. In a one-line string a line
+/// break ends it badly, so a broken string costs its line and the mode pops.
 pub fn lex_fstring_text(c: &mut Cursor) -> Kind {
     if c.at_end() {
+        pop_fstring();
         return FSTRING_BAD;
     }
-    let (quote, triple) = FSTRING.with(|state| state.get());
+    let Some((quote, triple)) = fstring_quotes() else {
+        return FSTRING_BAD;
+    };
     let closes = if triple { c.peek() == quote && c.peek_at(1) == quote && c.peek_at(2) == quote } else { c.peek() == quote };
     if closes {
         c.bump_n(if triple { 3 } else { 1 });
+        pop_fstring();
         return FSTRING_END;
     }
     if !triple && matches!(c.peek(), b'\n' | b'\r') {
         c.bump();
         c.eat(b'\n');
+        pop_fstring();
         return FSTRING_BAD;
     }
     if c.peek() == b'{' && c.peek_at(1) != b'{' {
         c.bump();
-        // `field` takes the spec and any nested braces, so the token is the
-        // whole replacement field, braces included, and its span is the
-        // expression's source.
-        field(c, quote, triple);
-        return FSTRING_FIELD;
+        // The field's expression is code: the mode stack returns to code here
+        // and `lex_field` closes it at the brace that matches this one.
+        open_field();
+        return FSTRING_FIELD_OPEN;
     }
     // Text up to a field, the closing quotes, or a line break in a one-line
     // string. `{{` and `}}` are escaped braces and stay text.
@@ -509,6 +567,126 @@ pub fn lex_fstring_text(c: &mut Cursor) -> Kind {
             _ => c.bump(),
         }
     }
+}
+
+fn open_field() {
+    let string = FSTRING_QUOTES.with(|quotes| quotes.borrow().len());
+    FIELDS.with(|fields| fields.borrow_mut().push(Field { depth: 0, spec: false, string }));
+}
+
+fn close_field() {
+    FIELDS.with(|fields| {
+        fields.borrow_mut().pop();
+    });
+}
+
+/// A field that cannot close ends its whole f-string: every field opened in
+/// that string loses its frame and the string loses its quote. The mode stack
+/// then pops through `FSTRING` on the one bad token.
+fn abandon_string() {
+    let string = FSTRING_QUOTES.with(|quotes| quotes.borrow().len());
+    FIELDS.with(|fields| {
+        let mut fields = fields.borrow_mut();
+        while fields.last().is_some_and(|field| field.string == string) {
+            fields.pop();
+        }
+    });
+    pop_fstring();
+}
+
+/// Change the innermost field's frame; a no-op when none is open.
+fn with_field(change: impl FnOnce(&mut Field)) {
+    FIELDS.with(|fields| {
+        if let Some(field) = fields.borrow_mut().last_mut() {
+            change(field);
+        }
+    });
+}
+
+/// The `FIELD` mode's step: ordinary code, with the two tokens that only exist
+/// inside a replacement field. At the field's own depth a `}` closes it and a
+/// `:` starts the format spec; deeper, they are a dict's brace and a slice's
+/// colon, handled by `lex`. A line break at depth 0 in a one-line string ends
+/// the field badly, as it ends the string itself.
+pub fn lex_field(c: &mut Cursor) -> Kind {
+    let Some(field) = FIELDS.with(|fields| fields.borrow().last().copied()) else {
+        // No field is open, so this frame and the mode stack disagree: lexing
+        // code cannot lose a token, and the parser still gets a tree.
+        return lex(c);
+    };
+    if c.at_end() {
+        abandon_string();
+        return FSTRING_BAD;
+    }
+    if field.spec {
+        // A format spec: text until the field's `}`, except that a single `{`
+        // opens one more field and `{{` is an escaped brace.
+        if c.peek() == b'}' {
+            c.bump();
+            close_field();
+            return FSTRING_FIELD_CLOSE;
+        }
+        if c.peek() == b'{' && c.peek_at(1) != b'{' {
+            c.bump();
+            open_field();
+            return FSTRING_FIELD_OPEN;
+        }
+        let triple = fstring_quotes().is_some_and(|(_, triple)| triple);
+        let start = c.pos();
+        while !c.at_end() {
+            match c.peek() {
+                b'}' => break,
+                b'{' if c.peek_at(1) == b'{' => c.bump_n(2),
+                b'{' => break,
+                b'\n' | b'\r' if !triple => break,
+                _ => c.bump(),
+            }
+        }
+        if matches!(c.peek(), b'\n' | b'\r') && !triple {
+            // A spec does not outlive its line in a one-line f-string either.
+            c.bump();
+            c.eat(b'\n');
+            abandon_string();
+            return FSTRING_BAD;
+        }
+        if c.pos() == start {
+            // A brace the checks above did not take: consume it so the loop
+            // always advances, and leave the rest to the parser.
+            c.bump();
+        }
+        return FSTRING_SPEC_TEXT;
+    }
+    if field.depth == 0 {
+        match c.peek() {
+            b'}' => {
+                c.bump();
+                close_field();
+                return FSTRING_FIELD_CLOSE;
+            }
+            // `:=` is the walrus, not a format spec.
+            b':' if c.peek_at(1) != b'=' => {
+                c.bump();
+                with_field(|field| field.spec = true);
+                return COLON;
+            }
+            b'\n' | b'\r' if !fstring_quotes().is_some_and(|(_, triple)| triple) => {
+                // A one-line f-string cannot hold this field: the string ends
+                // badly at its line, as it does between fields.
+                c.bump();
+                c.eat(b'\n');
+                abandon_string();
+                return FSTRING_BAD;
+            }
+            _ => {}
+        }
+    }
+    let kind = lex(c);
+    match kind {
+        LPAREN | LBRACKET | LBRACE => with_field(|field| field.depth += 1),
+        RPAREN | RBRACKET | RBRACE => with_field(|field| field.depth = field.depth.saturating_sub(1)),
+        _ => {}
+    }
+    kind
 }
 
 fn keyword(text: &[u8]) -> Kind {
@@ -556,36 +734,23 @@ fn keyword(text: &[u8]) -> Kind {
 }
 
 /// A string from its opening quote. A one-line string ends at its line if it
-/// does not close there; a triple-quoted one runs to the end of the file.
-///
-/// Fields of a one-line f-string may span lines (Python 3.12). Such a string
-/// is taken whole only if it then closes; otherwise it is lexed again with
-/// fields ending at the line, so a broken one costs one line.
-fn string(c: &mut Cursor, code: bool) -> Kind {
+/// does not close there; a triple-quoted one runs to the end of the file. An
+/// f-string never comes here: its quotes and its fields have tokens of their
+/// own, so the expression in a field is parsed.
+fn string(c: &mut Cursor) -> Kind {
     let quote = c.peek();
     let triple = c.peek_at(1) == quote && c.peek_at(2) == quote;
-    let open = if triple { 3 } else { 1 };
-    if code && !triple {
-        let mut trial = Cursor::new(c.rest());
-        trial.bump_n(open);
-        if string_body(&mut trial, quote, false, true, true) {
-            c.bump_n(trial.pos());
-            return STR;
-        }
-    }
-    c.bump_n(open);
-    if string_body(c, quote, triple, code, false) { STR } else { BAD_STR }
+    c.bump_n(if triple { 3 } else { 1 });
+    if string_body(c, quote, triple) { STR } else { BAD_STR }
 }
 
 /// The rest of a string after its opening quotes. True if it closed.
-fn string_body(c: &mut Cursor, quote: u8, triple: bool, code: bool, spanning: bool) -> bool {
+fn string_body(c: &mut Cursor, quote: u8, triple: bool) -> bool {
     loop {
         if c.at_end() {
             return false;
         }
         match c.peek() {
-            // A backslash never escapes a brace: `rf"\{{"` is a backslash and `{`.
-            b'\\' if code && matches!(c.peek_at(1), b'{' | b'}') => c.bump(),
             b'\\' => c.bump_n(2),
             byte if byte == quote => {
                 if !triple {
@@ -599,90 +764,6 @@ fn string_body(c: &mut Cursor, quote: u8, triple: bool, code: bool, spanning: bo
                 c.bump();
             }
             b'\n' | b'\r' if !triple => return false,
-            b'{' if code => {
-                if c.peek_at(1) == b'{' {
-                    c.bump_n(2);
-                } else {
-                    c.bump();
-                    field(c, quote, triple || spanning);
-                }
-            }
-            _ => c.bump(),
-        }
-    }
-}
-
-/// An f-string replacement field after its `{`, through its `}`. Strings
-/// inside may reuse the outer quote (Python 3.12). In a one-line string a line
-/// break ends the field, so a broken field cannot swallow the file.
-fn field(c: &mut Cursor, quote: u8, triple: bool) {
-    let mut depth = 0u32;
-    loop {
-        if c.at_end() {
-            return;
-        }
-        match c.peek() {
-            b'\'' | b'"' => {
-                let inner = c.peek();
-                let inner_triple = c.peek_at(1) == inner && c.peek_at(2) == inner;
-                if !inner_triple && !triple && inner == quote && depth == 0 && matches!(c.peek_at(1), b'\n' | b'\r' | 0) {
-                    // `f"{x"` then the line ends: the outer string's end.
-                    return;
-                }
-                string(c, false);
-            }
-            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
-                let start = c.rest();
-                let length = c.eat_while(is_word_byte);
-                if matches!(c.peek(), b'\'' | b'"') {
-                    if let Some(code) = string_prefix(&start[..length]) {
-                        string(c, code);
-                    }
-                }
-            }
-            b'(' | b'[' | b'{' => {
-                depth += 1;
-                c.bump();
-            }
-            b')' | b']' => {
-                depth = depth.saturating_sub(1);
-                c.bump();
-            }
-            b'}' => {
-                c.bump();
-                if depth == 0 {
-                    return;
-                }
-                depth -= 1;
-            }
-            b':' if depth == 0 => {
-                c.bump();
-                return spec(c, quote, triple);
-            }
-            b'\n' | b'\r' if !triple => return,
-            _ => c.bump(),
-        }
-    }
-}
-
-/// A format spec after its `:`, through the field's `}`. It may hold fields.
-fn spec(c: &mut Cursor, quote: u8, triple: bool) {
-    loop {
-        if c.at_end() {
-            return;
-        }
-        match c.peek() {
-            b'{' => {
-                c.bump();
-                field(c, quote, triple);
-            }
-            b'}' => {
-                c.bump();
-                return;
-            }
-            byte if byte == quote => return,
-            b'\n' | b'\r' if !triple => return,
-            b'\\' => c.bump_n(2),
             _ => c.bump(),
         }
     }
