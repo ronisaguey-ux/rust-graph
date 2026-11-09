@@ -11,10 +11,13 @@
 //! so nesting, qualified names and call arguments are facts, not inference.
 //!
 //! What is a definition, a call or an import is per language and written down as
-//! data (`PY_DEFS`, `JS_DEFS`, `PY_CALLS`, `PY_IMPORTS`), selected by [`kinds`];
-//! the walk itself is language neutral. Python, JavaScript, TypeScript and TSX
-//! have tables; the other grammars fall back to the module symbol until their
-//! table is written.
+//! data (`PY_DEFS`, `JS_DEFS`, `RS_DEFS`, `PY_CALLS`, `RS_CALLS`, ...), selected
+//! by [`kinds`]; the walk itself is language neutral. Python, JavaScript,
+//! TypeScript and TSX have tables, and Rust's live in their own region below.
+//! JSON has empty tables on purpose: a data file's only fact is the module
+//! symbol, so [`lang_for`] answers `None` for it and the lexer path is kept.
+//! The other grammars fall back to the module symbol until their table is
+//! written.
 //!
 //! Requires the `deep` and `parser` features: the Cst comes from
 //! `deep_integration`, which names the runtime's kind table, and the runtime
@@ -48,6 +51,9 @@ struct Kinds {
     soft: &'static [&'static str],
     /// `true` for the brace languages whose declarations are `const x = ...`.
     js: bool,
+    /// `true` for Rust: `impl` names itself from its type, `use` is a path
+    /// import, and the flow events are expressions, not statements.
+    rust: bool,
 }
 
 /// One definition node kind: where its name sits, where its parameters sit and
@@ -85,6 +91,36 @@ const JS_CALLS: &[&str] = &["call_expression", "new_expression"];
 const PY_IMPORTS: &[&str] = &["import_statement", "import_from_statement"];
 const JS_IMPORTS: &[&str] = &["import_statement", "export_statement"];
 
+// -- Rust and JSON (L3). Tables and walk arms live together below so a field
+// -- adding another language touches one region, not this one.
+
+/// Rust declarations the lexer files as symbols. `impl` is not here: its name
+/// is the type it implements, not a child kind, so [`Walker::rust_impl`] reads
+/// it. A trait's methods take the trait as their owner, which is why a trait is
+/// a container and a struct (no methods of its own in the grammar) is too.
+const RS_DEFS: &[Def] = &[
+    Def { kind: "struct_item", name: &["type_identifier", "identifier"], params: None, container: true },
+    Def { kind: "enum_item", name: &["type_identifier", "identifier"], params: None, container: true },
+    Def { kind: "union_item", name: &["type_identifier", "identifier"], params: None, container: true },
+    Def { kind: "trait_item", name: &["type_identifier", "identifier"], params: None, container: true },
+    Def { kind: "mod_item", name: &["identifier"], params: None, container: true },
+    Def { kind: "function_item", name: &["identifier"], params: Some("parameters"), container: false },
+];
+
+/// Rust calls. A macro invocation is not a call to the lexer — `assert_eq!(a)`
+/// is a merge of names — so it is read by [`Walker::rust_form`], not here.
+const RS_CALLS: &[&str] = &["call_expression"];
+
+/// Rust imports: `use` declarations. `mod` is a declaration, not an import.
+const RS_IMPORTS: &[&str] = &["use_declaration"];
+
+/// JSON is data: no definitions, no calls, no imports. The tables are empty on
+/// purpose and [`lang_for`] does not answer for `JSON`; the record is the
+/// module symbol, which is what a data file can honestly say.
+const JSON_DEFS: &[Def] = &[];
+const JSON_CALLS: &[&str] = &[];
+const JSON_IMPORTS: &[&str] = &[];
+
 /// Everything the walk needs to know about one language.
 /// Python's soft keywords: `match x:` is a statement, `match.group` is an
 /// attribute of a name, and only the position tells them apart. This grammar
@@ -93,14 +129,16 @@ const PY_SOFT: &[&str] = &["match", "case", "type", "_"];
 
 fn kinds(lang: Lang) -> Kinds {
     match lang {
-        Lang::Python => Kinds { definitions: PY_DEFS, calls: PY_CALLS, imports: PY_IMPORTS, soft: PY_SOFT, js: false },
+        Lang::Python => Kinds { definitions: PY_DEFS, calls: PY_CALLS, imports: PY_IMPORTS, soft: PY_SOFT, js: false, rust: false },
+        Lang::Rust => Kinds { definitions: RS_DEFS, calls: RS_CALLS, imports: RS_IMPORTS, soft: &[], js: false, rust: true },
+        Lang::Json => Kinds { definitions: JSON_DEFS, calls: JSON_CALLS, imports: JSON_IMPORTS, soft: &[], js: false, rust: false },
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
-            Kinds { definitions: JS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: &[], js: true }
+            Kinds { definitions: JS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: &[], js: true, rust: false }
         }
         // The other grammars have no definition table here yet; the walk still
         // returns a record with the module symbol, which is what the caller
         // falls back on. Named so a caller can tell "no facts" from "empty file".
-        _ => Kinds { definitions: &[], calls: &[], imports: &[], soft: &[], js: false },
+        _ => Kinds { definitions: &[], calls: &[], imports: &[], soft: &[], js: false, rust: false },
     }
 }
 
@@ -156,6 +194,10 @@ pub fn lang_for(tag: &str) -> Option<Lang> {
         "PY" => Some(Lang::Python),
         "JS" => Some(Lang::JavaScript),
         "TS" => Some(Lang::TypeScript),
+        "RS" => Some(Lang::Rust),
+        // JSON stays out: a data file has no symbols, calls or imports to
+        // read, so the CST would add the module symbol the lexer already
+        // writes and nothing else. See `tests/facts_rust_json.rs`.
         _ => None,
     }
 }
@@ -1789,6 +1831,7 @@ impl<'a> Walker<'a> {
             _ => self.leaf_name(id).filter(|path| !path.is_empty()),
         }
     }
+
 }
 
 /// Byte offset of the start of each line, so a node's line is a binary search.
