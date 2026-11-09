@@ -751,9 +751,9 @@ pub fn lex_typescript(c: &mut Cursor) -> Kind {
 }
 
 /// The grammar's step function, for the mode wrapper: the dialect the entry
-/// point that called it set.
+/// point that called it set, and the JSX construct that is open, if any.
 fn lex_dialect(c: &mut Cursor) -> Kind {
-    lex(c, JSX_DIALECT.with(|jsx| jsx.get()))
+    jsx_step(c, JSX_DIALECT.with(|jsx| jsx.get()))
 }
 
 /// One token at the cursor, for JavaScript and TSX: `<` where an operand
@@ -771,10 +771,13 @@ pub fn lex_jsx(c: &mut Cursor) -> Kind {
 
 fn lex(c: &mut Cursor, jsx: bool) -> Kind {
     if c.pos() == 0 {
-        // A new file starts outside every template, and whatever state a parse
-        // that stopped inside one left behind is not this file's.
+        // A new file starts outside every template and JSX construct, and
+        // whatever state a parse that stopped inside one left behind is not
+        // this file's.
         TEMPLATES.with(|depth| depth.set(0));
         SUBSTITUTIONS.with(|stack| stack.borrow_mut().clear());
+        JSX.with(|stack| stack.borrow_mut().clear());
+        SERIAL.with(|serial| serial.set(0));
     }
     match c.peek() {
         b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c' => {
@@ -825,7 +828,7 @@ fn lex(c: &mut Cursor, jsx: bool) -> Kind {
             if regex(c) { REGEX } else { BAD_LITERAL }
         }
         b'<' if jsx && !ends_operand(c.previous()) && c.previous() != KW_FUNCTION && (is_word_start(c.peek_at(1)) || c.peek_at(1) == b'>') && !generic_arrow(c.rest()) => {
-            if jsx_element(c) { JSX } else { BAD_LITERAL }
+            jsx_open(c)
         }
         b'0'..=b'9' => number(c),
         b'.' if c.peek_at(1).is_ascii_digit() => number(c),
@@ -852,7 +855,7 @@ fn ends_statement(c: &Cursor) -> bool {
 /// Whether a token of this kind can end an operand, so that a `/` after it
 /// divides and a `<` after it compares.
 fn ends_operand(kind: Kind) -> bool {
-    matches!(kind, IDENT | PRIVATE | NUMBER | STRING | TEMPLATE_END | REGEX | JSX | BAD_LITERAL | RPAREN | RBRACKET | RBRACE | KW_THIS | KW_SUPER | KW_TRUE | KW_FALSE | KW_NULL | INCREMENT | DECREMENT)
+    matches!(kind, IDENT | PRIVATE | NUMBER | STRING | TEMPLATE_END | REGEX | BAD_LITERAL | JSX_TAG_END | JSX_SELF_CLOSING | JSX_FRAGMENT_CLOSE | JSX_EXPR_CLOSE | RPAREN | RBRACKET | RBRACE | KW_THIS | KW_SUPER | KW_TRUE | KW_FALSE | KW_NULL | INCREMENT | DECREMENT)
         || (KW_ASYNC..=KW_GLOBAL).contains(&kind)
 }
 
@@ -986,31 +989,6 @@ fn number(c: &mut Cursor) -> Kind {
     NUMBER
 }
 
-/// A template literal scanned whole, from its backtick, including each
-/// substitution's braces: false if it never closes. Only the JSX scanner uses
-/// this — a JSX element is one token, so a template inside it is scanned, not
-/// parsed.
-fn skip_template(c: &mut Cursor) -> bool {
-    c.bump();
-    while !c.at_end() {
-        match c.peek() {
-            b'\\' => c.bump_n(2),
-            b'`' => {
-                c.bump();
-                return true;
-            }
-            b'$' if c.peek_at(1) == b'{' => {
-                c.bump();
-                if !code_in_braces(c) {
-                    return false;
-                }
-            }
-            _ => c.bump(),
-        }
-    }
-    false
-}
-
 thread_local! {
     /// How many template literals the `TEMPLATE_BODY` frame is inside,
     /// innermost last: a substitution's frame belongs to the template that
@@ -1021,6 +999,101 @@ thread_local! {
     /// `TEMPLATE_SUBSTITUTION_OPEN` and popped on the matching close, so
     /// `${ {'a': 1}['a'] }` closes at its own brace.
     static SUBSTITUTIONS: RefCell<Vec<Substitution>> = const { RefCell::new(Vec::new()) };
+    /// One frame per JSX construct that is open, innermost last: the element
+    /// (its tag, its children, or its closing tag) or an expression `{...}`.
+    /// Pushed at `<`, `<>` and `{`, popped where the construct ends. The frame
+    /// is what makes `<div>{<span/>}</div>` work: while an expression frame is
+    /// on top, the step is ordinary code again, and an element opened in it
+    /// pushes its frames above it.
+    static JSX: RefCell<Vec<JsxFrame>> = const { RefCell::new(Vec::new()) };
+    /// The order in which the open constructs were entered, so the `}` that
+    /// two of them could close goes to the inner one: a substitution opened in
+    /// a JSX expression closes before the expression does, and the reverse
+    /// after the template's body. One counter for both stacks.
+    static SERIAL: Cell<u64> = const { Cell::new(0) };
+}
+
+fn next_serial() -> u64 {
+    SERIAL.with(|serial| {
+        let next = serial.get() + 1;
+        serial.set(next);
+        next
+    })
+}
+
+/// What the innermost open JSX construct expects next.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JsxState {
+    /// An opening tag: its name, attributes and `>` or `/>`.
+    Tag,
+    /// `</name>`: the name and the `>` that pops the element.
+    ClosingTag,
+    /// Between an element's tags: text, `{...}` or a nested element.
+    Children,
+    /// A `{...}` part: ordinary code up to the brace that matches it.
+    Expression,
+}
+
+/// One open JSX construct.
+#[derive(Clone, Copy)]
+struct JsxFrame {
+    state: JsxState,
+    /// Openers minus closers inside an `Expression` frame, so its own `}`
+    /// closes it and a dict's or a block's brace does not.
+    depth: u32,
+    /// Open type-argument lists in a tag: `<Select<T | false> />` has one, and
+    /// the `>` that closes it is not the tag's own end.
+    angles: u32,
+    /// When the construct was entered, against a substitution's stamp.
+    serial: u64,
+}
+
+/// The state of the innermost open JSX construct, or `None` in ordinary code.
+fn jsx_state() -> Option<JsxState> {
+    JSX.with(|stack| stack.borrow().last().map(|frame| frame.state))
+}
+
+fn jsx_push(state: JsxState) {
+    JSX.with(|stack| stack.borrow_mut().push(JsxFrame { state, depth: 0, angles: 0, serial: next_serial() }));
+}
+
+/// The innermost frame's open type-argument lists, and the stamp of the frame
+/// the count belongs to: the callee may push a frame of its own.
+fn jsx_angles() -> (u32, usize) {
+    JSX.with(|stack| {
+        let stack = stack.borrow();
+        (stack.last().map_or(0, |frame| frame.angles), stack.len().saturating_sub(1))
+    })
+}
+
+/// The innermost frame's stamp, for deciding which open construct a `}` closes.
+fn jsx_serial() -> Option<u64> {
+    JSX.with(|stack| stack.borrow().last().map(|frame| frame.serial))
+}
+
+fn jsx_pop() {
+    JSX.with(|stack| {
+        stack.borrow_mut().pop();
+    });
+}
+
+/// The innermost frame's state, which a tag's `>` or `/>` changes.
+fn jsx_set(state: JsxState) {
+    JSX.with(|stack| {
+        if let Some(frame) = stack.borrow_mut().last_mut() {
+            frame.state = state;
+        }
+    });
+}
+
+/// Change the innermost frame at `index`, which is the one that was on top
+/// before the step: the step may have pushed a frame above it.
+fn jsx_update(index: usize, change: impl FnOnce(&mut JsxFrame)) {
+    JSX.with(|stack| {
+        if let Some(frame) = stack.borrow_mut().get_mut(index) {
+            change(frame);
+        }
+    });
 }
 
 /// What one open substitution holds.
@@ -1031,6 +1104,8 @@ struct Substitution {
     /// The template the substitution was opened in, as the nesting count. A
     /// broken template abandons every substitution opened in it.
     template: usize,
+    /// When the substitution was entered, against a JSX frame's stamp.
+    serial: u64,
 }
 
 /// The backtick: the bytes after it are text until a substitution's `${` or
@@ -1047,7 +1122,7 @@ fn pop_template() {
 
 fn open_substitution() {
     let template = TEMPLATES.with(|depth| depth.get());
-    SUBSTITUTIONS.with(|stack| stack.borrow_mut().push(Substitution { depth: 0, template }));
+    SUBSTITUTIONS.with(|stack| stack.borrow_mut().push(Substitution { depth: 0, template, serial: next_serial() }));
 }
 
 fn close_substitution() {
@@ -1128,18 +1203,18 @@ pub fn lex_template_code(c: &mut Cursor) -> Kind {
     let Some(frame) = SUBSTITUTIONS.with(|stack| stack.borrow().last().copied()) else {
         // No substitution is open, so this frame and the mode stack disagree:
         // lexing code cannot lose a token, and the parser still gets a tree.
-        return lex(c, JSX_DIALECT.with(|jsx| jsx.get()));
+        return jsx_step(c, JSX_DIALECT.with(|jsx| jsx.get()));
     };
     if c.at_end() {
         abandon_template();
         return TEMPLATE_BAD;
     }
-    if frame.depth == 0 && c.peek() == b'}' {
+    if frame.depth == 0 && c.peek() == b'}' && jsx_serial().map_or(true, |serial| serial < frame.serial) {
         c.bump();
         close_substitution();
         return TEMPLATE_SUBSTITUTION_CLOSE;
     }
-    let kind = lex(c, JSX_DIALECT.with(|jsx| jsx.get()));
+    let kind = jsx_step(c, JSX_DIALECT.with(|jsx| jsx.get()));
     match kind {
         LPAREN | LBRACKET | LBRACE => with_substitution(|frame| frame.depth += 1),
         RPAREN | RBRACKET | RBRACE => with_substitution(|frame| frame.depth = frame.depth.saturating_sub(1)),
