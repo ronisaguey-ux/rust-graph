@@ -251,7 +251,14 @@ mod tests {
     }
 
     fn fixtures() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        if root.is_dir() {
+            return root;
+        }
+        // The same file is compiled by `rust-graph` through `#[path]` in
+        // `src/deep/mod.rs`; there the manifest directory is that crate's, so
+        // the fixtures sit beside this source file instead.
+        Path::new(file!()).parent().map(|dir| dir.join("../../fixtures")).unwrap_or(root)
     }
 
     fn names_in(dir: &Path) -> Vec<String> {

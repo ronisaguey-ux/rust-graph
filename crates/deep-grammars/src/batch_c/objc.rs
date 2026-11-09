@@ -10,7 +10,7 @@
 //! (`NSArray<NSString *> *`), NSString format-checking attributes, and
 //! property `getter=`/`setter=` selectors are read as plain identifiers.
 
-use crate::batch_c::{directive, is_word_byte, is_word_start, literal_prefix, number, quoted, trivia};
+use super::{directive, is_word_byte, is_word_start, literal_prefix, number, quoted, trivia};
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, UNKNOWN};
 
