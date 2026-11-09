@@ -1009,3 +1009,130 @@ fn next_body() -> bool {
 
 /// The `PARAMETER` mode's step: the text of `${...}`, a nested expansion, or the
 /// `}` that closes it.
+pub fn lex_parameter(c: &mut Cursor) -> Kind {
+    if top_kind() != Some(FrameKind::Parameter) {
+        return lex_sh(c);
+    }
+    if c.at_end() {
+        pop_frame();
+        return PARAMETER_TEXT;
+    }
+    match c.peek() {
+        b'}' => {
+            c.bump();
+            pop_frame();
+            PARAMETER_CLOSE
+        }
+        b'`' => {
+            c.bump();
+            push_frame(FrameKind::Backtick);
+            BACKTICK_OPEN
+        }
+        b'$' if c.peek_at(1) == b'(' && c.peek_at(2) == b'(' => open_arithmetic(c, 3, 2),
+        b'$' if c.peek_at(1) == b'(' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Substitution);
+            SUBST_OPEN
+        }
+        b'$' if c.peek_at(1) == b'{' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Parameter);
+            PARAMETER_OPEN
+        }
+        b'$' if dollar_starts(c) => {
+            variable(c);
+            VARIABLE
+        }
+        _ => {
+            let start = c.pos();
+            while !c.at_end() {
+                match c.peek() {
+                    b'}' => break,
+                    b'`' => break,
+                    b'$' if dollar_starts(c) => break,
+                    _ => c.bump_char(),
+                }
+            }
+            if c.pos() == start {
+                c.bump_char();
+            }
+            PARAMETER_TEXT
+        }
+    }
+}
+
+/// The `ARITHMETIC` mode's step: the balanced text, then the `))`.
+pub fn lex_arithmetic(c: &mut Cursor) -> Kind {
+    if top_kind() != Some(FrameKind::Arithmetic) {
+        return lex_sh(c);
+    }
+    if c.at_end() {
+        pop_frame();
+        return ARITHMETIC_BAD;
+    }
+    if c.peek() == b')' && c.peek_at(1) == b')' {
+        c.bump_n(2);
+        pop_frame();
+        return ARITHMETIC_CLOSE;
+    }
+    // The text, up to the `))` that balances the opener. A `(` opens one more
+    // and a `)` closes one; the pair that would close the whole expression is
+    // left for the next step, so one token always advances.
+    let mut depth = top_depth();
+    let start = c.pos();
+    while !c.at_end() {
+        if c.peek() == b')' && c.peek_at(1) == b')' && depth <= 2 {
+            break;
+        }
+        match c.peek() {
+            b'(' => {
+                depth += 1;
+                c.bump();
+            }
+            b')' => {
+                if depth > 2 {
+                    depth -= 1;
+                }
+                c.bump();
+            }
+            _ => c.bump_char(),
+        }
+    }
+    if c.pos() == start {
+        c.bump_char();
+    }
+    ARITHMETIC_TEXT
+}
+
+/// The `TEST` mode's step: `[[ ... ]]` with `<`, `>` and `=` as operators.
+pub fn lex_test(c: &mut Cursor) -> Kind {
+    if top_kind() != Some(FrameKind::Test) {
+        return lex_sh(c);
+    }
+    if c.starts_with(b"]]") {
+        c.bump_n(2);
+        pop_frame();
+        return TEST_CLOSE;
+    }
+    match c.peek() {
+        b'<' | b'>' | b'=' => {
+            c.bump();
+            if c.peek() == b'=' {
+                c.bump();
+            }
+            if c.peek() == b'~' {
+                c.bump();
+            }
+            TEST_OPERATOR
+        }
+        b'!' if c.peek_at(1) == b'=' => {
+            c.bump_n(2);
+            if c.peek() == b'~' {
+                c.bump();
+            }
+            TEST_OPERATOR
+        }
+        _ => lex_sh(c),
+    }
+}
+
