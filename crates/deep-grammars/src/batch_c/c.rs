@@ -153,8 +153,11 @@ rust_graph_deep::grammar! { C {
         | _default_declaration,
     /// `static const Foo *f(void);`: a keyword-qualified typedef name.
     specified_user_declaration: declaration_specifiers user_type_name (_init_declarator % ",") ";",
-    /// `Foo x;`: two names in a row, which no expression can be.
-    bare_user_declaration: user_type_name (_init_declarator % ",") ";",
+    /// `Foo x;`: two names in a row, which no expression can be. The declarator
+    /// must start with its name, so this can never begin `Foo (`.
+    bare_user_declaration: user_type_name _named_init_declarator ("," _named_init_declarator)* ";",
+    _named_init_declarator: _named_declarator _attribute* ["=" _initializer],
+    _named_declarator: IDENT _declarator_suffix*,
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     /// A typedef name where a type specifier is expected.
     user_type_name: IDENT,
@@ -175,9 +178,12 @@ rust_graph_deep::grammar! { C {
     asm_statement: "asm" _asm_qualifier* asm_body ";",
     _asm_qualifier: "volatile" | "inline" | "goto",
     asm_body: "(" [asm_template] _asm_operand_list* ")",
-    asm_template: string,
+    /// A template is string literals with macros spliced between them:
+    /// `"addu "REG_FP",%0\n"`.
+    asm_template: (string | IDENT)+,
     _asm_operand_list: ":" (_asm_operand %? ","),
-    _asm_operand: string [asm_operand_expression],
+    _asm_operand: [asm_operand_name] (string | IDENT) [asm_operand_expression],
+    asm_operand_name: "[" IDENT "]",
     asm_operand_expression: "(" _expression ")",
 
     declaration_specifiers: _declaration_specifier+,
@@ -193,9 +199,12 @@ rust_graph_deep::grammar! { C {
     /// `__attribute__((packed, aligned(4)))` and `__declspec(dllexport)`.
     _attribute: ("__attribute__" | "__declspec") attribute_arguments,
     attribute_arguments: "(" attribute_body ")",
-    attribute_body: attribute_group | _attribute_argument % ",",
+    attribute_body: attribute_group | _attribute_argument ("," _attribute_argument)*,
     attribute_group: "(" (_attribute_argument %? ",") ")",
-    _attribute_argument: _expression@assign | parenthesized_expression,
+    /// An attribute argument is a name with an optional call: `packed`,
+    /// `aligned(4)`, `optimize("O2")`. It never starts with `(`, so the group
+    /// above is told apart from a bare list in one token.
+    _attribute_argument: IDENT [arguments],
 
     type_specifier:
         "void" | "char" | "short" | "int" | "long" | "float" | "double"
@@ -207,18 +216,24 @@ rust_graph_deep::grammar! { C {
     typeof_arguments: "(" _expression ")",
 
     struct_or_union_specifier: ("struct" | "union") [IDENT] [struct_body],
-    struct_body: "{" (_struct_declaration | ";" | macro_field)* "}",
+    struct_body: "{" (_struct_declaration | ";")* "}",
     _struct_declaration:
-        &(declaration_specifiers user_type_name) specified_struct_declaration
-        | user_struct_declaration
-        | declaration_specifiers (_struct_declarator % ",") ";",
-    /// `PyObject *weakreflist;`: a typedef name and its declarator. A struct
+        &(user_type_name _member_declarator_list ";") user_struct_declaration
+        | declaration_specifiers [user_type_name] (_struct_declarator % ",") ";"
+        | macro_field,
+    /// `PyObject *weakreflist;`: a typedef name and its declarators. A struct
     /// body holds declarations only, so the `x * y;` ambiguity does not exist
     /// here and the bare name is safe to accept.
-    user_struct_declaration: user_type_name (_struct_declarator % ",") ";",
-    specified_struct_declaration: declaration_specifiers user_type_name (_struct_declarator % ",") ";",
-    /// A field macro that expands to whole members: `PyObject_HEAD`.
+    user_struct_declaration: user_type_name _member_declarator_list ";",
+    _member_declarator_list: _member_declarator ("," _member_declarator)*,
+    /// A field macro that expands to whole members and has no declarator and
+    /// no semicolon of its own: `PyObject_HEAD`. The predicate above claims
+    /// every name that does have one, so this is the only reading left.
     macro_field: IDENT,
+    /// A struct member's declarator: no parameter list, so a bare field macro
+    /// can never be mistaken for the start of `Foo Bar(...)`.
+    _member_declarator: pointer* _member_direct _attribute* [":" _expression@assign],
+    _member_direct: (IDENT | parenthesized_declarator) array_suffix*,
     _struct_declarator: _declarator _attribute* [":" _expression@assign],
 
     enum_specifier: "enum" [IDENT] [enum_body],
@@ -235,18 +250,13 @@ rust_graph_deep::grammar! { C {
     array_suffix: "[" [_expression] "]",
     parameter_list: "(" (_parameter % ",") ")",
     _parameter:
-        &(declaration_specifiers user_type_name) specified_user_parameter
-        | parameter_declaration
+        declaration_specifiers [user_type_name] [_declarator]
         | user_parameter
-        | _unnamed_user_parameter
         | "...",
-    parameter_declaration: declaration_specifiers [_declarator],
-    /// `const Foo *self`: a qualifier and then a typedef name.
-    specified_user_parameter: declaration_specifiers user_type_name [_declarator],
-    /// `Foo *self`: a typedef name with no qualifier.
-    user_parameter: user_type_name _declarator,
-    /// `Foo*`: an unnamed parameter of typedef type.
-    _unnamed_user_parameter: user_type_name _abstract_declarator,
+    /// `Foo *self`, `Foo*`, `Foo`: a typedef name and either a named or an
+    /// abstract declarator.
+    user_parameter: user_type_name _declarator_or_abstract,
+    _declarator_or_abstract: pointer* [direct_declarator] abstract_suffix*,
 
     _abstract_declarator: pointer+ abstract_suffix*,
     abstract_suffix: array_suffix | parameter_list,
@@ -326,7 +336,9 @@ rust_graph_deep::grammar! { C {
     _member: IDENT,
     string: STR+,
     cast_expression: cast_type _expression@unary,
-    cast_type: "(" type_name ")",
+    cast_type: "(" _cast_type_body ")",
+    /// `(int *)`, `(struct s *)` and `(Foo *)`: a keyword type or a typedef name.
+    _cast_type_body: type_name | user_type_name [_abstract_declarator],
     sizeof_expression: "sizeof" sizeof_operand,
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     alignof_expression: "_Alignof" cast_type,
