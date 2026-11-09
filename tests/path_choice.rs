@@ -114,7 +114,9 @@ fn a_lost_fact_keeps_the_lexer_and_is_counted_as_a_fallback() {
     let row = source_row(&json, "opaque.js");
     assert!(row.contains("\"path_choice\":\"lexer:fallback\""), "{row}");
     assert!(row.contains("\"parsed_by\":\"lexer\""), "{row}");
-    assert!(row.contains("\"deep_fallback\":\"the CST record lost facts the lexer found\""), "{row}");
+    // The reason names the fact, so a reader never has to re-run both paths to
+    // find out what the CST missed.
+    assert!(row.contains("\"deep_fallback\":\"the CST lost a call"), "{row}");
     // The call inside the JSX attribute is only in the lexer's record, so it
     // survives the fallback.
     assert!(json.contains(r#""calls":[["handle",2,null,null,0]]"#), "{json}");

@@ -289,7 +289,10 @@ fn auto_falls_back_when_the_cst_record_loses_what_the_lexer_found() {
     let (auto, _) = tree.json(&["--stdout", "--no-cache"]);
     let lossy = source_row(&auto, "app/lossy.py");
     assert!(lossy.contains("\"parsed_by\":\"lexer\""), "{lossy}");
-    assert!(lossy.contains("\"deep_fallback\":\"the CST record lost facts the lexer found\""), "{lossy}");
+    // The fallback names the fact it missed, not just the fact that it missed
+    // one: a reader must be able to see what the CST lost without re-running
+    // both paths by hand.
+    assert!(lossy.contains("\"deep_fallback\":\"the CST lost a "), "{lossy}");
     assert!(source_row(&auto, "app/clean.py").contains("\"parsed_by\":\"deep\""), "{auto}");
     assert!(auto.contains(r#""deep":2,"lexer":1,"fallbacks":1"#), "{auto}");
     // The facts are the lexer's: the star import survives.
