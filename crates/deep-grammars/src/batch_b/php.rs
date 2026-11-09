@@ -535,33 +535,71 @@ rust_graph_deep::grammar! { PHP {
     empty_expression: "empty" empty_arguments,
     empty_arguments: "(" _expression ")",
     list_expression: "list" list_arguments,
-    list_arguments: "(" (VARIABLE %? ",") ")",
+    list_arguments: "(" (_expression %? ",") ")",
 
     // ---- types ----
 
-    _type: ["?"] _type_name ("|" _type_name)*,
-    _type_name: [BACKSLASH] (_name | "array" | "self" | "parent" | "static") (BACKSLASH _name)*,
+    _type: ["?"] _type_atom (("|" | "&") _type_atom)*,
+    _type_atom: _type_name | parenthesized_type,
+    /// `(A&B)|C`: a DNF type.
+    parenthesized_type: "(" _type ")",
+    _type_name: [BACKSLASH] _type_word (BACKSLASH _word)*,
+    _type_word: IDENT | "array" | "self" | "parent" | "static" | "null" | "false" | "true",
+    _word: IDENT,
 } }
 
-/// One token at the cursor.
-pub fn lex(c: &mut Cursor) -> Kind {
+thread_local! {
+    /// The marker of every heredoc the `HEREDOC` mode is inside, innermost last:
+    /// a heredoc opened inside an interpolated string restores the outer one.
+    static HEREDOC_MARKERS: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    /// One frame per open interpolation: the brackets opened inside it. The
+    /// frame is pushed when the lexer emits `INTERPOLATION_OPEN` and popped on
+    /// the `}` that matches it, so `"{$a["k"]}"` closes at the right brace.
+    static FIELDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The HTML mode, mode 0: the file starts here. Bytes are `inline_html` up to
+/// the tag that opens code. Only `<?php` and `<?=` open it: short tags would
+/// turn `<?xml` in a template into a PHP run.
+pub fn lex_html(c: &mut Cursor) -> Kind {
+    if c.pos() == 0 && c.starts_with(b"\xef\xbb\xbf") {
+        c.bump_n(3);
+        return WHITESPACE;
+    }
+    if c.starts_with(b"<?php") {
+        c.bump_n(5);
+        return OPEN_TAG;
+    }
+    if c.starts_with(b"<?=") {
+        c.bump_n(3);
+        return ECHO_TAG;
+    }
+    let start = c.pos();
+    while !c.at_end() {
+        if c.peek() == b'<' && (c.starts_with(b"<?php") || c.starts_with(b"<?=")) {
+            break;
+        }
+        c.bump();
+    }
+    if c.pos() == start {
+        // A lone `<` that opens no tag: consume it so the step always advances.
+        c.bump();
+    }
+    INLINE_HTML
+}
+
+/// One token of PHP code: mode 0's other half, and the `PHP` mode itself.
+pub fn lex_php(c: &mut Cursor) -> Kind {
     match c.peek() {
         b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
             c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
-            WHITESPACE
-        }
-        0xef if c.starts_with(b"\xef\xbb\xbf") => {
-            c.bump_n(3);
             WHITESPACE
         }
         b'<' if c.starts_with(b"<?php") => {
             c.bump_n(5);
             OPEN_TAG
         }
-        b'<' if c.starts_with(b"<?=") => {
-            c.bump_n(3);
-            OPEN_TAG
-        }
+        b'<' if c.starts_with(b"<<<") => heredoc(c),
         b'?' if c.peek_at(1) == b'>' => {
             c.bump_n(2);
             CLOSE_TAG
@@ -569,6 +607,10 @@ pub fn lex(c: &mut Cursor) -> Kind {
         b'/' if c.peek_at(1) == b'/' => {
             c.eat_while(|byte| byte != b'\n' && byte != b'\r');
             COMMENT
+        }
+        b'#' if c.peek_at(1) == b'[' => {
+            c.bump_n(2);
+            ATTRIBUTE_START
         }
         b'#' => {
             c.eat_while(|byte| byte != b'\n' && byte != b'\r');
@@ -578,10 +620,19 @@ pub fn lex(c: &mut Cursor) -> Kind {
             block_comment(c);
             COMMENT
         }
-        b'\'' | b'"' | b'`' => string(c),
-        b'<' if c.starts_with(b"<<<") => heredoc(c),
+        b'\'' | b'`' => string(c),
+        b'"' => {
+            c.bump();
+            DQUOTE_START
+        }
         b'$' if is_word_start(c.peek_at(1)) => {
             c.bump();
+            c.eat_while(is_word_byte);
+            VARIABLE
+        }
+        /// `$$name` is one variable-variable token.
+        b'$' if c.peek_at(1) == b'$' && is_word_start(c.peek_at(2)) => {
+            c.bump_n(2);
             c.eat_while(is_word_byte);
             VARIABLE
         }
@@ -590,6 +641,177 @@ pub fn lex(c: &mut Cursor) -> Kind {
         byte if is_word_start(byte) => word(c),
         _ => operator(c),
     }
+}
+
+/// The `DQUOTE` mode: the text of a double-quoted string, its closing quote, or
+/// a `{$`/`${` that opens an interpolation. A lone `$` and a `{` not followed
+/// by one are text, which is what PHP itself decided.
+pub fn lex_dquote(c: &mut Cursor) -> Kind {
+    if c.at_end() {
+        return DQUOTE_BAD;
+    }
+    match c.peek() {
+        b'"' => {
+            c.bump();
+            return DQUOTE_END;
+        }
+        b'\\' => {
+            c.bump_n(2);
+            return DQUOTE_TEXT;
+        }
+        b'{' if c.peek_at(1) == b'$' => {
+            c.bump_n(2);
+            open_field();
+            return INTERPOLATION_OPEN;
+        }
+        b'$' if c.peek_at(1) == b'{' => {
+            c.bump_n(2);
+            open_field();
+            return INTERPOLATION_OPEN;
+        }
+        b'$' if is_word_start(c.peek_at(1)) => {
+            c.bump();
+            c.eat_while(is_word_byte);
+            return VARIABLE;
+        }
+        _ => {}
+    }
+    // Text up to the next quote, escape or interpolation.
+    loop {
+        if c.at_end() {
+            return DQUOTE_TEXT;
+        }
+        match c.peek() {
+            b'"' => return DQUOTE_TEXT,
+            b'\\' => return DQUOTE_TEXT,
+            b'{' if c.peek_at(1) == b'$' => return DQUOTE_TEXT,
+            b'$' if c.peek_at(1) == b'{' || is_word_start(c.peek_at(1)) => return DQUOTE_TEXT,
+            _ => c.bump(),
+        }
+    }
+}
+
+/// The `FIELD` mode: ordinary code, with one token that only exists inside an
+/// interpolation. At the field's own depth a `}` closes it; deeper, it is a
+/// block's or an array's brace and `lex_php` takes it.
+pub fn lex_field(c: &mut Cursor) -> Kind {
+    let Some(depth) = FIELDS.with(|fields| fields.borrow().last().copied()) else {
+        // No field is open and the frame disagrees with the mode stack: lexing
+        // code cannot lose a token, and the parser still gets a tree.
+        return lex_php(c);
+    };
+    if depth == 0 && c.peek() == b'}' {
+        c.bump();
+        close_field();
+        return INTERPOLATION_CLOSE;
+    }
+    let kind = lex_php(c);
+    match kind {
+        LPAREN | LBRACKET | LBRACE | ATTRIBUTE_START => with_field(|depth| *depth += 1),
+        RPAREN | RBRACKET | RBRACE => with_field(|depth| *depth = depth.saturating_sub(1)),
+        _ => {}
+    }
+    kind
+}
+
+/// The `HEREDOC` mode: the body of a heredoc up to its terminator line, one
+/// interpolation, or one `$name`.
+pub fn lex_heredoc(c: &mut Cursor) -> Kind {
+    let Some(marker) = HEREDOC_MARKERS.with(|markers| markers.borrow().last().cloned()) else {
+        return lex_php(c);
+    };
+    if c.at_end() {
+        HEREDOC_MARKERS.with(|markers| {
+            markers.borrow_mut().pop();
+        });
+        return HEREDOC_BAD;
+    }
+    if heredoc_terminator(c, &marker) {
+        c.bump_n(terminator_width(c, &marker));
+        HEREDOC_MARKERS.with(|markers| {
+            markers.borrow_mut().pop();
+        });
+        return HEREDOC_END;
+    }
+    match c.peek() {
+        b'{' if c.peek_at(1) == b'$' => {
+            c.bump_n(2);
+            open_field();
+            return INTERPOLATION_OPEN;
+        }
+        b'$' if c.peek_at(1) == b'{' => {
+            c.bump_n(2);
+            open_field();
+            return INTERPOLATION_OPEN;
+        }
+        b'$' if is_word_start(c.peek_at(1)) => {
+            c.bump();
+            c.eat_while(is_word_byte);
+            return VARIABLE;
+        }
+        _ => {}
+    }
+    let start = c.pos();
+    while !c.at_end() {
+        match c.peek() {
+            b'\n' => {
+                c.bump();
+                if heredoc_terminator(c, &marker) {
+                    break;
+                }
+            }
+            b'{' if c.peek_at(1) == b'$' => break,
+            b'$' if c.peek_at(1) == b'{' || is_word_start(c.peek_at(1)) => break,
+            b'\\' => c.bump_n(2),
+            _ => c.bump(),
+        }
+    }
+    if c.pos() == start {
+        c.bump();
+    }
+    DQUOTE_TEXT
+}
+
+/// The marker's line starts here: indentation, the marker, and no word byte
+/// after it (`EOT;`, `EOT,` and a bare `EOT` all close a heredoc).
+fn heredoc_terminator(c: &Cursor, marker: &[u8]) -> bool {
+    if c.pos() != 0 && c.behind(1) != b'\n' {
+        return false;
+    }
+    let rest = c.rest();
+    let mut at = 0;
+    while matches!(rest.get(at), Some(b' ' | b'\t')) {
+        at += 1;
+    }
+    rest.get(at..).is_some_and(|tail| tail.starts_with(marker)) && !rest.get(at + marker.len()).is_some_and(|byte| is_word_byte(*byte))
+}
+
+/// Bytes from the cursor through the terminator's marker.
+fn terminator_width(c: &Cursor, marker: &[u8]) -> usize {
+    let rest = c.rest();
+    let mut at = 0;
+    while matches!(rest.get(at), Some(b' ' | b'\t')) {
+        at += 1;
+    }
+    at + marker.len()
+}
+
+fn open_field() {
+    FIELDS.with(|fields| fields.borrow_mut().push(0));
+}
+
+fn close_field() {
+    FIELDS.with(|fields| {
+        fields.borrow_mut().pop();
+    });
+}
+
+fn with_field(change: impl FnOnce(&mut u32)) {
+    FIELDS.with(|fields| {
+        if let Some(depth) = fields.borrow_mut().last_mut() {
+            change(depth);
+        }
+    });
 }
 
 #[inline]
@@ -605,7 +827,13 @@ fn is_word_byte(byte: u8) -> bool {
 fn word(c: &mut Cursor) -> Kind {
     let start = c.rest();
     let length = c.eat_while(is_word_byte);
-    keyword(&start[..length])
+    let text = &start[..length];
+    // A word after `->`, `?->` or `::` is a name, whatever it spells:
+    // `$this->namespace`, `$a->list()`, `Foo::class`.
+    if matches!(c.previous(), ARROW | NULLSAFE | COLONCOLON) {
+        return IDENT;
+    }
+    keyword(text)
 }
 
 fn keyword(text: &[u8]) -> Kind {
@@ -621,12 +849,19 @@ fn keyword(text: &[u8]) -> Kind {
         b"clone" => KW_CLONE,
         b"const" => KW_CONST,
         b"continue" => KW_CONTINUE,
+        b"declare" => KW_DECLARE,
         b"default" => KW_DEFAULT,
         b"do" => KW_DO,
         b"echo" => KW_ECHO,
         b"else" => KW_ELSE,
         b"elseif" => KW_ELSEIF,
         b"empty" => KW_EMPTY,
+        b"enddeclare" => KW_ENDDECLARE,
+        b"endfor" => KW_ENDFOR,
+        b"endforeach" => KW_ENDFOREACH,
+        b"endif" => KW_ENDIF,
+        b"endswitch" => KW_ENDSWITCH,
+        b"endwhile" => KW_ENDWHILE,
         b"enum" => KW_ENUM,
         b"extends" => KW_EXTENDS,
         b"false" => KW_FALSE,
@@ -635,13 +870,16 @@ fn keyword(text: &[u8]) -> Kind {
         b"fn" => KW_FN,
         b"for" => KW_FOR,
         b"foreach" => KW_FOREACH,
+        b"from" => KW_FROM,
         b"function" => KW_FUNCTION,
         b"global" => KW_GLOBAL,
+        b"goto" => KW_GOTO,
         b"if" => KW_IF,
         b"implements" => KW_IMPLEMENTS,
         b"include" => KW_INCLUDE,
         b"include_once" => KW_INCLUDE_ONCE,
         b"instanceof" => KW_INSTANCEOF,
+        b"insteadof" => KW_INSTEADOF,
         b"interface" => KW_INTERFACE,
         b"isset" => KW_ISSET,
         b"list" => KW_LIST,
@@ -685,8 +923,8 @@ fn block_comment(c: &mut Cursor) {
     c.bump_n(2);
 }
 
-/// A single- or double-quoted string, or a backtick shell string, from its
-/// quote. The interpolations of a double-quoted one stay opaque.
+/// A single-quoted or backtick string from its quote: one token, and it may
+/// span lines, because PHP lets it.
 fn string(c: &mut Cursor) -> Kind {
     let quote = c.peek();
     c.bump();
@@ -694,11 +932,6 @@ fn string(c: &mut Cursor) -> Kind {
         match c.peek() {
             0 if c.at_end() => return BAD_LITERAL,
             b'\\' => c.bump_n(2),
-            b'\n' | b'\r' if quote != b'"' && quote != b'`' => return BAD_LITERAL,
-            b'{' if quote == b'"' && c.peek_at(1) == b'$' => {
-                c.bump_n(2);
-                braces(c);
-            }
             byte if byte == quote => {
                 c.bump();
                 return STRING;
@@ -708,37 +941,13 @@ fn string(c: &mut Cursor) -> Kind {
     }
 }
 
-/// The code of a `{$...}` interpolation, up to its matching `}`.
-fn braces(c: &mut Cursor) {
-    let mut depth = 1u32;
-    while !c.at_end() {
-        match c.peek() {
-            b'{' => {
-                depth += 1;
-                c.bump();
-            }
-            b'}' => {
-                depth -= 1;
-                c.bump();
-                if depth == 0 {
-                    return;
-                }
-            }
-            b'"' | b'\'' => {
-                string(c);
-            }
-            _ => c.bump(),
-        }
-    }
-}
-
-/// A heredoc or nowdoc from `<<<` to the line holding its terminator. The
-/// terminator may be indented (PHP 7.3), and the `;` that ends the statement
-/// stays outside the token: scanning stops at the marker's last byte.
+/// A heredoc or a nowdoc from `<<<`. A nowdoc's body is not code, so the whole
+/// thing is one `STRING` token; a heredoc opens the `HEREDOC` mode after the
+/// line that declares its marker, and its body becomes parts.
 fn heredoc(c: &mut Cursor) -> Kind {
     let rest = c.rest();
     let mut at = 3;
-    while at < rest.len() && matches!(rest[at], b' ' | b'\t') {
+    while matches!(rest.get(at), Some(b' ' | b'\t')) {
         at += 1;
     }
     let quote = rest.get(at).copied().unwrap_or(0);
@@ -750,12 +959,11 @@ fn heredoc(c: &mut Cursor) -> Kind {
     while at < rest.len() && is_word_byte(rest[at]) {
         at += 1;
     }
-    let marker = &rest[mark_start..at];
+    let marker = rest[mark_start..at].to_vec();
     if marker.is_empty() {
         c.bump_n(3);
         return BAD_LITERAL;
     }
-    let marker_len = marker.len();
     if quoted && rest.get(at) == Some(&quote) {
         at += 1;
     }
