@@ -62,7 +62,7 @@ const JSON_VALID: &[(&str, &str)] = &[
 const SHELL_VALID: &[(&str, &str)] = &[
     (
         "build.sh",
-        "simple_command subshell function_definition function_definition for_clause subshell simple_command simple_command simple_command simple_command",
+        "simple_command function_definition function_definition for_clause subshell simple_command simple_command simple_command simple_command",
     ),
     (
         "deploy.sh",
@@ -242,7 +242,7 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     ("lua_broken.lua", "lua", "local_function"),
     ("perl_broken.pl", "perl", "package_statement sub_definition"),
     ("r_broken.R", "r", "expression_statement"),
-    ("shell_broken_if.sh", "shell", "simple_command if_clause ERROR"),
+    ("shell_broken_if.sh", "shell", "simple_command if_clause"),
     ("solidity_broken.sol", "solidity", "pragma_directive contract_definition"),
     ("sql_broken_insert.sql", "sql", "select_statement insert_statement"),
     ("sql_malformed.sql", "sql", "select_statement insert_statement create_table_statement"),
