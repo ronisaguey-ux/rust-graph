@@ -1874,6 +1874,11 @@ impl<'a> Walker<'a> {
         }
         match self.kind(child) {
             "assignment" | "assignment_expression" => self.assignment(child, false),
+            // Rust's `=` is the same statement: the lexer records the target,
+            // the value and the class the value constructs.
+            _ if self.is_rust() && self.kind(child) == "assignment_expression" => {
+                self.assignment(child, false)
+            }
             "augmented_assignment" | "augmented_assignment_expression" => self.assignment(child, true),
             // `x: T = f()`: the targets are the names and the value is the last
             // child, as in an assignment. `x: T` alone binds nothing and has no
@@ -2046,7 +2051,15 @@ impl<'a> Walker<'a> {
             // annotation, not the annotation. Reading it keeps the event an
             // assignment (`["a",...]`) instead of a bare expression (`["x",...]`).
             "annotated" => self.children(id).first().and_then(|&first| self.value_path(first)).into_iter().collect(),
-            _ => self.value_path(id).into_iter().collect(),
+            // `meter.exhausted = …`: a field path is a target like any other
+            // path, and `value_path` does not read one.
+            _ => match self.value_path(id) {
+                Some(path) if !path.is_empty() => vec![path],
+                _ => {
+                    let path = self.path_of(id);
+                    if path.is_empty() { Vec::new() } else { vec![path] }
+                }
+            },
         }
     }
 
@@ -3291,6 +3304,7 @@ impl<'a> Walker<'a> {
                 self.rust_const(id);
                 true
             }
+
             // A struct's fields are declarations, but the one-pass lexer reads
             // the body as an expression statement and files one event for it.
             // The names are real either way, and without an event the file
