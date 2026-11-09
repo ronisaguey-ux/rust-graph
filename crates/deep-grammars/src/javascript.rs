@@ -29,10 +29,21 @@
 //!
 //! - **Context-sensitive tokens.** Whether `/` starts a regular expression or
 //!   is division, and whether `<` starts JSX or is an operator, depends on the
-//!   tokens before it. The DSL has no lexer-state hook (no mode stack, no
-//!   "external scanner"), so the step lexer decides from
-//!   [`Cursor::previous`] and from the language it was built for, and the
-//!   three languages differ only in which function is passed as `lex`.
+//!   tokens before it. The DSL has no lexer-state hook for that, so the step
+//!   lexer decides from [`Cursor::previous`] and from the dialect flag its
+//!   language's entry point sets, and the three languages differ only in that
+//!   flag.
+//! - **A template literal's `${...}` is code again.** `modes { TEMPLATE_BODY =
+//!   ..., TEMPLATE_CODE = ... }` gives the mode stack the frames a template
+//!   needs: the backtick is `TEMPLATE_START`, which pushes `TEMPLATE_BODY` (the
+//!   bytes are text), `${` is `TEMPLATE_SUBSTITUTION_OPEN`, which pushes
+//!   `TEMPLATE_CODE` (ordinary expressions, whose `}` at the substitution's own
+//!   bracket depth is `TEMPLATE_SUBSTITUTION_CLOSE` and pops back to text), and
+//!   the closing backtick is `TEMPLATE_END`, which pops. `lex_template_code`
+//!   keeps one frame per open substitution, so `${ {'a': 1}['a'] }` closes at
+//!   its own brace and a template inside a substitution pushes its own frames
+//!   above the outer ones. The expression between the braces is therefore
+//!   ordinary grammar nodes: a call written in it is a `call_expression`.
 //! - **`>>` in a type.** Closing two type argument lists with `>>` would read
 //!   as one shift token, and the DSL cannot split a token. `>` directly before
 //!   `>` is therefore lexed as `GT_JOINED` followed by `>`, and both the type
@@ -47,12 +58,34 @@
 //! - **No grammar-level "empty statement" sugar**: an optional item is `[x]`
 //!   or `x?`, and an empty alternative is a DSL error by design.
 
+use std::cell::{Cell, RefCell};
+
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
 
 rust_graph_deep::grammar! { TYPESCRIPT {
     name = "typescript";
-    lex = lex_typescript;
+    lex = lex_dialect;
+
+    /// After a template's opening backtick the step lexer runs in
+    /// `TEMPLATE_BODY`: the bytes are text, not code, until the closing
+    /// backtick. `TEMPLATE_START` pushes the frame and `TEMPLATE_END` (or a
+    /// template that cannot close) pops it.
+    ///
+    /// `TEMPLATE_CODE` is the opposite frame: the lexer pushed it at a
+    /// substitution's `${`, so the bytes are ordinary expressions again until
+    /// the `}` that matches that brace at its own bracket depth pops it. One
+    /// switch token per transition is all the mode stack needs; the depth and
+    /// the nesting live in `lex_template_code`'s own state.
+    modes {
+        TEMPLATE_BODY = lex_template_text,
+        TEMPLATE_CODE = lex_template_code,
+    }
+    switch TEMPLATE_START => push TEMPLATE_BODY;
+    switch TEMPLATE_END => pop;
+    switch TEMPLATE_SUBSTITUTION_OPEN => push TEMPLATE_CODE;
+    switch TEMPLATE_SUBSTITUTION_CLOSE => pop;
+    switch TEMPLATE_BAD => pop TEMPLATE_BODY;
 
     tokens {
         LPAREN = "(" open parens,
@@ -65,7 +98,19 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         PRIVATE = "private_property_identifier",
         NUMBER = "number",
         STRING = "string",
-        TEMPLATE = "template_string",
+        /// The backtick that opens a template literal; the bytes after it are
+        /// text until the substitution's `${` or the closing backtick.
+        TEMPLATE_START = "template_start",
+        /// The bytes between a template's substitutions.
+        TEMPLATE_TEXT = "string_fragment",
+        /// `${`: the substitution's expression is ordinary code again.
+        TEMPLATE_SUBSTITUTION_OPEN = "template_substitution_open" open field,
+        /// The `}` that closes a substitution at its own bracket depth.
+        TEMPLATE_SUBSTITUTION_CLOSE = "template_substitution_close" close field,
+        /// The backtick that closes a template literal.
+        TEMPLATE_END = "template_end",
+        /// A template literal that cannot close.
+        TEMPLATE_BAD = "bad_template" bad,
         REGEX = "regex",
         /// A whole JSX element or fragment, in JavaScript and TSX.
         JSX = "jsx_element",
@@ -412,8 +457,8 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         postfix "++" | "--" => update_expression,
         member: postfix "!" => non_null_expression,
         postfix arguments => call_expression,
-        postfix TEMPLATE => call_expression,
-        postfix &(type_arguments (arguments | TEMPLATE)) type_arguments (arguments | TEMPLATE) => call_expression,
+        postfix template_string => call_expression,
+        postfix &(type_arguments (arguments | template_string)) type_arguments (arguments | template_string) => call_expression,
         postfix "." (_property_name | PRIVATE) => member_expression,
         postfix "?." (_property_name | PRIVATE) => member_expression,
         postfix "?." arguments => call_expression,
@@ -448,8 +493,8 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         postfix "++" | "--" => update_expression,
         postfix "!" => non_null_expression,
         postfix arguments => call_expression,
-        postfix TEMPLATE => call_expression,
-        postfix &(type_arguments (arguments | TEMPLATE)) type_arguments (arguments | TEMPLATE) => call_expression,
+        postfix template_string => call_expression,
+        postfix &(type_arguments (arguments | template_string)) type_arguments (arguments | template_string) => call_expression,
         postfix "." (_property_name | PRIVATE) => member_expression,
         postfix "?." (_property_name | PRIVATE) => member_expression,
         postfix "?." arguments => call_expression,
@@ -464,7 +509,7 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         | PRIVATE
         | NUMBER
         | STRING
-        | TEMPLATE
+        | template_string
         | REGEX
         | JSX
         | BAD_LITERAL
@@ -493,6 +538,17 @@ rust_graph_deep::grammar! { TYPESCRIPT {
     function_expression: ["async"] "function" ["*"] [_name] _signature statement_block,
     class: decorator* "class" [_name] [type_parameters] [LINE_END] [class_heritage] class_body,
     parenthesized_expression: "(" _expressions ")",
+    /// A template literal: its opening backtick, its text and one node per
+    /// substitution, then the closing backtick. `` `plain` `` is this node with
+    /// one `string_fragment` inside and no substitution.
+    template_string: TEMPLATE_START (_template_part)* TEMPLATE_END,
+    _template_part: string_fragment | template_substitution,
+    string_fragment: TEMPLATE_TEXT,
+    /// `${f(x)}`: the braces keep their own tokens and what is between them is
+    /// an ordinary expression, so a call written in a substitution is a
+    /// `call_expression` like any other. JavaScript has no empty substitution,
+    /// so `${}` is an error node, not a substitution.
+    template_substitution: TEMPLATE_SUBSTITUTION_OPEN _expressions TEMPLATE_SUBSTITUTION_CLOSE,
     array: "[" (_array_item [","] | ",")* "]",
     _array_item: spread_element | _expression@assign,
     spread_element: "..." _expression@assign,
@@ -554,7 +610,7 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         | type_query
         | infer_type
         | literal_type
-        | TEMPLATE
+        | template_string
         | "this"
         | "void"
         | "null"
@@ -620,18 +676,47 @@ pub static TSX: Language = Language::new("tsx", PROGRAM, KINDS, lex_jsx, parse_p
 
 use crate::deep::syntax::Language;
 
+thread_local! {
+    /// Whether the file being lexed reads `<` as a JSX element (JavaScript and
+    /// TSX) or as the start of a type assertion (TypeScript). A `Language`
+    /// carries one step function and the mode wrapper dispatches mode 0 to the
+    /// grammar's single `lex`, so the dialect is a flag the language's own
+    /// entry point sets for the length of one token. Mode frames read it too,
+    /// which is why a substitution's `<div>` is still JSX in a `.jsx` file.
+    static JSX_DIALECT: Cell<bool> = const { Cell::new(false) };
+}
+
 /// One token at the cursor, for TypeScript: `<` is always an operator.
 pub fn lex_typescript(c: &mut Cursor) -> Kind {
     lex(c, false)
 }
 
+/// The grammar's step function, for the mode wrapper: the dialect the entry
+/// point that called it set.
+fn lex_dialect(c: &mut Cursor) -> Kind {
+    lex(c, JSX_DIALECT.with(|jsx| jsx.get()))
+}
+
 /// One token at the cursor, for JavaScript and TSX: `<` where an operand
-/// starts opens a JSX element.
+/// starts opens a JSX element. This is the language's entry point, so it is
+/// where the dialect meets the mode stack: the generated wrapper (the one
+/// TypeScript uses) dispatches `${...}` to [`lex_template_code`] and the
+/// bytes between substitutions to [`lex_template_text`], and the flag tells
+/// both which language they are lexing.
 pub fn lex_jsx(c: &mut Cursor) -> Kind {
-    lex(c, true)
+    JSX_DIALECT.with(|jsx| jsx.set(true));
+    let kind = __deep_lex_TYPESCRIPT(c);
+    JSX_DIALECT.with(|jsx| jsx.set(false));
+    kind
 }
 
 fn lex(c: &mut Cursor, jsx: bool) -> Kind {
+    if c.pos() == 0 {
+        // A new file starts outside every template, and whatever state a parse
+        // that stopped inside one left behind is not this file's.
+        TEMPLATES.with(|depth| depth.set(0));
+        SUBSTITUTIONS.with(|stack| stack.borrow_mut().clear());
+    }
     match c.peek() {
         b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c' => {
             let mut line_break = false;
@@ -676,9 +761,7 @@ fn lex(c: &mut Cursor, jsx: bool) -> Kind {
             c.bump();
             if c.quoted(quote, true) { STRING } else { BAD_LITERAL }
         }
-        b'`' => {
-            if template(c) { TEMPLATE } else { BAD_LITERAL }
-        }
+        b'`' => template_start(c),
         b'/' if !ends_operand(c.previous()) => {
             if regex(c) { REGEX } else { BAD_LITERAL }
         }
@@ -710,7 +793,7 @@ fn ends_statement(c: &Cursor) -> bool {
 /// Whether a token of this kind can end an operand, so that a `/` after it
 /// divides and a `<` after it compares.
 fn ends_operand(kind: Kind) -> bool {
-    matches!(kind, IDENT | PRIVATE | NUMBER | STRING | TEMPLATE | REGEX | JSX | BAD_LITERAL | RPAREN | RBRACKET | RBRACE | KW_THIS | KW_SUPER | KW_TRUE | KW_FALSE | KW_NULL | INCREMENT | DECREMENT)
+    matches!(kind, IDENT | PRIVATE | NUMBER | STRING | TEMPLATE_END | REGEX | JSX | BAD_LITERAL | RPAREN | RBRACKET | RBRACE | KW_THIS | KW_SUPER | KW_TRUE | KW_FALSE | KW_NULL | INCREMENT | DECREMENT)
         || (KW_ASYNC..=KW_GLOBAL).contains(&kind)
 }
 
@@ -844,8 +927,11 @@ fn number(c: &mut Cursor) -> Kind {
     NUMBER
 }
 
-/// A template literal from its backtick: false if it never closes.
-fn template(c: &mut Cursor) -> bool {
+/// A template literal scanned whole, from its backtick, including each
+/// substitution's braces: false if it never closes. Only the JSX scanner uses
+/// this — a JSX element is one token, so a template inside it is scanned, not
+/// parsed.
+fn skip_template(c: &mut Cursor) -> bool {
     c.bump();
     while !c.at_end() {
         match c.peek() {
@@ -864,6 +950,143 @@ fn template(c: &mut Cursor) -> bool {
         }
     }
     false
+}
+
+thread_local! {
+    /// How many template literals the `TEMPLATE_BODY` frame is inside,
+    /// innermost last: a substitution's frame belongs to the template that
+    /// opened it, so a broken inner template abandons only its own.
+    static TEMPLATES: Cell<usize> = const { Cell::new(0) };
+    /// One frame per open substitution: the brackets opened inside it and the
+    /// template that opened it. Pushed when the lexer emits
+    /// `TEMPLATE_SUBSTITUTION_OPEN` and popped on the matching close, so
+    /// `${ {'a': 1}['a'] }` closes at its own brace.
+    static SUBSTITUTIONS: RefCell<Vec<Substitution>> = const { RefCell::new(Vec::new()) };
+}
+
+/// What one open substitution holds.
+#[derive(Clone, Copy)]
+struct Substitution {
+    /// Openers minus closers inside the substitution.
+    depth: u32,
+    /// The template the substitution was opened in, as the nesting count. A
+    /// broken template abandons every substitution opened in it.
+    template: usize,
+}
+
+/// The backtick: the bytes after it are text until a substitution's `${` or
+/// the closing backtick, so this pushes `TEMPLATE_BODY` through its switch.
+fn template_start(c: &mut Cursor) -> Kind {
+    c.bump();
+    TEMPLATES.with(|depth| depth.set(depth.get() + 1));
+    TEMPLATE_START
+}
+
+fn pop_template() {
+    TEMPLATES.with(|depth| depth.set(depth.get().saturating_sub(1)));
+}
+
+fn open_substitution() {
+    let template = TEMPLATES.with(|depth| depth.get());
+    SUBSTITUTIONS.with(|stack| stack.borrow_mut().push(Substitution { depth: 0, template }));
+}
+
+fn close_substitution() {
+    SUBSTITUTIONS.with(|stack| {
+        stack.borrow_mut().pop();
+    });
+}
+
+/// A substitution that cannot close ends its whole template: every
+/// substitution opened there loses its frame and the template loses its
+/// place. The mode stack then pops through `TEMPLATE_BODY` on the one bad
+/// token.
+fn abandon_template() {
+    let template = TEMPLATES.with(|depth| depth.get());
+    SUBSTITUTIONS.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        while stack.last().is_some_and(|frame| frame.template == template) {
+            stack.pop();
+        }
+    });
+    pop_template();
+}
+
+/// Change the innermost substitution's frame; a no-op when none is open.
+fn with_substitution(change: impl FnOnce(&mut Substitution)) {
+    SUBSTITUTIONS.with(|stack| {
+        if let Some(frame) = stack.borrow_mut().last_mut() {
+            change(frame);
+        }
+    });
+}
+
+/// The `TEMPLATE_BODY` mode's step: text between substitutions, one `${` that
+/// opens a substitution, or the closing backtick. A template that runs out of
+/// file ends badly, so its frames unwind and the parse still produces a tree.
+pub fn lex_template_text(c: &mut Cursor) -> Kind {
+    if c.at_end() {
+        abandon_template();
+        return TEMPLATE_BAD;
+    }
+    match c.peek() {
+        b'`' => {
+            c.bump();
+            pop_template();
+            return TEMPLATE_END;
+        }
+        b'$' if c.peek_at(1) == b'{' => {
+            c.bump_n(2);
+            // The substitution's expression is code: the mode stack returns to
+            // code here and `lex_template_code` closes it at the brace that
+            // matches this one.
+            open_substitution();
+            return TEMPLATE_SUBSTITUTION_OPEN;
+        }
+        _ => {}
+    }
+    // Text up to a substitution or the closing backtick. A template literal is
+    // one token's worth of bytes whatever lines it spans, so no byte in it ends
+    // a statement.
+    loop {
+        match c.peek() {
+            b'`' => break,
+            b'\\' => c.bump_n(2),
+            b'$' if c.peek_at(1) == b'{' => break,
+            0 if c.at_end() => break,
+            _ => c.bump(),
+        }
+    }
+    TEMPLATE_TEXT
+}
+
+/// The `TEMPLATE_CODE` mode's step: ordinary code, with the one token that
+/// only exists inside a substitution. At the substitution's own depth a `}`
+/// closes it; deeper, `}` is a dict's or a block's brace and `lex` hands it
+/// back as `RBRACE`. A template started here pushes its own frames above this
+/// one, so `` `${`inner ${g(y)}`}` `` closes each at its own brace.
+pub fn lex_template_code(c: &mut Cursor) -> Kind {
+    let Some(frame) = SUBSTITUTIONS.with(|stack| stack.borrow().last().copied()) else {
+        // No substitution is open, so this frame and the mode stack disagree:
+        // lexing code cannot lose a token, and the parser still gets a tree.
+        return lex(c, JSX_DIALECT.with(|jsx| jsx.get()));
+    };
+    if c.at_end() {
+        abandon_template();
+        return TEMPLATE_BAD;
+    }
+    if frame.depth == 0 && c.peek() == b'}' {
+        c.bump();
+        close_substitution();
+        return TEMPLATE_SUBSTITUTION_CLOSE;
+    }
+    let kind = lex(c, JSX_DIALECT.with(|jsx| jsx.get()));
+    match kind {
+        LPAREN | LBRACKET | LBRACE => with_substitution(|frame| frame.depth += 1),
+        RPAREN | RBRACKET | RBRACE => with_substitution(|frame| frame.depth = frame.depth.saturating_sub(1)),
+        _ => {}
+    }
+    kind
 }
 
 /// Code from a `{` to its `}`, as in `${...}` and JSX's `{...}`, with strings,
@@ -896,7 +1119,7 @@ fn code_in_braces(c: &mut Cursor) -> bool {
                 operand = true;
             }
             b'`' => {
-                template(c);
+                skip_template(c);
                 operand = true;
             }
             b'/' if c.peek_at(1) == b'/' => {

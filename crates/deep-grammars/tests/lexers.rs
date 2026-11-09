@@ -111,18 +111,55 @@ fn python_an_unterminated_string_is_a_bad_token() {
 
 #[test]
 fn javascript_string_forms() {
+    // A template literal is not one token: its backticks, the `${` of each
+    // substitution, the code between them and the bytes of its text are tokens
+    // of their own, so the expression in a substitution is lexed as code and
+    // parsed.
     assert_eq!(
         significant(&JAVASCRIPT, "const s = 'a' + \"b\" + `t ${x + 1}`;\n"),
-        ["const", "identifier", "=", "string", "+", "string", "+", "template_string", ";"]
+        [
+            "const",
+            "identifier",
+            "=",
+            "string",
+            "+",
+            "string",
+            "+",
+            "template_start",
+            "string_fragment",
+            "template_substitution_open",
+            "identifier",
+            "+",
+            "number",
+            "template_substitution_close",
+            "template_end",
+            ";",
+        ]
     );
-    let mut workspace = Workspace::default();
-    workspace.parse(b"const t = `a ${`b ${c}`} d`;", &JAVASCRIPT, &Budget::default()).unwrap();
-    let templates = (0..workspace.tokens.len())
-        .filter(|&at| workspace.tokens.kind[at] == deep_grammars::javascript::TEMPLATE)
-        .count();
-    // The nested `${}` parts are scanned with their braces balanced: the outer
-    // template is one token, and the inner one is not a token of its own.
-    assert_eq!(templates, 1);
+    assert_eq!(class_of(&JAVASCRIPT, "`t ${x + 1}`"), Class::Token);
+    // A template inside a substitution opens a frame of its own, so both
+    // backticks and both substitutions are tokens.
+    assert_eq!(
+        significant(&JAVASCRIPT, "const t = `a ${`b ${c}`} d`;"),
+        [
+            "const",
+            "identifier",
+            "=",
+            "template_start",
+            "string_fragment",
+            "template_substitution_open",
+            "template_start",
+            "string_fragment",
+            "template_substitution_open",
+            "identifier",
+            "template_substitution_close",
+            "template_end",
+            "template_substitution_close",
+            "string_fragment",
+            "template_end",
+            ";",
+        ]
+    );
 }
 
 #[test]
