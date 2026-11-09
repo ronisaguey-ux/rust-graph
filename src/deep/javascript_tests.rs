@@ -168,9 +168,56 @@ fn lexing_regexes_templates_and_jsx() {
             "number",
         ]
     );
-    assert_eq!(kinds("<div a=\"}\" b={c > d}>{'}'}<br/>{x && <i>{`${y}`}</i>}</div>;", &JAVASCRIPT), ["jsx_element", ";"]);
+    assert_eq!(
+        kinds("<div a=\"}\" b={c > d}>{'}'}<br/>{x && <i>{`${y}`}</i>}</div>;", &JAVASCRIPT),
+        [
+            "jsx_tag_open",
+            "jsx_identifier",
+            "jsx_identifier",
+            "=",
+            "jsx_string",
+            "jsx_identifier",
+            "=",
+            "jsx_expr_open",
+            "identifier",
+            ">",
+            "identifier",
+            "jsx_expr_close",
+            "jsx_tag_end",
+            "jsx_expr_open",
+            "string",
+            "jsx_expr_close",
+            "jsx_tag_open",
+            "jsx_identifier",
+            "jsx_self_closing",
+            "jsx_expr_open",
+            "identifier",
+            "&&",
+            "jsx_tag_open",
+            "jsx_identifier",
+            "jsx_tag_end",
+            "jsx_expr_open",
+            "template_start",
+            "template_substitution_open",
+            "identifier",
+            "template_substitution_close",
+            "template_end",
+            "jsx_expr_close",
+            "jsx_tag_close_open",
+            "jsx_identifier",
+            "jsx_tag_end",
+            "jsx_expr_close",
+            "jsx_tag_close_open",
+            "jsx_identifier",
+            "jsx_tag_end",
+            ";",
+        ]
+    );
     assert_eq!(kinds("<T>x", &TYPESCRIPT), ["<", "identifier", ">", "identifier"]);
-    assert_eq!(kinds("<Select<T | false> v={1} />", &TSX), ["jsx_element"]);
+    assert_eq!(
+        kinds("<Select<T | false> v={1} />", &TSX),
+        ["jsx_tag_open", "jsx_identifier", "<", "identifier", "|", "false", ">", "jsx_identifier", "=", "jsx_expr_open", "number", "jsx_expr_close", "jsx_self_closing"]
+    );
     assert_eq!(kinds("1_000n 0x1F .5e-3 1.", &JAVASCRIPT), ["number", "number", "number", "number"]);
     assert_eq!(kinds("#p 'it\\'s' \"q\"", &JAVASCRIPT), ["private_property_identifier", "string", "string"]);
 }
