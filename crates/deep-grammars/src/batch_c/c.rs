@@ -135,6 +135,7 @@ rust_graph_deep::grammar! { C {
         &(declaration_specifiers _declarator "{") function_definition
         | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
         | &("extern" string) linkage_specification
+        | &(IDENT _qualified_tail) macro_qualified_item
         | declaration_statement
         | static_assert_statement
         | asm_statement
@@ -146,6 +147,16 @@ rust_graph_deep::grammar! { C {
     user_function_definition: declaration_specifiers user_type_name _declarator compound_statement,
     /// `extern "C" { ... }` and `extern "C" int f(void);`: a linkage block.
     linkage_specification: "extern" string ("{" _top_item* "}" | _top_item),
+    /// A visibility macro in front of a declaration: `NPY_NO_EXPORT int f(void);`,
+    /// `XMLPUBFUN xmlRegexpPtr xmlRegexpCompile(...)`. The guard above claims
+    /// the name only when a whole declaration follows it, so a macro *call*
+    /// statement at file scope is still an expression.
+    macro_qualified_item: IDENT _qualified_tail,
+    _qualified_tail:
+        &(declaration_specifiers _declarator "{") function_definition
+        | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
+        | declaration_statement
+        | static_assert_statement,
 
     declaration_statement:
         &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
@@ -233,7 +244,7 @@ rust_graph_deep::grammar! { C {
     /// A struct member's declarator: no parameter list, so a bare field macro
     /// can never be mistaken for the start of `Foo Bar(...)`.
     _member_declarator: pointer* _member_direct _attribute* [":" _expression@assign],
-    _member_direct: (IDENT | parenthesized_declarator) array_suffix*,
+    _member_direct: IDENT array_suffix* | parenthesized_declarator _declarator_suffix*,
     _struct_declarator: _declarator _attribute* [":" _expression@assign],
 
     enum_specifier: "enum" [IDENT] [enum_body],
@@ -250,7 +261,7 @@ rust_graph_deep::grammar! { C {
     array_suffix: "[" [_expression] "]",
     parameter_list: "(" (_parameter % ",") ")",
     _parameter:
-        declaration_specifiers [user_type_name] [_declarator]
+        declaration_specifiers [user_type_name] [_declarator_or_abstract]
         | user_parameter
         | "...",
     /// `Foo *self`, `Foo*`, `Foo`: a typedef name and either a named or an
@@ -258,9 +269,12 @@ rust_graph_deep::grammar! { C {
     user_parameter: user_type_name _declarator_or_abstract,
     _declarator_or_abstract: pointer* [direct_declarator] abstract_suffix*,
 
-    _abstract_declarator: pointer+ abstract_suffix*,
+    /// `*`, `**`, `(*)`, `*(*)(void)`: pointers, an optional parenthesised part
+    /// and suffixes, in the order a type id spells them.
+    _abstract_declarator: pointer* [parenthesized_abstract] abstract_suffix*,
+    parenthesized_abstract: "(" _abstract_declarator ")",
     abstract_suffix: array_suffix | parameter_list,
-    type_name: declaration_specifiers [_abstract_declarator],
+    type_name: declaration_specifiers [user_type_name] [_abstract_declarator],
 
     compound_statement: "{" _statement* "}",
 
@@ -302,6 +316,7 @@ rust_graph_deep::grammar! { C {
     expression_statement: _expression ";",
 
     _expression: precedence _primary {
+        comma: left "," => sequence_expression,
         assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" => assignment_expression,
         cond: postfix "?" _expression@assign ":" _expression@assign => conditional_expression,
         lor: left "||" => binary_expression,
@@ -338,7 +353,13 @@ rust_graph_deep::grammar! { C {
     cast_expression: cast_type _expression@unary,
     cast_type: "(" _cast_type_body ")",
     /// `(int *)`, `(struct s *)` and `(Foo *)`: a keyword type or a typedef name.
-    _cast_type_body: type_name | user_type_name [_abstract_declarator],
+    _cast_type_body: type_name | _user_cast_type,
+    /// A cast to a typedef name only counts when a `*` or a `(...)` follows it:
+    /// `(Foo)` alone is a parenthesised expression, as it has always been.
+    _user_cast_type: user_type_name _nonempty_abstract_declarator,
+    _nonempty_abstract_declarator:
+        pointer+ [parenthesized_abstract] abstract_suffix*
+        | parenthesized_abstract abstract_suffix*,
     sizeof_expression: "sizeof" sizeof_operand,
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     alignof_expression: "_Alignof" cast_type,
@@ -562,8 +583,9 @@ mod corpus {
         let Ok(src) = fs::read(&path) else { return String::new() };
         let mut workspace = Workspace::default();
         let Ok(_) = workspace.parse(&src, &C, &Budget::default()) else { return String::new() };
-        let nodes = &workspace.tree.nodes;
-        let Some(node) = nodes.iter().find(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0) else {
+        let mut nodes: Vec<_> = workspace.tree.nodes.iter().filter(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0).collect();
+        nodes.sort_by_key(|node| (node.start, node.end));
+        let Some(node) = nodes.first() else {
             return String::new();
         };
         let at = (node.start as usize).min(src.len());
@@ -581,11 +603,9 @@ mod corpus {
         let src = fs::read(&path).expect("file");
         let mut workspace = Workspace::default();
         workspace.parse(&src, &C, &Budget::default()).expect("parse");
-        let nodes = &workspace.tree.nodes;
-        for node in nodes.iter() {
-            if node.kind != ERROR && node.flags & HAS_ERROR == 0 {
-                continue;
-            }
+        let mut nodes: Vec<_> = workspace.tree.nodes.iter().filter(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0).collect();
+        nodes.sort_by_key(|node| (node.start, node.end));
+        for node in nodes {
             let at = (node.start as usize).min(src.len());
             let end = (node.end as usize).min(src.len());
             let text = String::from_utf8_lossy(&src[at..end.max(at).min(at + 120)]);
