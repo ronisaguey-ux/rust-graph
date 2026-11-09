@@ -15,9 +15,12 @@ pub mod budget;
 pub mod go;
 pub mod java;
 // The one JavaScript grammar: the same file `deep-grammars` compiles against
-// its runtime shim, so the two paths can never drift apart again.
+// its runtime shim, so the two paths can never drift apart again. Its own
+// tests are in `javascript_tests`, beside this include.
 #[path = "../../crates/deep-grammars/src/javascript.rs"]
 pub mod javascript;
+#[cfg(test)]
+pub mod javascript_tests;
 pub mod json;
 pub mod json_grammar;
 pub mod lexer;
