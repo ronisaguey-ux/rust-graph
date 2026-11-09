@@ -76,6 +76,9 @@ const JAVASCRIPT_VALID: &[(&str, &str)] = &[
     ("node_stream.js", "lexical_declaration lexical_declaration lexical_declaration class_declaration function_declaration if_statement expression_statement"),
     ("reducers.js", "lexical_declaration export_statement export_statement export_statement"),
     ("regex_parse.js", "lexical_declaration lexical_declaration lexical_declaration function_declaration function_declaration function_declaration expression_statement"),
+    // A template's substitution is code now: the fixture is the statements a
+    // reader expects, not one literal swallowing the rest of a line.
+    ("template_substitutions.js", "lexical_declaration lexical_declaration lexical_declaration lexical_declaration lexical_declaration function_declaration"),
     ("util_async.js", "lexical_declaration function_declaration function_declaration function_declaration function_declaration expression_statement"),
 ];
 
