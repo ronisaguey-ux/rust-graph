@@ -72,7 +72,7 @@ mod tests {
             "control_flow.php",
             "expression_statement if_statement expression_statement while_statement do_statement for_statement switch_statement while_statement",
         ),
-        ("functions.php", "require_statement require_statement function_declaration function_declaration expression_statement echo_statement echo_statement"),
+        ("functions.php", "expression_statement expression_statement function_declaration function_declaration expression_statement echo_statement echo_statement"),
         (
             "operators.php",
             "expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement echo_statement",

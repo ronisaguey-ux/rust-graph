@@ -67,10 +67,12 @@
 //! - **One kind per rule**, so `member_access` and `nullsafe_member_access` are
 //!   two rules rather than one labelled alternative.
 //!
-//! Not modelled, and named rather than silently dropped: `goto` (the statement
-//! parses, a label is an `expression_statement`), property hooks (PHP 8.4),
+//! Not modelled, and named rather than silently dropped: an intersection type
+//! (`A&B`; list-typed `A|B` and `?A` are), property hooks (PHP 8.4),
 //! `__halt_compiler`, and short open tags (`<?`); `<?xml` at the top of a file
-//! is inline HTML, which is what makes ignoring `<?` the safe choice.
+//! is inline HTML, which is what makes ignoring `<?` the safe choice. An `&`
+//! after a parameter's type is a reference, which is the reading that matters:
+//! `array &$options` is everywhere, `Countable&Traversable $x` is not.
 
 use std::cell::RefCell;
 
@@ -295,7 +297,6 @@ rust_graph_deep::grammar! { PHP {
         | &("const" IDENT "=") const_declaration
         | namespace_declaration
         | use_declaration
-        | require_statement
         | if_statement
         | while_statement
         | do_statement
@@ -312,6 +313,7 @@ rust_graph_deep::grammar! { PHP {
         | unset_statement
         | declare_statement
         | goto_statement
+        | &(IDENT ":") labeled_statement
         | block
         | OPEN_TAG
         | CLOSE_TAG
@@ -329,10 +331,9 @@ rust_graph_deep::grammar! { PHP {
     use_declaration: "use" [("function" | "const")] (_use_name % ",") ";",
     /// `Foo\Bar`, and `Foo\{Bar, Baz as Qux}`: the group is a tail of the same
     /// name, so the two forms share every token up to the brace the group needs.
-    _use_name: [BACKSLASH] _name (BACKSLASH _name)* [BACKSLASH use_group],
+    _use_name: [BACKSLASH] _name (BACKSLASH _name)* [BACKSLASH use_group] ["as" _name],
     use_group: "{" (_use_item %? ",") "}",
     _use_item: _qualified_name ["as" _name],
-    require_statement: ("require" | "require_once" | "include" | "include_once") _expression _end,
 
     /// An attribute group is a statement or a member of its own; see the module
     /// comment for why it is not a child of the declaration it decorates.
@@ -349,7 +350,8 @@ rust_graph_deep::grammar! { PHP {
     interface_declaration: [top_modifiers] "interface" _name ["extends" _interface_list] class_body,
     trait_declaration: [top_modifiers] "trait" _name class_body,
     enum_declaration: [top_modifiers] "enum" _name [":" _type] ["implements" _interface_list] enum_body,
-    enum_body: "{" (enum_case | ";")* "}",
+    enum_body: "{" enum_member* "}",
+    enum_member: ";" | attribute_group | [modifiers] (enum_case | member_declaration),
     enum_case: "case" _name ["=" _expression] ";",
     class_body: "{" class_member* "}",
     /// Attributes and modifiers come first, the declaration keyword decides.
@@ -359,7 +361,7 @@ rust_graph_deep::grammar! { PHP {
     method_declaration: "function" ["&"] _name formal_parameters [":" _type] (block | ";"),
     function_declaration: "function" ["&"] _name formal_parameters [":" _type] (block | ";"),
     formal_parameters: "(" (formal_parameter %? ",") ")",
-    formal_parameter: [modifiers] [_type] ["&"] ["..."] VARIABLE ["=" _expression],
+    formal_parameter: attribute_group* [modifiers] [_type] ["&"] ["..."] VARIABLE ["=" _expression],
     property_declaration: [_type] _property_item ("," _property_item)* ";",
     _property_item: VARIABLE ["=" _expression],
     const_declaration: "const" _const_item ("," _const_item)* ";",
@@ -415,6 +417,9 @@ rust_graph_deep::grammar! { PHP {
     declare_arguments: "(" (declare_item %? ",") ")",
     declare_item: _name "=" _expression,
     goto_statement: "goto" _name _end,
+    labeled_statement: _name ":",
+    /// `$x ?: require $y`: the include family is an expression in PHP.
+    include_expression: ("require" | "require_once" | "include" | "include_once") _expression,
     parenthesized_expression: "(" _expression ")",
 
     // ---- expressions ----
@@ -449,8 +454,8 @@ rust_graph_deep::grammar! { PHP {
         postfix "++" | "--" => update_expression,
         call: postfix arguments => function_call_expression,
         index: postfix subscript => subscript_expression,
-        member: postfix "->" _member_name => member_access_expression,
-        nullsafe: postfix "?->" _member_name => nullsafe_member_access_expression,
+        member: postfix "->" (_member_name | VARIABLE | dynamic_member) => member_access_expression,
+        nullsafe: postfix "?->" (_member_name | VARIABLE | dynamic_member) => nullsafe_member_access_expression,
         scope: postfix "::" (_member_name | VARIABLE) => scoped_property_access_expression,
     },
 
@@ -464,8 +469,8 @@ rust_graph_deep::grammar! { PHP {
         | "null"
         | "self"
         | "parent"
-        | &("static" "fn") arrow_function
-        | &("static" "function") anonymous_function
+        | static_arrow_function
+        | static_anonymous_function
         | "static"
         | parenthesized_expression
         | array_literal
@@ -475,6 +480,7 @@ rust_graph_deep::grammar! { PHP {
         | empty_expression
         | list_expression
         | match_expression
+        | include_expression
         | anonymous_function
         | arrow_function
         | yield_expression
@@ -499,17 +505,23 @@ rust_graph_deep::grammar! { PHP {
     _literal_name: "true" | "false" | "null",
     /// After `->`, `?->` and `::` every word is a member name.
     _member_name: IDENT | "class",
+    /// `$data->{$column}`: a computed member name.
+    dynamic_member: "{" _expression "}",
 
     new_expression: "new" _new_class [arguments],
-    _new_class: "self" | "parent" | "static" | _qualified_name | anonymous_class,
+    _new_class: "self" | "parent" | "static" | VARIABLE | _qualified_name | anonymous_class,
     anonymous_class: "class" [arguments] ["extends" _qualified_name] ["implements" _interface_list] class_body,
     anonymous_function: "function" ["&"] formal_parameters ["use" closure_use] [":" _type] block,
     closure_use: "(" (closure_use_item %? ",") ")",
     closure_use_item: ["&"] VARIABLE,
-    arrow_function: ["static"] "fn" ["&"] formal_parameters [":" _type] "=>" _expression,
+    arrow_function: "fn" ["&"] formal_parameters [":" _type] "=>" _expression,
+    /// `static fn () => ...` and `static function () {}`: the modifier is the
+    /// same token a `static::` call starts with, so each is its own rule.
+    static_arrow_function: "static" arrow_function,
+    static_anonymous_function: "static" anonymous_function,
     match_expression: "match" parenthesized_expression match_body,
-    match_body: "{" [match_arms [","]] "}",
-    match_arms: _arm ("," _arm)*,
+    match_body: "{" [match_arms] "}",
+    match_arms: _arm %? ",",
     _arm: match_arm | default_arm,
     match_arm: _expression ("," _expression)* "=>" _expression,
     default_arm: "default" "=>" _expression,
@@ -517,14 +529,13 @@ rust_graph_deep::grammar! { PHP {
     yield_body: "from" _expression | _expression ["=>" _expression],
 
     arguments: "(" (_argument %? ",") ")",
-    _argument: &(_name ":") named_argument | &(ELLIPSIS ")") first_class_callable | spread_element | _expression,
+    _argument: &(_name ":") named_argument | spread_element | _expression,
     named_argument: _name ":" _expression,
-    spread_element: "..." _expression,
-    /// `strlen(...)`: the first-class callable syntax.
-    first_class_callable: "...",
+    /// `f(...$xs)` and, with no operand, the first-class callable `f(...)`.
+    spread_element: "..." [_expression],
     subscript: "[" [_expression] "]",
 
-    array_literal: "[" (_array_element %? ",") "]",
+    array_literal: "[" ([_array_element] ("," [_array_element])*) "]",
     array_expression: "array" array_arguments,
     array_arguments: "(" (_array_element %? ",") ")",
     _array_element: &(_expression "=>") pair_element | spread_element | _expression,
@@ -535,11 +546,11 @@ rust_graph_deep::grammar! { PHP {
     empty_expression: "empty" empty_arguments,
     empty_arguments: "(" _expression ")",
     list_expression: "list" list_arguments,
-    list_arguments: "(" (_expression %? ",") ")",
+    list_arguments: "(" ([_expression] ("," [_expression])*) ")",
 
     // ---- types ----
 
-    _type: ["?"] _type_atom (("|" | "&") _type_atom)*,
+    _type: ["?"] _type_atom ("|" _type_atom)*,
     _type_atom: _type_name | parenthesized_type,
     /// `(A&B)|C`: a DNF type.
     parenthesized_type: "(" _type ")",
@@ -605,7 +616,7 @@ pub fn lex_php(c: &mut Cursor) -> Kind {
             CLOSE_TAG
         }
         b'/' if c.peek_at(1) == b'/' => {
-            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            line_comment(c);
             COMMENT
         }
         b'#' if c.peek_at(1) == b'[' => {
@@ -613,7 +624,7 @@ pub fn lex_php(c: &mut Cursor) -> Kind {
             ATTRIBUTE_START
         }
         b'#' => {
-            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            line_comment(c);
             COMMENT
         }
         b'/' if c.peek_at(1) == b'*' => {
@@ -660,11 +671,14 @@ pub fn lex_dquote(c: &mut Cursor) -> Kind {
             return DQUOTE_TEXT;
         }
         b'{' if c.peek_at(1) == b'$' => {
-            c.bump_n(2);
+            // `{$name}`: the `$` belongs to the variable, so only the brace is
+            // the field's opener and the code inside starts at the `$`.
+            c.bump();
             open_field();
             return INTERPOLATION_OPEN;
         }
         b'$' if c.peek_at(1) == b'{' => {
+            // `${name}`: the `$` is the interpolation's own.
             c.bump_n(2);
             open_field();
             return INTERPOLATION_OPEN;
@@ -735,11 +749,14 @@ pub fn lex_heredoc(c: &mut Cursor) -> Kind {
     }
     match c.peek() {
         b'{' if c.peek_at(1) == b'$' => {
-            c.bump_n(2);
+            // `{$name}`: the `$` belongs to the variable, so only the brace is
+            // the field's opener and the code inside starts at the `$`.
+            c.bump();
             open_field();
             return INTERPOLATION_OPEN;
         }
         b'$' if c.peek_at(1) == b'{' => {
+            // `${name}`: the `$` is the interpolation's own.
             c.bump_n(2);
             open_field();
             return INTERPOLATION_OPEN;
@@ -830,7 +847,12 @@ fn word(c: &mut Cursor) -> Kind {
     let text = &start[..length];
     // A word after `->`, `?->` or `::` is a name, whatever it spells:
     // `$this->namespace`, `$a->list()`, `Foo::class`.
-    if matches!(c.previous(), ARROW | NULLSAFE | COLONCOLON) {
+    if matches!(c.previous(), ARROW | NULLSAFE | COLONCOLON | KW_FUNCTION) {
+        return IDENT;
+    }
+    // `f(name: 1)`, `f(default: false)`: a keyword before a `:` right after an
+    // argument opener or a comma is a named argument's name.
+    if matches!(c.previous(), LPAREN | COMMA) && named_argument_ahead(c) {
         return IDENT;
     }
     keyword(text)
@@ -911,6 +933,25 @@ fn keyword(text: &[u8]) -> Kind {
         b"xor" => KW_XOR,
         b"yield" => KW_YIELD,
         _ => IDENT,
+    }
+}
+
+/// Whether the cursor is just past the name of `name:` — the byte after the
+/// spaces that follow is a colon that does not start a `::`.
+fn named_argument_ahead(c: &Cursor) -> bool {
+    let rest = c.rest();
+    let mut at = 0;
+    while matches!(rest.get(at), Some(b' ' | b'\t')) {
+        at += 1;
+    }
+    rest.get(at) == Some(&b':') && rest.get(at + 1) != Some(&b':')
+}
+
+/// `//` or `#` to the end of the line, or to a `?>` that closes PHP inside it:
+/// PHP ends a one-line comment at the close tag, so the mode must see it.
+fn line_comment(c: &mut Cursor) {
+    while !c.at_end() && !matches!(c.peek(), b'\n' | b'\r') && !c.starts_with(b"?>") {
+        c.bump();
     }
 }
 
