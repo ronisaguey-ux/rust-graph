@@ -134,12 +134,7 @@ rust_graph_deep::grammar! { C {
     _top_item:
         &(declaration_specifiers _declarator "{") function_definition
         | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
-        | &(user_type_name _declarator "{") bare_user_function_definition
         | &("extern" string) linkage_specification
-        | &(IDENT IDENT _qualified_tail) double_qualified_item
-        | &(IDENT _qualified_tail) macro_qualified_item
-        | &(declaration_specifiers IDENT _qualified_tail) specified_macro_item
-        | &(IDENT parameter_list "{") implicit_function
         | declaration_statement
         | static_assert_statement
         | asm_statement
@@ -149,45 +144,17 @@ rust_graph_deep::grammar! { C {
     function_definition: declaration_specifiers _declarator compound_statement,
     /// A definition whose return type is a typedef name: `PyObject *f(void) {`.
     user_function_definition: declaration_specifiers user_type_name _declarator compound_statement,
-    bare_user_function_definition: user_type_name _declarator compound_statement,
     /// `extern "C" { ... }` and `extern "C" int f(void);`: a linkage block.
     linkage_specification: "extern" string ("{" _top_item* "}" | _top_item),
-    /// A visibility macro in front of a declaration: `NPY_NO_EXPORT int f(void);`,
-    /// `XMLPUBFUN xmlRegexpPtr xmlRegexpCompile(...)`. The guard above claims
-    /// the name only when a whole declaration follows it, so a macro *call*
-    /// statement at file scope is still an expression.
-    macro_qualified_item: IDENT _qualified_tail,
-    /// `XML_DEPRECATED XMLPUBFUN xmlRegexpPtr f(void);`: two visibility macros.
-    double_qualified_item: IDENT IDENT _qualified_tail,
-    /// `extern NPY_NO_EXPORT PyTypeObject PyUFunc_Type;`: the macro comes after
-    /// a storage class. The guard above keeps it out of the way of every plain
-    /// declaration, and marks the name where no declarator follows.
-    specified_macro_item: declaration_specifiers IDENT _qualified_tail,
-    _qualified_tail:
-        &(declaration_specifiers _declarator "{") function_definition
-        | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
-        | &(user_type_name _declarator "{") bare_user_function_definition
-        | &(IDENT parameter_list "{") implicit_function
-        | declaration_statement
-        | static_assert_statement,
-    /// A definition whose return type is supplied by the macro above it:
-    /// `PyMODINIT_FUNC ENTRY_FUNC_NAME(void) { ... }`.
-    implicit_function: IDENT parameter_list compound_statement,
 
     declaration_statement:
         &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
-        | &("typedef" user_type_name _declarator) typedef_user_declaration
         | &(user_type_name IDENT) bare_user_declaration
         | _default_declaration,
     /// `static const Foo *f(void);`: a keyword-qualified typedef name.
     specified_user_declaration: declaration_specifiers user_type_name (_init_declarator % ",") ";",
-    /// `typedef Foo (*handler)(void);`: a typedef whose type is a typedef name.
-    typedef_user_declaration: "typedef" user_type_name _init_declarator ("," _init_declarator)* ";",
-    /// `Foo x;`: two names in a row, which no expression can be. The declarator
-    /// must start with its name, so this can never begin `Foo (`.
-    bare_user_declaration: user_type_name _named_init_declarator ("," _named_init_declarator)* ";",
-    _named_init_declarator: _named_declarator _attribute* ["=" _initializer],
-    _named_declarator: IDENT _declarator_suffix*,
+    /// `Foo x;`: two names in a row, which no expression can be.
+    bare_user_declaration: user_type_name (_init_declarator % ",") ";",
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     /// A typedef name where a type specifier is expected.
     user_type_name: IDENT,
@@ -208,12 +175,9 @@ rust_graph_deep::grammar! { C {
     asm_statement: "asm" _asm_qualifier* asm_body ";",
     _asm_qualifier: "volatile" | "inline" | "goto",
     asm_body: "(" [asm_template] _asm_operand_list* ")",
-    /// A template is string literals with macros spliced between them:
-    /// `"addu "REG_FP",%0\n"`.
-    asm_template: (string | IDENT)+,
+    asm_template: string,
     _asm_operand_list: ":" (_asm_operand %? ","),
-    _asm_operand: [asm_operand_name] (string | IDENT) [asm_operand_expression],
-    asm_operand_name: "[" IDENT "]",
+    _asm_operand: string [asm_operand_expression],
     asm_operand_expression: "(" _expression ")",
 
     declaration_specifiers: _declaration_specifier+,
@@ -229,12 +193,9 @@ rust_graph_deep::grammar! { C {
     /// `__attribute__((packed, aligned(4)))` and `__declspec(dllexport)`.
     _attribute: ("__attribute__" | "__declspec") attribute_arguments,
     attribute_arguments: "(" attribute_body ")",
-    attribute_body: attribute_group | _attribute_argument ("," _attribute_argument)*,
+    attribute_body: attribute_group | _attribute_argument % ",",
     attribute_group: "(" (_attribute_argument %? ",") ")",
-    /// An attribute argument is a name with an optional call: `packed`,
-    /// `aligned(4)`, `optimize("O2")`. It never starts with `(`, so the group
-    /// above is told apart from a bare list in one token.
-    _attribute_argument: IDENT [arguments],
+    _attribute_argument: _expression@assign | parenthesized_expression,
 
     type_specifier:
         "void" | "char" | "short" | "int" | "long" | "float" | "double"
@@ -246,27 +207,18 @@ rust_graph_deep::grammar! { C {
     typeof_arguments: "(" _expression ")",
 
     struct_or_union_specifier: ("struct" | "union") [IDENT] [struct_body],
-    struct_body: "{" (_struct_declaration | ";")* "}",
+    struct_body: "{" (_struct_declaration | ";" | macro_field)* "}",
     _struct_declaration:
-        &(user_type_name _member_declarator_list ";") user_struct_declaration
-        | declaration_specifiers [user_type_name] (_struct_declarator % ",") ";"
-        | macro_field,
-    /// `PyObject *weakreflist;`: a typedef name and its declarators. A struct
+        &(declaration_specifiers user_type_name) specified_struct_declaration
+        | user_struct_declaration
+        | declaration_specifiers (_struct_declarator % ",") ";",
+    /// `PyObject *weakreflist;`: a typedef name and its declarator. A struct
     /// body holds declarations only, so the `x * y;` ambiguity does not exist
     /// here and the bare name is safe to accept.
-    user_struct_declaration: user_type_name _member_declarator_list ";",
-    _member_declarator_list: _member_declarator ("," _member_declarator)*,
-    /// A field macro that expands to whole members and has no declarator and
-    /// no semicolon of its own: `PyObject_HEAD`. The predicate above claims
-    /// every name that does have one, so this is the only reading left.
+    user_struct_declaration: user_type_name (_struct_declarator % ",") ";",
+    specified_struct_declaration: declaration_specifiers user_type_name (_struct_declarator % ",") ";",
+    /// A field macro that expands to whole members: `PyObject_HEAD`.
     macro_field: IDENT,
-    /// A struct member's declarator: no parameter list, so a bare field macro
-    /// can never be mistaken for the start of `Foo Bar(...)`.
-    _member_declarator: pointer* _member_direct _attribute* [trailing_macro] [":" _expression@assign],
-    /// A deprecation macro after a member's declarator: `char **names
-    /// XML_DEPRECATED_MEMBER;`.
-    trailing_macro: IDENT,
-    _member_direct: IDENT array_suffix* | parenthesized_declarator _declarator_suffix*,
     _struct_declarator: _declarator _attribute* [":" _expression@assign],
 
     enum_specifier: "enum" [IDENT] [enum_body],
@@ -283,21 +235,22 @@ rust_graph_deep::grammar! { C {
     array_suffix: "[" [_expression] "]",
     parameter_list: "(" (_parameter % ",") ")",
     _parameter:
-        declaration_specifiers [user_type_name] [_declarator_or_abstract]
+        &(declaration_specifiers user_type_name) specified_user_parameter
+        | parameter_declaration
         | user_parameter
+        | _unnamed_user_parameter
         | "...",
-    /// `Foo *self`, `Foo*`, `Foo`: a typedef name and either a named or an
-    /// abstract declarator.
-    user_parameter: user_type_name _declarator_or_abstract,
-    _declarator_or_abstract: pointer* [direct_declarator] abstract_suffix*,
+    parameter_declaration: declaration_specifiers [_declarator],
+    /// `const Foo *self`: a qualifier and then a typedef name.
+    specified_user_parameter: declaration_specifiers user_type_name [_declarator],
+    /// `Foo *self`: a typedef name with no qualifier.
+    user_parameter: user_type_name _declarator,
+    /// `Foo*`: an unnamed parameter of typedef type.
+    _unnamed_user_parameter: user_type_name _abstract_declarator,
 
-    /// `*`, `**`, `*(*)(void)`: pointers, an optional parenthesised part and
-    /// suffixes. It always starts with a `*`, so a `(` after a type id is still
-    /// an argument list (`new T(5)`, `int f(void)`).
-    _abstract_declarator: pointer+ [parenthesized_abstract] abstract_suffix*,
-    parenthesized_abstract: "(" _abstract_declarator ")",
+    _abstract_declarator: pointer+ abstract_suffix*,
     abstract_suffix: array_suffix | parameter_list,
-    type_name: declaration_specifiers [user_type_name] [_abstract_declarator],
+    type_name: declaration_specifiers [_abstract_declarator],
 
     compound_statement: "{" _statement* "}",
 
@@ -339,7 +292,6 @@ rust_graph_deep::grammar! { C {
     expression_statement: _expression ";",
 
     _expression: precedence _primary {
-        comma: left "," => sequence_expression,
         assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" => assignment_expression,
         cond: postfix "?" _expression@assign ":" _expression@assign => conditional_expression,
         lor: left "||" => binary_expression,
@@ -353,7 +305,6 @@ rust_graph_deep::grammar! { C {
         add: left "+" | "-" => binary_expression,
         mul: left "*" | "/" | "%" => binary_expression,
         unary: prefix "!" | "~" | "-" | "+" | "*" | "&" => unary_expression,
-        prefix "++" | "--" => update_expression,
         postfix "++" | "--" => update_expression,
         postfix arguments => call_expression,
         postfix subscript => subscript_expression,
@@ -363,7 +314,6 @@ rust_graph_deep::grammar! { C {
 
     _primary:
         &(cast_type) cast_expression
-        | &(user_cast_head (IDENT | NUMBER | STR | CHAR_LITERAL)) user_cast_expression
         | sizeof_expression
         | alignof_expression
         | parenthesized_expression
@@ -376,21 +326,7 @@ rust_graph_deep::grammar! { C {
     _member: IDENT,
     string: STR+,
     cast_expression: cast_type _expression@unary,
-    /// `(PyCFunction) f`: a cast to a typedef name. It is read as a cast only
-    /// when an operand that cannot be a binary operator follows, so `(a) * b`
-    /// stays a multiplication.
-    user_cast_expression: user_cast_head _expression@unary,
-    user_cast_head: "(" user_type_name ")",
-
-    cast_type: "(" _cast_type_body ")",
-    /// `(int *)`, `(struct s *)` and `(Foo *)`: a keyword type or a typedef name.
-    _cast_type_body: type_name | _user_cast_type,
-    /// A cast to a typedef name only counts when a `*` or a `(...)` follows it:
-    /// `(Foo)` alone is a parenthesised expression, as it has always been.
-    _user_cast_type: user_type_name _nonempty_abstract_declarator,
-    _nonempty_abstract_declarator:
-        pointer+ [parenthesized_abstract] abstract_suffix*
-        | parenthesized_abstract abstract_suffix*,
+    cast_type: "(" type_name ")",
     sizeof_expression: "sizeof" sizeof_operand,
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     alignof_expression: "_Alignof" cast_type,
@@ -614,9 +550,8 @@ mod corpus {
         let Ok(src) = fs::read(&path) else { return String::new() };
         let mut workspace = Workspace::default();
         let Ok(_) = workspace.parse(&src, &C, &Budget::default()) else { return String::new() };
-        let mut nodes: Vec<_> = workspace.tree.nodes.iter().filter(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0).collect();
-        nodes.sort_by_key(|node| (node.start, node.end));
-        let Some(node) = nodes.first() else {
+        let nodes = &workspace.tree.nodes;
+        let Some(node) = nodes.iter().find(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0) else {
             return String::new();
         };
         let at = (node.start as usize).min(src.len());
@@ -634,9 +569,11 @@ mod corpus {
         let src = fs::read(&path).expect("file");
         let mut workspace = Workspace::default();
         workspace.parse(&src, &C, &Budget::default()).expect("parse");
-        let mut nodes: Vec<_> = workspace.tree.nodes.iter().filter(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0).collect();
-        nodes.sort_by_key(|node| (node.start, node.end));
-        for node in nodes {
+        let nodes = &workspace.tree.nodes;
+        for node in nodes.iter() {
+            if node.kind != ERROR && node.flags & HAS_ERROR == 0 {
+                continue;
+            }
             let at = (node.start as usize).min(src.len());
             let end = (node.end as usize).min(src.len());
             let text = String::from_utf8_lossy(&src[at..end.max(at).min(at + 120)]);
