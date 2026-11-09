@@ -12,11 +12,13 @@
 //!   semicolon insertion for real code, where `a\n(b)` is a call too. A
 //!   restricted production (`return` and a value on the next line) reads as one
 //!   statement here, not two.
-//! - A JSX element is one token; the lexer scans its `{...}` parts with the
-//!   braces balanced. A template literal is not: the mode stack hands its text
-//!   to one frame and each `${...}` back to code (see below), so a substitution
-//!   is parsed. A regular expression is a token where an operand may start:
-//!   after anything that cannot end an operand ([`Cursor::previous`]).
+//! - A template literal's `${...}` and a JSX element's `{...}` are code again:
+//!   the mode stack hands a template's text to one frame and each substitution
+//!   back to code, and the lexer's own JSX frames do the same for a tag, its
+//!   children and an attribute or child expression (see below), so a call
+//!   written in either is parsed. A regular expression is a token where an
+//!   operand may start: after anything that cannot end an operand
+//!   ([`Cursor::previous`]).
 //! - `>` right before `>` is `GT_JOINED`, so `Map<K, Set<V>>` closes two lists
 //!   and `a >> b` is `GT_JOINED ">"`, as in the Rust grammar.
 //! - What only a longer look tells apart is decided by predicates: an arrow
@@ -45,6 +47,18 @@
 //!   its own brace and a template inside a substitution pushes its own frames
 //!   above the outer ones. The expression between the braces is therefore
 //!   ordinary grammar nodes: a call written in it is a `call_expression`.
+//! - **A JSX element is parsed, not one token.** The grammar's mode stack can
+//!   only make one switch per token, and a JSX element needs a state an outer
+//!   template may already be inside. So the lexer keeps its own stack of
+//!   [`JsxFrame`]s — a tag, an element's children, a closing tag, an expression
+//!   — and [`lex_dialect`] dispatches to the one on top before it falls back to
+//!   `lex`. `{` pushes an `Expression` frame, whose step is ordinary code with
+//!   its own `}` as `JSX_EXPR_CLOSE`; `<` pushes a tag, whose `>` moves to the
+//!   children and whose `/>` pops the element. A template opened inside a JSX
+//!   expression still uses the mode stack, and a JSX element inside a template
+//!   substitution pushes its frames above the substitution's, so all three
+//!   stacks can be open at once. Which `}` closes which is decided by the
+//!   order the frames were entered ([`SERIAL`]), not by depth alone.
 //! - **`>>` in a type.** Closing two type argument lists with `>>` would read
 //!   as one shift token, and the DSL cannot split a token. `>` directly before
 //!   `>` is therefore lexed as `GT_JOINED` followed by `>`, and both the type
@@ -113,8 +127,28 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         /// A template literal that cannot close.
         TEMPLATE_BAD = "bad_template" bad,
         REGEX = "regex",
-        /// A whole JSX element or fragment, in JavaScript and TSX.
-        JSX = "jsx_element",
+        /// `<` that opens a JSX element, in JavaScript and TSX.
+        JSX_TAG_OPEN = "jsx_tag_open",
+        /// `</` that opens a closing tag.
+        JSX_TAG_CLOSE_OPEN = "jsx_tag_close_open",
+        /// The `>` that ends an opening or closing tag.
+        JSX_TAG_END = "jsx_tag_end",
+        /// `/>`, which ends a self-closing element.
+        JSX_SELF_CLOSING = "jsx_self_closing",
+        /// `<>`, which opens a fragment.
+        JSX_FRAGMENT_OPEN = "jsx_fragment_open",
+        /// `</>`, which closes a fragment.
+        JSX_FRAGMENT_CLOSE = "jsx_fragment_close",
+        /// A tag or attribute name: one segment of `A.B` or `a:b`, `-` allowed.
+        JSX_IDENT = "jsx_identifier",
+        /// A quoted attribute value. Entities are not decoded.
+        JSX_STRING = "jsx_string",
+        /// Text between elements. Entities are not decoded.
+        JSX_TEXT = "jsx_text",
+        /// `{` that opens an attribute value, a spread or a child expression.
+        JSX_EXPR_OPEN = "jsx_expr_open",
+        /// The `}` that closes it at its own bracket depth.
+        JSX_EXPR_CLOSE = "jsx_expr_close",
         /// A line break that ends a statement: after `break`, `continue`, `return`
         /// or `yield`, and after an operand when the next line starts with `[`,
         /// `++` or `--`. Elsewhere a line break is whitespace.
@@ -512,7 +546,7 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         | STRING
         | template_string
         | REGEX
-        | JSX
+        | jsx_element
         | BAD_LITERAL
         | "this"
         | "super"
@@ -550,6 +584,30 @@ rust_graph_deep::grammar! { TYPESCRIPT {
     /// `call_expression` like any other. JavaScript has no empty substitution,
     /// so `${}` is an error node, not a substitution.
     template_substitution: TEMPLATE_SUBSTITUTION_OPEN _expressions TEMPLATE_SUBSTITUTION_CLOSE,
+    /// A JSX element or fragment. Its tags are tokens, but every `{...}` part
+    /// is ordinary code again (the lexer leaves the JSX state for it), so an
+    /// attribute value and a child expression are expressions: a call written
+    /// in one is a `call_expression` like any other. The opening tag's name,
+    /// its attributes and the closing tag are nodes, so `<A.B/>` and `<a:b/>`
+    /// keep their shape.
+    jsx_element:
+        JSX_TAG_OPEN jsx_element_name [type_parameters] (jsx_attribute | jsx_spread_attribute)* (JSX_TAG_END _jsx_child* jsx_closing_element | JSX_SELF_CLOSING)
+        | jsx_fragment,
+    jsx_fragment: JSX_FRAGMENT_OPEN _jsx_child* JSX_FRAGMENT_CLOSE,
+    jsx_closing_element: JSX_TAG_CLOSE_OPEN jsx_element_name JSX_TAG_END,
+    /// `<A.B/>` is a `nested_identifier`, `<a:b/>` a `jsx_namespace_name`, and
+    /// either may nest (`<A.B.C/>`).
+    jsx_element_name: &(JSX_IDENT ":" JSX_IDENT) jsx_namespace_name | &(JSX_IDENT ".") nested_identifier | JSX_IDENT,
+    nested_identifier: JSX_IDENT ("." JSX_IDENT)+,
+    jsx_namespace_name: JSX_IDENT ":" JSX_IDENT,
+    jsx_attribute: jsx_attribute_name ["=" jsx_attribute_value],
+    jsx_attribute_name: &(JSX_IDENT ":" JSX_IDENT) jsx_namespace_name | JSX_IDENT,
+    jsx_attribute_value: JSX_STRING | jsx_expression | jsx_element,
+    /// `{...props}`: the ellipsis is a token, the expression is code.
+    jsx_spread_attribute: JSX_EXPR_OPEN "..." _expression JSX_EXPR_CLOSE,
+    /// `{expr}`, in an attribute or between children; `{}` is empty.
+    jsx_expression: JSX_EXPR_OPEN [_expressions] JSX_EXPR_CLOSE,
+    _jsx_child: jsx_expression | jsx_element | JSX_TEXT,
     array: "[" (_array_item [","] | ",")* "]",
     _array_item: spread_element | _expression@assign,
     spread_element: "..." _expression@assign,
