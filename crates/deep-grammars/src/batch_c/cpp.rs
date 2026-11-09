@@ -206,6 +206,7 @@ rust_graph_deep::grammar! { CPP {
 
     declaration_statement:
         &(scoped_type_name) _scoped_user_declaration
+        | &(user_type_name IDENT arguments) constructor_declaration
         | &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
         | _user_type_declaration
         | &(declaration_specifiers scoped_type_name) _scoped_qualified_declaration
@@ -214,6 +215,10 @@ rust_graph_deep::grammar! { CPP {
     specified_user_declaration: declaration_specifiers user_type_name (_init_declarator % ",") ";",
     _scoped_user_declaration: scoped_type_name (_init_declarator % ",") ";",
     _user_type_declaration: plain_type_name (_init_declarator % ",") ";",
+    /// `LockGuard lock(mutex);`: a typedef name and a constructor call. C++
+    /// reads this as a declaration, and so does the parser, in preference to
+    /// the function declaration `LockGuard lock(Parameter);`.
+    constructor_declaration: user_type_name IDENT arguments ("," _init_declarator)* ";",
     _scoped_qualified_declaration: declaration_specifiers scoped_type_name (_init_declarator % ",") ";",
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     _init_declarator: _declarator _attribute* ["=" _initializer],
@@ -283,7 +288,7 @@ rust_graph_deep::grammar! { CPP {
     non_type_parameter: _non_class_specifier+ [_declarator] ["=" _expression@assign],
     _non_class_specifier:
         "const" | "volatile" | "unsigned" | "signed" | "short" | "long" | "int" | "char"
-        | "bool" | "auto" | enum_specifier | scoped_type_name,
+        | "bool" | "auto" | enum_specifier | user_type_name,
 
     template_arguments: "<" (_type_id % ",") _gt,
     _gt: ">" | GT_JOINED,
@@ -372,6 +377,7 @@ rust_graph_deep::grammar! { CPP {
         | static_assert_statement
         | &(declaration_specifiers) declaration_statement
         | &(scoped_type_name _declarator) declaration_statement
+        | &(plain_type_name IDENT) declaration_statement
         | expression_statement,
 
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
@@ -430,6 +436,7 @@ rust_graph_deep::grammar! { CPP {
 
     _primary:
         &(cast_type) cast_expression
+        | &(user_cast_head (IDENT | NUMBER | STR | CHAR_LITERAL | "true" | "false" | "nullptr")) user_cast_expression
         | named_cast
         | sizeof_expression
         | new_expression
@@ -449,6 +456,12 @@ rust_graph_deep::grammar! { CPP {
     _member: IDENT,
     string: STR+,
     cast_expression: cast_type _expression@unary,
+    /// `(PyCFunction) f`: a cast to a typedef name. It is read as a cast only
+    /// when an operand that cannot be a binary operator follows, so `(a) * b`
+    /// stays a multiplication.
+    user_cast_expression: user_cast_head _expression@unary,
+    user_cast_head: "(" user_type_name ")",
+
     cast_type: "(" (_type_prefixed | _scoped_type_id) ")",
     sizeof_expression: "sizeof" sizeof_operand,
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
