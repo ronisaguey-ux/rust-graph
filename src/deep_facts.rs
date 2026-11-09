@@ -1413,9 +1413,6 @@ impl<'a> Walker<'a> {
     fn decl_values(&mut self, ids: &[u32]) -> String {
         let mut parts = Vec::new();
         for &id in ids {
-            if self.is_layout(id) {
-                continue;
-            }
             let value = self.decl_value(id);
             if !value.is_empty() {
                 parts.push(value);
@@ -1464,7 +1461,7 @@ impl<'a> Walker<'a> {
         if matches!(
             kind,
             "selector_expression" | "qualified_type" | "field_access" | "dotted_name" | "scoped_identifier"
-                | "scoped_type_identifier" | "nested_type_identifier"
+                | "scoped_type_identifier" | "nested_type_identifier" | "class_literal" | "method_reference"
         ) {
             let path = self.decl_path(id);
             if !path.is_empty() {
@@ -1512,11 +1509,16 @@ impl<'a> Walker<'a> {
             .iter()
             .position(|&child| matches!(self.kind(child), "arguments" | "argument_list" | "type_arguments"));
         let end = args.unwrap_or(children.len());
+        // The callee is read by its text, so a member this grammar gives a
+        // keyword kind (`Mockito.when(x)`, `obj.record`) still has a name.
         children[..end]
             .iter()
             .copied()
             .rev()
-            .find(|&child| !self.is_layout(child) && !matches!(self.kind(child), "type_arguments" | "type_parameter_list" | "index"))
+            .find(|&child| {
+                self.leaf_name(child).is_some()
+                    || (!self.is_layout(child) && !matches!(self.kind(child), "type_arguments" | "type_parameter_list" | "index"))
+            })
             .unwrap_or(id)
     }
 
@@ -1534,15 +1536,15 @@ impl<'a> Walker<'a> {
                 }
             }
             "selector_expression" | "qualified_type" | "field_access" | "scoped_identifier" | "dotted_name"
-            | "scoped_type_identifier" | "nested_type_identifier" => {
+            | "scoped_type_identifier" | "nested_type_identifier" | "class_literal" | "method_reference" => {
                 let children = self.children(id);
+                // The last segment is read by its text: `Mockito.when` names a
+                // member called `when`, which this grammar gives a keyword kind.
                 let name = children
                     .iter()
                     .copied()
                     .rev()
-                    .find(|&child| {
-                        matches!(self.kind(child), "identifier" | "type_identifier" | "field_identifier" | "this" | "super")
-                    })
+                    .find(|&child| self.kind(child) != "." && self.leaf_name(child).is_some())
                     .map(|child| self.decl_path(child))
                     .unwrap_or_default();
                 let base = children
@@ -1555,26 +1557,12 @@ impl<'a> Walker<'a> {
                 format!("{base}{name}")
             }
             "method_invocation" => {
-                let children = self.children(id);
-                let args = children.iter().position(|&child| matches!(self.kind(child), "arguments" | "type_arguments"));
-                let end = args.unwrap_or(children.len());
-                let name = children[..end]
-                    .iter()
-                    .copied()
-                    .rev()
-                    .find(|&child| matches!(self.kind(child), "identifier" | "type_identifier" | "field_identifier"))
-                    .map(|child| self.text_string(child))
-                    .unwrap_or_default();
-                let base_at = children[..end].iter().position(|&child| {
-                    matches!(self.kind(child), "identifier" | "type_identifier" | "field_identifier")
-                });
-                let base = base_at
-                    .filter(|&at| at + 1 < end)
-                    .and_then(|at| children.get(at))
-                    .map(|&child| self.decl_path(child))
-                    .unwrap_or_default();
-                let base = if base.is_empty() { String::new() } else { format!("{base}.") };
-                format!("{base}{name}")
+                // A call has no name of its own: the name belongs to its callee.
+                let callee = self.decl_callee(id);
+                if callee == id {
+                    return String::new();
+                }
+                self.decl_path(callee)
             }
             "call_expression" => {
                 let callee = self.decl_callee(id);
