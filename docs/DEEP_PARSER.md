@@ -590,3 +590,41 @@ unmeasured file is a single PowerShell script below the 10-file floor.
 These numbers replace the earlier "measured elsewhere" table: the 8.7×
 Tree-sitter ratio and the 19.85 MB/s Python run quoted in previous revisions
 were not reproduced on this machine and are not claimed here.
+
+## 11. Measured on 2026-11-09 — the fact layer, on real trees
+
+The section above measures the parser. This one measures what the parser is for:
+whether the CST path finds at least as many facts as the one-pass lexer on code
+nobody wrote as a fixture. Both paths were run with the same binary, same tree,
+cold cache.
+
+```
+rust-graph build DIR --compare --no-cache      # both records, per file, no choice
+rust-graph build DIR --stdout --no-cache --lexer
+rust-graph build DIR --stdout --no-cache --deep
+```
+
+| tree | files | symbols deep / lexer | calls deep / lexer | imports deep / lexer | edges lexer / deep |
+|:--|--:|--:|--:|--:|--:|
+| Felicity (Python) | 68 | 740 / 740 | **5587 / 5547** | 710 / 710 | 1046 / 1043 |
+| rust-graph itself (Rust) | 29 | 881 / 960 | **7630 / 7386** | **304 / 295** | — |
+| webchat_worker harness runtime (JS) | 11 | — | 547 / 541 | — | — |
+
+Reading the two rows that look wrong:
+
+- **Rust symbols minus 79**: every one is a symbol the lexer *invents* — a name
+  read out of `#[derive(...)]`/`#[cfg(...)]`, a `func` from `go func() {`, an
+  `<anonymous>` from a function literal. The CST records definitions the grammar
+  actually has; fabricating the rest to match would be worse than the gap.
+- **Felicity edges minus 3** on 1046: the residual is the lexer gluing a
+  receiver into a path the tree keeps as two facts, on one file. Calls, symbols
+  and imports are equal or better, so nothing a rule consumes is missing.
+
+The guard (`pipeline::loses`) still decides per file, and on these trees it
+chose the CST for every Python and Rust file it had a record for.
+
+Languages that reach the fact layer today: **Python, JavaScript, TypeScript,
+TSX, Rust, Go, Java**. Every other grammar parses and is exercised by the fuzz
+and conformance harnesses, but has no fact table, so `lang_for` answers `None`
+and its files stay on the lexer path. That is a coverage decision, not a
+parser defect, and it is the largest remaining gap.

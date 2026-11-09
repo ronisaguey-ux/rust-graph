@@ -1,8 +1,63 @@
 # Changelog
 
-All measured numbers below are from this worktree on 2026-11-08: Ubuntu 24.04.4
-LTS, Intel Core i7-8550U, 8 cores, `x86_64-unknown-linux-musl`, rustc 1.99.1.
-The commands that produced them are in `docs/DEEP_PARSER.md` §10.
+All measured numbers below are from this worktree on 2026-11-08 and 2026-11-09:
+Ubuntu 24.04.4 LTS, Intel Core i7-8550U, 8 cores, `x86_64-unknown-linux-musl`,
+rustc 1.99.1. The commands that produced them are in `docs/DEEP_PARSER.md`
+§10 and §11.
+
+## [0.2.1] - 2026-11-09
+
+### Fixed
+
+- **An f-string's `{...}` field is code, not a string.** The Python grammar now
+  opens a field mode with its own brace depth, so `f"{len(x)}"` contains a
+  `call` node, `f"{ {'a': 1}['a'] }"` closes at its own brace, `!r` and `:>{w}`
+  specs parse, a nested f-string restores the outer quote, and `f"{}"` is an
+  error exactly as Python says. A broken field abandons the whole string with
+  one `pop FSTRING` unwind instead of swallowing the rest of the file.
+- **Template substitutions in JavaScript, TypeScript, TSX** get the same
+  treatment: `${f(x)}` is an expression, a nested template keeps its own frames,
+  a tagged template is a call with the literal as its argument.
+- **`x: T = f()` lost its call**: the walk had no case for an annotated
+  assignment, so the value was never read.
+- **`x = lambda k: f(k)` lost its body**: the grammar writes the binding as a
+  definition node and nothing read the lambda inside it.
+- **`assert a(x), b(y)` dropped everything after the comma**; it now reads every
+  value-bearing child, as the lexer does.
+- **The guard compared event counts, not values.** A record whose `return` lost
+  a value could still replace the lexer's. It now compares the shape of each
+  event (targets and the names/calls/constants in the value) and keeps the
+  lexer's record when anything differs. It also stops counting the lexer's own
+  artefacts (`.call`, `assert` read as a call) as losses, and compares the class
+  bindings.
+- **Two Python grammar copies drifted**: `src/deep/python.rs` was a stale fork of
+  the crate's grammar, so the facts path and the harnesses disagreed. One file
+  is compiled by both now, and the same is true for JavaScript.
+
+### Added
+
+- **Fact tables for Rust, Go and Java**, alongside the existing Python and
+  JavaScript/TypeScript ones. `lang_for` answers for `RS`, `GO` and `JAVA`, so
+  those files can take the CST path; JSON deliberately stays out.
+- `--compare`: parses every file both ways and prints symbols, calls and imports
+  per side without choosing. The per-file choice is now named in the JSON
+  (`path_choice`) and counted (`paths`), so a tree's split is auditable.
+- Kotlin, Scala, Swift and Dart corpora: every sample parses clean, with
+  interpolation parsed as expressions.
+- C and C++: 84 → 185 and 92 → 169 clean files on a 331-file real corpus.
+- PHP: 436/1553 real files clean → 5048/5053 across eight projects.
+- Ruby: interpolation fields, command calls and heredocs.
+
+### Measured
+
+| tree | files | calls deep / lexer | imports deep / lexer |
+|:--|--:|--:|--:|
+| Felicity (Python) | 68 | 5587 / 5547 | 710 / 710 |
+| rust-graph itself (Rust) | 29 | 7630 / 7386 | 304 / 295 |
+| webchat_harness runtime (JS) | 11 | 547 / 541 | — |
+
+Suite: 1318 tests with `--features "deep parser"`, 454 without. Deep release
+binary 2,796,192 B; default build unchanged.
 
 ## [0.2.0] - 2026-11-08
 
