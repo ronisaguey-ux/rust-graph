@@ -438,6 +438,9 @@ impl<'a> Walker<'a> {
 
     fn enter(&mut self, id: u32) {
         let kind = self.kind(id);
+        if self.kinds.rust && self.enter_rust(id) {
+            return;
+        }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
             self.open_definition(id, def);
             return;
@@ -524,6 +527,9 @@ impl<'a> Walker<'a> {
                     self.event(&format!("[\"r\",{line},{value}]"));
                 }
             }
+        }
+        if self.kinds.rust {
+            self.leave_rust(id);
         }
         if matches!(
             kind,
@@ -1831,6 +1837,348 @@ impl<'a> Walker<'a> {
             _ => self.leaf_name(id).filter(|path| !path.is_empty()),
         }
     }
+
+    // -- Rust ---------------------------------------------------------------
+    //
+    // Rust is read here rather than through the Python/JS arms above: its
+    // declarations are items, its calls are `call_expression` with a
+    // `field_expression` or `scoped_identifier` callee, and a `use` is a path,
+    // not a binding list. Every function below is reached only when
+    // `Kinds::rust` is set, so nothing here can change another language.
+
+    /// The Rust-only nodes, in the order they are met. `false` means "not mine,
+    /// let the shared walk read it" (an `expression_statement`, a block, a
+    /// plain value).
+    fn enter_rust(&mut self, id: u32) -> bool {
+        match self.kind(id) {
+            "impl_item" => {
+                self.rust_impl(id);
+                true
+            }
+            "use_declaration" => {
+                self.rust_import(id);
+                true
+            }
+            "let_declaration" => {
+                self.rust_let(id);
+                true
+            }
+            "return_expression" => {
+                let line = self.line(id);
+                let value = match self.expression_child(id) {
+                    Some(child) => self.form(child),
+                    None => "0".to_string(),
+                };
+                self.event(&format!("[\"r\",{line},{value}]"));
+                true
+            }
+            "if_expression" | "while_expression" => {
+                self.rust_condition(id);
+                self.event("[\"b\"]");
+                true
+            }
+            "loop_expression" => {
+                self.event("[\"b\"]");
+                true
+            }
+            "for_expression" => {
+                self.rust_for(id);
+                true
+            }
+            "match_expression" => {
+                self.event("[\"b\"]");
+                true
+            }
+            "match_arm" => {
+                // `pat => expr,`: the arm's value is an expression of its own,
+                // and where the calls written after `=>` live.
+                if let Some(value) = self.rust_after_arrow(id) {
+                    self.form(value);
+                }
+                self.event("[\"e\"]");
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// The control-flow markers a Rust expression closes with. `if`/`while`/
+    /// `loop`/`for`/`match` are expressions here, so they are not the shared
+    /// `_statement` kinds the other arms close.
+    fn leave_rust(&mut self, id: u32) {
+        if matches!(self.kind(id), "if_expression" | "while_expression" | "loop_expression" | "for_expression" | "match_expression") {
+            self.event("[\"j\"]");
+        }
+    }
+
+    /// `impl Reader { ... }`, `impl Draw for Widget { ... }`: a container named
+    /// after the type it implements, so its methods take that type as owner and
+    /// their calls sit on them. A trait impl records the trait as a base.
+    fn rust_impl(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut inherent = String::new();
+        let mut trait_name = String::new();
+        let mut seen_for = false;
+        for child in self.children(id) {
+            match self.kind(child) {
+                "impl" | "type_parameters" | "where_clause" | "declaration_list" => {}
+                "for" => seen_for = true,
+                _ => {
+                    let name = self.rust_type_name(child);
+                    if name.is_empty() {
+                        continue;
+                    }
+                    if seen_for && inherent.is_empty() {
+                        inherent = name;
+                    } else if !seen_for && trait_name.is_empty() {
+                        trait_name = name;
+                    }
+                }
+            }
+        }
+        let (name, base) = if inherent.is_empty() { (trait_name, String::new()) } else { (inherent, trait_name) };
+        if name.is_empty() {
+            return;
+        }
+        let index = self.add_symbol(name.clone(), String::new(), KIND_CLASS, line, Vec::new());
+        if !base.is_empty() {
+            self.facts.symbols[index].bases.push(base);
+        }
+        let symbol = self.frame().symbol;
+        self.stack.push(Frame { node: id, symbol, class: name, container: true, defines: Some(index) });
+    }
+
+    /// The spelled name of a type node: `Reader`, `Reader<'a>`, `fmt::Display`.
+    fn rust_type_name(&self, id: u32) -> String {
+        match self.kind(id) {
+            "type_identifier" | "identifier" => self.text_string(id),
+            "generic_type" | "reference_type" | "scoped_type_identifier" | "tuple_type" => {
+                self.last_name(id).unwrap_or_default()
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// `let mut value = f(x);` / `let x: T;`. A binding is an assignment event
+    /// when it carries a value and a name event when it does not, as the lexer
+    /// writes it. The pattern is the child after `let`; the value is the child
+    /// after `=`.
+    fn rust_let(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(&pattern) = children.iter().find(|&&child| !matches!(self.kind(child), "let" | ";" | ":")) else {
+            return;
+        };
+        let line = self.line(id);
+        let targets = self.rust_pattern_names(pattern);
+        match children.iter().position(|&child| self.kind(child) == "=") {
+            Some(equal) if children.len() > equal + 1 => {
+                let value = children[equal + 1];
+                self.assignment_parts(targets, value, line, false);
+            }
+            _ => {
+                if targets.len() == 1 {
+                    let mut text = format!("[\"x\",{line},[\"n\",");
+                    push_string(&mut text, &targets[0]);
+                    text.push_str("]]");
+                    self.event(&text);
+                }
+            }
+        }
+    }
+
+    /// The value side of a `match` arm: the child after `=>`.
+    fn rust_after_arrow(&self, id: u32) -> Option<u32> {
+        let children = self.children(id);
+        let at = children.iter().position(|&child| self.kind(child) == "=>")?;
+        children.get(at + 1).copied()
+    }
+
+    /// The value side of a `let_condition` (`if let Ok(x) = f()`): the child
+    /// after `=`. The pattern is a binding, not a value.
+    fn rust_let_value(&self, id: u32) -> Option<u32> {
+        let children = self.children(id);
+        let at = children.iter().position(|&child| self.kind(child) == "=")?;
+        children.get(at + 1).copied()
+    }
+
+    /// The names a Rust pattern binds. A tuple-struct pattern's first child is
+    /// the variant (`Ok(name)` binds `name`, not `Ok`) and a struct pattern's
+    /// field names are its own, so neither is read as a binder.
+    fn rust_pattern_names(&self, id: u32) -> Vec<String> {
+        match self.kind(id) {
+            "identifier" | "shorthand_field_identifier" | "self" => vec![self.text_string(id)],
+            "mut_pattern" | "ref_pattern" | "reference_pattern" => self.first_identifier(id).into_iter().collect(),
+            "tuple_struct_pattern" => {
+                self.children(id).into_iter().skip(1).flat_map(|child| self.rust_pattern_names(child)).collect()
+            }
+            "struct_pattern" => self
+                .children(id)
+                .into_iter()
+                .filter(|&child| matches!(self.kind(child), "field_pattern" | "shorthand_field_identifier" | "remaining_field_pattern"))
+                .flat_map(|child| self.rust_pattern_names(child))
+                .collect(),
+            // `Struct { field: binder }` binds `binder`; `Struct { field }`
+            // binds the field's own name.
+            "field_pattern" => self
+                .children(id)
+                .into_iter()
+                .rev()
+                .find_map(|child| self.first_identifier(child))
+                .into_iter()
+                .collect(),
+            "tuple_pattern" | "or_pattern" | "slice_pattern" | "tuple_expression" => {
+                self.children(id).into_iter().flat_map(|child| self.rust_pattern_names(child)).collect()
+            }
+            _ => self.pattern_names(id),
+        }
+    }
+
+    /// `if cond {`, `while cond {`: the condition is a value of its own and its
+    /// calls are facts. `if let pat = value` is read on the value side, which is
+    /// where the calls are.
+    fn rust_condition(&mut self, id: u32) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "if" | "while" => continue,
+                "block" | "else_clause" => return,
+                "let_condition" | "let_chain" => {
+                    if let Some(value) = self.rust_let_value(child) {
+                        let value = self.form(value);
+                        if value != "0" {
+                            let line = self.line(child);
+                            self.event(&format!("[\"x\",{line},{value}]"));
+                        }
+                    }
+                    return;
+                }
+                _ => {
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        let line = self.line(child);
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// `for value in values {`: the loop binds its pattern to the iterable, so
+    /// the record gets an assignment event and a block, as the lexer writes.
+    fn rust_for(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "in") else {
+            self.event("[\"b\"]");
+            return;
+        };
+        self.event("[\"b\"]");
+        let targets = children[..at]
+            .iter()
+            .filter(|&&child| !matches!(self.kind(child), "for" | "&" | "ref" | "mut"))
+            .flat_map(|&child| self.rust_pattern_names(child))
+            .collect();
+        if let Some(&value) = children.get(at + 1) {
+            let line = self.line(id);
+            self.assignment_parts(targets, value, line, false);
+        }
+    }
+
+    /// `use std::path::PathBuf;`, `use x as y;`, `use a::b::*;`,
+    /// `use a::{b, c as d};` — the path import the lexer spells with dots.
+    fn rust_import(&mut self, id: u32) {
+        let line = self.line(id);
+        for child in self.children(id) {
+            match self.kind(child) {
+                "use" | ";" => {}
+                "use_as_clause" => {
+                    let inner = self.children(child);
+                    let Some(&path) = inner.first() else { continue };
+                    let module = self.rust_module_text(path);
+                    let alias = inner.last().filter(|&&last| last != path).map(|&last| self.text_string(last));
+                    self.facts.imports.push(Import {
+                        line,
+                        module,
+                        alias: alias.unwrap_or_default(),
+                        kind: IMPORT_MODULE,
+                        ..Import::default()
+                    });
+                }
+                "use_wildcard" => {
+                    let Some(&path) = self.children(child).first() else { continue };
+                    self.facts.imports.push(Import {
+                        line,
+                        module: self.rust_module_text(path),
+                        kind: IMPORT_STAR,
+                        ..Import::default()
+                    });
+                }
+                "scoped_use_list" => {
+                    let inner = self.children(child);
+                    let Some(&path) = inner.first() else { continue };
+                    let module = self.rust_module_text(path);
+                    let Some(&list) = inner.iter().find(|&&node| self.kind(node) == "use_list") else { continue };
+                    self.rust_use_list(list, &module, line);
+                }
+                "use_list" => self.rust_use_list(child, "", line),
+                _ => {
+                    let module = self.rust_module_text(child);
+                    if module.is_empty() {
+                        continue;
+                    }
+                    let alias = module.rsplit('.').next().unwrap_or("").to_string();
+                    self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+                }
+            }
+        }
+    }
+
+    fn rust_use_list(&mut self, id: u32, module: &str, line: u32) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "use_as_clause" => {
+                    let inner = self.children(child);
+                    let Some(&path) = inner.first() else { continue };
+                    let name = self.rust_module_text(path);
+                    let alias = inner.last().filter(|&&last| last != path).map(|&last| self.text_string(last));
+                    self.facts.imports.push(Import {
+                        line,
+                        module: module.into(),
+                        name,
+                        alias: alias.unwrap_or_default(),
+                        kind: IMPORT_MODULE,
+                    });
+                }
+                "identifier" | "scoped_identifier" | "type_identifier" | "self" => {
+                    let name = self.rust_module_text(child);
+                    let (module_name, member) = match module.rsplit_once('.') {
+                        _ if module.is_empty() => (String::new(), name.clone()),
+                        _ => (module.to_string(), name.clone()),
+                    };
+                    self.facts.imports.push(Import {
+                        line,
+                        module: module_name,
+                        name: member.clone(),
+                        alias: member,
+                        kind: IMPORT_MODULE,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A path as the lexer spells it: `std::path::PathBuf` is `std.path.PathBuf`,
+    /// `crate` and `super` keep their word.
+    fn rust_module_text(&self, id: u32) -> String {
+        match self.kind(id) {
+            "use_wildcard" => self.children(id).first().map(|&child| self.rust_module_text(child)).unwrap_or_default(),
+            _ => self.text_string(id).replace("::", "."),
+        }
+    }
+
 
 }
 
