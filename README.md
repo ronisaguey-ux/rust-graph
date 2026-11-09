@@ -251,6 +251,42 @@ parser in a scripting language can need several times the file size.
 This table compares rust-graph with nothing. The one comparison with another
 tool is the parser gate below.
 
+### The fact layer
+
+A tree on its own is not a result. `--deep` exists to produce the same facts the
+one-pass lexer produces — symbols, calls, imports, flow events — with more
+information about each. `src/deep_facts.rs` holds one table per language, and
+`lang_for` is the list of languages a file may take the CST path for:
+
+| language | tags | what the CST adds |
+|:--|:--|:--|
+| Python | `PY` | f-string fields, annotated assignments, assigned lambdas, multi-target patterns |
+| JavaScript, TypeScript, TSX | `JS`, `TS` | template substitutions, tagged templates |
+| Rust | `RS` | `impl` owners, `use` paths, struct-literal values |
+| Go | `GO` | receiver-named methods, interface signatures |
+| Java | `JAVA` | heritage clauses, typed parameters |
+
+Every other grammar in `crates/deep-grammars` parses and is exercised by the
+fuzz and conformance harnesses, but has no fact table yet, so its files stay on
+the lexer path. That is the largest remaining gap and it is a coverage
+decision, not a parser defect.
+
+**The guard.** `pipeline::loses` parses a file both ways and compares the
+records fact by fact — imports, symbols, calls, class bindings, and the shape of
+every flow event (targets, and the names, calls and constants in each value).
+Any loss keeps the lexer's record and is counted as a fallback; the JSON says
+which path won per file (`path_choice`) and the counts (`paths`). `--compare`
+prints both sides without choosing, which is how the numbers below were
+measured.
+
+Measured on 2026-11-09 (commands in `docs/DEEP_PARSER.md` §11):
+
+| tree | files | calls deep / lexer | imports deep / lexer |
+|:--|--:|--:|--:|
+| Felicity (Python) | 68 | 5587 / 5547 | 710 / 710 |
+| rust-graph itself (Rust) | 29 | 7630 / 7386 | 304 / 295 |
+| webchat_harness runtime (JS) | 11 | 547 / 541 | — |
+
 ### Reproducing the parser gate
 
 The deep scan (`--features parser`, the `rust-graph-deep-scan` binary) has a
