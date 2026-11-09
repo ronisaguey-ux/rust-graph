@@ -1307,6 +1307,11 @@ impl<'a> Walker<'a> {
     /// ```
     fn form(&mut self, id: u32) -> String {
         let kind = self.kind(id);
+        if self.kinds.rust {
+            if let Some(out) = self.rust_form(id) {
+                return out;
+            }
+        }
         if self.kinds.calls.contains(&kind) {
             return self.call_form(id);
         }
@@ -1787,6 +1792,11 @@ impl<'a> Walker<'a> {
         if let Some(name) = self.soft_name(id) {
             return name;
         }
+        if self.kinds.rust {
+            if let Some(path) = self.rust_path(id) {
+                return path;
+            }
+        }
         match self.kind(id) {
             "identifier" | "property_identifier" | "private_property_identifier" | "type_identifier"
             | "shorthand_property_identifier" | "this" | "super" => {
@@ -2179,7 +2189,228 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// Rust's value forms, or `None` for a node the shared arms already read.
+    fn rust_form(&mut self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "call_expression" => Some(self.rust_call(id)),
+            "macro_invocation" => Some(self.rust_macro(id)),
+            // `Facts { tag, lines }`: the constructor and its fields.
+            "struct_expression" => Some(self.rust_struct_expression(id)),
+            "field_initializer_list" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                Some(if items.is_empty() { "0".to_string() } else { self.merge_form(&items) })
+            }
+            "field_initializer" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.as_slice() {
+                    [name, value] => {
+                        let key = self.form(*name);
+                        let value = self.form(*value);
+                        Some(format!("[\"m\",[{key},{value}]]"))
+                    }
+                    _ => Some("0".to_string()),
+                }
+            }
+            "shorthand_field_initializer" => {
+                let name = self.children(id).into_iter().next().map(|child| self.form(child)).unwrap_or_else(|| "0".to_string());
+                Some(name)
+            }
+            "type_cast_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !matches!(self.kind(child), "as")).collect();
+                Some(if items.is_empty() { "0".to_string() } else { self.merge_form(&items) })
+            }
+            // `&x`, `*x`, `x?`, `x.await`: the operator is not a value, the
+            // operand is, and it is where the calls are.
+            "reference_expression" | "try_expression" | "await_expression" => {
+                self.expression_child(id).map(|child| self.form(child))
+            }
+            "range_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                Some(if items.is_empty() { "0".to_string() } else { self.merge_form(&items) })
+            }
+            "index_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.split_first() {
+                    Some((base, rest)) => {
+                        let base = self.form(*base);
+                        if rest.is_empty() {
+                            Some(base)
+                        } else {
+                            let mut all = vec![base];
+                            all.extend(rest.iter().map(|&item| self.form(item)));
+                            Some(format!("[\"m\",[{}]]", all.join(",")))
+                        }
+                    }
+                    None => Some("0".to_string()),
+                }
+            }
+            "tuple_expression" | "array_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                Some(if items.is_empty() { "0".to_string() } else { self.tuple_form(&items) })
+            }
+            // `|_| self.string()`: the body is what the closure yields.
+            "closure_expression" => match self.children(id).into_iter().rev().find(|&child| !self.is_layout(child)) {
+                Some(body) if !matches!(self.kind(body), "block") => Some(self.form(body)),
+                Some(_) => Some("0".to_string()),
+                None => Some("0".to_string()),
+            },
+            // `value >>= 7` / `x += 1`: the lexer reads the target as the value.
+            "compound_assignment_expr" => {
+                let children = self.children(id);
+                Some(children.first().map(|&first| self.form(first)).unwrap_or_else(|| "0".to_string()))
+            }
+            // A token tree is the macro's argument list; its names and nested
+            // calls are values, its punctuation is not.
+            "token_tree" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                Some(if items.is_empty() { "0".to_string() } else { self.merge_form(&items) })
+            }
+            _ => None,
+        }
+    }
 
+    fn rust_call(&mut self, id: u32) -> String {
+        let children = self.children(id);
+        let callee = children
+            .iter()
+            .copied()
+            .find(|&child| !matches!(self.kind(child), "arguments" | "type_arguments" | "(" | ")"))
+            .unwrap_or(id);
+        let (path, receiver) = self.rust_callee(callee);
+        let line = self.rust_call_line(callee, id);
+        let index = self.push_call(path, line);
+        let mut out = format!("[\"c\",{index},{receiver},");
+        match children.iter().copied().find(|&child| self.kind(child) == "arguments") {
+            Some(list) => out.push_str(&self.arguments(list)),
+            None => out.push_str("[]"),
+        }
+        out.push(']');
+        out
+    }
+
+    /// The called path and the receiver form: `render` -> (`render`, `0`),
+    /// `self.bytes.get` -> (`self.bytes.get`, `["n","self.bytes"]`),
+    /// `u32::from` -> (`u32.from`, `0`), `make().run` -> (`.run`, the call's
+    /// form).
+    fn rust_callee(&mut self, callee: u32) -> (String, String) {
+        match self.kind(callee) {
+            "field_expression" => {
+                let children = self.children(callee);
+                let name = self.member_name(callee);
+                let Some(&object) = children.first() else {
+                    return (format!(".{name}"), "0".to_string());
+                };
+                if matches!(self.kind(object), "call_expression" | "macro_invocation") {
+                    let inner = self.form(object);
+                    return (format!(".{name}"), inner);
+                }
+                let receiver = self.path_of(object);
+                self.form(object);
+                if receiver.is_empty() {
+                    (format!(".{name}"), "0".to_string())
+                } else {
+                    let mut text = "[\"n\",".to_string();
+                    push_string(&mut text, &receiver);
+                    text.push(']');
+                    (format!("{receiver}.{name}"), text)
+                }
+            }
+            "generic_function" => {
+                let inner = self.children(callee).into_iter().find(|&child| self.kind(child) != "type_arguments");
+                match inner {
+                    Some(inner) => self.rust_callee(inner),
+                    None => (String::new(), "0".to_string()),
+                }
+            }
+            _ => (self.path_of(callee), "0".to_string()),
+        }
+    }
+
+    /// The line a Rust call is written on: for `a.iter()\n  .map(f)` that is
+    /// the line of `map`, which is what a reader points at and where the lexer
+    /// stamps it.
+    fn rust_call_line(&self, callee: u32, call: u32) -> u32 {
+        match self.kind(callee) {
+            "field_expression" => {
+                let children = self.children(callee);
+                if let Some(&name) = children.iter().rev().find(|&&child| {
+                    self.node(child).first_child == NONE && !self.is_layout(child)
+                }) {
+                    return self.line(name);
+                }
+                self.line(call)
+            }
+            _ => self.line(callee),
+        }
+    }
+
+    /// `assert_eq!(a, b)` is a merge of the macro's name and its arguments, not
+    /// a call: the lexer reads the name as a name, and a resolver has no callee
+    /// called `assert_eq!`.
+    fn rust_macro(&mut self, id: u32) -> String {
+        let mut items = Vec::new();
+        for child in self.children(id) {
+            match self.kind(child) {
+                "token_tree" => items.push(self.form(child)),
+                "identifier" | "scoped_identifier" => {
+                    let path = self.path_of(child);
+                    let mut text = "[\"n\",".to_string();
+                    push_string(&mut text, &path);
+                    text.push(']');
+                    items.push(text);
+                }
+                _ => {}
+            }
+        }
+        if items.is_empty() {
+            "0".to_string()
+        } else {
+            format!("[\"m\",[{}]]", items.join(","))
+        }
+    }
+
+    fn rust_struct_expression(&mut self, id: u32) -> String {
+        let mut items = Vec::new();
+        let children = self.children(id);
+        if let Some(&name) = children.first() {
+            let path = self.path_of(name);
+            if !path.is_empty() {
+                let mut text = "[\"n\",".to_string();
+                push_string(&mut text, &path);
+                text.push(']');
+                items.push(text);
+            }
+        }
+        for child in children.iter().skip(1) {
+            if self.kind(*child) == "field_initializer_list" {
+                items.push(self.form(*child));
+            }
+        }
+        if items.is_empty() {
+            "0".to_string()
+        } else {
+            format!("[\"m\",[{}]]", items.join(","))
+        }
+    }
+
+    /// Rust's path spellings, or `None` when the shared `path_of` arm is right
+    /// (a plain identifier, a literal).
+    fn rust_path(&self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "field_expression" => {
+                let name = self.member_name(id);
+                let object = self.children(id).first().copied()?;
+                let base = self.path_of(object);
+                Some(if base.is_empty() { format!(".{name}") } else { format!("{base}.{name}") })
+            }
+            // `u32::from` is `u32.from`, the lexer's spelling of a path.
+            "scoped_identifier" | "scoped_type_identifier" => Some(self.text_string(id).replace("::", ".")),
+            "call_expression" | "macro_invocation" => Some(String::new()),
+            "struct_expression" => self.children(id).first().map(|&name| self.path_of(name)),
+            "generic_function" => self.children(id).into_iter().find(|&child| self.kind(child) != "type_arguments").map(|child| self.path_of(child)),
+            _ => None,
+        }
+    }
 }
 
 /// Byte offset of the start of each line, so a node's line is a binary search.
