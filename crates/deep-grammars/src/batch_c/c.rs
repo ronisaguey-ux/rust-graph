@@ -140,16 +140,21 @@ rust_graph_deep::grammar! { C {
         | &(IDENT _qualified_tail) macro_qualified_item
         | &(declaration_specifiers IDENT _qualified_tail) specified_macro_item
         | &(IDENT parameter_list "{") implicit_function
+        | &(user_type_name "*") user_pointer_declaration
         | declaration_statement
         | static_assert_statement
         | asm_statement
         | ";"
-        | expression_statement,
+        | macro_call_statement,
 
     function_definition: declaration_specifiers _declarator compound_statement,
     /// A definition whose return type is a typedef name: `PyObject *f(void) {`.
     user_function_definition: declaration_specifiers user_type_name _declarator compound_statement,
     bare_user_function_definition: user_type_name _declarator compound_statement,
+    /// `PyDoc_STRVAR(name, "...");`: a macro that expands to a declaration, at
+    /// file scope. Nothing else is a statement there, so this is the only
+    /// expression-shaped form the root accepts.
+    macro_call_statement: IDENT arguments ";",
     /// `extern "C" { ... }` and `extern "C" int f(void);`: a linkage block.
     linkage_specification: "extern" string ("{" _top_item* "}" | _top_item),
     /// A visibility macro in front of a declaration: `NPY_NO_EXPORT int f(void);`,
@@ -168,6 +173,7 @@ rust_graph_deep::grammar! { C {
         | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
         | &(user_type_name _declarator "{") bare_user_function_definition
         | &(IDENT parameter_list "{") implicit_function
+        | &(user_type_name "*") user_pointer_declaration
         | declaration_statement
         | static_assert_statement,
     /// A definition whose return type is supplied by the macro above it:
@@ -181,17 +187,21 @@ rust_graph_deep::grammar! { C {
         | _default_declaration,
     /// `static const Foo *f(void);`: a keyword-qualified typedef name.
     specified_user_declaration: declaration_specifiers user_type_name (_init_declarator % ",") ";",
+    /// `buffer *buffer_new(int size);`: a typedef name and a pointer declarator.
+    /// Only file scope accepts this: inside a function `x * y;` must stay a
+    /// multiplication.
+    user_pointer_declaration: user_type_name _pointer_named_declarator ("," _pointer_named_declarator)* ";",
+    _pointer_named_declarator: pointer* IDENT _declarator_suffix* attribute* ["=" _initializer],
     /// `typedef Foo (*handler)(void);`: a typedef whose type is a typedef name.
     typedef_user_declaration: "typedef" user_type_name _init_declarator ("," _init_declarator)* ";",
-    /// `Foo x;`: two names in a row, which no expression can be. The declarator
-    /// must start with its name, so this can never begin `Foo (`.
+    /// `Foo x;`: a typedef name and a named declarator. It never starts with a
+    /// `*`, so `x * y;` in a function stays a multiplication.
     bare_user_declaration: user_type_name _named_init_declarator ("," _named_init_declarator)* ";",
-    _named_init_declarator: _named_declarator _attribute* ["=" _initializer],
-    _named_declarator: IDENT _declarator_suffix*,
+    _named_init_declarator: IDENT _declarator_suffix* attribute* ["=" _initializer],
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     /// A typedef name where a type specifier is expected.
     user_type_name: IDENT,
-    _init_declarator: _declarator _attribute* ["=" _initializer],
+    _init_declarator: _declarator attribute* ["=" _initializer],
     _initializer: designated_field | designated_index | _expression@assign | initializer_list,
     initializer_list: "{" (_initializer %? ",") "}",
     /// C99 `.name = value` inside an initializer list.
@@ -222,12 +232,12 @@ rust_graph_deep::grammar! { C {
         | "_Thread_local" | "const" | "volatile" | "restrict" | "_Atomic"
         | "_Alignas" alignment_arguments
         | "__extension__"
-        | _attribute
+        | attribute
         | type_specifier,
     alignment_arguments: "(" _expression ")",
 
     /// `__attribute__((packed, aligned(4)))` and `__declspec(dllexport)`.
-    _attribute: ("__attribute__" | "__declspec") attribute_arguments,
+    attribute: ("__attribute__" | "__declspec") attribute_arguments,
     attribute_arguments: "(" attribute_body ")",
     attribute_body: attribute_group | _attribute_argument ("," _attribute_argument)*,
     attribute_group: "(" (_attribute_argument %? ",") ")",
@@ -262,12 +272,12 @@ rust_graph_deep::grammar! { C {
     macro_field: IDENT,
     /// A struct member's declarator: no parameter list, so a bare field macro
     /// can never be mistaken for the start of `Foo Bar(...)`.
-    _member_declarator: pointer* _member_direct _attribute* [trailing_macro] [":" _expression@assign],
+    _member_declarator: pointer* _member_direct attribute* [trailing_macro] [":" _expression@assign],
     /// A deprecation macro after a member's declarator: `char **names
     /// XML_DEPRECATED_MEMBER;`.
     trailing_macro: IDENT,
     _member_direct: IDENT array_suffix* | parenthesized_declarator _declarator_suffix*,
-    _struct_declarator: _declarator _attribute* [":" _expression@assign],
+    _struct_declarator: _declarator attribute* [":" _expression@assign],
 
     enum_specifier: "enum" [IDENT] [enum_body],
     enum_body: "{" (_enumerator %? ",") "}",
@@ -662,5 +672,126 @@ mod corpus {
             }
         }
         println!("C: {clean}/{} clean", results.len());
+    }
+}
+
+/// The fixtures this grammar owns, and the construct each one proves: one node
+/// kind and the exact source text it must span.
+///
+/// ```text
+/// fixtures/c_*.c  ->  deep-grammars/src/batch_c/c.rs
+/// ```
+#[cfg(test)]
+mod kinds {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use crate::batch_c::c::C;
+    use crate::deep::syntax::{Kind, Language, ERROR, FIRST_LANGUAGE_KIND};
+    use crate::deep::tree::{HAS_ERROR, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    /// `(fixture, first node of this kind, exact text it spans)`.
+    const FIXTURES: &[(&str, &[(&str, &str)])] = &[
+        (
+            "c_attributes.c",
+            &[
+                ("attribute", "__attribute__((noreturn))"),
+                ("function_definition", "__attribute__((always_inline)) static inline int twice(int value) {\n    return value + value;\n}"),
+            ],
+        ),
+        (
+            "c_designated_initializers.c",
+            &[
+                ("designated_field", ".x = 0"),
+                ("designated_index", "[1] = 7"),
+                ("sequence_expression", "left = input, right = input + 1"),
+            ],
+        ),
+        (
+            "c_function_pointers.c",
+            &[
+                ("typedef_user_declaration", "typedef outcome_t (*outcome_handler)(int value);"),
+                ("user_struct_declaration", "handler dispatch;"),
+                ("user_cast_expression", "(handler) invoke"),
+            ],
+        ),
+        (
+            "c_inline_asm.c",
+            &[
+                ("asm_statement", "__asm__ volatile(\"mov %0, sp\" : \"=r\"(sp));"),
+                ("asm_operand_expression", "(sp)"),
+            ],
+        ),
+        (
+            "c_linkage_block.c",
+            &[(
+                "linkage_specification",
+                "extern \"C\" {\n#endif\n\nint widget_open(const char *name);\nint widget_close(int handle);\n\n#ifdef __cplusplus\n}",
+            )],
+        ),
+        (
+            "c_macro_field.c",
+            &[("macro_field", "HEADER_FIELDS"), ("user_struct_declaration", "holder_t **names;")],
+        ),
+        (
+            "c_macro_qualifiers.c",
+            &[
+                ("macro_qualified_item", "EXPORT int public_entry(int argc, char **argv);"),
+                ("specified_macro_item", "static EXPORT int hidden_entry(void) {\n    return 0;\n}"),
+            ],
+        ),
+        (
+            "c_typedef_names.c",
+            &[
+                ("specified_user_declaration", "static const buffer *buffer_empty(void);"),
+                ("user_pointer_declaration", "buffer *buffer_new(int size);"),
+                ("function_definition", "int fill(void) {\n    buffer *slot;\n    const buffer *limit;\n    return slot == limit;\n}"),
+            ],
+        ),
+    ];
+
+    fn fixtures() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+    }
+
+    fn kind_of(language: &'static Language, name: &str) -> Kind {
+        let at = language
+            .kinds
+            .iter()
+            .position(|info| info.name == name)
+            .unwrap_or_else(|| panic!("the C grammar has no kind named {name}"));
+        FIRST_LANGUAGE_KIND + at as Kind
+    }
+
+    #[test]
+    fn every_c_fixture_parses_and_spans_the_construct_it_names() {
+        let dir = fixtures();
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("c_") && name.ends_with(".c"))
+            .collect();
+        names.sort();
+        let listed: Vec<String> = FIXTURES.iter().map(|(name, _)| (*name).to_string()).collect();
+        assert_eq!(names, listed, "fixtures/: the table and the directory disagree");
+
+        for (name, expectations) in FIXTURES {
+            let path = dir.join(name);
+            let src = fs::read(&path).unwrap();
+            let mut workspace = Workspace::default();
+            let outcome = workspace.parse(&src, &C, &Budget::default()).expect("too large");
+            assert!(outcome.complete(), "{name}: the parse did not finish");
+            let nodes = &workspace.tree.nodes;
+            let errors = nodes.iter().filter(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0 && node.flags & TOKEN != 0).count();
+            assert_eq!(errors, 0, "{name}: {errors} error nodes:\n{}", workspace.tree.sexp(&C, true));
+            for (kind_name, text) in *expectations {
+                let kind = kind_of(&C, kind_name);
+                let node = nodes.iter().find(|node| node.kind == kind).unwrap_or_else(|| panic!("{name}: no {kind_name} node"));
+                let span = String::from_utf8_lossy(&src[node.start as usize..node.end as usize]).into_owned();
+                assert_eq!(span, *text, "{name}: the first {kind_name} spans something else");
+            }
+        }
     }
 }
