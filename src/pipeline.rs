@@ -460,7 +460,7 @@ fn resolve_file(
             calls.push('[');
             push_string(&mut calls, &call.path);
             calls.push_str(&format!(",{},", call.line));
-            match resolver.call(&call.path, id, &symbol.owner, facts, scope) {
+            match resolver.call_at(&call.path, symbol, position, id, facts, scope) {
                 Outcome::Bound(bound) => {
                     let target = index.id(&bound.row);
                     let mut edge = String::from("{\"caller\":");

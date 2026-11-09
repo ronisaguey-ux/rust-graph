@@ -5,13 +5,212 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::facts::{Facts, Import, IMPORT_STAR, KIND_CLASS};
+use crate::facts::{Facts, Import, Symbol, IMPORT_STAR, KIND_CLASS, KIND_FUNCTION};
 use crate::index::{family, hash, Index, Row};
 
 const MAX_FOLLOW: usize = 8;
+const MAX_RECEIVERS: usize = 4;
 const MAX_DEAD_ENDS: usize = 1 << 16;
 const CONSTRUCTORS: [&str; 5] = ["__init__", "constructor", "initialize", "init", "new"];
 const EXTENSIONS: [&str; 13] = ["", ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rb", ".lua", ".php", ".pm", ".go"];
+
+/// The flow encoding, read back. A symbol's `events` is a comma-separated list
+/// of forms (`["c",index,receiver,args]`, `["r",line,value]`, `["n","a.b"]`,
+/// ...) without its outer brackets; the resolver needs exactly one field of it
+/// — which call produced a call's receiver — so a strict reader of the shape is
+/// enough and no dependency is pulled in for the rest.
+mod form {
+    #[derive(Debug)]
+    pub enum Value {
+        Null,
+        Bool,
+        Num(u32),
+        Str(String),
+        List(Vec<Value>),
+    }
+
+    pub fn parse(text: &str) -> Option<Value> {
+        let mut reader = Reader { bytes: text.as_bytes(), pos: 0 };
+        let value = reader.value()?;
+        reader.space();
+        (reader.pos == reader.bytes.len()).then_some(value)
+    }
+
+    struct Reader<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+    }
+
+    impl Reader<'_> {
+        fn space(&mut self) {
+            while matches!(self.bytes.get(self.pos), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+                self.pos += 1;
+            }
+        }
+
+        fn value(&mut self) -> Option<Value> {
+            self.space();
+            match *self.bytes.get(self.pos)? {
+                b'[' => self.list(),
+                b'"' => self.string().map(Value::Str),
+                b't' => self.word("true", Value::Bool),
+                b'f' => self.word("false", Value::Bool),
+                b'n' => self.word("null", Value::Null),
+                b'-' | b'0'..=b'9' => self.number(),
+                _ => None,
+            }
+        }
+
+        fn word(&mut self, text: &str, value: Value) -> Option<Value> {
+            self.bytes.get(self.pos..self.pos + text.len())?.eq(text.as_bytes()).then(|| {
+                self.pos += text.len();
+                value
+            })
+        }
+
+        fn number(&mut self) -> Option<Value> {
+            let start = self.pos;
+            if self.bytes.get(self.pos) == Some(&b'-') {
+                // No form the resolver reads is negative; a line or an index is
+                // never one, so a negative number is not the shape to read.
+                return None;
+            }
+            while matches!(self.bytes.get(self.pos), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+            let text = std::str::from_utf8(self.bytes.get(start..self.pos)?).ok()?;
+            let value = text.parse::<u32>().ok()?;
+            // A fractional or exponent part is not a form this reader claims.
+            matches!(self.bytes.get(self.pos), None | Some(b',' | b']' | b' ' | b'\t' | b'\n' | b'\r')).then_some(Value::Num(value))
+        }
+
+        fn list(&mut self) -> Option<Value> {
+            self.pos += 1;
+            let mut items = Vec::new();
+            self.space();
+            if self.bytes.get(self.pos) == Some(&b']') {
+                self.pos += 1;
+                return Some(Value::List(items));
+            }
+            loop {
+                items.push(self.value()?);
+                self.space();
+                match *self.bytes.get(self.pos)? {
+                    b',' => self.pos += 1,
+                    b']' => {
+                        self.pos += 1;
+                        return Some(Value::List(items));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+
+        fn string(&mut self) -> Option<String> {
+            self.pos += 1;
+            let mut out = String::new();
+            loop {
+                let byte = *self.bytes.get(self.pos)?;
+                self.pos += 1;
+                match byte {
+                    b'"' => return Some(out),
+                    b'\\' => {
+                        let escape = *self.bytes.get(self.pos)?;
+                        self.pos += 1;
+                        match escape {
+                            b'"' => out.push('"'),
+                            b'\\' => out.push('\\'),
+                            b'/' => out.push('/'),
+                            b'n' => out.push('\n'),
+                            b'r' => out.push('\r'),
+                            b't' => out.push('\t'),
+                            b'u' => {
+                                let hex = self.bytes.get(self.pos..self.pos + 4)?;
+                                self.pos += 4;
+                                let code = u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+                                out.push(char::from_u32(code)?);
+                            }
+                            _ => return None,
+                        }
+                    }
+                    byte if byte < 0x20 => return None,
+                    // Only the ASCII forms are read (a tag, a call index); a
+                    // multi-byte name is copied byte by byte and never compared.
+                    byte => out.push(char::from(byte)),
+                }
+            }
+        }
+    }
+}
+
+/// For each call a symbol records, the call whose result it is a method call
+/// on, when the walk recorded one: `A().run` holds `0` at the index of `.run`,
+/// and `None` everywhere the receiver is not a call.
+///
+/// The stored field is the inside of the array — the pipeline writes the
+/// brackets around it — so it is wrapped before it is read.
+pub fn receiver_calls(events: &str) -> Vec<Option<u32>> {
+    let mut out: Vec<Option<u32>> = Vec::new();
+    if events.is_empty() {
+        return out;
+    }
+    if let Some(value) = form::parse(&format!("[{events}]")) {
+        collect_receivers(&value, &mut out);
+    }
+    out
+}
+
+fn collect_receivers(value: &form::Value, out: &mut Vec<Option<u32>>) {
+    let form::Value::List(items) = value else { return };
+    if matches!(items.first(), Some(form::Value::Str(tag)) if tag == "c") {
+        if let Some(form::Value::Num(index)) = items.get(1) {
+            let receiver = match items.get(2) {
+                Some(form::Value::List(inner)) => match (inner.first(), inner.get(1)) {
+                    (Some(form::Value::Str(tag)), Some(form::Value::Num(call))) if tag == "c" => Some(*call),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let index = *index as usize;
+            if out.len() <= index {
+                out.resize(index + 1, None);
+            }
+            out[index] = receiver;
+        }
+    }
+    // A call form appears where it is used: at a statement, in an argument, or
+    // as another call's receiver, which carries that receiver's own receiver.
+    for item in items {
+        collect_receivers(item, out);
+    }
+}
+
+/// The value of each `return`, as the call index it is, or `None` when the
+/// return is not a call at all (a bare `return`, a name, a literal).
+fn returns_of(events: &str) -> Vec<Option<u32>> {
+    let mut out = Vec::new();
+    if events.is_empty() {
+        return out;
+    }
+    let Some(form::Value::List(items)) = form::parse(&format!("[{events}]")) else {
+        return out;
+    };
+    for item in &items {
+        let form::Value::List(parts) = item else { continue };
+        if !matches!(parts.first(), Some(form::Value::Str(tag)) if tag == "r") {
+            continue;
+        }
+        let value = match parts.get(2) {
+            Some(form::Value::List(inner)) => match (inner.first(), inner.get(1)) {
+                (Some(form::Value::Str(tag)), Some(form::Value::Num(call))) if tag == "c" => Some(*call),
+                _ => None,
+            },
+            _ => None,
+        };
+        out.push(value);
+    }
+    out
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Tag {
@@ -86,6 +285,9 @@ pub struct Resolver<'a, S: ImportSource> {
     source: &'a mut S,
     dead_methods: DeadEnds,
     dead_paths: DeadEnds,
+    /// Per symbol, the call each method call's receiver is: read from the
+    /// symbol's flow events once, keyed by the symbol's key.
+    receivers: HashMap<(u32, u64), Rc<Vec<Option<u32>>>>,
 }
 
 fn parent(path: &str) -> &str {
@@ -108,7 +310,7 @@ fn join(dir: &str, relative: &str) -> Option<String> {
 
 impl<'a, S: ImportSource> Resolver<'a, S> {
     pub fn new(index: &'a Index, source: &'a mut S) -> Self {
-        Resolver { index, source, dead_methods: DeadEnds::default(), dead_paths: DeadEnds::default() }
+        Resolver { index, source, dead_methods: DeadEnds::default(), dead_paths: DeadEnds::default(), receivers: HashMap::new() }
     }
 
     fn exact(&self, stem_path: &str, file: u32) -> Option<u32> {
@@ -340,6 +542,173 @@ impl<'a, S: ImportSource> Resolver<'a, S> {
             }
         }
         None
+    }
+
+    /// The write-name of a class row: `A` for both `A` and `A.__init__`.
+    fn class_name(&self, row: &Row) -> Option<String> {
+        let id = self.index.id(row);
+        let key = id.rsplit_once(':')?.1;
+        Some(key.split('.').next()?.to_string())
+    }
+
+    /// The owner and the name a row was written under: `A.run` is `("A", "run")`,
+    /// a class `A` is `("", "A")` and a module-level `make` is `("", "make")`.
+    /// The key is the only place a row's own name survives the index (the row
+    /// holds its hashes), so it is read from there.
+    fn row_parts(&self, row: &Row) -> Option<(String, String)> {
+        let id = self.index.id(row);
+        let key = id.rsplit_once(':')?.1;
+        let (owner, name) = key.rsplit_once('.').unwrap_or(("", key));
+        Some((owner.to_string(), name.to_string()))
+    }
+
+    /// The call that produced this call's receiver, when the walk recorded it.
+    fn receiver_call(&mut self, file: u32, symbol: &Symbol, position: usize) -> Option<u32> {
+        let key = (file, hash(&symbol.key));
+        if !self.receivers.contains_key(&key) {
+            let table = receiver_calls(&symbol.events);
+            self.receivers.insert(key, Rc::new(table));
+        }
+        self.receivers.get(&key)?.get(position).copied().flatten()
+    }
+
+    /// The class whose instance the call at `position` produces, and the
+    /// strategy that says how it was read. `None` is a value whose class the
+    /// tree does not state.
+    fn call_class(
+        &mut self,
+        symbol: &Symbol,
+        position: usize,
+        file: u32,
+        facts: &Facts,
+        scope: Scope,
+        depth: usize,
+    ) -> Option<(u32, String, &'static str)> {
+        if depth > MAX_RECEIVERS {
+            return None;
+        }
+        let path = symbol.calls.get(position)?.path.clone();
+        if let Some(name) = path.strip_prefix('.') {
+            // `.b` on a receiver that is itself a call: `A().b().c()`. What
+            // `.c` is called on is whatever `A.b` returns, and only `A.b`'s
+            // body can say that.
+            if name.is_empty() || name.contains('.') {
+                return None;
+            }
+            let receiver = self.receiver_call(file, symbol, position)?;
+            let (class_file, class, _) = self.call_class(symbol, receiver as usize, file, facts, scope, depth + 1)?;
+            let method = self.method(class_file, &class, name, 0)?;
+            let (owner_file, owner) = self.returned_from_row(facts, &method, file, scope, depth + 1)?;
+            return Some((owner_file, owner, "receiver-return"));
+        }
+        match self.call(&path, file, &symbol.owner, facts, scope) {
+            // `A(...)`, or `A` with no constructor of its own: the class is
+            // the row's own name or the owner of the constructor it found.
+            Outcome::Bound(bound) if bound.row.kind == KIND_CLASS || bound.constructor => {
+                Some((bound.row.file, self.class_name(&bound.row)?, "receiver-call"))
+            }
+            // `make()`: a function produces an instance only when its body
+            // says so, and the body is its own row, not the caller's.
+            Outcome::Bound(bound) => {
+                let (owner_file, class) = self.returned_from_row(facts, &bound.row, file, scope, depth + 1)?;
+                Some((owner_file, class, "receiver-return"))
+            }
+            _ => None,
+        }
+    }
+
+    /// `returned_class` for a resolved row, with the owner and the name read
+    /// from the row itself: `self.make()` is `A.make` whatever symbol calls it,
+    /// and `obj.make()` at module level is still `A.make`.
+    fn returned_from_row(
+        &mut self,
+        facts: &Facts,
+        row: &Row,
+        file: u32,
+        scope: Scope,
+        depth: usize,
+    ) -> Option<(u32, String)> {
+        // The body is only readable in the file being resolved; a function in
+        // another file needs that file's facts, which this pass does not hold.
+        if row.file != file {
+            return None;
+        }
+        let (owner, name) = self.row_parts(row)?;
+        self.returned_class(facts, &owner, &name, file, scope, depth)
+    }
+
+    /// The class a same-file callable returns, when every `return` in its body
+    /// is a call to the same class: `def chain(self): return A()`. A bare
+    /// `return`, a second class, a name or a literal leaves it undecided.
+    fn returned_class(
+        &mut self,
+        facts: &Facts,
+        owner: &str,
+        name: &str,
+        file: u32,
+        scope: Scope,
+        depth: usize,
+    ) -> Option<(u32, String)> {
+        if depth > MAX_RECEIVERS {
+            return None;
+        }
+        let symbol = facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == name && symbol.owner == owner && symbol.kind == KIND_FUNCTION)?;
+        let returns = returns_of(&symbol.events);
+        if returns.is_empty() {
+            return None;
+        }
+        let mut found: Option<(u32, String)> = None;
+        for index in returns {
+            let index = index?;
+            let path = symbol.calls.get(index as usize)?.path.clone();
+            // A method call's value is not a constructor call; only a name is.
+            if path.contains('.') {
+                return None;
+            }
+            let bound = match self.call(&path, file, owner, facts, scope) {
+                Outcome::Bound(bound) if bound.row.kind == KIND_CLASS || bound.constructor => bound,
+                _ => return None,
+            };
+            let class = (bound.row.file, self.class_name(&bound.row)?);
+            match &found {
+                Some(seen) if *seen != class => return None,
+                _ => found = Some(class),
+            }
+        }
+        found
+    }
+
+    /// `call`, with the call's position in its symbol so the receiver the walk
+    /// recorded can be read. `.run` on `A()` is tied to `A.run` exactly as the
+    /// one-pass lexer's glued `A().run` is; the path here keeps the name the
+    /// source spells, and the link is a fact of its own.
+    pub fn call_at(
+        &mut self,
+        path: &str,
+        symbol: &Symbol,
+        position: usize,
+        file: u32,
+        facts: &Facts,
+        scope: Scope,
+    ) -> Outcome {
+        if let Some(name) = path.strip_prefix('.') {
+            if !name.is_empty() && !name.contains('.') {
+                if let Some(receiver) = self.receiver_call(file, symbol, position) {
+                    if let Some((class_file, class, strategy)) =
+                        self.call_class(symbol, receiver as usize, file, facts, scope, 0)
+                    {
+                        if let Some(row) = self.method(class_file, &class, name, 0) {
+                            return Outcome::Bound(Bound { row, tag: Tag::Inferred, strategy, constructor: false });
+                        }
+                    }
+                }
+            }
+            return Outcome::Unknown;
+        }
+        self.call(path, file, &symbol.owner, facts, scope)
     }
 
     /// The tie-breaks for languages whose names are visible without an import.
