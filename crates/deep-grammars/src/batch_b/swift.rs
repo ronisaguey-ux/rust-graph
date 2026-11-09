@@ -955,9 +955,192 @@ fn number(c: &mut Cursor) -> Kind {
     if float { FLOAT } else { NUMBER }
 }
 
+#[cfg(test)]
+mod tests {
+    //! The corpus under `fixtures/swift_corpus/` is real-shaped Swift (the box
+    //! has no `.swift` checkout to read, so the files are hand-written from
+    //! idiomatic Foundation/SwiftUI/concurrency code). Each file must parse
+    //! completely with no error node; the ignored inventory prints what is
+    //! still red, and `PROBES` pins one construct per entry.
+
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use crate::deep::syntax::ERROR;
+    use crate::deep::tree::HAS_ERROR;
+    use crate::deep::{Budget, Workspace};
+
+    use super::SWIFT;
+
+    const PROBES: &[(&str, &str)] = &[
+        ("argument_labels", "func move(from start: Point, to end: Point) {}"),
+        ("optionals", "func find(_ id: Int?) -> String! { return nil }"),
+        ("trailing_closure", "let done = items.filter { item in item.ready }.map { $0 }"),
+        ("guard", "func f(_ x: Int?) -> Int {\n    guard let value = x else { return 0 }\n    return value\n}"),
+        ("generic_constraint", "func largest<T: Comparable>(_ values: [T]) -> T? where T: Hashable { return nil }"),
+        ("interpolation_call", "let text = \"total \\(format(count)) items\""),
+        ("async_await", "func load() async throws -> Data {\n    let (data, _) = try await session.data(for: request)\n    return data\n}"),
+        ("protocol_extension", "protocol P { func run() }\nextension P { func twice() { run(); run() } }"),
+        ("enum_associated_values", "enum Result {\n    case success(Int)\n    case failure(String, code: Int)\n}"),
+        ("tuple_binding", "let (data, response) = try await load()"),
+        ("labeled_loop", "outer: for (left, right) in pairs {\n    break outer\n}"),
+        ("if_case", "for value in values {\n    if case let text as String = value { return text }\n}"),
+        ("catch_typed", "do { try run() } catch let error as CocoaError { print(error) }"),
+        ("for_where", "for value in values where value > 0 { print(value) }"),
+        ("escaping_closure_type", "func withDefaults(_ handler: @escaping (Result<[String], Error>) -> Void) {}"),
+        ("closure_array", "let operations: [(String) -> Int] = [\n    { text in text.count },\n    { text in text.uppercased().count * 2 },\n]"),
+        ("catch_block", "func f() {\n    do {\n        try run()\n    } catch {\n        if attempt < 3 {\n            sleep()\n        }\n    }\n}"),
+        ("init_defaults", "struct S {\n    init(path: String, query: [String: String] = [:]) {}\n}"),
+        ("array_trailing_comma", "let values = [1, 2,];"),
+        ("array_closure_last", "let values = [1, { text in text.count },];"),
+        ("array_closure_no_comma", "let values = [1, { text in text.count }];"),
+    ];
+
+    fn parse(src: &[u8]) -> (bool, usize, String) {
+        let mut workspace = Workspace::default();
+        let outcome = workspace.parse(src, &SWIFT, &Budget::default()).expect("input too large");
+        let nodes = &workspace.tree.nodes;
+        let errors = (0..nodes.len())
+            .filter(|&i| nodes[i].kind == ERROR || nodes[i].flags & HAS_ERROR != 0 && nodes[i].flags & crate::deep::tree::TOKEN != 0)
+            .count();
+        (outcome.complete(), errors, workspace.tree.sexp(&SWIFT, true))
+    }
+
+    fn corpus() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/swift_corpus")
+    }
+
+    fn corpus_files() -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = fs::read_dir(corpus())
+            .expect("fixtures/swift_corpus")
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "swift"))
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// The field of a literal is code: `\(format(count))` is an
+    /// `interpolation` node whose child call has exactly that span, so a scan
+    /// that counts call sites sees the call inside a string.
+    #[test]
+    fn interpolation_is_a_span_of_code() {
+        const SRC: &str =
+            "let text = \"total \\(format(count)) items\"\nlet nested = \"outer \\(items.map { value in \"\\(value)\" }.joined())\"\nlet raw = #\"no \\(field) here\"#\n";
+        let mut workspace = Workspace::default();
+        workspace.parse(SRC.as_bytes(), &SWIFT, &Budget::default()).expect("input too large");
+        let nodes = &workspace.tree.nodes;
+        let text = |index: usize| {
+            let node = &nodes[index];
+            std::str::from_utf8(&SRC.as_bytes()[node.start as usize..node.end as usize]).unwrap()
+        };
+        let kinds = |wanted: &str| -> Vec<usize> {
+            (0..nodes.len()).filter(|&index| SWIFT.name(nodes[index].kind) == wanted).collect()
+        };
+
+        let literals = kinds("string_literal");
+        assert_eq!(literals.len(), 3, "the first literal, the nested one, and its inner literal");
+        let interpolations = kinds("interpolation");
+        assert_eq!(interpolations.len(), 3, "one field in the first literal, two in the nested one");
+
+        let first = interpolations[0];
+        assert_eq!(text(first), "\\(format(count))", "the whole field is the node's span");
+        let children: Vec<&str> = workspace
+            .tree
+            .children(first as u32)
+            .map(|child| SWIFT.name(nodes[child as usize].kind))
+            .filter(|kind| !matches!(*kind, "interpolation_open" | "interpolation_close"))
+            .collect();
+        assert_eq!(children, ["call_expression"], "the field's expression is a child of the field");
+
+        let calls = kinds("call_expression");
+        let inside: Vec<&str> = calls.iter().map(|&index| text(index)).collect();
+        assert!(inside.contains(&"format(count)"), "the call inside the field is visible: {inside:?}");
+        assert_eq!(text(interpolations[2]), "\\(value)", "the nested literal's field is its own span");
+        assert!(
+            calls.iter().any(|&index| text(index) == "items.map { value in \"\\(value)\" }.joined()"),
+            "the outer call keeps its trailing closure and the nested literal: {inside:?}"
+        );
+
+        let raw = kinds("string");
+        assert_eq!(raw.len(), 1, "a raw literal with no field stays one opaque token");
+        assert_eq!(text(raw[0]), "#\"no \\(field) here\"#");
+    }
+
+    #[test]
+    fn corpus_parses_cleanly() {
+        let files = corpus_files();
+        assert!(files.len() >= 8, "the corpus needs at least eight files, has {}", files.len());
+        for path in &files {
+            let src = fs::read(path).unwrap();
+            let (complete, errors, tree) = parse(&src);
+            assert!(complete, "{}: the parse did not finish", path.display());
+            assert_eq!(errors, 0, "{}: {errors} error nodes:\n{tree}", path.display());
+        }
+    }
+
+    #[test]
+    fn every_probe_parses_without_an_error_node() {        let mut failed = Vec::new();
+        for (name, src) in PROBES {
+            let (complete, errors, tree) = parse(src.as_bytes());
+            if !complete || errors > 0 {
+                failed.push(format!("{name}: complete={complete} errors={errors}\n{tree}"));
+            }
+        }
+        assert!(failed.is_empty(), "{} of {} probes failed:\n{}", failed.len(), PROBES.len(), failed.join("\n"));
+    }
+
+    #[test]
+    #[ignore]
+    fn inventory() {
+        for path in corpus_files() {
+            let src = fs::read(&path).unwrap();
+            let (complete, errors, _) = parse(&src);
+            let name = path.file_name().unwrap().to_string_lossy();
+            println!("{name}: complete={complete} errors={errors}");
+            if errors > 0 {
+                println!("{}", error_context(&src));
+            }
+        }
+        for (name, src) in PROBES {
+            let (complete, errors, tree) = parse(src.as_bytes());
+            let status = if complete && errors == 0 { "ok" } else { "FAIL" };
+            println!("probe {name}: {status} complete={complete} errors={errors}");
+            if errors > 0 {
+                println!("{}", error_context(src.as_bytes()));
+                let cut = tree.len().min(1200);
+                println!("{}", &tree[..cut]);
+            }
+        }
+    }
+
+    /// Every error node's span and the source around it, for retuning.
+    fn error_context(src: &[u8]) -> String {
+        let mut workspace = Workspace::default();
+        workspace.parse(src, &SWIFT, &Budget::default()).expect("input too large");
+        let nodes = &workspace.tree.nodes;
+        let mut out = String::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let bad = node.kind == ERROR
+                || node.flags & HAS_ERROR != 0 && node.flags & crate::deep::tree::TOKEN != 0;
+            if !bad {
+                continue;
+            }
+            let start = node.start as usize;
+            let end = node.end as usize;
+            let from = start.saturating_sub(50);
+            let to = (end + 50).min(src.len());
+            let text = String::from_utf8_lossy(&src[from..to]);
+            out.push_str(&format!("#{index} {} {}..{end} 「{}」\n", SWIFT.name(node.kind), start, text.replace('\n', "\\n")));
+        }
+        out
+    }
+}
+
 fn operator(c: &mut Cursor) -> Kind {
     let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
     let (kind, width) = match (a, b, d) {
+        (b'<', _, _) if is_word_byte(c.behind(1)) && !matches!(b, b'=' | b'<') => (GENERIC_LT, 1),
         (b'.', b'.', b'.') => (ELLIPSIS, 3),
         (b'.', b'.', b'<') => (RANGE_OPEN, 3),
         (b'.', b'.', _) => (DOTDOT, 2),
