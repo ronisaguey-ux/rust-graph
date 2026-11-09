@@ -100,6 +100,7 @@ const TYPESCRIPT_VALID: &[(&str, &str)] = &[
     ("service.ts", "import_statement export_statement export_statement export_statement"),
     ("store.ts", "export_statement export_statement export_statement export_statement"),
     ("telemetry.ts", "export_statement export_statement export_statement export_statement class_declaration export_statement"),
+    ("template_substitutions.ts", "export_statement export_statement"),
 ];
 
 /// `(file, language, top-level node kinds)` for every malformed fixture.
