@@ -100,6 +100,18 @@ rust_graph_deep::grammar! { CPP {
         KW_VOLATILE = "volatile",
         KW_WHILE = "while",
         KW_BOOL = "bool",
+        KW_THREAD_LOCAL = "thread_local",
+        KW_ALIGNAS = "alignas",
+        /// GCC's attribute introducer: `__attribute__((packed))`.
+        KW_ATTRIBUTE = "__attribute__",
+        /// MSVC's: `__declspec(dllexport)`.
+        KW_DECLSPEC = "__declspec",
+        /// GCC's "ignore the following construct's extension warning".
+        KW_EXTENSION = "__extension__",
+        /// `asm`, `__asm`, `__asm__`: one inline-assembly statement.
+        KW_ASM = "asm",
+        /// `typeof`, `__typeof`, `__typeof__`: the GNU type-of operator.
+        KW_TYPEOF = "typeof",
 
         COMMA = ",",
         SEMI = ";",
@@ -147,12 +159,42 @@ rust_graph_deep::grammar! { CPP {
 
     _top_item:
         &(declaration_specifiers _declarator _function_tail "{") function_definition
+        | &(declaration_specifiers user_type_name _declarator _function_tail "{") specified_user_function
         | &(scoped_type_name _declarator _function_tail "{") scoped_user_function
         | &(plain_type_name _declarator _function_tail "{") plain_user_function
+        | &(scoped_type_name parameter_list _function_tail "{") scoped_member_definition
+        | &(scoped_type_name "~" IDENT parameter_list _function_tail "{") scoped_destructor_definition
+        | &("extern" string) linkage_specification
+        | &(IDENT IDENT _qualified_tail) double_qualified_item
+        | &(IDENT _qualified_tail) macro_qualified_item
+        | &(declaration_specifiers IDENT _qualified_tail) specified_macro_item
         | namespace_definition
         | template_declaration
         | using_declaration
-        | declaration_statement,
+        | declaration_statement
+        | static_assert_statement
+        | asm_statement
+        | ";"
+        | &(IDENT arguments ";") macro_call_statement,
+
+    /// `extern "C" { ... }`: a linkage block.
+    linkage_specification: "extern" string ("{" _top_item* "}" | _top_item),
+    /// A visibility macro in front of a declaration.
+    macro_qualified_item: IDENT _qualified_tail,
+    double_qualified_item: IDENT IDENT _qualified_tail,
+    specified_macro_item: declaration_specifiers IDENT _qualified_tail,
+    _qualified_tail:
+        &(declaration_specifiers _declarator _function_tail "{") function_definition
+        | &(declaration_specifiers user_type_name _declarator _function_tail "{") specified_user_function
+        | declaration_statement
+        | static_assert_statement,
+    macro_call_statement: IDENT arguments ";",
+    /// `PyDoc_STRVAR(name, "...");`: a macro that expands to a declaration.
+    specified_user_function: declaration_specifiers user_type_name _declarator _function_tail compound_statement,
+    /// `Greenlet::Greenlet(PyGreenlet *p) : base(p) { ... }`: an out-of-line
+    /// constructor, and its destructor.
+    scoped_member_definition: scoped_type_name parameter_list [member_initializer_list] compound_statement,
+    scoped_destructor_definition: scoped_type_name "~" IDENT parameter_list compound_statement,
 
     function_definition: declaration_specifiers _declarator _function_tail compound_statement,
     scoped_user_function: scoped_type_name _declarator _function_tail compound_statement,
@@ -164,14 +206,17 @@ rust_graph_deep::grammar! { CPP {
 
     declaration_statement:
         &(scoped_type_name) _scoped_user_declaration
+        | &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
         | _user_type_declaration
         | &(declaration_specifiers scoped_type_name) _scoped_qualified_declaration
         | _default_declaration,
+    /// `static PyObject *f(void);`, `extern PyTypeObject x;`.
+    specified_user_declaration: declaration_specifiers user_type_name (_init_declarator % ",") ";",
     _scoped_user_declaration: scoped_type_name (_init_declarator % ",") ";",
     _user_type_declaration: plain_type_name (_init_declarator % ",") ";",
     _scoped_qualified_declaration: declaration_specifiers scoped_type_name (_init_declarator % ",") ";",
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
-    _init_declarator: _declarator ["=" _initializer],
+    _init_declarator: _declarator _attribute* ["=" _initializer],
     _initializer: designated_field | &(array_suffix "=") designated_index | _expression@assign | initializer_list,
     initializer_list: "{" (_initializer %? ",") "}",
     designated_field: "." IDENT "=" _initializer,
@@ -180,15 +225,38 @@ rust_graph_deep::grammar! { CPP {
     static_assert_statement: "static_assert" static_assert_arguments ";",
     static_assert_arguments: "(" _expression ["," string] ")",
 
+    /// `__asm__ __volatile__ ("..." : "=m"(x) : : "memory");`.
+    asm_statement: "asm" _asm_qualifier* asm_body ";",
+    _asm_qualifier: "volatile" | "inline" | "goto",
+    asm_body: "(" [asm_template] _asm_operand_list* ")",
+    /// A template is string literals with macros spliced between them.
+    asm_template: (string | IDENT)+,
+    _asm_operand_list: ":" (_asm_operand %? ","),
+    _asm_operand: [asm_operand_name] (string | IDENT) [asm_operand_expression],
+    asm_operand_name: "[" IDENT "]",
+    asm_operand_expression: "(" _expression ")",
+
     declaration_specifiers: _declaration_specifier+,
     _declaration_specifier:
         "typedef" | "extern" | "static" | "auto" | "register" | "inline" | "mutable"
         | "constexpr" | "virtual" | "explicit" | "friend" | "const" | "volatile"
+        | "thread_local"
+        | "__extension__"
+        | _attribute
         | type_specifier,
+    /// `__attribute__((packed, aligned(4)))` and `__declspec(dllexport)`.
+    _attribute: ("__attribute__" | "__declspec") attribute_arguments,
+    attribute_arguments: "(" attribute_body ")",
+    attribute_body: attribute_group | _attribute_argument ("," _attribute_argument)*,
+    attribute_group: "(" (_attribute_argument %? ",") ")",
+    /// An attribute argument is a name with an optional call: `packed`,
+    /// `aligned(4)`, `optimize("O2")`.
+    _attribute_argument: IDENT [arguments],
     type_specifier:
         "void" | "char" | "short" | "int" | "long" | "float" | "double"
         | "signed" | "unsigned" | "bool"
         | "decltype" decltype_arguments
+        | "typeof" decltype_arguments
         | class_specifier
         | enum_specifier,
     decltype_arguments: "(" _expression ")",
@@ -205,6 +273,7 @@ rust_graph_deep::grammar! { CPP {
 
     using_declaration:
         "using" "namespace" [_namespace_name] ";"
+        | "using" _namespace_name ";"
         | "using" IDENT "=" _type_id ";",
 
     template_declaration: "template" template_parameter_list _top_item,
@@ -239,7 +308,7 @@ rust_graph_deep::grammar! { CPP {
     constructor_definition: IDENT parameter_list [member_initializer_list] compound_statement,
     destructor_definition: "~" IDENT parameter_list [member_initializer_list] compound_statement,
     member_initializer_list: ":" (_member_initializer % ","),
-    _member_initializer: IDENT member_initializer_args,
+    _member_initializer: user_type_name member_initializer_args,
     member_initializer_args: arguments | initializer_list,
 
     // ---- types and declarators ----
@@ -257,16 +326,18 @@ rust_graph_deep::grammar! { CPP {
         &(scoped_type_name) _scoped_user_parameter
         | _user_type_parameter
         | &(declaration_specifiers scoped_type_name) _scoped_parameter
-        | &(declaration_specifiers plain_type_name _declarator) _qualified_user_parameter
+        | &(declaration_specifiers user_type_name) _specified_user_parameter
         | _default_parameter
         | "...",
     _scoped_user_parameter: scoped_type_name _declarator,
-    _user_type_parameter: plain_type_name _declarator,
-    _scoped_parameter: declaration_specifiers scoped_type_name _declarator,
-    _qualified_user_parameter: declaration_specifiers plain_type_name _declarator,
+    _user_type_parameter: plain_type_name _declarator_or_abstract,
+    _scoped_parameter: declaration_specifiers scoped_type_name [_declarator_or_abstract],
+    _specified_user_parameter: declaration_specifiers user_type_name [_declarator_or_abstract],
     _default_parameter: declaration_specifiers [_declarator],
 
-    _abstract_declarator: pointer+ abstract_suffix*,
+    _declarator_or_abstract: pointer* [direct_declarator] abstract_suffix*,
+    _abstract_declarator: pointer* [parenthesized_abstract] abstract_suffix*,
+    parenthesized_abstract: "(" _abstract_declarator ")",
     abstract_suffix: array_suffix | parameter_list,
 
     _type_id: _type_prefixed | &(scoped_type_name) _scoped_type_id | _user_type_id,
