@@ -20,6 +20,9 @@ pub mod json_grammar;
 pub mod lexer;
 pub mod pairs;
 pub mod parser;
+// The one Python grammar: the same file `deep-grammars` compiles against
+// its runtime shim, so the two paths can never drift apart again.
+#[path = "../../crates/deep-grammars/src/python.rs"]
 pub mod python;
 pub mod rust;
 pub mod syntax;
