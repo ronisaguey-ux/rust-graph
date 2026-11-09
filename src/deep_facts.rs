@@ -245,6 +245,22 @@ struct Walker<'a> {
 /// this path has no grammar for it. The pipeline uses this to pick the deep
 /// path for exactly the files whose facts it can produce.
 pub fn lang_for(tag: &str) -> Option<Lang> {
+    // `auto` picks only languages whose record reliably beats the lexer. Go and
+    // Java have tables (see `lang_for_forced`) but their records still lose the
+    // lexer's artefacts often enough that the guard keeps the lexer on most
+    // files, so choosing them automatically would pay for a second parse and
+    // then throw it away.
+    match tag {
+        "PY" | "JS" | "TS" | "RS" => lang_for_forced(tag),
+        _ => None,
+    }
+}
+
+/// The languages this build can parse at all, whether or not `auto` would pick
+/// them. `--deep` uses this, so a caller can still ask for the CST on a language
+/// whose record is better for calls than the lexer's even where the guard would
+/// keep the lexer.
+pub fn lang_for_forced(tag: &str) -> Option<Lang> {
     match tag {
         "PY" => Some(Lang::Python),
         "JS" => Some(Lang::JavaScript),
@@ -2579,6 +2595,30 @@ impl<'a> Walker<'a> {
             }
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment" => "0".to_string(),
+            // A region the grammar could not name. The tokens are still there —
+            // recovery keeps every byte — so the values inside it are read like
+            // any other: `("prefix " f"{call(x)}")` is an ERROR today because
+            // implicit concatenation of a literal with an f-string is not a
+            // rule, and skipping the region dropped the call inside it.
+            "ERROR" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.node(child).first_child != NONE)
+                    .collect();
+                // The tokens inside a region the grammar could not name are
+                // still there, and a call is visible in them: a name followed by
+                // an argument list. Reading that is not inventing a fact — it is
+                // reading what recovery left — and it is the only way a call
+                // inside `("prefix " f"{call(x)}")` survives, since implicit
+                // concatenation of a literal with an f-string is not a rule yet.
+                self.recovered_calls(id);
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
             // A keyword reused as an identifier (`match`, `type`, `case`)
             // carries that keyword as its kind; the spelling is the name.
             _ if self.leaf_name(id).is_some() => {
@@ -2597,6 +2637,39 @@ impl<'a> Walker<'a> {
                     _ => "0".to_string(),
                 }
             }
+        }
+    }
+
+
+    /// Calls visible in the raw tokens of an `ERROR` region: `name(` or
+    /// `a.b(`. Nothing is invented — the name and the argument list are both in
+    /// the source, and the region is only reached where the grammar failed to
+    /// build a node for them.
+    fn recovered_calls(&mut self, id: u32) {
+        let tokens: Vec<u32> = self.children(id);
+        let mut at = 0;
+        while at < tokens.len() {
+            if self.kind(tokens[at]) != "identifier" {
+                at += 1;
+                continue;
+            }
+            // `a.b(` walks the dotted chain forward before the paren, and the
+            // name keeps every component: the resolver matches on the path.
+            let mut end = at;
+            let mut name = self.text_string(tokens[at]);
+            while end + 2 < tokens.len()
+                && matches!(self.kind(tokens[end + 1]), "." | "?.")
+                && self.kind(tokens[end + 2]) == "identifier"
+            {
+                name.push('.');
+                name.push_str(&self.text_string(tokens[end + 2]));
+                end += 2;
+            }
+            if end + 1 < tokens.len() && self.kind(tokens[end + 1]) == "(" {
+                let line = self.line(tokens[at]);
+                self.push_call(name, line);
+            }
+            at = end + 1;
         }
     }
 
