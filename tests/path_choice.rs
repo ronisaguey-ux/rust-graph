@@ -8,12 +8,16 @@
 //!
 //! The fixture is measured, not assumed: `deep_more.ts` is a win the CST finds
 //! on a generic call (`g<number>(x)`, which the one-pass lexer does not record),
-//! `lossy.js` holds a call inside a template literal's `${...}`, which the
-//! JavaScript grammar still keeps as one token, `tie.py` is one function with
-//! nothing to differ on, and `plain.c` has no CST at all. Python agrees on
-//! everything measured here (an f-string field is parsed now), so the split
-//! comes from the template literal and the generic call. The expected counters
-//! in the tests are the values this fixture produces.
+//! `opaque.js` holds a call inside a JSX element's attribute, which the
+//! JavaScript grammar keeps as one token, `tie.py` is one function with nothing
+//! to differ on, and `plain.c` has no CST at all. The expected counters in the
+//! tests are the values this fixture produces.
+//!
+//! `lossy.js` used to be the fallback case: a call inside a template literal's
+//! `${...}`, which the grammar kept as one token. The grammar parses a
+//! substitution now, so that file is a tie (`deep:tie`, `calls deep=1 lexer=1`)
+//! and the fallback moved to the JSX gap, which is still open. The counters
+//! below are a fresh measurement of the moved fixture, not the old numbers.
 #![cfg(all(feature = "deep", feature = "parser"))]
 
 use std::fs;
@@ -25,9 +29,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_rust-graph");
 const FIXTURE: &[(&str, &str)] = &[
     // The CST reads the call behind the type arguments; the lexer stops there.
     ("deep_more.ts", "import { a, b } from \"./m\";\n\nconst x: number = f(1);\nexport const y = g<number>(x);\n"),
-    // A template literal is one token to the deep grammar, so a call inside
-    // `${...}` is a fact only the lexer's record carries; the guard keeps it.
-    ("lossy.js", "function f(x) {\n  return `value ${g(x)}`;\n}\n"),
+    // A JSX element is one token to the deep grammar, so a call inside its
+    // attribute is a fact only the lexer's record carries; the guard keeps it.
+    ("opaque.js", "function panel(x) {\n  return <button onClick={() => handle(x)}>press</button>;\n}\n"),
     // Nothing to differ on: both records weigh the same.
     ("tie.py", "def f(x):\n    return x\n"),
     // No deep parser for C: the lexer stands alone and is not a comparison.
@@ -107,13 +111,13 @@ fn a_lost_fact_keeps_the_lexer_and_is_counted_as_a_fallback() {
     let tree = Tree::new("loss");
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
-    let row = source_row(&json, "lossy.js");
+    let row = source_row(&json, "opaque.js");
     assert!(row.contains("\"path_choice\":\"lexer:fallback\""), "{row}");
     assert!(row.contains("\"parsed_by\":\"lexer\""), "{row}");
     assert!(row.contains("\"deep_fallback\":\"the CST record lost facts the lexer found\""), "{row}");
-    // The call inside the template literal is only in the lexer's record, so
-    // it survives the fallback.
-    assert!(json.contains(r#""calls":[["g",2,null,null,0]]"#), "{json}");
+    // The call inside the JSX attribute is only in the lexer's record, so it
+    // survives the fallback.
+    assert!(json.contains(r#""calls":[["handle",2,null,null,0]]"#), "{json}");
     assert!(json.contains(r#""fallbacks":1"#), "{json}");
 }
 
@@ -147,7 +151,7 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
         "{text}"
     );
     assert!(
-        text.contains("lossy.js\tsymbols deep=2 lexer=2 (+0)\tcalls deep=0 lexer=1 (-1)\timports deep=0 lexer=0 (+0)\n"),
+        text.contains("opaque.js\tsymbols deep=2 lexer=2 (+0)\tcalls deep=0 lexer=1 (-1)\timports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
     assert!(
