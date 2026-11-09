@@ -22,7 +22,7 @@
 //! is ambiguous with a member function declaration within the three-token
 //! lookahead the runtime allows).
 
-use crate::batch_c::{directive, is_word_byte, is_word_start, number, quoted, trivia};
+use super::{directive, is_word_byte, is_word_start, number, quoted, trivia};
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, UNKNOWN};
 
@@ -742,7 +742,7 @@ fn operator(c: &mut Cursor) -> Kind {
 mod corpus {
     use std::fs;
 
-    use crate::batch_c::cpp::CPP;
+    use super::CPP;
     use crate::deep::syntax::ERROR;
     use crate::deep::tree::{HAS_ERROR, TOKEN};
     use crate::deep::{Budget, Workspace};

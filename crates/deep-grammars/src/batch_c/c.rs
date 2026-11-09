@@ -24,7 +24,7 @@
 //! spelling other than the punctuation forms. Everything listed here as
 //! modelled has a fixture or a test.
 
-use crate::batch_c::{directive, is_word_byte, is_word_start, literal_prefix, number, quoted, trivia};
+use super::{directive, is_word_byte, is_word_start, literal_prefix, number, quoted, trivia};
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, UNKNOWN};
 
@@ -611,7 +611,7 @@ fn operator(c: &mut Cursor) -> Kind {
 mod corpus {
     use std::fs;
 
-    use crate::batch_c::c::C;
+    use super::C;
     use crate::deep::syntax::ERROR;
     use crate::deep::tree::{HAS_ERROR, TOKEN};
     use crate::deep::{Budget, Workspace};
