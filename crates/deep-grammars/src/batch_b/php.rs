@@ -67,12 +67,10 @@
 //! - **One kind per rule**, so `member_access` and `nullsafe_member_access` are
 //!   two rules rather than one labelled alternative.
 //!
-//! Not modelled, and named rather than silently dropped: an intersection type
-//! (`A&B`; list-typed `A|B` and `?A` are), property hooks (PHP 8.4),
+//! Not modelled, and named rather than silently dropped: `goto` (the statement
+//! parses, a label is an `expression_statement`), property hooks (PHP 8.4),
 //! `__halt_compiler`, and short open tags (`<?`); `<?xml` at the top of a file
-//! is inline HTML, which is what makes ignoring `<?` the safe choice. An `&`
-//! after a parameter's type is a reference, which is the reading that matters:
-//! `array &$options` is everywhere, `Countable&Traversable $x` is not.
+//! is inline HTML, which is what makes ignoring `<?` the safe choice.
 
 use std::cell::RefCell;
 
@@ -297,6 +295,7 @@ rust_graph_deep::grammar! { PHP {
         | &("const" IDENT "=") const_declaration
         | namespace_declaration
         | use_declaration
+        | require_statement
         | if_statement
         | while_statement
         | do_statement
@@ -313,7 +312,6 @@ rust_graph_deep::grammar! { PHP {
         | unset_statement
         | declare_statement
         | goto_statement
-        | &(IDENT ":") labeled_statement
         | block
         | OPEN_TAG
         | CLOSE_TAG
@@ -331,9 +329,10 @@ rust_graph_deep::grammar! { PHP {
     use_declaration: "use" [("function" | "const")] (_use_name % ",") ";",
     /// `Foo\Bar`, and `Foo\{Bar, Baz as Qux}`: the group is a tail of the same
     /// name, so the two forms share every token up to the brace the group needs.
-    _use_name: [BACKSLASH] _name (BACKSLASH _name)* [BACKSLASH use_group] ["as" _name],
+    _use_name: [BACKSLASH] _name (BACKSLASH _name)* [BACKSLASH use_group],
     use_group: "{" (_use_item %? ",") "}",
     _use_item: _qualified_name ["as" _name],
+    require_statement: ("require" | "require_once" | "include" | "include_once") _expression _end,
 
     /// An attribute group is a statement or a member of its own; see the module
     /// comment for why it is not a child of the declaration it decorates.
@@ -350,8 +349,7 @@ rust_graph_deep::grammar! { PHP {
     interface_declaration: [top_modifiers] "interface" _name ["extends" _interface_list] class_body,
     trait_declaration: [top_modifiers] "trait" _name class_body,
     enum_declaration: [top_modifiers] "enum" _name [":" _type] ["implements" _interface_list] enum_body,
-    enum_body: "{" enum_member* "}",
-    enum_member: ";" | attribute_group | [modifiers] (enum_case | member_declaration),
+    enum_body: "{" (enum_case | ";")* "}",
     enum_case: "case" _name ["=" _expression] ";",
     class_body: "{" class_member* "}",
     /// Attributes and modifiers come first, the declaration keyword decides.
@@ -361,7 +359,7 @@ rust_graph_deep::grammar! { PHP {
     method_declaration: "function" ["&"] _name formal_parameters [":" _type] (block | ";"),
     function_declaration: "function" ["&"] _name formal_parameters [":" _type] (block | ";"),
     formal_parameters: "(" (formal_parameter %? ",") ")",
-    formal_parameter: attribute_group* [modifiers] [_type] ["&"] ["..."] VARIABLE ["=" _expression],
+    formal_parameter: [modifiers] [_type] ["&"] ["..."] VARIABLE ["=" _expression],
     property_declaration: [_type] _property_item ("," _property_item)* ";",
     _property_item: VARIABLE ["=" _expression],
     const_declaration: "const" _const_item ("," _const_item)* ";",
@@ -417,9 +415,6 @@ rust_graph_deep::grammar! { PHP {
     declare_arguments: "(" (declare_item %? ",") ")",
     declare_item: _name "=" _expression,
     goto_statement: "goto" _name _end,
-    labeled_statement: _name ":",
-    /// `$x ?: require $y`: the include family is an expression in PHP.
-    include_expression: ("require" | "require_once" | "include" | "include_once") _expression,
     parenthesized_expression: "(" _expression ")",
 
     // ---- expressions ----
@@ -454,8 +449,8 @@ rust_graph_deep::grammar! { PHP {
         postfix "++" | "--" => update_expression,
         call: postfix arguments => function_call_expression,
         index: postfix subscript => subscript_expression,
-        member: postfix "->" (_member_name | VARIABLE | dynamic_member) => member_access_expression,
-        nullsafe: postfix "?->" (_member_name | VARIABLE | dynamic_member) => nullsafe_member_access_expression,
+        member: postfix "->" _member_name => member_access_expression,
+        nullsafe: postfix "?->" _member_name => nullsafe_member_access_expression,
         scope: postfix "::" (_member_name | VARIABLE) => scoped_property_access_expression,
     },
 
@@ -469,8 +464,8 @@ rust_graph_deep::grammar! { PHP {
         | "null"
         | "self"
         | "parent"
-        | static_arrow_function
-        | static_anonymous_function
+        | &("static" "fn") arrow_function
+        | &("static" "function") anonymous_function
         | "static"
         | parenthesized_expression
         | array_literal
@@ -480,7 +475,6 @@ rust_graph_deep::grammar! { PHP {
         | empty_expression
         | list_expression
         | match_expression
-        | include_expression
         | anonymous_function
         | arrow_function
         | yield_expression
@@ -505,23 +499,17 @@ rust_graph_deep::grammar! { PHP {
     _literal_name: "true" | "false" | "null",
     /// After `->`, `?->` and `::` every word is a member name.
     _member_name: IDENT | "class",
-    /// `$data->{$column}`: a computed member name.
-    dynamic_member: "{" _expression "}",
 
     new_expression: "new" _new_class [arguments],
-    _new_class: "self" | "parent" | "static" | VARIABLE | _qualified_name | anonymous_class,
+    _new_class: "self" | "parent" | "static" | _qualified_name | anonymous_class,
     anonymous_class: "class" [arguments] ["extends" _qualified_name] ["implements" _interface_list] class_body,
     anonymous_function: "function" ["&"] formal_parameters ["use" closure_use] [":" _type] block,
     closure_use: "(" (closure_use_item %? ",") ")",
     closure_use_item: ["&"] VARIABLE,
-    arrow_function: "fn" ["&"] formal_parameters [":" _type] "=>" _expression,
-    /// `static fn () => ...` and `static function () {}`: the modifier is the
-    /// same token a `static::` call starts with, so each is its own rule.
-    static_arrow_function: "static" arrow_function,
-    static_anonymous_function: "static" anonymous_function,
+    arrow_function: ["static"] "fn" ["&"] formal_parameters [":" _type] "=>" _expression,
     match_expression: "match" parenthesized_expression match_body,
-    match_body: "{" [match_arms] "}",
-    match_arms: _arm %? ",",
+    match_body: "{" [match_arms [","]] "}",
+    match_arms: _arm ("," _arm)*,
     _arm: match_arm | default_arm,
     match_arm: _expression ("," _expression)* "=>" _expression,
     default_arm: "default" "=>" _expression,
@@ -529,13 +517,14 @@ rust_graph_deep::grammar! { PHP {
     yield_body: "from" _expression | _expression ["=>" _expression],
 
     arguments: "(" (_argument %? ",") ")",
-    _argument: &(_name ":") named_argument | spread_element | _expression,
+    _argument: &(_name ":") named_argument | &(ELLIPSIS ")") first_class_callable | spread_element | _expression,
     named_argument: _name ":" _expression,
-    /// `f(...$xs)` and, with no operand, the first-class callable `f(...)`.
-    spread_element: "..." [_expression],
+    spread_element: "..." _expression,
+    /// `strlen(...)`: the first-class callable syntax.
+    first_class_callable: "...",
     subscript: "[" [_expression] "]",
 
-    array_literal: "[" ([_array_element] ("," [_array_element])*) "]",
+    array_literal: "[" (_array_element %? ",") "]",
     array_expression: "array" array_arguments,
     array_arguments: "(" (_array_element %? ",") ")",
     _array_element: &(_expression "=>") pair_element | spread_element | _expression,
@@ -546,104 +535,53 @@ rust_graph_deep::grammar! { PHP {
     empty_expression: "empty" empty_arguments,
     empty_arguments: "(" _expression ")",
     list_expression: "list" list_arguments,
-    list_arguments: "(" ([_expression] ("," [_expression])*) ")",
+    list_arguments: "(" (VARIABLE %? ",") ")",
 
     // ---- types ----
 
-    _type: ["?"] _type_atom ("|" _type_atom)*,
-    _type_atom: _type_name | parenthesized_type,
-    /// `(A&B)|C`: a DNF type.
-    parenthesized_type: "(" _type ")",
-    _type_name: [BACKSLASH] _type_word (BACKSLASH _word)*,
-    _type_word: IDENT | "array" | "self" | "parent" | "static" | "null" | "false" | "true",
-    _word: IDENT,
+    _type: ["?"] _type_name ("|" _type_name)*,
+    _type_name: [BACKSLASH] (_name | "array" | "self" | "parent" | "static") (BACKSLASH _name)*,
 } }
 
-thread_local! {
-    /// The marker of every heredoc the `HEREDOC` mode is inside, innermost last:
-    /// a heredoc opened inside an interpolated string restores the outer one.
-    static HEREDOC_MARKERS: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
-    /// One frame per open interpolation: the brackets opened inside it. The
-    /// frame is pushed when the lexer emits `INTERPOLATION_OPEN` and popped on
-    /// the `}` that matches it, so `"{$a["k"]}"` closes at the right brace.
-    static FIELDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
-}
-
-/// The HTML mode, mode 0: the file starts here. Bytes are `inline_html` up to
-/// the tag that opens code. Only `<?php` and `<?=` open it: short tags would
-/// turn `<?xml` in a template into a PHP run.
-pub fn lex_html(c: &mut Cursor) -> Kind {
-    if c.pos() == 0 && c.starts_with(b"\xef\xbb\xbf") {
-        c.bump_n(3);
-        return WHITESPACE;
-    }
-    if c.starts_with(b"<?php") {
-        c.bump_n(5);
-        return OPEN_TAG;
-    }
-    if c.starts_with(b"<?=") {
-        c.bump_n(3);
-        return ECHO_TAG;
-    }
-    let start = c.pos();
-    while !c.at_end() {
-        if c.peek() == b'<' && (c.starts_with(b"<?php") || c.starts_with(b"<?=")) {
-            break;
-        }
-        c.bump();
-    }
-    if c.pos() == start {
-        // A lone `<` that opens no tag: consume it so the step always advances.
-        c.bump();
-    }
-    INLINE_HTML
-}
-
-/// One token of PHP code: mode 0's other half, and the `PHP` mode itself.
-pub fn lex_php(c: &mut Cursor) -> Kind {
+/// One token at the cursor.
+pub fn lex(c: &mut Cursor) -> Kind {
     match c.peek() {
         b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
             c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
+            WHITESPACE
+        }
+        0xef if c.starts_with(b"\xef\xbb\xbf") => {
+            c.bump_n(3);
             WHITESPACE
         }
         b'<' if c.starts_with(b"<?php") => {
             c.bump_n(5);
             OPEN_TAG
         }
-        b'<' if c.starts_with(b"<<<") => heredoc(c),
+        b'<' if c.starts_with(b"<?=") => {
+            c.bump_n(3);
+            OPEN_TAG
+        }
         b'?' if c.peek_at(1) == b'>' => {
             c.bump_n(2);
             CLOSE_TAG
         }
         b'/' if c.peek_at(1) == b'/' => {
-            line_comment(c);
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
             COMMENT
         }
-        b'#' if c.peek_at(1) == b'[' => {
-            c.bump_n(2);
-            ATTRIBUTE_START
-        }
         b'#' => {
-            line_comment(c);
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
             COMMENT
         }
         b'/' if c.peek_at(1) == b'*' => {
             block_comment(c);
             COMMENT
         }
-        b'\'' | b'`' => string(c),
-        b'"' => {
-            c.bump();
-            DQUOTE_START
-        }
+        b'\'' | b'"' | b'`' => string(c),
+        b'<' if c.starts_with(b"<<<") => heredoc(c),
         b'$' if is_word_start(c.peek_at(1)) => {
             c.bump();
-            c.eat_while(is_word_byte);
-            VARIABLE
-        }
-        /// `$$name` is one variable-variable token.
-        b'$' if c.peek_at(1) == b'$' && is_word_start(c.peek_at(2)) => {
-            c.bump_n(2);
             c.eat_while(is_word_byte);
             VARIABLE
         }
@@ -652,183 +590,6 @@ pub fn lex_php(c: &mut Cursor) -> Kind {
         byte if is_word_start(byte) => word(c),
         _ => operator(c),
     }
-}
-
-/// The `DQUOTE` mode: the text of a double-quoted string, its closing quote, or
-/// a `{$`/`${` that opens an interpolation. A lone `$` and a `{` not followed
-/// by one are text, which is what PHP itself decided.
-pub fn lex_dquote(c: &mut Cursor) -> Kind {
-    if c.at_end() {
-        return DQUOTE_BAD;
-    }
-    match c.peek() {
-        b'"' => {
-            c.bump();
-            return DQUOTE_END;
-        }
-        b'\\' => {
-            c.bump_n(2);
-            return DQUOTE_TEXT;
-        }
-        b'{' if c.peek_at(1) == b'$' => {
-            // `{$name}`: the `$` belongs to the variable, so only the brace is
-            // the field's opener and the code inside starts at the `$`.
-            c.bump();
-            open_field();
-            return INTERPOLATION_OPEN;
-        }
-        b'$' if c.peek_at(1) == b'{' => {
-            // `${name}`: the `$` is the interpolation's own.
-            c.bump_n(2);
-            open_field();
-            return INTERPOLATION_OPEN;
-        }
-        b'$' if is_word_start(c.peek_at(1)) => {
-            c.bump();
-            c.eat_while(is_word_byte);
-            return VARIABLE;
-        }
-        _ => {}
-    }
-    // Text up to the next quote, escape or interpolation.
-    loop {
-        if c.at_end() {
-            return DQUOTE_TEXT;
-        }
-        match c.peek() {
-            b'"' => return DQUOTE_TEXT,
-            b'\\' => return DQUOTE_TEXT,
-            b'{' if c.peek_at(1) == b'$' => return DQUOTE_TEXT,
-            b'$' if c.peek_at(1) == b'{' || is_word_start(c.peek_at(1)) => return DQUOTE_TEXT,
-            _ => c.bump(),
-        }
-    }
-}
-
-/// The `FIELD` mode: ordinary code, with one token that only exists inside an
-/// interpolation. At the field's own depth a `}` closes it; deeper, it is a
-/// block's or an array's brace and `lex_php` takes it.
-pub fn lex_field(c: &mut Cursor) -> Kind {
-    let Some(depth) = FIELDS.with(|fields| fields.borrow().last().copied()) else {
-        // No field is open and the frame disagrees with the mode stack: lexing
-        // code cannot lose a token, and the parser still gets a tree.
-        return lex_php(c);
-    };
-    if depth == 0 && c.peek() == b'}' {
-        c.bump();
-        close_field();
-        return INTERPOLATION_CLOSE;
-    }
-    let kind = lex_php(c);
-    match kind {
-        LPAREN | LBRACKET | LBRACE | ATTRIBUTE_START => with_field(|depth| *depth += 1),
-        RPAREN | RBRACKET | RBRACE => with_field(|depth| *depth = depth.saturating_sub(1)),
-        _ => {}
-    }
-    kind
-}
-
-/// The `HEREDOC` mode: the body of a heredoc up to its terminator line, one
-/// interpolation, or one `$name`.
-pub fn lex_heredoc(c: &mut Cursor) -> Kind {
-    let Some(marker) = HEREDOC_MARKERS.with(|markers| markers.borrow().last().cloned()) else {
-        return lex_php(c);
-    };
-    if c.at_end() {
-        HEREDOC_MARKERS.with(|markers| {
-            markers.borrow_mut().pop();
-        });
-        return HEREDOC_BAD;
-    }
-    if heredoc_terminator(c, &marker) {
-        c.bump_n(terminator_width(c, &marker));
-        HEREDOC_MARKERS.with(|markers| {
-            markers.borrow_mut().pop();
-        });
-        return HEREDOC_END;
-    }
-    match c.peek() {
-        b'{' if c.peek_at(1) == b'$' => {
-            // `{$name}`: the `$` belongs to the variable, so only the brace is
-            // the field's opener and the code inside starts at the `$`.
-            c.bump();
-            open_field();
-            return INTERPOLATION_OPEN;
-        }
-        b'$' if c.peek_at(1) == b'{' => {
-            // `${name}`: the `$` is the interpolation's own.
-            c.bump_n(2);
-            open_field();
-            return INTERPOLATION_OPEN;
-        }
-        b'$' if is_word_start(c.peek_at(1)) => {
-            c.bump();
-            c.eat_while(is_word_byte);
-            return VARIABLE;
-        }
-        _ => {}
-    }
-    let start = c.pos();
-    while !c.at_end() {
-        match c.peek() {
-            b'\n' => {
-                c.bump();
-                if heredoc_terminator(c, &marker) {
-                    break;
-                }
-            }
-            b'{' if c.peek_at(1) == b'$' => break,
-            b'$' if c.peek_at(1) == b'{' || is_word_start(c.peek_at(1)) => break,
-            b'\\' => c.bump_n(2),
-            _ => c.bump(),
-        }
-    }
-    if c.pos() == start {
-        c.bump();
-    }
-    DQUOTE_TEXT
-}
-
-/// The marker's line starts here: indentation, the marker, and no word byte
-/// after it (`EOT;`, `EOT,` and a bare `EOT` all close a heredoc).
-fn heredoc_terminator(c: &Cursor, marker: &[u8]) -> bool {
-    if c.pos() != 0 && c.behind(1) != b'\n' {
-        return false;
-    }
-    let rest = c.rest();
-    let mut at = 0;
-    while matches!(rest.get(at), Some(b' ' | b'\t')) {
-        at += 1;
-    }
-    rest.get(at..).is_some_and(|tail| tail.starts_with(marker)) && !rest.get(at + marker.len()).is_some_and(|byte| is_word_byte(*byte))
-}
-
-/// Bytes from the cursor through the terminator's marker.
-fn terminator_width(c: &Cursor, marker: &[u8]) -> usize {
-    let rest = c.rest();
-    let mut at = 0;
-    while matches!(rest.get(at), Some(b' ' | b'\t')) {
-        at += 1;
-    }
-    at + marker.len()
-}
-
-fn open_field() {
-    FIELDS.with(|fields| fields.borrow_mut().push(0));
-}
-
-fn close_field() {
-    FIELDS.with(|fields| {
-        fields.borrow_mut().pop();
-    });
-}
-
-fn with_field(change: impl FnOnce(&mut u32)) {
-    FIELDS.with(|fields| {
-        if let Some(depth) = fields.borrow_mut().last_mut() {
-            change(depth);
-        }
-    });
 }
 
 #[inline]
@@ -844,18 +605,7 @@ fn is_word_byte(byte: u8) -> bool {
 fn word(c: &mut Cursor) -> Kind {
     let start = c.rest();
     let length = c.eat_while(is_word_byte);
-    let text = &start[..length];
-    // A word after `->`, `?->` or `::` is a name, whatever it spells:
-    // `$this->namespace`, `$a->list()`, `Foo::class`.
-    if matches!(c.previous(), ARROW | NULLSAFE | COLONCOLON | KW_FUNCTION) {
-        return IDENT;
-    }
-    // `f(name: 1)`, `f(default: false)`: a keyword before a `:` right after an
-    // argument opener or a comma is a named argument's name.
-    if matches!(c.previous(), LPAREN | COMMA) && named_argument_ahead(c) {
-        return IDENT;
-    }
-    keyword(text)
+    keyword(&start[..length])
 }
 
 fn keyword(text: &[u8]) -> Kind {
@@ -871,19 +621,12 @@ fn keyword(text: &[u8]) -> Kind {
         b"clone" => KW_CLONE,
         b"const" => KW_CONST,
         b"continue" => KW_CONTINUE,
-        b"declare" => KW_DECLARE,
         b"default" => KW_DEFAULT,
         b"do" => KW_DO,
         b"echo" => KW_ECHO,
         b"else" => KW_ELSE,
         b"elseif" => KW_ELSEIF,
         b"empty" => KW_EMPTY,
-        b"enddeclare" => KW_ENDDECLARE,
-        b"endfor" => KW_ENDFOR,
-        b"endforeach" => KW_ENDFOREACH,
-        b"endif" => KW_ENDIF,
-        b"endswitch" => KW_ENDSWITCH,
-        b"endwhile" => KW_ENDWHILE,
         b"enum" => KW_ENUM,
         b"extends" => KW_EXTENDS,
         b"false" => KW_FALSE,
@@ -892,16 +635,13 @@ fn keyword(text: &[u8]) -> Kind {
         b"fn" => KW_FN,
         b"for" => KW_FOR,
         b"foreach" => KW_FOREACH,
-        b"from" => KW_FROM,
         b"function" => KW_FUNCTION,
         b"global" => KW_GLOBAL,
-        b"goto" => KW_GOTO,
         b"if" => KW_IF,
         b"implements" => KW_IMPLEMENTS,
         b"include" => KW_INCLUDE,
         b"include_once" => KW_INCLUDE_ONCE,
         b"instanceof" => KW_INSTANCEOF,
-        b"insteadof" => KW_INSTEADOF,
         b"interface" => KW_INTERFACE,
         b"isset" => KW_ISSET,
         b"list" => KW_LIST,
@@ -936,25 +676,6 @@ fn keyword(text: &[u8]) -> Kind {
     }
 }
 
-/// Whether the cursor is just past the name of `name:` — the byte after the
-/// spaces that follow is a colon that does not start a `::`.
-fn named_argument_ahead(c: &Cursor) -> bool {
-    let rest = c.rest();
-    let mut at = 0;
-    while matches!(rest.get(at), Some(b' ' | b'\t')) {
-        at += 1;
-    }
-    rest.get(at) == Some(&b':') && rest.get(at + 1) != Some(&b':')
-}
-
-/// `//` or `#` to the end of the line, or to a `?>` that closes PHP inside it:
-/// PHP ends a one-line comment at the close tag, so the mode must see it.
-fn line_comment(c: &mut Cursor) {
-    while !c.at_end() && !matches!(c.peek(), b'\n' | b'\r') && !c.starts_with(b"?>") {
-        c.bump();
-    }
-}
-
 /// `/* ... */`. An unclosed one runs to the end of the file.
 fn block_comment(c: &mut Cursor) {
     c.bump_n(2);
@@ -964,8 +685,8 @@ fn block_comment(c: &mut Cursor) {
     c.bump_n(2);
 }
 
-/// A single-quoted or backtick string from its quote: one token, and it may
-/// span lines, because PHP lets it.
+/// A single- or double-quoted string, or a backtick shell string, from its
+/// quote. The interpolations of a double-quoted one stay opaque.
 fn string(c: &mut Cursor) -> Kind {
     let quote = c.peek();
     c.bump();
@@ -973,6 +694,11 @@ fn string(c: &mut Cursor) -> Kind {
         match c.peek() {
             0 if c.at_end() => return BAD_LITERAL,
             b'\\' => c.bump_n(2),
+            b'\n' | b'\r' if quote != b'"' && quote != b'`' => return BAD_LITERAL,
+            b'{' if quote == b'"' && c.peek_at(1) == b'$' => {
+                c.bump_n(2);
+                braces(c);
+            }
             byte if byte == quote => {
                 c.bump();
                 return STRING;
@@ -982,13 +708,37 @@ fn string(c: &mut Cursor) -> Kind {
     }
 }
 
-/// A heredoc or a nowdoc from `<<<`. A nowdoc's body is not code, so the whole
-/// thing is one `STRING` token; a heredoc opens the `HEREDOC` mode after the
-/// line that declares its marker, and its body becomes parts.
+/// The code of a `{$...}` interpolation, up to its matching `}`.
+fn braces(c: &mut Cursor) {
+    let mut depth = 1u32;
+    while !c.at_end() {
+        match c.peek() {
+            b'{' => {
+                depth += 1;
+                c.bump();
+            }
+            b'}' => {
+                depth -= 1;
+                c.bump();
+                if depth == 0 {
+                    return;
+                }
+            }
+            b'"' | b'\'' => {
+                string(c);
+            }
+            _ => c.bump(),
+        }
+    }
+}
+
+/// A heredoc or nowdoc from `<<<` to the line holding its terminator. The
+/// terminator may be indented (PHP 7.3), and the `;` that ends the statement
+/// stays outside the token: scanning stops at the marker's last byte.
 fn heredoc(c: &mut Cursor) -> Kind {
     let rest = c.rest();
     let mut at = 3;
-    while matches!(rest.get(at), Some(b' ' | b'\t')) {
+    while at < rest.len() && matches!(rest[at], b' ' | b'\t') {
         at += 1;
     }
     let quote = rest.get(at).copied().unwrap_or(0);
@@ -1000,11 +750,12 @@ fn heredoc(c: &mut Cursor) -> Kind {
     while at < rest.len() && is_word_byte(rest[at]) {
         at += 1;
     }
-    let marker = rest[mark_start..at].to_vec();
+    let marker = &rest[mark_start..at];
     if marker.is_empty() {
         c.bump_n(3);
         return BAD_LITERAL;
     }
+    let marker_len = marker.len();
     if quoted && rest.get(at) == Some(&quote) {
         at += 1;
     }
@@ -1016,71 +767,49 @@ fn heredoc(c: &mut Cursor) -> Kind {
         return BAD_LITERAL;
     }
     at += 1;
-    if quote == b'\'' {
-        return nowdoc_body(c, at, &marker);
-    }
-    c.bump_n(at);
-    HEREDOC_MARKERS.with(|markers| markers.borrow_mut().push(marker));
-    HEREDOC_START
-}
-
-/// The body of a nowdoc: every line up to the marker's line, terminator and all,
-/// as one token.
-fn nowdoc_body(c: &mut Cursor, body: usize, marker: &[u8]) -> Kind {
-    let rest = c.rest();
-    let mut line = body;
     loop {
-        let mut at = line;
-        while matches!(rest.get(at), Some(b' ' | b'\t')) {
-            at += 1;
+        if at >= rest.len() {
+            c.bump_n(rest.len());
+            return BAD_LITERAL;
         }
-        if rest.get(at..).is_some_and(|tail| tail.starts_with(marker)) && !rest.get(at + marker.len()).is_some_and(|byte| is_word_byte(*byte)) {
-            c.bump_n(at + marker.len());
+        let line_start = at;
+        let mut line_end = at;
+        while line_end < rest.len() && rest[line_end] != b'\n' {
+            line_end += 1;
+        }
+        let line = &rest[line_start..line_end];
+        let lead = line.iter().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
+        let body = &line[lead..];
+        let body = body.strip_suffix(b";").unwrap_or(body);
+        if trim_end(body) == marker {
+            c.bump_n(line_start + lead + marker_len);
             return STRING;
         }
-        match rest[line..].iter().position(|&byte| byte == b'\n') {
-            Some(offset) => line += offset + 1,
-            None => {
-                c.bump_n(rest.len());
-                return BAD_LITERAL;
-            }
+        if line_end >= rest.len() {
+            c.bump_n(rest.len());
+            return BAD_LITERAL;
         }
+        at = line_end + 1;
     }
 }
 
-/// `(int)`, `(string)`, `(array)` and the rest, as one token.
-fn cast(c: &mut Cursor) -> Option<Kind> {
-    let rest = c.rest();
-    let mut at = 1;
-    while matches!(rest.get(at), Some(b' ' | b'\t')) {
-        at += 1;
+fn trim_end(mut bytes: &[u8]) -> &[u8] {
+    while let [rest @ .., last] = bytes {
+        if matches!(last, b' ' | b'\t' | b'\r') {
+            bytes = rest;
+        } else {
+            break;
+        }
     }
-    let start = at;
-    while rest.get(at).is_some_and(|byte| is_word_byte(*byte)) {
-        at += 1;
-    }
-    let word = rest.get(start..at)?;
-    while matches!(rest.get(at), Some(b' ' | b'\t')) {
-        at += 1;
-    }
-    if rest.get(at) != Some(&b')') {
-        return None;
-    }
-    let known = matches!(
-        word,
-        b"int" | b"integer" | b"float" | b"double" | b"string" | b"binary" | b"bool" | b"boolean" | b"array" | b"object" | b"unset"
-    );
-    if !known {
-        return None;
-    }
-    c.bump_n(at + 1);
-    Some(CAST)
+    bytes
 }
 
 fn number(c: &mut Cursor) -> Kind {
     if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B' | b'o' | b'O') {
+        let radix = c.peek_at(1).to_ascii_lowercase();
         c.bump_n(2);
         c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        let _ = radix;
         return NUMBER;
     }
     let mut float = false;
@@ -1135,10 +864,7 @@ fn operator(c: &mut Cursor) -> Kind {
         (b'&', b'=', _) => (AMP_EQ, 2),
         (b'|', b'=', _) => (PIPE_EQ, 2),
         (b'^', b'=', _) => (CARET_EQ, 2),
-        (b'(', ..) => match cast(c) {
-            Some(kind) => (kind, 0),
-            None => (LPAREN, 1),
-        },
+        (b'(', ..) => (LPAREN, 1),
         (b')', ..) => (RPAREN, 1),
         (b'[', ..) => (LBRACKET, 1),
         (b']', ..) => (RBRACKET, 1),
@@ -1171,138 +897,4 @@ fn operator(c: &mut Cursor) -> Kind {
     };
     c.bump_n(width);
     kind
-}
-
-#[cfg(test)]
-mod real_world {
-    use std::collections::BTreeMap;
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
-    use super::PHP;
-    use crate::deep::syntax::ERROR;
-    use crate::deep::tree::{HAS_ERROR, TOKEN};
-    use crate::deep::{Budget, Workspace};
-
-    fn php_files(root: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(root) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                php_files(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "php") {
-                out.push(path);
-            }
-        }
-    }
-
-    fn errors_of(src: &[u8]) -> Vec<(usize, usize)> {
-        let mut workspace = Workspace::default();
-        let Ok(outcome) = workspace.parse(src, &PHP, &Budget::default()) else { return Vec::new() };
-        assert!(outcome.complete(), "the parse did not finish");
-        let nodes = &workspace.tree.nodes;
-        (0..nodes.len())
-            .filter(|&index| nodes[index].kind == ERROR || nodes[index].flags & HAS_ERROR != 0 && nodes[index].flags & TOKEN != 0)
-            .map(|index| (nodes[index].start as usize, nodes[index].end as usize))
-            .collect()
-    }
-
-    /// `(clean files, total files, one sample per bucket, buckets by the first
-    /// word of a failing file's first error)`.
-    fn census(root: &Path) -> (usize, usize, Vec<String>, Vec<(usize, String, String)>) {
-        let mut files = Vec::new();
-        php_files(root, &mut files);
-        files.sort();
-        let mut clean = 0usize;
-        let mut samples = Vec::new();
-        let mut histogram: BTreeMap<String, (usize, String)> = BTreeMap::new();
-        for path in &files {
-            let Ok(src) = fs::read(path) else { continue };
-            let text = String::from_utf8_lossy(&src);
-            let errors = errors_of(&src);
-            if errors.is_empty() {
-                clean += 1;
-                continue;
-            }
-            let (start, end) = errors[0];
-            let snippet: String = text.get(start..end).unwrap_or("").chars().take(70).collect();
-            let key = snippet.split_whitespace().next().unwrap_or("<empty>").to_string();
-            let entry = histogram.entry(key).or_insert((0, format!("{}: {:?}", path.display(), snippet)));
-            entry.0 += 1;
-            if samples.len() < 30 {
-                samples.push(format!("{}: {:?}", path.display(), snippet));
-            }
-        }
-        let mut rows: Vec<(usize, String, String)> = histogram.into_iter().map(|(key, (count, sample))| (count, key, sample)).collect();
-        rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        (clean, files.len(), samples, rows)
-    }
-
-    /// The real-world measure: how many files of a PHP corpus parse with no
-    /// error node, and what the first error of each remaining file is.
-    ///
-    /// `PHP_CORPUS=<dir> cargo test -p deep-grammars -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn census_of_a_real_php_corpus() {
-        let root = std::env::var("PHP_CORPUS").unwrap_or_else(|_| "/tmp/opencode/php-corpus".to_string());
-        let (clean, total, _samples, rows) = census(Path::new(&root));
-        println!("php corpus {root}: {clean}/{total} files parse with no error node");
-        for (count, key, sample) in rows.iter().take(25) {
-            println!("{count:5}  {key:28} first: {:?}", sample.replace('\n', "\\n"));
-        }
-        assert!(total > 0, "{root}: no PHP files");
-    }
-
-    /// One file, its error nodes and the path that leads to each, with the line
-    /// each starts on: `PHP_TRACE=<file> cargo test ... --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn trace_one_file() {
-        let Ok(path) = std::env::var("PHP_TRACE") else { return };
-        let src = fs::read(&path).unwrap();
-        let text = String::from_utf8_lossy(&src).into_owned();
-        let mut workspace = Workspace::default();
-        workspace.parse(&src, &PHP, &Budget::default()).unwrap();
-        let nodes = &workspace.tree.nodes;
-        let mut parent = vec![0usize; nodes.len()];
-        let mut open: Vec<usize> = vec![0];
-        for index in 1..nodes.len() {
-            while open.len() > 1 && nodes[*open.last().unwrap()].subtree_end as usize <= index {
-                open.pop();
-            }
-            parent[index] = *open.last().unwrap();
-            open.push(index);
-        }
-        let line_of = |at: usize| text[..at.min(text.len())].bytes().filter(|byte| *byte == b'\n').count() + 1;
-        let mut shown = 0;
-        for (index, node) in nodes.iter().enumerate() {
-            if !(node.kind == ERROR || node.flags & HAS_ERROR != 0 && node.flags & TOKEN != 0) {
-                continue;
-            }
-            let mut ancestors = Vec::new();
-            let mut at = index;
-            while at != 0 {
-                at = parent[at];
-                ancestors.push(PHP.name(nodes[at].kind));
-            }
-            ancestors.reverse();
-            println!(
-                "line {}: {:?} in [{}]",
-                line_of(node.start as usize),
-                text.get(node.start as usize..node.end as usize).unwrap_or("").chars().take(120).collect::<String>(),
-                ancestors.join(" > ")
-            );
-            shown += 1;
-            if shown == 25 {
-                break;
-            }
-        }
-        println!("{shown} error nodes in {} nodes", nodes.len());
-    }
-
-    #[test]
-    fn the_census_reads_an_empty_directory_as_zero() {
-        assert_eq!(census(Path::new("/nonexistent/php")).1, 0);
-    }
 }
