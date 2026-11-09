@@ -43,7 +43,11 @@ const PYTHON_VALID: &[(&str, &str)] = &[
         "flask_api.py",
         "import_statement import_statement import_from_statement expression_statement expression_statement expression_statement expression_statement function_definition decorated_definition decorated_definition decorated_definition",
     ),
-    ("fstring_fields.py", "expression_statement expression_statement expression_statement expression_statement expression_statement"),
+    ("fstring_fields.py", "expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement"),
+    (
+        "fstring_nested.py",
+        "expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement expression_statement",
+    ),
     ("matrix_math.py", "import_from_statement class_definition function_definition"),
     ("models.py", "import_from_statement import_from_statement import_from_statement import_from_statement class_definition class_definition class_definition"),
     (
@@ -106,6 +110,9 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     ("unclosed_brace.js", "javascript", "lexical_declaration"),
     ("unclosed_brace.py", "python", "expression_statement expression_statement"),
     ("unclosed_brace.ts", "typescript", "lexical_declaration"),
+    // A replacement field that cannot close: `f"{"` at a line end, an empty
+    // field, a field whose quote is the string's own, and an escaped brace.
+    ("unclosed_field.py", "python", "expression_statement expression_statement"),
     ("unterminated_string.js", "javascript", "lexical_declaration expression_statement"),
     ("unterminated_string.py", "python", "expression_statement expression_statement expression_statement"),
     ("unterminated_string.ts", "typescript", "lexical_declaration expression_statement"),
