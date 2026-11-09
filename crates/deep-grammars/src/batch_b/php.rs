@@ -1,56 +1,121 @@
 //! PHP through `grammar!`: one of Field 6's four languages (Ruby, PHP, Swift,
 //! Scala).
 //!
-//! PHP is brace- and semicolon-delimited, so no layout rule is needed and every
-//! statement ends at its `;`. Node names follow Tree-sitter's PHP where that
-//! costs nothing; the tree is not the same tree.
+//! PHP is brace- and semicolon-delimited, so no layout rule is needed. A file
+//! is not one language, though: it is PHP runs joined by inline HTML, so the
+//! step lexer has a mode stack and the file *starts* in the HTML mode.
+//!
+//! ```text
+//! HTML --`<?php`/`<?=`--> PHP --`?>`--> HTML
+//!                           |  `"`      pushes DQUOTE   (text and fields)
+//!                           |  `{$`     pushes FIELD    (ordinary code again)
+//!                           |  `<<<X`   pushes HEREDOC  (heredoc text)
+//! ```
 //!
 //! What the DSL covers here:
 //!
-//! - **The opening tag is trivia.** `<?php` and `?>` are lexed as trivia, so
-//!   the root is the file's statements and nothing has to consume the tag.
+//! - **The open tag, the close tag and inline HTML are statements.** `<?php`
+//!   and `<?=` are tokens that switch the lexer to code, `?>` is a token that
+//!   switches it back to HTML, and the bytes between two PHP runs are one
+//!   `inline_html` token. `?>` also ends a statement, so `echo $x ?>` needs no
+//!   `;` — that is PHP's own rule, not a recovery.
 //! - **Variables are one token.** `$name` is `VARIABLE`, which is what makes
 //!   `$x = 1`, `$this->y` and `$a[$i]` ordinary expression forms.
 //! - **A member and a static member are postfix rows.** `$this->name(...)`,
 //!   `Foo::bar`, `Foo::CONST` and `$obj?->name` are `member_access`,
-//!   `scoped_call` and `nullsafe_member_access`, taken after their operands.
-//! - **Strings are single tokens.** A double-quoted string's `{$...}` and
-//!   `$name` interpolations, a heredoc's whole body and a nowdoc's whole body
-//!   are scanned as one `string`; the code inside a string is not parsed.
-//! - **Types are shallow.** A parameter or return type is `?` plus a qualified
-//!   name plus `|` alternatives (`?int`, `string|int`, `\App\Model`). Generic
-//!   phpdoc types are comments, not syntax.
+//!   `scoped_property_access` and `nullsafe_member_access`, taken after their
+//!   operands. A word after `->`, `?->` or `::` is a name even when it is a
+//!   keyword (`$this->namespace`, `$a->list()`, `Foo::class`): the step lexer
+//!   reads the previous significant token, which is what makes that possible
+//!   without a contextual-keyword mode.
+//! - **An interpolated string is a tree, not a token.** `"a{$o->m()}b"` is a
+//!   `double_quoted_string` over its quote, its text runs and one
+//!   `interpolation` per field; a call written in a field is an ordinary
+//!   `function_call_expression`, and `?>` inside the string closes nothing.
+//!   A heredoc (not a nowdoc) is a `heredoc_string` shaped the same way; a
+//!   nowdoc is one `string` token, because nothing inside it is code.
+//! - **`{$...}` and `${...}` are the same node.** Both push the field mode, so
+//!   the braces keep their own spans and the code between them is parsed. The
+//!   simple `"$a"`, `"$a->b"` and `"$a[0]"` forms are an `interpolated_variable`
+//!   part instead: they name a variable, they do not run an expression.
+//! - **Alternative syntax is a body, not a second grammar.** `if (...): ...
+//!   endif;` is `if_statement` with a `":" _statement* ["endif" _end]` body,
+//!   and the same shape is used by `while`, `for`, `foreach`, `switch` and
+//!   `declare`. That is why a keyword such as `endif` only has to end the
+//!   statement loop: it can never start a statement.
 //!
 //! What the DSL cannot express, and how it is handled here instead:
 //!
-//! - **A heredoc or nowdoc is a lexer state.** `<<<EOT` opens a body that ends
-//!   at a line holding `EOT` (optionally indented, optionally followed by `;`).
-//!   The DSL has no external scanner, so the step lexer scans it whole and
-//!   returns one `string` token; the terminator line is part of the token.
-//! - **`->` is a token, not an operator.** There is no row for it: a member
-//!   access is `postfix "->" _member_name`, so `$a->b->c` is two postfix
-//!   takes of the same row, which is what keeps the table LL(3).
-//! - **Alternative syntax is not modelled.** `if (...): ... endif;`,
-//!   `foreach (...): ... endforeach;` and friends are valid PHP but are not
-//!   rules here; the fixtures use braces. The colon form would need a second
-//!   statement grammar per construct for no tree-shape gain.
-//! - **Attributes (`#[...]`) collide with `#` comments.** A `#` starts a
-//!   comment in this lexer; PHP 8 attributes are therefore not lexed, which is
-//!   the one place a valid file can lose tokens it should keep.
-//! - **A decision sees three tokens.** `foreach ($xs as $k => $v)` and a named
-//!   argument `f(name: 1)` share their first token with an expression, so they
-//!   are entered through `&(...)` predicates.
-//! - **One kind per rule**, so `member_access` and `nullsafe_member_access`
-//!   are two rules rather than one labelled alternative.
+//! - **A quoted string, a heredoc and a field are lexer states.** `modes` and
+//!   `switch` are the runtime's own mechanism; the `{` of a field pushes the
+//!   field frame and the `}` at that field's own bracket depth pops it, so
+//!   `"{$a["k"]}"` closes at the right brace. A string that cannot close ends
+//!   its frame on one bad token, and the mode stack is never left holding a
+//!   frame the step function abandoned.
+//! - **Attributes are siblings of what they decorate.** One decision sees at
+//!   most three tokens, and `#[A] final public static function` puts the
+//!   declaration keyword past that window. The attribute group is therefore a
+//!   statement/member of its own, with its own span, instead of a child of the
+//!   declaration it decorates. Nothing is lost from the bytes.
+//! - **A cast is one token.** `(int)`, `(string)`, `(array)` and friends are
+//!   lexed as a single `CAST` token when the bytes spell exactly one, so
+//!   `(int) $x` cannot be confused with a parenthesized constant named `int`.
+//! - **No negative lookahead.** A choice is decided by the next one to three
+//!   tokens, so a construct that starts like an expression is entered through
+//!   a leading predicate (`&(...)`): `function name(` is a declaration,
+//!   `function (` is an anonymous function.
+//! - **One kind per rule**, so `member_access` and `nullsafe_member_access` are
+//!   two rules rather than one labelled alternative.
+//!
+//! Not modelled, and named rather than silently dropped: `goto` (the statement
+//! parses, a label is an `expression_statement`), property hooks (PHP 8.4),
+//! `__halt_compiler`, and short open tags (`<?`); `<?xml` at the top of a file
+//! is inline HTML, which is what makes ignoring `<?` the safe choice.
+
+use std::cell::RefCell;
 
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
 
 rust_graph_deep::grammar! { PHP {
     name = "php";
-    lex = lex;
+    lex = lex_html;
+
+    /// The mode stack of a file: HTML text, PHP code, the text of a
+    /// double-quoted string or heredoc, and the code of an interpolation.
+    modes {
+        HTML = lex_html,
+        PHP = lex_php,
+        DQUOTE = lex_dquote,
+        HEREDOC = lex_heredoc,
+        FIELD = lex_field,
+    }
+    switch OPEN_TAG => PHP;
+    switch ECHO_TAG => PHP;
+    switch CLOSE_TAG => HTML;
+    switch DQUOTE_START => push DQUOTE;
+    switch DQUOTE_END => pop DQUOTE;
+    /// A string that cannot close takes its own frame and every field opened
+    /// inside it, so the mode stack cannot hold a frame the lexer has left.
+    switch DQUOTE_BAD => pop DQUOTE;
+    switch INTERPOLATION_OPEN => push FIELD;
+    switch INTERPOLATION_CLOSE => pop;
+    switch HEREDOC_START => push HEREDOC;
+    switch HEREDOC_END => pop HEREDOC;
+    switch HEREDOC_BAD => pop HEREDOC;
 
     tokens {
+        /// `<?php`: the tag itself switches the lexer to code.
+        OPEN_TAG = "<?php",
+        /// `<?=`: the short echo tag, an `echo` with its `<?php`.
+        ECHO_TAG = "<?=",
+        /// `?>`: ends the PHP run and the statement it ends.
+        CLOSE_TAG = "?>",
+        /// Everything between two PHP runs.
+        INLINE_HTML = "inline_html",
+        /// `#[`: an attribute group is a bracket pair.
+        ATTRIBUTE_START = "#[",
+
         LPAREN = "(" open parens,
         RPAREN = ")" close parens,
         LBRACKET = "[" open brackets,
@@ -61,12 +126,31 @@ rust_graph_deep::grammar! { PHP {
         VARIABLE = "variable_name",
         NUMBER = "integer",
         FLOAT = "float",
+        /// A single-quoted, backtick or nowdoc string: nothing inside is code.
         STRING = "string",
-        /// A string literal or heredoc with no end.
+        /// A string literal with no end.
         BAD_LITERAL = "bad_literal" bad,
-        /// `<?php` and `<?=`: the opening tag is not syntax here.
-        OPEN_TAG = "<?php" trivia,
-        CLOSE_TAG = "?>" trivia,
+        /// The opening quote of a double-quoted string.
+        DQUOTE_START = "string_start",
+        /// The bytes between the fields of a double-quoted string.
+        DQUOTE_TEXT = "string_content",
+        /// The closing quote of a double-quoted string.
+        DQUOTE_END = "string_end",
+        /// A double-quoted string that cannot close.
+        DQUOTE_BAD = "bad_string" bad,
+        /// The `<<<X` line that opens a heredoc.
+        HEREDOC_START = "heredoc_start",
+        /// The terminator line of a heredoc, marker included.
+        HEREDOC_END = "heredoc_end",
+        /// A heredoc with no terminator line.
+        HEREDOC_BAD = "bad_heredoc" bad,
+        /// The `{` of `{$...}` or the `$`-brace of `${...}`: code again until
+        /// the brace that matches it.
+        INTERPOLATION_OPEN = "interpolation_open" open field,
+        /// The `}` that closes an interpolation at its own depth.
+        INTERPOLATION_CLOSE = "interpolation_close" close field,
+        /// `(int)`, `(string)`, `(array)`: a cast is one token.
+        CAST = "cast",
 
         KW_ABSTRACT = "abstract",
         KW_AND = "and",
@@ -79,12 +163,19 @@ rust_graph_deep::grammar! { PHP {
         KW_CLONE = "clone",
         KW_CONST = "const",
         KW_CONTINUE = "continue",
+        KW_DECLARE = "declare",
         KW_DEFAULT = "default",
         KW_DO = "do",
         KW_ECHO = "echo",
         KW_ELSE = "else",
         KW_ELSEIF = "elseif",
         KW_EMPTY = "empty",
+        KW_ENDDECLARE = "enddeclare",
+        KW_ENDFOR = "endfor",
+        KW_ENDFOREACH = "endforeach",
+        KW_ENDIF = "endif",
+        KW_ENDSWITCH = "endswitch",
+        KW_ENDWHILE = "endwhile",
         KW_ENUM = "enum",
         KW_EXTENDS = "extends",
         KW_FALSE = "false",
@@ -93,13 +184,16 @@ rust_graph_deep::grammar! { PHP {
         KW_FN = "fn",
         KW_FOR = "for",
         KW_FOREACH = "foreach",
+        KW_FROM = "from",
         KW_FUNCTION = "function",
         KW_GLOBAL = "global",
+        KW_GOTO = "goto",
         KW_IF = "if",
         KW_IMPLEMENTS = "implements",
         KW_INCLUDE = "include",
         KW_INCLUDE_ONCE = "include_once",
         KW_INSTANCEOF = "instanceof",
+        KW_INSTEADOF = "insteadof",
         KW_INTERFACE = "interface",
         KW_ISSET = "isset",
         KW_LIST = "list",
@@ -190,14 +284,18 @@ rust_graph_deep::grammar! { PHP {
     program: _statement*,
 
     _statement:
-        &([top_modifiers] "class") class_declaration
+        attribute_group
+        // A declaration is entered through the tokens that make it one: the
+        // keyword alone is not enough, because `function (` is an expression.
+        | &([top_modifiers] "class") class_declaration
         | &([top_modifiers] "interface") interface_declaration
         | &([top_modifiers] "trait") trait_declaration
         | &([top_modifiers] "enum") enum_declaration
+        | &("function" ["&"] IDENT) function_declaration
+        | &("const" IDENT "=") const_declaration
         | namespace_declaration
         | use_declaration
         | require_statement
-        | function_declaration
         | if_statement
         | while_statement
         | do_statement
@@ -210,19 +308,36 @@ rust_graph_deep::grammar! { PHP {
         | continue_statement
         | echo_statement
         | global_statement
-        | throw_statement
+        | &("static" VARIABLE) static_statement
         | unset_statement
+        | declare_statement
+        | goto_statement
         | block
+        | OPEN_TAG
+        | CLOSE_TAG
+        | INLINE_HTML
         | ";"
         | expression_statement,
 
+    /// A statement ends at `;` or at `?>`, which PHP counts as a `;`.
+    _end: ";" | CLOSE_TAG,
+
     // ---- declarations ----
 
-    namespace_declaration: "namespace" _qualified_name (";" | namespace_block),
+    namespace_declaration: "namespace" [_qualified_name] (";" | namespace_block),
     namespace_block: "{" _statement* "}",
-    use_declaration: "use" [("function" | "const")] (_use_item % ",") ";",
+    use_declaration: "use" [("function" | "const")] (_use_name % ",") ";",
+    /// `Foo\Bar`, and `Foo\{Bar, Baz as Qux}`: the group is a tail of the same
+    /// name, so the two forms share every token up to the brace the group needs.
+    _use_name: [BACKSLASH] _name (BACKSLASH _name)* [BACKSLASH use_group],
+    use_group: "{" (_use_item %? ",") "}",
     _use_item: _qualified_name ["as" _name],
-    require_statement: ("require" | "require_once" | "include" | "include_once") _expression ";",
+    require_statement: ("require" | "require_once" | "include" | "include_once") _expression _end,
+
+    /// An attribute group is a statement or a member of its own; see the module
+    /// comment for why it is not a child of the declaration it decorates.
+    attribute_group: "#[" (_attribute %? ",") "]",
+    _attribute: _qualified_name [arguments],
 
     modifiers: _modifier+,
     _modifier: "public" | "protected" | "private" | "static" | "abstract" | "final" | "readonly" | "var",
@@ -230,62 +345,76 @@ rust_graph_deep::grammar! { PHP {
     /// level starts a `static::` expression instead.
     top_modifiers: ("abstract" | "final" | "readonly")+,
 
-    class_declaration: [top_modifiers] "class" _name ["extends" _qualified_name] ["implements" _qualified_name ("," _qualified_name)*] class_body,
-    interface_declaration: [top_modifiers] "interface" _name ["extends" _qualified_name ("," _qualified_name)*] class_body,
+    class_declaration: [top_modifiers] "class" _name ["extends" _qualified_name] ["implements" _interface_list] class_body,
+    interface_declaration: [top_modifiers] "interface" _name ["extends" _interface_list] class_body,
     trait_declaration: [top_modifiers] "trait" _name class_body,
-    enum_declaration: [top_modifiers] "enum" _name [":" _type] ["implements" _qualified_name ("," _qualified_name)*] enum_body,
-    enum_body: "{" enum_case* "}",
+    enum_declaration: [top_modifiers] "enum" _name [":" _type] ["implements" _interface_list] enum_body,
+    enum_body: "{" (enum_case | ";")* "}",
     enum_case: "case" _name ["=" _expression] ";",
-    class_body: "{" _member* "}",
-    _member:
-        &([modifiers] "function") method_declaration
-        | &([modifiers] "const") const_declaration
-        | &("use" _qualified_name) trait_use_declaration
-        | &([modifiers] _type VARIABLE) property_declaration
-        | ";",
+    class_body: "{" class_member* "}",
+    /// Attributes and modifiers come first, the declaration keyword decides.
+    class_member: ";" | attribute_group | [modifiers] member_declaration,
+    member_declaration: method_declaration | const_declaration | trait_use_declaration | property_declaration,
 
-    method_declaration: [modifiers] "function" ["&"] _name formal_parameters [":" _type] (block | ";"),
+    method_declaration: "function" ["&"] _name formal_parameters [":" _type] (block | ";"),
     function_declaration: "function" ["&"] _name formal_parameters [":" _type] (block | ";"),
     formal_parameters: "(" (formal_parameter %? ",") ")",
     formal_parameter: [modifiers] [_type] ["&"] ["..."] VARIABLE ["=" _expression],
-    property_declaration: [modifiers] _type (_property_item % ",") ";",
+    property_declaration: [_type] _property_item ("," _property_item)* ";",
     _property_item: VARIABLE ["=" _expression],
-    const_declaration: [modifiers] "const" _name "=" _expression ";",
-    trait_use_declaration: "use" _qualified_name ("," _qualified_name)* ";",
+    const_declaration: "const" _const_item ("," _const_item)* ";",
+    _const_item: _name "=" _expression,
+    trait_use_declaration: "use" _qualified_name ("," _qualified_name)* [trait_adaptations],
+    trait_adaptations: "{" trait_adaptation* "}",
+    /// `A::foo insteadof B;` and `A::foo as protected bar;`
+    trait_adaptation: trait_reference trait_adaptation_tail ";",
+    trait_adaptation_tail: "insteadof" _qualified_name ("," _qualified_name)* | "as" [modifiers] [_name],
+    trait_reference: _qualified_name ["::" _name],
+    _interface_list: _qualified_name ("," _qualified_name)*,
 
     // ---- statements ----
 
     block: "{" _statement* "}",
-    expression_statement: _expression ";",
-    if_statement: "if" parenthesized_expression _statement elseif_clause* [else_clause],
-    elseif_clause: "elseif" parenthesized_expression _statement,
-    else_clause: "else" _statement,
-    while_statement: "while" parenthesized_expression _statement,
-    do_statement: "do" _statement "while" parenthesized_expression ";",
-    for_statement: "for" for_header _statement,
+    expression_statement: _expression _end,
+    /// The body of a control structure: a block, an alternative-syntax run, or
+    /// one statement (`if ($x) return;`).
+    _body: ":" _statement* | _statement,
+    if_statement: "if" parenthesized_expression _body elseif_clause* [else_clause] ["endif" _end],
+    elseif_clause: "elseif" parenthesized_expression _body,
+    else_clause: "else" _body,
+    while_statement: "while" parenthesized_expression _body ["endwhile" _end],
+    do_statement: "do" _statement "while" parenthesized_expression _end,
+    for_statement: "for" for_header _body ["endfor" _end],
     for_header: "(" [_expression_list] ";" [_expression_list] ";" [_expression_list] ")",
     _expression_list: _expression ("," _expression)*,
-    foreach_statement: "foreach" foreach_header _statement,
+    foreach_statement: "foreach" foreach_header _body ["endforeach" _end],
     foreach_header: "(" _expression "as" _foreach_target ")",
     _foreach_target: &(_expression "=>") key_value_target | _expression,
     key_value_target: _expression "=>" _expression,
-    switch_statement: "switch" parenthesized_expression switch_body,
+    switch_statement: "switch" parenthesized_expression (switch_body | switch_alternative),
     switch_body: "{" (case_clause | default_clause)* "}",
+    switch_alternative: ":" (case_clause | default_clause)* ["endswitch" _end],
     case_clause: "case" _expression (":" | ";") _statement*,
     default_clause: "default" (":" | ";") _statement*,
     try_statement: "try" block catch_clause* [finally_clause],
     catch_clause: "catch" catch_header block,
-    catch_header: "(" _catch_types VARIABLE ")",
+    catch_header: "(" _catch_types [VARIABLE] ")",
     _catch_types: _qualified_name ("|" _qualified_name)*,
     finally_clause: "finally" block,
-    return_statement: "return" [_expression] ";",
-    break_statement: "break" [NUMBER] ";",
-    continue_statement: "continue" [NUMBER] ";",
-    echo_statement: "echo" _expression ("," _expression)* ";",
-    global_statement: "global" (VARIABLE % ",") ";",
-    throw_statement: "throw" _expression ";",
-    unset_statement: "unset" unset_arguments ";",
+    return_statement: "return" [_expression] _end,
+    break_statement: "break" [NUMBER] _end,
+    continue_statement: "continue" [NUMBER] _end,
+    echo_statement: ("echo" | ECHO_TAG) _expression ("," _expression)* _end,
+    global_statement: "global" (VARIABLE % ",") _end,
+    /// `static $cache = [];` inside a function.
+    static_statement: "static" static_item ("," static_item)* _end,
+    static_item: VARIABLE ["=" _expression],
+    unset_statement: "unset" unset_arguments _end,
     unset_arguments: "(" (_expression %? ",") ")",
+    declare_statement: "declare" declare_arguments (";" | ":" _statement* ["enddeclare" _end] | block),
+    declare_arguments: "(" (declare_item %? ",") ")",
+    declare_item: _name "=" _expression,
+    goto_statement: "goto" _name _end,
     parenthesized_expression: "(" _expression ")",
 
     // ---- expressions ----
@@ -296,6 +425,7 @@ rust_graph_deep::grammar! { PHP {
         word_xor: left "xor" => binary_expression,
         word_and: left "and" => binary_expression,
         cond: postfix "?" _expression ":" _expression@assign => conditional_expression,
+        short_cond: postfix "?" ":" _expression@assign => conditional_expression,
         nullish: left "??" => binary_expression,
         or: left "||" => binary_expression,
         and: left "&&" => binary_expression,
@@ -309,9 +439,12 @@ rust_graph_deep::grammar! { PHP {
         add: left "+" | "-" | "." => binary_expression,
         mul: left "*" | "/" | "%" => binary_expression,
         exp: right "**" => binary_expression,
+        cast: prefix CAST => cast_expression,
         clone: prefix "clone" => clone_expression,
         print: prefix "print" => print_expression,
+        throw: prefix "throw" => throw_expression,
         unary: prefix "!" | "~" | "-" | "+" | "@" => unary_expression,
+        reference: prefix "&" => reference_expression,
         update: prefix "++" | "--" => update_expression,
         postfix "++" | "--" => update_expression,
         call: postfix arguments => function_call_expression,
@@ -325,12 +458,14 @@ rust_graph_deep::grammar! { PHP {
         VARIABLE
         | NUMBER
         | FLOAT
-        | STRING
+        | string_literal
         | "true"
         | "false"
         | "null"
         | "self"
         | "parent"
+        | &("static" "fn") arrow_function
+        | &("static" "function") anonymous_function
         | "static"
         | parenthesized_expression
         | array_literal
@@ -339,18 +474,54 @@ rust_graph_deep::grammar! { PHP {
         | isset_expression
         | empty_expression
         | list_expression
-        | _qualified_name,
+        | match_expression
+        | anonymous_function
+        | arrow_function
+        | yield_expression
+        | _qualified_name
+        | BACKSLASH _literal_name,
+
+    /// A double-quoted string or a heredoc is a tree; a nowdoc, a single-quoted
+    /// string and a backtick string are one token.
+    string_literal: (STRING | BAD_LITERAL | double_quoted_string | heredoc_string)+,
+    double_quoted_string: DQUOTE_START _string_part* (DQUOTE_END | DQUOTE_BAD),
+    heredoc_string: HEREDOC_START _string_part* (HEREDOC_END | HEREDOC_BAD),
+    _string_part: string_content | interpolation | interpolated_variable,
+    string_content: DQUOTE_TEXT,
+    /// `{$obj->m()}` or `${name}`: the braces keep their own spans and the code
+    /// between them is ordinary grammar.
+    interpolation: INTERPOLATION_OPEN _expression INTERPOLATION_CLOSE,
+    /// `"$a"`, `"$a->b"`, `"$a[0]"`: a variable named in a string, not code.
+    interpolated_variable: VARIABLE [("->" _member_name) | subscript],
 
     _qualified_name: [BACKSLASH] _name (BACKSLASH _name)*,
-    new_expression: "new" _new_class [arguments],
-    _new_class: "self" | "parent" | "static" | _qualified_name,
     _name: IDENT,
-    /// After `->` and `::` every word is a member name.
+    _literal_name: "true" | "false" | "null",
+    /// After `->`, `?->` and `::` every word is a member name.
     _member_name: IDENT | "class",
+
+    new_expression: "new" _new_class [arguments],
+    _new_class: "self" | "parent" | "static" | _qualified_name | anonymous_class,
+    anonymous_class: "class" [arguments] ["extends" _qualified_name] ["implements" _interface_list] class_body,
+    anonymous_function: "function" ["&"] formal_parameters ["use" closure_use] [":" _type] block,
+    closure_use: "(" (closure_use_item %? ",") ")",
+    closure_use_item: ["&"] VARIABLE,
+    arrow_function: ["static"] "fn" ["&"] formal_parameters [":" _type] "=>" _expression,
+    match_expression: "match" parenthesized_expression match_body,
+    match_body: "{" [match_arms [","]] "}",
+    match_arms: _arm ("," _arm)*,
+    _arm: match_arm | default_arm,
+    match_arm: _expression ("," _expression)* "=>" _expression,
+    default_arm: "default" "=>" _expression,
+    yield_expression: "yield" [yield_body],
+    yield_body: "from" _expression | _expression ["=>" _expression],
+
     arguments: "(" (_argument %? ",") ")",
-    _argument: &(_name ":") named_argument | spread_element | _expression,
+    _argument: &(_name ":") named_argument | &(ELLIPSIS ")") first_class_callable | spread_element | _expression,
     named_argument: _name ":" _expression,
     spread_element: "..." _expression,
+    /// `strlen(...)`: the first-class callable syntax.
+    first_class_callable: "...",
     subscript: "[" [_expression] "]",
 
     array_literal: "[" (_array_element %? ",") "]",
