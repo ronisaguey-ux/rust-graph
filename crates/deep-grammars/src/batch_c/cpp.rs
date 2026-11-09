@@ -162,8 +162,9 @@ rust_graph_deep::grammar! { CPP {
         | &(declaration_specifiers user_type_name _declarator _function_tail "{") specified_user_function
         | &(scoped_type_name _declarator _function_tail "{") scoped_user_function
         | &(plain_type_name _declarator _function_tail "{") plain_user_function
-        | &(scoped_type_name parameter_list _function_tail "{") scoped_member_definition
-        | &(scoped_type_name "~" IDENT parameter_list _function_tail "{") scoped_destructor_definition
+        | &(declaration_specifiers scoped_type_name parameter_list _function_tail ("{" | ":")) specified_scoped_function
+        | &(scoped_type_name parameter_list _function_tail ("{" | ":")) scoped_member_definition
+        | &(IDENT "::" "~" IDENT parameter_list "{") scoped_destructor_definition
         | &("extern" string) linkage_specification
         | &(IDENT IDENT _qualified_tail) double_qualified_item
         | &(IDENT _qualified_tail) macro_qualified_item
@@ -193,8 +194,10 @@ rust_graph_deep::grammar! { CPP {
     specified_user_function: declaration_specifiers user_type_name _declarator _function_tail compound_statement,
     /// `Greenlet::Greenlet(PyGreenlet *p) : base(p) { ... }`: an out-of-line
     /// constructor, and its destructor.
-    scoped_member_definition: scoped_type_name parameter_list [member_initializer_list] compound_statement,
-    scoped_destructor_definition: scoped_type_name "~" IDENT parameter_list compound_statement,
+    scoped_member_definition: scoped_type_name parameter_list _function_tail [member_initializer_list] compound_statement,
+    /// `int Guard::level() const { ... }`: a method defined out of line.
+    specified_scoped_function: declaration_specifiers scoped_type_name parameter_list _function_tail [member_initializer_list] compound_statement,
+    scoped_destructor_definition: IDENT "::" "~" IDENT parameter_list compound_statement,
 
     function_definition: declaration_specifiers _declarator _function_tail compound_statement,
     scoped_user_function: scoped_type_name _declarator _function_tail compound_statement,
@@ -221,7 +224,7 @@ rust_graph_deep::grammar! { CPP {
     constructor_declaration: user_type_name IDENT arguments ("," _init_declarator)* ";",
     _scoped_qualified_declaration: declaration_specifiers scoped_type_name (_init_declarator % ",") ";",
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
-    _init_declarator: _declarator _attribute* ["=" _initializer],
+    _init_declarator: _declarator attribute* ["=" _initializer],
     _initializer: designated_field | &(array_suffix "=") designated_index | _expression@assign | initializer_list,
     initializer_list: "{" (_initializer %? ",") "}",
     designated_field: "." IDENT "=" _initializer,
@@ -247,10 +250,10 @@ rust_graph_deep::grammar! { CPP {
         | "constexpr" | "virtual" | "explicit" | "friend" | "const" | "volatile"
         | "thread_local"
         | "__extension__"
-        | _attribute
+        | attribute
         | type_specifier,
     /// `__attribute__((packed, aligned(4)))` and `__declspec(dllexport)`.
-    _attribute: ("__attribute__" | "__declspec") attribute_arguments,
+    attribute: ("__attribute__" | "__declspec") attribute_arguments,
     attribute_arguments: "(" attribute_body ")",
     attribute_body: attribute_group | _attribute_argument ("," _attribute_argument)*,
     attribute_group: "(" (_attribute_argument %? ",") ")",
@@ -301,7 +304,8 @@ rust_graph_deep::grammar! { CPP {
     class_body: "{" _class_member* "}",
     _class_member:
         &(IDENT parameter_list ("{" | ":")) constructor_definition
-        | &("~" IDENT parameter_list) destructor_definition
+        | &("~" IDENT parameter_list ("{" | ":")) destructor_definition
+        | &("~" IDENT parameter_list ";") destructor_declaration
         | &(declaration_specifiers _declarator _function_tail "{") function_definition
         | &(scoped_type_name _declarator _function_tail "{") scoped_user_function
         | &(plain_type_name _declarator _function_tail "{") plain_user_function
@@ -312,6 +316,7 @@ rust_graph_deep::grammar! { CPP {
     access_specifier: ("public" | "private" | "protected") ":",
     constructor_definition: IDENT parameter_list [member_initializer_list] compound_statement,
     destructor_definition: "~" IDENT parameter_list [member_initializer_list] compound_statement,
+    destructor_declaration: "~" IDENT parameter_list ";",
     member_initializer_list: ":" (_member_initializer % ","),
     _member_initializer: user_type_name member_initializer_args,
     member_initializer_args: arguments | initializer_list,
@@ -375,6 +380,7 @@ rust_graph_deep::grammar! { CPP {
         | try_statement
         | throw_statement
         | static_assert_statement
+        | asm_statement
         | &(declaration_specifiers) declaration_statement
         | &(scoped_type_name _declarator) declaration_statement
         | &(plain_type_name IDENT) declaration_statement
@@ -462,7 +468,13 @@ rust_graph_deep::grammar! { CPP {
     user_cast_expression: user_cast_head _expression@unary,
     user_cast_head: "(" user_type_name ")",
 
-    cast_type: "(" (_type_prefixed | _scoped_type_id) ")",
+    cast_type: "(" _cast_body ")",
+    _cast_body: _type_prefixed | _user_cast_type,
+    /// `(Node *)`: a cast to a typedef name with a declarator.
+    _user_cast_type: user_type_name _nonempty_abstract_declarator,
+    _nonempty_abstract_declarator:
+        pointer+ [parenthesized_abstract] abstract_suffix*
+        | parenthesized_abstract abstract_suffix*,
     sizeof_expression: "sizeof" sizeof_operand,
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     named_cast: named_cast_head parenthesized_expression,
@@ -573,6 +585,14 @@ fn raw_string(c: &mut Cursor) -> bool {
 
 fn keyword(text: &[u8]) -> Kind {
     match text {
+        // The alternate spellings GCC and MSVC add for the same keywords.
+        b"thread_local" => KW_THREAD_LOCAL,
+        b"alignas" => KW_ALIGNAS,
+        b"__attribute" | b"__attribute__" => KW_ATTRIBUTE,
+        b"__declspec" => KW_DECLSPEC,
+        b"__extension__" => KW_EXTENSION,
+        b"asm" | b"__asm" | b"__asm__" => KW_ASM,
+        b"typeof" | b"__typeof" | b"__typeof__" => KW_TYPEOF,
         b"auto" => KW_AUTO,
         b"break" => KW_BREAK,
         b"case" => KW_CASE,
@@ -772,5 +792,107 @@ mod corpus {
             }
         }
         println!("C++: {clean}/{} clean", results.len());
+    }
+}
+
+/// The fixtures this grammar owns, and the construct each one proves: one node
+/// kind and the exact source text it must span.
+///
+/// ```text
+/// fixtures/cpp_*.cpp  ->  deep-grammars/src/batch_c/cpp.rs
+/// ```
+#[cfg(test)]
+mod kinds {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use crate::batch_c::cpp::CPP;
+    use crate::deep::syntax::{Kind, Language, ERROR, FIRST_LANGUAGE_KIND};
+    use crate::deep::tree::{HAS_ERROR, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    /// `(fixture, first node of this kind, exact text it spans)`.
+    const FIXTURES: &[(&str, &[(&str, &str)])] = &[
+        (
+            "cpp_attributes_asm.cpp",
+            &[("attribute", "__attribute__((always_inline))"), ("asm_statement", "__asm__ volatile(\"mov %0, %%eax\" : \"=r\"(counter));")],
+        ),
+        (
+            "cpp_linkage_and_using.cpp",
+            &[
+                (
+                    "linkage_specification",
+                    "extern \"C\" {\n#endif\n\nint c_api_entry(int argc);\n\n#ifdef __cplusplus\n}",
+                ),
+                ("using_declaration", "using helpers::LockGuard;"),
+            ],
+        ),
+        (
+            "cpp_out_of_line_members.cpp",
+            &[
+                ("scoped_member_definition", "Guard::Guard(mutex &lock) : held(lock), depth(1) {\n}"),
+                ("specified_scoped_function", "int Guard::level() const {\n    return depth;\n}"),
+                ("scoped_destructor_definition", "Guard::~Guard() {\n}"),
+            ],
+        ),
+        (
+            "cpp_template_params.cpp",
+            &[("non_type_parameter", "cleanup Function"), (
+                    "class_specifier",
+                    "class Holder {\npublic:\n    Holder() : value(0) {\n    }\n    int value;\n}",
+                )],
+        ),
+        (
+            "cpp_user_types.cpp",
+            &[
+                ("specified_user_declaration", "static Result *build(Context &context, int flags);"),
+                ("constructor_declaration", "LockGuard lock(context.mutex);"),
+                ("cast_type", "(Node *)"),
+            ],
+        ),
+    ];
+
+    fn fixtures() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+    }
+
+    fn kind_of(language: &'static Language, name: &str) -> Kind {
+        let at = language
+            .kinds
+            .iter()
+            .position(|info| info.name == name)
+            .unwrap_or_else(|| panic!("the C++ grammar has no kind named {name}"));
+        FIRST_LANGUAGE_KIND + at as Kind
+    }
+
+    #[test]
+    fn every_cpp_fixture_parses_and_spans_the_construct_it_names() {
+        let dir = fixtures();
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("cpp_") && name.ends_with(".cpp"))
+            .collect();
+        names.sort();
+        let listed: Vec<String> = FIXTURES.iter().map(|(name, _)| (*name).to_string()).collect();
+        assert_eq!(names, listed, "fixtures/: the table and the directory disagree");
+
+        for (name, expectations) in FIXTURES {
+            let path = dir.join(name);
+            let src = fs::read(&path).unwrap();
+            let mut workspace = Workspace::default();
+            let outcome = workspace.parse(&src, &CPP, &Budget::default()).expect("too large");
+            assert!(outcome.complete(), "{name}: the parse did not finish");
+            let nodes = &workspace.tree.nodes;
+            let errors = nodes.iter().filter(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0 && node.flags & TOKEN != 0).count();
+            assert_eq!(errors, 0, "{name}: {errors} error nodes:\n{}", workspace.tree.sexp(&CPP, true));
+            for (kind_name, text) in *expectations {
+                let kind = kind_of(&CPP, kind_name);
+                let node = nodes.iter().find(|node| node.kind == kind).unwrap_or_else(|| panic!("{name}: no {kind_name} node"));
+                let span = String::from_utf8_lossy(&src[node.start as usize..node.end as usize]).into_owned();
+                assert_eq!(span, *text, "{name}: the first {kind_name} spans something else");
+            }
+        }
     }
 }
