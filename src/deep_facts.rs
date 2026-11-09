@@ -1517,7 +1517,9 @@ impl<'a> Walker<'a> {
         match parts.len() {
             0 => "0".to_string(),
             1 => parts.pop().unwrap_or_else(|| "0".to_string()),
-            _ => format!("[\"m\",[{}]]", parts.join(",")),
+            // A run of values from a comma-separated list is a tuple to the
+            // lexer, not a merge.
+            _ => format!("[\"t\",[{}]]", parts.join(",")),
         }
     }
 
@@ -1549,11 +1551,33 @@ impl<'a> Walker<'a> {
         let kind = self.kind(id);
         // A call is a call in the flow form the lexer writes: the index into
         // the symbol's call table, with the names and arguments beside it.
-        let mut parts = Vec::new();
-        if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression" | "function_type" | "func_literal") {
+        // A call is the whole value: the lexer writes `["c",index,recv,args]`
+        // and nothing beside it. Descending into the call's children as well
+        // produced a merge of the callee's name and the raw arguments, which
+        // never equals the lexer's event and made every Go file look like it had
+        // lost a fact.
+        if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression") {
             let index = self.decl_call(id);
-            parts.push(format!("[\"c\",{index},0,[]]"));
+            let args = self
+                .children(id)
+                .into_iter()
+                .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                .map(|list| self.arguments(list))
+                .unwrap_or_else(|| "[]".to_string());
+            let callee = self.decl_callee(id);
+            let path = self.decl_path(callee);
+            let receiver = match path.rsplit_once('.') {
+                Some((head, _)) if !head.is_empty() => {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, head);
+                    out.push(']');
+                    out
+                }
+                _ => "0".to_string(),
+            };
+            return format!("[\"c\",{index},{receiver},{args}]");
         }
+        let mut parts = Vec::new();
         if matches!(
             kind,
             "selector_expression" | "qualified_type" | "field_access" | "dotted_name" | "scoped_identifier"
@@ -1573,9 +1597,11 @@ impl<'a> Walker<'a> {
                 parts.push(value);
             }
         }
+        let comma = self.children(id).iter().any(|&child| self.kind(child) == ",");
         match parts.len() {
             0 => "0".to_string(),
             1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ if comma => format!("[\"t\",[{}]]", parts.join(",")),
             _ => format!("[\"m\",[{}]]", parts.join(",")),
         }
     }
@@ -2974,7 +3000,13 @@ impl<'a> Walker<'a> {
                 out.push(',');
             }
             first = false;
-            out.push_str(&self.form(child));
+            // Go and Java do not use `form`: an argument that is itself a call
+            // (`path.Join(os.Getenv(..))`) would come back as `0`.
+            let value = match self.kinds.family {
+                Family::Go | Family::Java => self.decl_value(child),
+                _ => self.form(child),
+            };
+            out.push_str(&value);
         }
         out.push(']');
         out
