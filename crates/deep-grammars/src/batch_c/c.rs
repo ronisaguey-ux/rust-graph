@@ -134,8 +134,11 @@ rust_graph_deep::grammar! { C {
     _top_item:
         &(declaration_specifiers _declarator "{") function_definition
         | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
+        | &(user_type_name _declarator "{") bare_user_function_definition
         | &("extern" string) linkage_specification
+        | &(IDENT IDENT _qualified_tail) double_qualified_item
         | &(IDENT _qualified_tail) macro_qualified_item
+        | &(declaration_specifiers IDENT _qualified_tail) specified_macro_item
         | &(IDENT parameter_list "{") implicit_function
         | declaration_statement
         | static_assert_statement
@@ -146,6 +149,7 @@ rust_graph_deep::grammar! { C {
     function_definition: declaration_specifiers _declarator compound_statement,
     /// A definition whose return type is a typedef name: `PyObject *f(void) {`.
     user_function_definition: declaration_specifiers user_type_name _declarator compound_statement,
+    bare_user_function_definition: user_type_name _declarator compound_statement,
     /// `extern "C" { ... }` and `extern "C" int f(void);`: a linkage block.
     linkage_specification: "extern" string ("{" _top_item* "}" | _top_item),
     /// A visibility macro in front of a declaration: `NPY_NO_EXPORT int f(void);`,
@@ -153,9 +157,16 @@ rust_graph_deep::grammar! { C {
     /// the name only when a whole declaration follows it, so a macro *call*
     /// statement at file scope is still an expression.
     macro_qualified_item: IDENT _qualified_tail,
+    /// `XML_DEPRECATED XMLPUBFUN xmlRegexpPtr f(void);`: two visibility macros.
+    double_qualified_item: IDENT IDENT _qualified_tail,
+    /// `extern NPY_NO_EXPORT PyTypeObject PyUFunc_Type;`: the macro comes after
+    /// a storage class. The guard above keeps it out of the way of every plain
+    /// declaration, and marks the name where no declarator follows.
+    specified_macro_item: declaration_specifiers IDENT _qualified_tail,
     _qualified_tail:
         &(declaration_specifiers _declarator "{") function_definition
         | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
+        | &(user_type_name _declarator "{") bare_user_function_definition
         | &(IDENT parameter_list "{") implicit_function
         | declaration_statement
         | static_assert_statement,
@@ -165,10 +176,13 @@ rust_graph_deep::grammar! { C {
 
     declaration_statement:
         &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
+        | &("typedef" user_type_name _declarator) typedef_user_declaration
         | &(user_type_name IDENT) bare_user_declaration
         | _default_declaration,
     /// `static const Foo *f(void);`: a keyword-qualified typedef name.
     specified_user_declaration: declaration_specifiers user_type_name (_init_declarator % ",") ";",
+    /// `typedef Foo (*handler)(void);`: a typedef whose type is a typedef name.
+    typedef_user_declaration: "typedef" user_type_name _init_declarator ("," _init_declarator)* ";",
     /// `Foo x;`: two names in a row, which no expression can be. The declarator
     /// must start with its name, so this can never begin `Foo (`.
     bare_user_declaration: user_type_name _named_init_declarator ("," _named_init_declarator)* ";",
@@ -248,7 +262,10 @@ rust_graph_deep::grammar! { C {
     macro_field: IDENT,
     /// A struct member's declarator: no parameter list, so a bare field macro
     /// can never be mistaken for the start of `Foo Bar(...)`.
-    _member_declarator: pointer* _member_direct _attribute* [":" _expression@assign],
+    _member_declarator: pointer* _member_direct _attribute* [trailing_macro] [":" _expression@assign],
+    /// A deprecation macro after a member's declarator: `char **names
+    /// XML_DEPRECATED_MEMBER;`.
+    trailing_macro: IDENT,
     _member_direct: IDENT array_suffix* | parenthesized_declarator _declarator_suffix*,
     _struct_declarator: _declarator _attribute* [":" _expression@assign],
 
