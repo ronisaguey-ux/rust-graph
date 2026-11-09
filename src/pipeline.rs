@@ -1152,7 +1152,80 @@ fn loses(lexer: &Facts, deep: &Facts) -> bool {
             return true;
         }
     }
+    // A value the lexer read and the CST wrote as a constant on the same line.
+    // `f"{x}"` is the live case: the grammar keeps the whole string as one
+    // token, so the CST has no field to read and says `0` where the lexer
+    // follows the interpolation. The event count above cannot see it because
+    // both paths still write the event, only with a different payload.
+    for symbol in &lexer.symbols {
+        let paired = if symbol.kind == KIND_MODULE {
+            deep.symbols.iter().find(|row| row.kind == KIND_MODULE)
+        } else {
+            deep.symbols.iter().find(|row| row.name == symbol.name && row.kind == symbol.kind)
+        };
+        let Some(paired) = paired else { continue };
+        let deep_values = value_events(&paired.events);
+        for (marker, line, constant) in value_events(&symbol.events) {
+            if constant {
+                continue;
+            }
+            if deep_values.iter().any(|(deep_marker, deep_line, deep_constant)| {
+                *deep_marker == marker && *deep_line == line && *deep_constant
+            }) {
+                return true;
+            }
+        }
+    }
     false
+}
+
+/// The `["r",line,value]` and `["x",line,value]` events in a record, as
+/// `(marker, line, is_constant)`. Those two kinds end with their value, so a
+/// payload of exactly `0` is the constant form; every other payload is a value
+/// the reader of the record can follow.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn value_events(events: &str) -> Vec<(u8, u32, bool)> {
+    let bytes = events.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + 6 < bytes.len() {
+        if bytes[at] != b'[' || bytes[at + 1] != b'"' || bytes[at + 3] != b'"' || bytes[at + 4] != b',' {
+            at += 1;
+            continue;
+        }
+        let marker = bytes[at + 2];
+        if !matches!(marker, b'r' | b'x') {
+            at += 1;
+            continue;
+        }
+        let mut index = at + 5;
+        let mut line = 0u32;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            line = line.saturating_mul(10).saturating_add((bytes[index] - b'0') as u32);
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b',') {
+            at += 1;
+            continue;
+        }
+        let payload = index + 1;
+        // The event ends at the `]` that closes the `[` this scan started on.
+        let mut depth = 0u32;
+        let mut end = payload;
+        while end < bytes.len() {
+            match bytes[end] {
+                b'[' => depth += 1,
+                b']' if depth == 0 => break,
+                b']' => depth -= 1,
+                _ => {}
+            }
+            end += 1;
+        }
+        let constant = &bytes[payload..end.min(bytes.len())] == b"0";
+        out.push((marker, line, constant));
+        at = end.max(at + 1);
+    }
+    out
 }
 
 /// The facts for one file, and the record of which parser produced them.
