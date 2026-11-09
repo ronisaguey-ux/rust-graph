@@ -117,6 +117,9 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     // A replacement field that cannot close: `f"{"` at a line end, an empty
     // field, a field whose quote is the string's own, and an escaped brace.
     ("unclosed_field.py", "python", "expression_statement expression_statement"),
+    // A substitution with no expression and a template that runs out of file:
+    // both are errors inside their statement, and the file still parses.
+    ("unclosed_template.js", "javascript", "lexical_declaration lexical_declaration"),
     ("unterminated_string.js", "javascript", "lexical_declaration expression_statement"),
     ("unterminated_string.py", "python", "expression_statement expression_statement expression_statement"),
     ("unterminated_string.ts", "typescript", "lexical_declaration expression_statement"),
