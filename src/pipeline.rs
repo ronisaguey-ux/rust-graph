@@ -1181,6 +1181,33 @@ impl Accepted {
     }
 }
 
+/// A statement keyword is never a callee, so a lexer call to one is an artefact
+/// of reading the statement as an expression. Only a bare path counts:
+/// `match.group` is an attribute of a name and a real call.
+#[cfg(all(feature = "deep", feature = "parser"))]
+const KEYWORD_STATEMENTS: [&str; 25] = [
+    "assert", "return", "yield", "await", "throw", "raise", "del", "delete", "new", "sizeof", "defined", "if", "elif",
+    "else", "for", "foreach", "while", "until", "unless", "switch", "try", "except", "finally", "with", "do",
+];
+
+/// A lexer call with no name in the source for the CST to read.
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phantom {
+    /// `f(x)(y)`: the callee is a value, so the call is named `.call`.
+    Anonymous,
+    /// `assert (a, b) == c`: the callee is a statement keyword.
+    Keyword,
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn phantom_call(path: &str) -> Option<Phantom> {
+    if path.is_empty() || path.starts_with('.') || path.ends_with('.') {
+        return Some(Phantom::Anonymous);
+    }
+    (!path.contains('.') && KEYWORD_STATEMENTS.contains(&path)).then_some(Phantom::Keyword)
+}
+
 /// How the two records compare: a loss, or the lexer artefacts accepted in its
 /// place. A loss keeps the lexer's record; an acceptance is counted and does
 /// not decide anything.
@@ -1231,10 +1258,13 @@ impl Verdict {
 ///
 /// The `Verdict` carries the fact that tripped the check so a fallback can be
 /// read rather than counted, and the lexer artefacts accepted instead, so the
-/// report says how much was set aside.
+/// report says how much was set aside. A name the source never writes for the
+/// CST to read is not a fact: `f(x)(y)` makes the lexer name the outer call
+/// `.call`, and `assert (a, b) == c` makes it call `assert`. Both are accepted
+/// and counted, never a reason to fall back.
 #[cfg(all(feature = "deep", feature = "parser"))]
 pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
-    let accepted = Accepted::default();
+    let mut accepted = Accepted::default();
     let verdict = |loss: Option<&'static str>, detail: String, accepted: Accepted| Verdict { loss, detail, accepted };
     for import in &lexer.imports {
         let same = deep.imports.iter().any(|row| {
@@ -1258,6 +1288,17 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
     let name_of = |path: &str| path.rsplit('.').next().unwrap_or(path).to_string();
     for symbol in &lexer.symbols {
         for call in &symbol.calls {
+            match phantom_call(&call.path) {
+                Some(Phantom::Anonymous) => {
+                    accepted.anonymous_calls += 1;
+                    continue;
+                }
+                Some(Phantom::Keyword) => {
+                    accepted.keyword_calls += 1;
+                    continue;
+                }
+                None => {}
+            }
             let name = name_of(&call.path);
             let near = |line: u32| (line as i64 - call.line as i64).abs() <= 1;
             let same = deep
@@ -1269,6 +1310,17 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
                 let detail = format!("call {} line {} in {}", call.path, call.line, symbol.name);
                 return verdict(Some("call"), detail, accepted);
             }
+        }
+    }
+    // `repo = Repo()` is what ties `repo.find()` to `Repo.find`: the resolver's
+    // typed-variable edges come from this table, so a binding the CST misses is
+    // a lost fact even though no event names it.
+    for pair in &lexer.vars {
+        let wanted = lexer.vars.iter().filter(|row| *row == pair).count();
+        let found = deep.vars.iter().filter(|row| *row == pair).count();
+        if found < wanted {
+            let detail = format!("var {} = {}", pair.0, pair.1);
+            return verdict(Some("var"), detail, accepted);
         }
     }
     let events = |facts: &Facts, marker: &str| -> usize {
