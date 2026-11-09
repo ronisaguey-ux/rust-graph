@@ -3683,9 +3683,14 @@ impl<'a> Walker<'a> {
                 Some(_) => Some("0".to_string()),
                 None => Some("0".to_string()),
             },
-            // `value >>= 7` / `x += 1`: the lexer reads the target as the value.
+            // `value >>= 7` / `bytes += src.len()`: the lexer reads the target
+            // as the value, but the right side is still evaluated and its calls
+            // are facts — reading only the target dropped `src.len` here.
             "compound_assignment_expr" => {
                 let children = self.children(id);
+                if let Some(&value) = children.last() {
+                    self.form(value);
+                }
                 Some(children.first().map(|&first| self.form(first)).unwrap_or_else(|| "0".to_string()))
             }
             // A token tree is the macro's argument list; its names and nested
@@ -3731,9 +3736,13 @@ impl<'a> Walker<'a> {
                     return (format!(".{name}"), inner);
                 }
                 let receiver = self.path_of(object);
-                self.form(object);
+                // `(value ^ u64::from(b)).wrapping_mul(k)`: the receiver is an
+                // expression, and the lexer writes its value there. Reading the
+                // call for its facts and then writing 0 as the receiver lost
+                // every name in the parenthesised receiver.
+                let formed = self.form(object);
                 if receiver.is_empty() {
-                    (format!(".{name}"), "0".to_string())
+                    (format!(".{name}"), formed)
                 } else {
                     let mut text = "[\"n\",".to_string();
                     push_string(&mut text, &receiver);
