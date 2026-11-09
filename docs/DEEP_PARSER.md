@@ -628,3 +628,42 @@ TSX, Rust, Go, Java**. Every other grammar parses and is exercised by the fuzz
 and conformance harnesses, but has no fact table, so `lang_for` answers `None`
 and its files stay on the lexer path. That is a coverage decision, not a
 parser defect, and it is the largest remaining gap.
+
+## 12. Measured on 2026-11-09, late — the guard, and what it decides
+
+The guard is the reason `auto` can be trusted with a new parser. It parses a
+file both ways and compares the records fact by fact: imports, symbols, calls,
+class bindings, and the shape of every flow event. A loss keeps the lexer's
+record; the row says which path won and, when it fell back, which fact was
+missing.
+
+Three classes of difference are counted as *accepted*, never as losses, because
+the lexer invented them:
+
+| accepted class | example | why it is not a loss |
+|:--|:--|:--|
+| anonymous call | `f(x)(y)` read as `.call` | no such name is in the source |
+| keyword callee | `go func() {`, `synchronized (lock)` | a keyword cannot be a callee |
+| invented symbol | `for _, x := range []string{…}` read as a definition of `string` | the line declares nothing of the kind |
+
+The third was added after measuring Go: 88% of the files in `net/http` fell back
+on a symbol the source does not contain. With it, the fallback count on that
+tree went from 99 to 91, and the remaining ones name a real gap (a `var`
+binding, an event shape).
+
+What `auto` picks today: **Python, JavaScript, TypeScript, TSX and Rust**.
+Go, Java, C, C++, PHP and Ruby have tables and are reachable with `--deep`, but
+their records still lose real facts on enough files that choosing them
+automatically would cost a second parse and then discard it. Each is measured,
+and the numbers are in the branch notes and in `lang_for`'s comment.
+
+The residual on the two reference trees, with everything above merged:
+
+```
+Felicity (Python, 68 files)   calls 5638 / 5547   symbols 740 / 740   imports 710 / 710
+rust-graph (Rust, 29 files)   calls 7841 / 7589   symbols 897 / 976   imports 304 / 295
+```
+
+Rust's symbol deficit is the lexer's `#[derive]`-derived and `<anonymous>@N`
+names; the accepted-symbol class above explains all but a handful, and the rest
+are on files the guard keeps on the lexer.

@@ -52,11 +52,16 @@ rustc 1.99.1. The commands that produced them are in `docs/DEEP_PARSER.md`
 
 | tree | files | calls deep / lexer | imports deep / lexer |
 |:--|--:|--:|--:|
-| Felicity (Python) | 68 | 5587 / 5547 | 710 / 710 |
-| rust-graph itself (Rust) | 29 | 7630 / 7386 | 304 / 295 |
+| Felicity (Python) | 68 | 5638 / 5547 | 710 / 710 |
+| rust-graph itself (Rust) | 29 | 7841 / 7589 | 304 / 295 |
 | webchat_harness runtime (JS) | 11 | 547 / 541 | — |
 
-Suite: 1318 tests with `--features "deep parser"`, 454 without. Deep release
+Grammar corpora after this release: PHP 5048/5053 real files clean, shell
+297/300 (two of the three are not shell), C 185/229, C++ 169/249, CSS 250/256,
+HTML 336/383, Kotlin and Scala 8/8 each on their fixtures, Swift 9/9 and Dart
+8/8 on their corpora.
+
+Suite: 1442 tests with `--features "deep parser"`, 488 without. Deep release
 binary 2,796,192 B; default build unchanged.
 
 ## [0.2.0] - 2026-11-08
