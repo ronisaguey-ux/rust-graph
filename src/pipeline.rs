@@ -893,6 +893,10 @@ mod deep_run {
         accepted_keyword_events: u64,
         /// Lexer assignment events whose target is an imported type name.
         accepted_annotation_targets: u64,
+        /// Lexer symbols with no name of their own (`<anonymous>@12`).
+        accepted_anonymous_symbols: u64,
+        /// Named symbols the lexer built out of an ordinary expression.
+        accepted_invented_symbols: u64,
     }
 
     impl State {
@@ -917,7 +921,7 @@ mod deep_run {
         /// header carries the format number, so a file from an older writer is
         /// void rather than half-read.
         pub(super) fn save(&self, dir: &Path) -> io::Result<()> {
-            let mut text = format!("rust-graph facts.meta 4 {}\n", bits());
+            let mut text = format!("rust-graph facts.meta 5 {}\n", bits());
             let mut rows: Vec<(&String, &Taken)> = self.records.iter().collect();
             rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
             for (path, taken) in rows {
@@ -927,7 +931,7 @@ mod deep_run {
                     (false, false) => "lexer",
                 };
                 text.push_str(&format!(
-                    "{} {} {} {} {} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {} {} {} {} {}\n",
                     escape(path),
                     parser,
                     taken.errors,
@@ -937,7 +941,9 @@ mod deep_run {
                     taken.accepted.anonymous_calls,
                     taken.accepted.keyword_calls,
                     taken.accepted.keyword_events,
-                    taken.accepted.annotation_targets
+                    taken.accepted.annotation_targets,
+                    taken.accepted.anonymous_symbols,
+                    taken.accepted.invented_symbols
                 ));
             }
             let temporary = dir.join("facts.meta.tmp");
@@ -1038,7 +1044,7 @@ mod deep_run {
 
         pub(super) fn report_line(&self, text: &str) -> String {
             format!(
-                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\nAccepted differences: {} lexer-only calls ({} anonymous, {} statement keywords), {} lexer-only value events for a statement keyword, {} lexer assignment targets naming an imported type instead of a binder.\n",
+                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\nAccepted differences: {} lexer-only calls ({} anonymous, {} statement keywords), {} lexer-only value events for a statement keyword, {} lexer assignment targets naming an imported type instead of a binder, {} lexer symbols with no name in the source, {} lexer symbols whose line declares nothing.\n",
                 self.deep,
                 self.lexer,
                 self.fallbacks,
@@ -1050,7 +1056,9 @@ mod deep_run {
                 self.accepted_anonymous_calls,
                 self.accepted_keyword_calls,
                 self.accepted_keyword_events,
-                self.accepted_annotation_targets
+                self.accepted_annotation_targets,
+                self.accepted_anonymous_symbols,
+                self.accepted_invented_symbols
             )
         }
 
@@ -1072,7 +1080,7 @@ mod deep_run {
     pub(super) fn load(dir: &Path) -> Option<HashMap<String, Taken>> {
         let text = std::fs::read_to_string(dir.join("facts.meta")).ok()?;
         let mut lines = text.lines();
-        if lines.next()? != format!("rust-graph facts.meta 4 {}", bits()) {
+        if lines.next()? != format!("rust-graph facts.meta 5 {}", bits()) {
             return None;
         }
         let mut out = HashMap::new();
@@ -1093,6 +1101,8 @@ mod deep_run {
                 keyword_calls: fields.next()?.parse().ok()?,
                 keyword_events: fields.next()?.parse().ok()?,
                 annotation_targets: fields.next()?.parse().ok()?,
+                anonymous_symbols: fields.next()?.parse().ok()?,
+                invented_symbols: fields.next()?.parse().ok()?,
             };
             out.insert(
                 path,
@@ -1182,13 +1192,25 @@ pub(crate) struct Accepted {
     /// wrote the statement's real target with the same value, so no binding was
     /// lost — the lexer invented one.
     pub(crate) annotation_targets: u32,
+    /// A symbol the lexer opened with no name of its own (`<anonymous>@12`, or
+    /// an empty one for `go func() {`). There is nothing in the source for the
+    /// CST to name, so requiring it would be requiring an invention.
+    pub(crate) anonymous_symbols: u32,
+    /// A named symbol the lexer built out of an ordinary expression: the line it
+    /// points at carries no definition keyword for that name.
+    pub(crate) invented_symbols: u32,
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
 impl Accepted {
     /// Everything set aside for this file, of every kind.
     pub(crate) fn total(self) -> u32 {
-        self.anonymous_calls + self.keyword_calls + self.keyword_events + self.annotation_targets
+        self.anonymous_calls
+            + self.keyword_calls
+            + self.keyword_events
+            + self.annotation_targets
+            + self.anonymous_symbols
+            + self.invented_symbols
     }
 }
 
@@ -1288,6 +1310,16 @@ impl Verdict {
 /// `Accepted` by kind, so the report says how much was set aside.
 #[cfg(all(feature = "deep", feature = "parser"))]
 pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
+    loses_in(lexer, deep, "")
+}
+
+/// The same comparison, with the source in hand so a symbol can be checked
+/// against the line it claims to come from. A one-pass lexer invents definitions
+/// out of ordinary expressions (`for _, x := range []string{…}`, `if err := f()`,
+/// `go func() {`), and the CST cannot reproduce a definition the source does not
+/// contain. Without the source the check has nothing to appeal to.
+#[cfg(all(feature = "deep", feature = "parser"))]
+pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
     let mut accepted = Accepted::default();
     let verdict = |loss: Option<&'static str>, detail: String, accepted: Accepted| Verdict { loss, detail, accepted };
     for import in &lexer.imports {
@@ -1300,6 +1332,21 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
         }
     }
     for symbol in lexer.symbols.iter().filter(|symbol| symbol.kind != KIND_MODULE) {
+        // A symbol with no name is not a fact: the one-pass lexer opens one for
+        // `go func() {`, for a function literal, for an `if` header it misreads
+        // as a definition. The CST cannot reproduce a name the source does not
+        // contain, so asking it to is a demand to invent one.
+        if symbol.name.is_empty() || symbol.name.starts_with("<anonymous>@") {
+            accepted.anonymous_symbols += 1;
+            continue;
+        }
+        // The lexer's line says `for … := range []string{…}`; a definition of
+        // `string` is not there. A fact the source does not support is not a
+        // loss when the CST does not repeat it.
+        if !src.is_empty() && !claims_the_line(src, &lexer.tag, symbol.line, &symbol.name) {
+            accepted.invented_symbols += 1;
+            continue;
+        }
         let same = deep.symbols.iter().any(|row| row.name == symbol.name && row.kind == symbol.kind);
         if !same {
             let detail = format!("symbol {} kind {} line {}", symbol.name, symbol.kind, symbol.line);
@@ -1309,6 +1356,13 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
     let name_of = |path: &str| path.rsplit('.').next().unwrap_or(path).to_string();
     for symbol in &lexer.symbols {
         for call in &symbol.calls {
+            // A keyword is never a callee: `go func() {` in Go, `synchronized
+            // (lock)` in Java. The lexer reads one as a call, the tree cannot
+            // name it, and that is not a lost fact.
+            if is_keyword_callee(&lexer.tag, &name_of(&call.path)) {
+                accepted.keyword_calls += 1;
+                continue;
+            }
             match phantom_call(&call.path) {
                 Some(Phantom::Anonymous) => {
                     accepted.anonymous_calls += 1;
@@ -1860,7 +1914,10 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
     }
     // `deep_facts::lang_for` is keyed by the lexer tag; TSX shares TS's tag but
     // not its grammar, so the suffix decides between them.
-    let lang = match deep_facts::lang_for(language.tag) {
+    // `--deep` may force a language whose record `auto` would not choose; the
+    // eligibility list differs, the parse does not.
+    let requested = if mode == PathMode::Deep { deep_facts::lang_for_forced } else { deep_facts::lang_for };
+    let lang = match requested(language.tag) {
         Some(Lang::TypeScript) if path.ends_with(".tsx") => Some(Lang::Tsx),
         other => other,
     };
@@ -1892,9 +1949,15 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
         return deep;
     }
     if mode == PathMode::Auto {
-        let verdict = loses(&lexer, &deep);
+        let verdict = loses_in(&lexer, &deep, &String::from_utf8_lossy(bytes));
         if verdict.lost() {
-            let fallback = Some("the CST record lost facts the lexer found".to_string());
+            // Name the fact, not just the fact that there was one: a reader
+            // looking at a fallback must be able to see what the CST missed
+            // without re-running both paths by hand.
+            let fallback = Some(match verdict.why() {
+                Some(why) => format!("the CST lost a {why}: {}", verdict.detail()),
+                None => "the CST record lost facts the lexer found".to_string(),
+            });
             deep_run::record(
                 path,
                 deep_run::Taken { compared: true, fallback, accepted: verdict.accepted(), ..deep_run::Taken::default() },
@@ -1922,4 +1985,48 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
     }
     deep_run::record(path, deep_run::Taken { deep: true, errors: cst.errors, fallback: None, why: "", ..deep_run::Taken::default() });
     deep
+}
+
+/// Does the line the lexer says a definition starts on actually declare it?
+///
+/// The one-pass reader opens a symbol whenever a name is followed by `(` inside
+/// a statement it does not model — `for _, x := range []string{…}` yields a
+/// definition named `string`, `if err := f(); err != nil` one named `err`. Each
+/// language spells a definition with a keyword, so the source is the appeal: no
+/// keyword, no definition.
+/// Keywords that can never name a callee, per lexer tag. A call with one of
+/// these names is the one-pass reader's reconstruction of a statement it does
+/// not model, not a fact about the source.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_keyword_callee(tag: &str, name: &str) -> bool {
+    let keywords: &[&str] = match tag {
+        "PY" => &["assert", "del", "raise", "with", "lambda", "return", "yield", "await", "not"],
+        "JS" | "TS" => &["function", "if", "for", "while", "return", "typeof", "delete", "await", "yield", "switch", "catch"],
+        "RS" => &["fn", "if", "for", "while", "return", "match", "loop", "let", "unsafe"],
+        "GO" => &["func", "go", "defer", "range", "select", "switch", "if", "for", "type", "var", "const", "return"],
+        "JAVA" => &[
+            "new", "if", "while", "for", "switch", "return", "throw", "synchronized", "assert", "try", "catch", "instanceof",
+        ],
+        _ => &["if", "for", "while", "return", "switch", "function", "func", "fn", "def"],
+    };
+    keywords.contains(&name)
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn claims_the_line(src: &str, tag: &str, line: u32, name: &str) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    if !text.contains(name) {
+        return false;
+    }
+    let keywords: &[&str] = match tag {
+        "PY" => &["def ", "class "],
+        "JS" | "TS" => &["function ", "class ", "const ", "let ", "var ", "=> "],
+        "RS" => &["fn ", "struct ", "enum ", "trait ", "impl ", "mod "],
+        "GO" => &["func ", "type ", "var ", "const "],
+        "JAVA" => &["class ", "interface ", "enum ", "record ", "void ", "public ", "private ", "protected "],
+        _ => &["def ", "function ", "func ", "fn ", "class ", "struct "],
+    };
+    keywords.iter().any(|keyword| text.contains(keyword))
 }
