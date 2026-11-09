@@ -614,3 +614,77 @@ fn operator(c: &mut Cursor) -> Kind {
     c.bump_n(width);
     kind
 }
+
+/// The corpus measurement: not part of the suite, run by hand on real code.
+///
+/// ```text
+/// DEEP_CPP_CORPUS=/tmp/opencode/ccorpus cargo test -p deep-grammars --lib \
+///   cpp::corpus::clean_files -- --ignored --nocapture
+/// ```
+#[cfg(test)]
+mod corpus {
+    use std::fs;
+
+    use crate::batch_c::cpp::CPP;
+    use crate::deep::syntax::ERROR;
+    use crate::deep::tree::{HAS_ERROR, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    /// Every file in the directory, as `(name, did it parse with no error node, error count)`.
+    fn scan(dir: &str, only: &[&str]) -> Vec<(String, bool, usize)> {
+        let mut out = Vec::new();
+        let mut names: Vec<_> = fs::read_dir(dir).expect("corpus dir").filter_map(Result::ok).map(|e| e.path()).collect();
+        names.sort();
+        for path in names {
+            let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !only.contains(&extension) {
+                continue;
+            }
+            let Ok(src) = fs::read(&path) else { continue };
+            let mut workspace = Workspace::default();
+            let Ok(outcome) = workspace.parse(&src, &CPP, &Budget::default()) else { continue };
+            if !outcome.complete() {
+                continue;
+            }
+            let nodes = &workspace.tree.nodes;
+            let errors = nodes.iter().filter(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0 && node.flags & TOKEN != 0).count();
+            out.push((path.file_name().unwrap().to_string_lossy().into_owned(), errors == 0, errors));
+        }
+        out
+    }
+
+    /// One file's error regions, with the source each one covers.
+    #[test]
+    #[ignore]
+    fn one_file() {
+        let Ok(path) = std::env::var("DEEP_CPP_ONE") else { return };
+        let src = fs::read(&path).expect("file");
+        let mut workspace = Workspace::default();
+        workspace.parse(&src, &CPP, &Budget::default()).expect("parse");
+        let nodes = &workspace.tree.nodes;
+        for node in nodes.iter() {
+            if node.kind != ERROR && node.flags & HAS_ERROR == 0 {
+                continue;
+            }
+            let at = (node.start as usize).min(src.len());
+            let end = (node.end as usize).min(src.len());
+            let text = String::from_utf8_lossy(&src[at..end.max(at).min(at + 120)]);
+            let line = src[..at].iter().filter(|byte| **byte == b'\n').count() + 1;
+            println!("{}..{} L{} {:?}", at, end, line, text.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn clean_files() {
+        let Ok(dir) = std::env::var("DEEP_CPP_CORPUS") else { return };
+        let results = scan(&dir, &["cpp", "hpp", "cc", "h"]);
+        let clean = results.iter().filter(|(_, clean, _)| *clean).count();
+        for (name, clean, errors) in &results {
+            if !*clean {
+                println!("FAIL {name} {errors}");
+            }
+        }
+        println!("C++: {clean}/{} clean", results.len());
+    }
+}

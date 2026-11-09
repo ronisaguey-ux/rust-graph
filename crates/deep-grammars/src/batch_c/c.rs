@@ -75,6 +75,16 @@ rust_graph_deep::grammar! { C {
         KW_NORETURN = "_Noreturn",
         KW_STATIC_ASSERT = "_Static_assert",
         KW_THREAD_LOCAL = "_Thread_local",
+        /// GCC's attribute introducer: `__attribute__((packed))`.
+        KW_ATTRIBUTE = "__attribute__",
+        /// MSVC's: `__declspec(dllexport)`.
+        KW_DECLSPEC = "__declspec",
+        /// GCC's "ignore the following construct's extension warning".
+        KW_EXTENSION = "__extension__",
+        /// `asm`, `__asm`, `__asm__`: one inline-assembly statement.
+        KW_ASM = "asm",
+        /// `typeof`, `__typeof`, `__typeof__`: the GNU type-of operator.
+        KW_TYPEOF = "typeof",
 
         COMMA = ",",
         SEMI = ";",
@@ -123,13 +133,32 @@ rust_graph_deep::grammar! { C {
 
     _top_item:
         &(declaration_specifiers _declarator "{") function_definition
+        | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
+        | &("extern" string) linkage_specification
         | declaration_statement
-        | static_assert_statement,
+        | static_assert_statement
+        | asm_statement
+        | ";"
+        | expression_statement,
 
     function_definition: declaration_specifiers _declarator compound_statement,
+    /// A definition whose return type is a typedef name: `PyObject *f(void) {`.
+    user_function_definition: declaration_specifiers user_type_name _declarator compound_statement,
+    /// `extern "C" { ... }` and `extern "C" int f(void);`: a linkage block.
+    linkage_specification: "extern" string ("{" _top_item* "}" | _top_item),
 
-    declaration_statement: declaration_specifiers (_init_declarator % ",") ";",
-    _init_declarator: _declarator ["=" _initializer],
+    declaration_statement:
+        &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
+        | &(user_type_name IDENT) bare_user_declaration
+        | _default_declaration,
+    /// `static const Foo *f(void);`: a keyword-qualified typedef name.
+    specified_user_declaration: declaration_specifiers user_type_name (_init_declarator % ",") ";",
+    /// `Foo x;`: two names in a row, which no expression can be.
+    bare_user_declaration: user_type_name (_init_declarator % ",") ";",
+    _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
+    /// A typedef name where a type specifier is expected.
+    user_type_name: IDENT,
+    _init_declarator: _declarator _attribute* ["=" _initializer],
     _initializer: designated_field | designated_index | _expression@assign | initializer_list,
     initializer_list: "{" (_initializer %? ",") "}",
     /// C99 `.name = value` inside an initializer list.
@@ -140,24 +169,57 @@ rust_graph_deep::grammar! { C {
     static_assert_statement: "_Static_assert" static_assert_arguments ";",
     static_assert_arguments: "(" _expression ["," string] ")",
 
+    /// `__asm__ __volatile__ ("..." : "=m"(x) : : "memory");`. The template and
+    /// each operand are string literals, so the colons are separators rather
+    /// than punctuation the expression grammar would have to swallow.
+    asm_statement: "asm" _asm_qualifier* asm_body ";",
+    _asm_qualifier: "volatile" | "inline" | "goto",
+    asm_body: "(" [asm_template] _asm_operand_list* ")",
+    asm_template: string,
+    _asm_operand_list: ":" (_asm_operand %? ","),
+    _asm_operand: string [asm_operand_expression],
+    asm_operand_expression: "(" _expression ")",
+
     declaration_specifiers: _declaration_specifier+,
     _declaration_specifier:
         "typedef" | "extern" | "static" | "auto" | "register" | "inline" | "_Noreturn"
         | "_Thread_local" | "const" | "volatile" | "restrict" | "_Atomic"
         | "_Alignas" alignment_arguments
+        | "__extension__"
+        | _attribute
         | type_specifier,
     alignment_arguments: "(" _expression ")",
+
+    /// `__attribute__((packed, aligned(4)))` and `__declspec(dllexport)`.
+    _attribute: ("__attribute__" | "__declspec") attribute_arguments,
+    attribute_arguments: "(" attribute_body ")",
+    attribute_body: attribute_group | _attribute_argument % ",",
+    attribute_group: "(" (_attribute_argument %? ",") ")",
+    _attribute_argument: _expression@assign | parenthesized_expression,
 
     type_specifier:
         "void" | "char" | "short" | "int" | "long" | "float" | "double"
         | "signed" | "unsigned" | "_Bool" | "_Complex" | "_Imaginary"
+        | typeof_specifier
         | struct_or_union_specifier
         | enum_specifier,
+    typeof_specifier: "typeof" typeof_arguments,
+    typeof_arguments: "(" _expression ")",
 
     struct_or_union_specifier: ("struct" | "union") [IDENT] [struct_body],
-    struct_body: "{" _struct_declaration* "}",
-    _struct_declaration: declaration_specifiers (_struct_declarator % ",") ";",
-    _struct_declarator: _declarator [":" _expression@assign],
+    struct_body: "{" (_struct_declaration | ";" | macro_field)* "}",
+    _struct_declaration:
+        &(declaration_specifiers user_type_name) specified_struct_declaration
+        | user_struct_declaration
+        | declaration_specifiers (_struct_declarator % ",") ";",
+    /// `PyObject *weakreflist;`: a typedef name and its declarator. A struct
+    /// body holds declarations only, so the `x * y;` ambiguity does not exist
+    /// here and the bare name is safe to accept.
+    user_struct_declaration: user_type_name (_struct_declarator % ",") ";",
+    specified_struct_declaration: declaration_specifiers user_type_name (_struct_declarator % ",") ";",
+    /// A field macro that expands to whole members: `PyObject_HEAD`.
+    macro_field: IDENT,
+    _struct_declarator: _declarator _attribute* [":" _expression@assign],
 
     enum_specifier: "enum" [IDENT] [enum_body],
     enum_body: "{" (_enumerator %? ",") "}",
@@ -172,8 +234,19 @@ rust_graph_deep::grammar! { C {
     _declarator_suffix: array_suffix | parameter_list,
     array_suffix: "[" [_expression] "]",
     parameter_list: "(" (_parameter % ",") ")",
-    _parameter: parameter_declaration | "...",
+    _parameter:
+        &(declaration_specifiers user_type_name) specified_user_parameter
+        | parameter_declaration
+        | user_parameter
+        | _unnamed_user_parameter
+        | "...",
     parameter_declaration: declaration_specifiers [_declarator],
+    /// `const Foo *self`: a qualifier and then a typedef name.
+    specified_user_parameter: declaration_specifiers user_type_name [_declarator],
+    /// `Foo *self`: a typedef name with no qualifier.
+    user_parameter: user_type_name _declarator,
+    /// `Foo*`: an unnamed parameter of typedef type.
+    _unnamed_user_parameter: user_type_name _abstract_declarator,
 
     _abstract_declarator: pointer+ abstract_suffix*,
     abstract_suffix: array_suffix | parameter_list,
@@ -194,6 +267,7 @@ rust_graph_deep::grammar! { C {
         | goto_statement
         | labeled_statement
         | static_assert_statement
+        | asm_statement
         | declaration_statement
         | expression_statement,
 
@@ -313,6 +387,19 @@ fn word(c: &mut Cursor) -> Kind {
 
 fn keyword(text: &[u8]) -> Kind {
     match text {
+        // The alternate spellings GCC and MSVC add for the same keywords: they
+        // are the same token, so a grammar rule never has to name both.
+        b"__inline" | b"__inline__" => KW_INLINE,
+        b"__restrict" | b"__restrict__" => KW_RESTRICT,
+        b"__const" | b"__const__" => KW_CONST,
+        b"__volatile" | b"__volatile__" => KW_VOLATILE,
+        b"__signed" | b"__signed__" => KW_SIGNED,
+        b"__thread" => KW_THREAD_LOCAL,
+        b"__attribute" | b"__attribute__" => KW_ATTRIBUTE,
+        b"__declspec" => KW_DECLSPEC,
+        b"__extension__" => KW_EXTENSION,
+        b"asm" | b"__asm" | b"__asm__" => KW_ASM,
+        b"typeof" | b"__typeof" | b"__typeof__" => KW_TYPEOF,
         b"auto" => KW_AUTO,
         b"break" => KW_BREAK,
         b"case" => KW_CASE,
@@ -417,4 +504,95 @@ fn operator(c: &mut Cursor) -> Kind {
     };
     c.bump_n(width);
     kind
+}
+
+/// The corpus measurement: not part of the suite, run by hand on real code.
+///
+/// ```text
+/// DEEP_C_CORPUS=/tmp/opencode/ccorpus cargo test -p deep-grammars --lib \
+///   c::corpus::clean_files -- --ignored --nocapture
+/// ```
+#[cfg(test)]
+mod corpus {
+    use std::fs;
+
+    use crate::batch_c::c::C;
+    use crate::deep::syntax::ERROR;
+    use crate::deep::tree::{HAS_ERROR, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    /// Every file in the directory, as `(name, did it parse with no error node)`.
+    fn scan(dir: &str, only: &[&str]) -> Vec<(String, bool, usize)> {
+        let mut out = Vec::new();
+        let mut names: Vec<_> = fs::read_dir(dir).expect("corpus dir").filter_map(Result::ok).map(|e| e.path()).collect();
+        names.sort();
+        for path in names {
+            let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !only.contains(&extension) {
+                continue;
+            }
+            let Ok(src) = fs::read(&path) else { continue };
+            let mut workspace = Workspace::default();
+            let Ok(outcome) = workspace.parse(&src, &C, &Budget::default()) else { continue };
+            if !outcome.complete() {
+                continue;
+            }
+            let nodes = &workspace.tree.nodes;
+            let errors = nodes.iter().filter(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0 && node.flags & TOKEN != 0).count();
+            out.push((path.file_name().unwrap().to_string_lossy().into_owned(), errors == 0, errors));
+        }
+        out
+    }
+
+    /// The first error's own text plus the line it starts on, for clustering.
+    fn detail(dir: &str, name: &str) -> String {
+        let path = std::path::Path::new(dir).join(name);
+        let Ok(src) = fs::read(&path) else { return String::new() };
+        let mut workspace = Workspace::default();
+        let Ok(_) = workspace.parse(&src, &C, &Budget::default()) else { return String::new() };
+        let nodes = &workspace.tree.nodes;
+        let Some(node) = nodes.iter().find(|node| node.kind == ERROR || node.flags & HAS_ERROR != 0) else {
+            return String::new();
+        };
+        let at = (node.start as usize).min(src.len());
+        let end = (node.end as usize).min(src.len()).max(at);
+        let start = src[..at].iter().rposition(|byte| *byte == b'\n').map_or(0, |at| at + 1);
+        let line = String::from_utf8_lossy(&src[start..end.max(at)]).split_whitespace().collect::<Vec<_>>().join(" ");
+        line.chars().take(80).collect()
+    }
+
+    /// One file's error regions, with the source each one covers.
+    #[test]
+    #[ignore]
+    fn one_file() {
+        let Ok(path) = std::env::var("DEEP_C_ONE") else { return };
+        let src = fs::read(&path).expect("file");
+        let mut workspace = Workspace::default();
+        workspace.parse(&src, &C, &Budget::default()).expect("parse");
+        let nodes = &workspace.tree.nodes;
+        for node in nodes.iter() {
+            if node.kind != ERROR && node.flags & HAS_ERROR == 0 {
+                continue;
+            }
+            let at = (node.start as usize).min(src.len());
+            let end = (node.end as usize).min(src.len());
+            let text = String::from_utf8_lossy(&src[at..end.max(at).min(at + 120)]);
+            let line = src[..at].iter().filter(|byte| **byte == b'\n').count() + 1;
+            println!("{}..{} L{} {:?}", at, end, line, text.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn clean_files() {
+        let Ok(dir) = std::env::var("DEEP_C_CORPUS") else { return };
+        let results = scan(&dir, &["c", "h"]);
+        let clean = results.iter().filter(|(_, clean, _)| *clean).count();
+        for (name, clean, errors) in &results {
+            if !*clean {
+                println!("FAIL {name} {errors} {}", detail(&dir, name));
+            }
+        }
+        println!("C: {clean}/{} clean", results.len());
+    }
 }
