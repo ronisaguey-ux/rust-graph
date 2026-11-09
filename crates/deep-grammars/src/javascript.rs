@@ -12,10 +12,11 @@
 //!   semicolon insertion for real code, where `a\n(b)` is a call too. A
 //!   restricted production (`return` and a value on the next line) reads as one
 //!   statement here, not two.
-//! - A template literal and a JSX element are one token each; the lexer scans
-//!   their `${...}` and `{...}` parts with the braces balanced. A regular
-//!   expression is a token where an operand may start: after anything that
-//!   cannot end an operand ([`Cursor::previous`]).
+//! - A JSX element is one token; the lexer scans its `{...}` parts with the
+//!   braces balanced. A template literal is not: the mode stack hands its text
+//!   to one frame and each `${...}` back to code (see below), so a substitution
+//!   is parsed. A regular expression is a token where an operand may start:
+//!   after anything that cannot end an operand ([`Cursor::previous`]).
 //! - `>` right before `>` is `GT_JOINED`, so `Map<K, Set<V>>` closes two lists
 //!   and `a >> b` is `GT_JOINED ">"`, as in the Rust grammar.
 //! - What only a longer look tells apart is decided by predicates: an arrow

@@ -101,9 +101,10 @@ conditional and `infer`, `keyof`/`typeof`/`readonly`/`unique` operators, index
 signatures, mapped types, tuples, function types, overload-style signatures,
 type assertions, `implements`).
 
-**JavaScript / TypeScript — not modelled.** A template literal is one token:
-`${...}` contents are *not* parsed as expressions. A JSX element is one token
-for `JAVASCRIPT`/`TSX`: its children and attribute expressions are not nodes.
+**JavaScript / TypeScript — partly modelled.** A template literal's `${...}` is
+parsed as expressions: the substitution is a `template_substitution` node and a
+call in it is a `call_expression`. A JSX element is one token for
+`JAVASCRIPT`/`TSX`: its children and attribute expressions are not nodes.
 A regular expression is one token. The tree is Tree-sitter-shaped but not
 Tree-sitter's tree. Automatic semicolon insertion is modelled as optional
 semicolons, so a restricted production (`return` then a value on the next line)
