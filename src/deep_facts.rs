@@ -533,6 +533,13 @@ impl<'a> Walker<'a> {
         // exception: `match` spelled that way is a name unless the grammar
         // built a statement out of it, and a statement is a node, not a leaf.
         if self.kind(id).as_bytes() == text {
+            // Python spells its three constants as keywords, and the lexer
+            // reads each of them as a name: `default=True` is
+            // `["k","default",["n","True"]]`, not a constant. Dropping them as
+            // layout lost the keyword argument's value on every Python call.
+            if self.language.name == "python" && matches!(self.kind(id), "True" | "False" | "None") {
+                return false;
+            }
             return !self.kinds.soft.contains(&self.kind(id));
         }
         !(text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'"' || text[0] == b'\'')
@@ -2496,6 +2503,15 @@ impl<'a> Walker<'a> {
         if self.kinds.calls.contains(&kind) {
             return self.call_form(id);
         }
+        // Python has no boolean keyword in this grammar, but the lexer reads
+        // `True`, `False` and `None` as names, so they are names here too.
+        if matches!(kind, "True" | "False" | "None") {
+            let text = self.text_string(id);
+            let mut out = "[\"n\",".to_string();
+            push_string(&mut out, &text);
+            out.push(']');
+            return out;
+        }
         if let Some(name) = self.soft_name(id) {
             let mut out = "[\"n\",".to_string();
             push_string(&mut out, &name);
@@ -2663,13 +2679,22 @@ impl<'a> Walker<'a> {
                 }
             }
             "keyword_argument" => {
-                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
-                match items.as_slice() {
-                    [name, value] => {
+                // `f(default=True)` is `name`, `=`, `value`: the separator is a
+                // child, and taking the children as a pair read the value as
+                // the `=` and every keyword argument as a constant.
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != "=")
+                    .collect();
+                // The grammar writes the `=` sometimes as a child and sometimes
+                // not, so the name is the first item and the value the last.
+                match (items.first().copied(), items.last().copied()) {
+                    (Some(name), Some(value)) if items.len() >= 2 => {
                         let mut out = "[\"k\",".to_string();
-                        push_string(&mut out, &self.text_string(*name));
+                        push_string(&mut out, &self.text_string(name));
                         out.push(',');
-                        out.push_str(&self.form(*value));
+                        out.push_str(&self.form(value));
                         out.push(']');
                         out
                     }
@@ -2870,7 +2895,11 @@ impl<'a> Walker<'a> {
                     // receiver that is a call the walk records, whose own
                     // receiver is carried along so a chain stays readable one
                     // call at a time.
-                    receiver_call = self.call_form_link(object).1;
+                    // The receiver is the inner call's whole form, arguments
+                    // included: rebuilding it from the link alone wrote `[]` for
+                    // every argument and lost `Path(path)` in `Path(path).resolve()`.
+                    let (form, _link) = self.call_form_link(object);
+                    receiver_call = Some(form);
                 } else {
                     // `[...xs].filter(f)`, `handlers[k](x)`: any expression,
                     // whose calls are facts of their own.
@@ -2904,7 +2933,7 @@ impl<'a> Walker<'a> {
     /// The called path and the receiver form: `f(x)` -> (`f`, `0`),
     /// `a.b.c(x)` -> (`a.b.c`, `["n","a.b"]`), `A().b()` -> (`.b`,
     /// `["c",0,0,[]]`) with the index of the `A` call the walk recorded.
-    fn call_target(&self, callee: u32, receiver_call: Option<(u32, String)>) -> (String, String) {
+    fn call_target(&self, callee: u32, receiver_call: Option<String>) -> (String, String) {
         match self.kind(callee) {
             "attribute" | "member_expression" => {
                 let children = self.children(callee);
@@ -2922,10 +2951,7 @@ impl<'a> Walker<'a> {
                     out.push(']');
                     out
                 } else {
-                    match receiver_call {
-                        Some((index, inner)) => format!("[\"c\",{index},{inner},[]]"),
-                        None => "0".to_string(),
-                    }
+                    receiver_call.unwrap_or_else(|| "0".to_string())
                 };
                 (path, receiver)
             }
