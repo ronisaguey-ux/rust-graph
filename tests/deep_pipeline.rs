@@ -149,10 +149,16 @@ fn a_flag_forces_one_parser_and_asking_for_both_is_an_error() {
 
 #[test]
 fn a_language_without_a_deep_parser_is_a_recorded_and_counted_fallback() {
-    // `.c` and `.rs` are languages this build has no facts table for, so a
-    // forced CST parse must say so rather than pretend: the file is still
-    // parsed by the lexer, its facts are still written, and the fallback is
-    // both on the row and in the counter a reader would sum.
+    // `.c` is a language this build has no facts table for, so a forced CST
+    // parse must say so rather than pretend: the file is still parsed by the
+    // lexer, its facts are still written, and the fallback is both on the row
+    // and in the counter a reader would sum.
+    //
+    // Rust used to be in the same list. `lang_for` answers for `RS` now (the
+    // field L3 tables), so the same `.rs` file is parsed by the CST here and
+    // the numbers moved: deep 1 -> 2, lexer 2 -> 1, fallbacks 2 -> 1 under
+    // `--deep`, and `fallbacks` stays 0 under `auto` because the CST record no
+    // longer ties with the lexer on this file — it wins.
     let tree = Tree::new("fallback", &[
         ("src/main.c", "int main(void) {\n  return helper(1);\n}\n"),
         ("src/lib.rs", "pub fn f() -> u32 {\n    1\n}\n"),
@@ -163,19 +169,22 @@ fn a_language_without_a_deep_parser_is_a_recorded_and_counted_fallback() {
     let row = source_row(&json, "src/main.c");
     assert!(row.contains("\"parsed_by\":\"lexer\""), "{row}");
     assert!(row.contains("\"deep_fallback\":\"no deep parser for C\""), "{row}");
-    assert!(source_row(&json, "src/lib.rs").contains("\"deep_fallback\":\"no deep parser for RS\""));
+    // Rust has a table and a grammar, so the forced CST parse is taken.
+    let rust = source_row(&json, "src/lib.rs");
+    assert!(rust.contains("\"parsed_by\":\"deep\""), "{rust}");
+    assert!(!rust.contains("deep_fallback"), "{rust}");
     // The Python file did get the CST, so this is a fallback for that language
     // and not for the run.
     assert!(source_row(&json, "src/app.py").contains("\"parsed_by\":\"deep\""));
-    assert!(json.contains(r#""deep":1,"lexer":2,"fallbacks":2"#), "{json}");
+    assert!(json.contains(r#""deep":2,"lexer":1,"fallbacks":1"#), "{json}");
     // A fallback is a downgrade, not a failure: the facts are still there.
     assert!(json.contains("\"id\":\"src/main.c:main\""), "{json}");
     assert!(json.contains("\"id\":\"src/lib.rs:f\""), "{json}");
 
-    // Under `auto` the same two files are the lexer's by choice, not by
-    // fallback, and the counter stays at zero.
+    // Under `auto` the `.c` file is the lexer's by choice, not by fallback, and
+    // the counter stays at zero.
     let (auto, _) = tree.json(&["--stdout", "--no-cache"]);
-    assert!(auto.contains(r#""deep":1,"lexer":2,"fallbacks":0"#), "{auto}");
+    assert!(auto.contains(r#""deep":2,"lexer":1,"fallbacks":0"#), "{auto}");
 }
 
 #[test]
