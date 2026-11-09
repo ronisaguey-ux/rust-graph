@@ -1022,6 +1022,17 @@ mod deep_run {
                 out,
                 ",\"paths\":{{\"deep\":{},\"lexer\":{},\"chosen_deep\":{},\"chosen_lexer\":{}}}",
                 self.compared, self.lexer_only, self.deep, self.lexer
+            )?;
+            // Lexer artefacts accepted instead of reproduced. Zero everywhere
+            // means the two readers agreed on every fact the guard compares;
+            // a count here is a difference a reader can audit, not a silent
+            // agreement.
+            write!(
+                out,
+                ",\"accepted\":{{\"anonymous_call\":{},\"keyword_call\":{},\"keyword_event\":{}}}",
+                self.accepted_anonymous_calls,
+                self.accepted_keyword_calls,
+                self.accepted_keyword_events
             )
         }
 
@@ -1256,12 +1267,25 @@ impl Verdict {
 /// event. A loss is recorded as a fallback rather than hidden, and `--deep`
 /// skips the comparison because the user asked for the CST.
 ///
-/// The `Verdict` carries the fact that tripped the check so a fallback can be
-/// read rather than counted, and the lexer artefacts accepted instead, so the
-/// report says how much was set aside. A name the source never writes for the
-/// CST to read is not a fact: `f(x)(y)` makes the lexer name the outer call
-/// `.call`, and `assert (a, b) == c` makes it call `assert`. Both are accepted
-/// and counted, never a reason to fall back.
+/// Flow events are compared by *structure*, not by count: the same number of
+/// `["r",...]` events can carry different values, and a value the lexer read and
+/// the CST wrote as `0` is a loss even though both paths wrote the event. Each
+/// event is reduced to its shape — marker, assignment targets, and the value
+/// with the call table's numbering erased — and an event is covered when a deep
+/// event with the same marker and targets contains every name and call the
+/// lexer's value names. Association is not compared (the lexer's
+/// `g<number>(x)` merge of names is covered by the CST's call `g(x)`), but a
+/// name or a call the CST dropped is a loss even when the count and the shape
+/// agree. Only a value the CST dropped to `0`, a target it did not write, and an
+/// event it did not write at all are losses. What the guard cannot see — two
+/// non-constant readings that disagree in content — is what the differential
+/// harness has the source for.
+///
+/// What the lexer invented is never a loss and never forces a fallback: a call
+/// whose path is not a name in the source (`.call`, an anonymous application), a
+/// call to a statement keyword (`assert`), an `x` event for a statement keyword,
+/// and an assignment target that names an imported type. They are counted in
+/// `Accepted` by kind, so the report says how much was set aside.
 #[cfg(all(feature = "deep", feature = "parser"))]
 pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
     let mut accepted = Accepted::default();
@@ -1276,10 +1300,7 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
         }
     }
     for symbol in lexer.symbols.iter().filter(|symbol| symbol.kind != KIND_MODULE) {
-        let same = deep
-            .symbols
-            .iter()
-            .any(|row| row.name == symbol.name && row.kind == symbol.kind);
+        let same = deep.symbols.iter().any(|row| row.name == symbol.name && row.kind == symbol.kind);
         if !same {
             let detail = format!("symbol {} kind {} line {}", symbol.name, symbol.kind, symbol.line);
             return verdict(Some("symbol"), detail, accepted);
@@ -1323,21 +1344,6 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
             return verdict(Some("var"), detail, accepted);
         }
     }
-    let events = |facts: &Facts, marker: &str| -> usize {
-        facts.symbols.iter().map(|symbol| symbol.events.matches(marker).count()).sum()
-    };
-    for marker in ["[\"a\",", "[\"r\",", "[\"x\","] {
-        let (found, wanted) = (events(deep, marker), events(lexer, marker));
-        if found < wanted {
-            let detail = format!("event {} count {} < {}", marker, found, wanted);
-            return verdict(Some("event"), detail, accepted);
-        }
-    }
-    // A value the lexer read and the CST wrote as a constant on the same line.
-    // `f"{x}"` is the live case: the grammar keeps the whole string as one
-    // token, so the CST has no field to read and says `0` where the lexer
-    // follows the interpolation. The event count above cannot see it because
-    // both paths still write the event, only with a different payload.
     for symbol in &lexer.symbols {
         let paired = if symbol.kind == KIND_MODULE {
             deep.symbols.iter().find(|row| row.kind == KIND_MODULE)
@@ -1345,20 +1351,127 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
             deep.symbols.iter().find(|row| row.name == symbol.name && row.kind == symbol.kind)
         };
         let Some(paired) = paired else { continue };
-        let deep_values = value_events(&paired.events);
-        for (marker, line, constant) in value_events(&symbol.events) {
-            if constant {
-                continue;
-            }
-            if deep_values.iter().any(|(deep_marker, deep_line, deep_constant)| {
-                *deep_marker == marker && *deep_line == line && *deep_constant
-            }) {
-                let detail = format!("event {} line {} in {}: the CST wrote the value as 0", marker as char, line, symbol.name);
-                return verdict(Some("event"), detail, accepted);
-            }
+        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted) {
+            return verdict(Some("event"), detail, accepted);
         }
     }
     verdict(None, String::new(), accepted)
+}
+
+/// The first flow event of `symbol` that no event of `paired` covers, with both
+/// records' payloads so a fallback can be read rather than counted. The
+/// acceptance counters are updated on the way past the same markers `loses`
+/// skips, so there is one implementation of the comparison.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts::Symbol, accepted: &mut Accepted) -> Option<String> {
+    let keyword_lines: Vec<u32> = symbol
+        .calls
+        .iter()
+        .filter(|call| phantom_call(&call.path) == Some(Phantom::Keyword))
+        .map(|call| call.line)
+        .collect();
+    let mut wanted: Vec<(u8, Shape)> = Vec::new();
+    for event in raw_events(&symbol.events) {
+        if !matches!(event.tag, b'a' | b'r' | b'x') {
+            continue;
+        }
+        if event.tag == b'x' && keyword_lines.contains(&event.line) {
+            accepted.keyword_events += 1;
+            continue;
+        }
+        wanted.push((event.tag, shape_event(event.tag, event.line, event.payload, &symbol.calls, &mut *accepted)));
+    }
+    let mut found: Vec<(u8, Shape)> = raw_events(&paired.events)
+        .into_iter()
+        .filter(|event| matches!(event.tag, b'a' | b'r' | b'x'))
+        .map(|event| {
+            let mut none = Accepted::default();
+            (event.tag, shape_event(event.tag, event.line, event.payload, &paired.calls, &mut none))
+        })
+        .collect();
+    for want in wanted {
+        // The exact match is tried first and always wins: a statement both
+        // readers bind the same way is never re-read as an artefact.
+        let mut miss = Miss::Line;
+        let exact = found.iter().position(|row| match covers(&row.1, &want.1) {
+            Ok(()) => true,
+            Err(reason) => {
+                if row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 {
+                    miss = reason;
+                }
+                false
+            }
+        });
+        if let Some(at) = exact {
+            found.swap_remove(at);
+            continue;
+        }
+        // A target list that names an imported type instead of a binder is the
+        // lexer reading `x: Dict[...] = ...` as an assignment to `Dict`. Its
+        // statement is still in the CST's record, with the real name and the
+        // same value, so the fact is there and only the invented binder is set
+        // aside.
+        if annotation_targets(lexer, &want, &found) {
+            accepted.annotation_targets += 1;
+            if let Some(at) = found.iter().position(|row| {
+                row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 && covers_value(&row.1, &want.1).is_ok()
+            }) {
+                found.swap_remove(at);
+            }
+            continue;
+        }
+        let near = found.iter().find(|row| row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1);
+        let other = match near {
+            Some(row) => format!("line {} targets {} value {}", row.1.line, row.1.targets, row.1.value),
+            None => "no event of that marker within one line".to_string(),
+        };
+        let why = match miss {
+            Miss::Line => "no event on a line both readers can mean",
+            Miss::Targets => "the statement binds different names",
+            Miss::Constant => "the CST wrote the value as the constant 0",
+            Miss::Name => "a name the lexer read is not in the CST's value",
+            Miss::Call => "a call or constant the lexer read is not in the CST's value",
+        };
+        return Some(format!(
+            "event {} line {} targets {} in {} ({why}): lexer {}; CST {}",
+            want.0 as char, want.1.line, want.1.targets, symbol.name, want.1.value, other
+        ));
+    }
+    None
+}
+
+/// Whether a lexer assignment event names an imported type rather than a binder,
+/// and the CST wrote the same statement with a value that covers it.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn annotation_targets(lexer: &Facts, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool {
+    if want.0 != b'a' {
+        return false;
+    }
+    let names = quoted_names(&want.1.targets);
+    if names.is_empty() {
+        return false;
+    }
+    let imported = |name: &str| {
+        lexer.imports.iter().any(|row| {
+            let local = if row.alias.is_empty() { row.name.as_str() } else { row.alias.as_str() };
+            local == name
+        })
+    };
+    if !names.iter().all(|name| imported(name)) {
+        return false;
+    }
+    found.iter().any(|row| {
+        row.0 == b'a'
+            && (row.1.line as i64 - want.1.line as i64).abs() <= 1
+            && row.1.targets != want.1.targets
+            && covers_value(&row.1, &want.1).is_ok()
+    })
+}
+
+/// The quoted names in a target list: `["a","b"]` yields `a`, `b`.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn quoted_names(text: &str) -> Vec<&str> {
+    text.split('"').skip(1).step_by(2).filter(|name| !name.is_empty()).collect()
 }
 
 /// What one flow event says, reduced to what the lexer and the CST must agree
@@ -1533,56 +1646,192 @@ fn split_items(text: &str) -> Vec<&str> {
     out
 }
 
-
-/// The `["r",line,value]` and `["x",line,value]` events in a record, as
-/// `(marker, line, is_constant)`. Those two kinds end with their value, so a
-/// payload of exactly `0` is the constant form; every other payload is a value
-/// the reader of the record can follow.
+/// One top-level element of an events array: its marker letter, its line, and
+/// the text after the line. `payload` is the targets and value of an `a` event,
+/// or the value of an `r`/`x` event; control markers are parsed but skipped by
+/// the caller because they carry no value.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn value_events(events: &str) -> Vec<(u8, u32, bool)> {
+struct RawEvent<'a> {
+    tag: u8,
+    line: u32,
+    payload: &'a str,
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn raw_events(events: &str) -> Vec<RawEvent<'_>> {
     let bytes = events.as_bytes();
     let mut out = Vec::new();
     let mut at = 0;
-    while at + 6 < bytes.len() {
-        if bytes[at] != b'[' || bytes[at + 1] != b'"' || bytes[at + 3] != b'"' || bytes[at + 4] != b',' {
+    while at < bytes.len() {
+        if bytes[at] != b'[' {
             at += 1;
             continue;
         }
-        let marker = bytes[at + 2];
-        if !matches!(marker, b'r' | b'x') {
-            at += 1;
-            continue;
+        let end = element_end(bytes, at);
+        if let Some(event) = event_at(events, at, end) {
+            out.push(event);
         }
-        let mut index = at + 5;
-        let mut line = 0u32;
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            line = line.saturating_mul(10).saturating_add((bytes[index] - b'0') as u32);
-            index += 1;
-        }
-        if bytes.get(index) != Some(&b',') {
-            at += 1;
-            continue;
-        }
-        let payload = index + 1;
-        // The event ends at the `]` that closes the `[` this scan started on.
-        let mut depth = 0u32;
-        let mut end = payload;
-        while end < bytes.len() {
-            match bytes[end] {
-                b'[' => depth += 1,
-                b']' if depth == 0 => break,
-                b']' => depth -= 1,
-                _ => {}
-            }
-            end += 1;
-        }
-        let constant = &bytes[payload..end.min(bytes.len())] == b"0";
-        out.push((marker, line, constant));
         at = end.max(at + 1);
     }
     out
 }
 
+/// The index just past the `]` that closes the `[` at `start`.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn element_end(bytes: &[u8], start: usize) -> usize {
+    let mut depth = 0usize;
+    let mut at = start;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return at + 1;
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    bytes.len()
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn event_at(events: &str, start: usize, end: usize) -> Option<RawEvent<'_>> {
+    let bytes = events.as_bytes();
+    if end < start + 6 || bytes[start] != b'[' || bytes[start + 1] != b'"' || bytes[start + 3] != b'"' {
+        return None;
+    }
+    if bytes[start + 4] != b',' {
+        return None;
+    }
+    let tag = bytes[start + 2];
+    let mut at = start + 5;
+    let mut line = 0u32;
+    while at < end && bytes[at].is_ascii_digit() {
+        line = line.saturating_mul(10).saturating_add((bytes[at] - b'0') as u32);
+        at += 1;
+    }
+    if at >= end || bytes[at] != b',' {
+        return None;
+    }
+    Some(RawEvent { tag, line, payload: &events[at + 1..end - 1] })
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn shape_event(tag: u8, line: u32, payload: &str, calls: &[crate::facts::Call], accepted: &mut Accepted) -> Shape {
+    if tag != b'a' {
+        let mut pos = 0;
+        return Shape { line, targets: String::new(), value: shape_at(payload, &mut pos, calls, accepted) };
+    }
+    let targets_end = element_end(payload.as_bytes(), 0);
+    let targets = payload[..targets_end].to_string();
+    let mut pos = targets_end;
+    if payload.as_bytes().get(pos) == Some(&b',') {
+        pos += 1;
+    }
+    let value = shape_at(payload, &mut pos, calls, accepted);
+    Shape { line, targets, value }
+}
+
+/// The form of one value at `pos`, with call numbering erased: a call
+/// contributes its receiver and arguments, never its symbol-local index. An
+/// anonymous call (`f(x)(y)` is named `.call`) contributes the value it applies;
+/// the application has no name for the CST to read, so it is not a fact either
+/// path can be asked to agree on.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn shape_at(text: &str, pos: &mut usize, calls: &[crate::facts::Call], accepted: &mut Accepted) -> String {
+    let bytes = text.as_bytes();
+    if *pos >= bytes.len() {
+        return "0".to_string();
+    }
+    if bytes[*pos] == b'0' {
+        *pos += 1;
+        return "0".to_string();
+    }
+    if bytes[*pos] != b'[' {
+        *pos += 1;
+        return String::new();
+    }
+    let start = *pos;
+    let end = element_end(bytes, start);
+    *pos = end;
+    let body = &text[start..end];
+    if body.len() < 7 || body.as_bytes()[1] != b'"' {
+        return body.to_string();
+    }
+    let tag = body.as_bytes()[2];
+    let inner = &body[4..body.len() - 1];
+    let inner_bytes = inner.as_bytes();
+    match tag {
+        b'n' => format!("n:{}", inner.trim_start_matches(',').trim_matches('"')),
+        b'c' => {
+            let mut at = 1;
+            let comma = inner[at..].find(',').map(|value| value + at).unwrap_or(inner.len());
+            let id: usize = inner[at..comma].parse().unwrap_or(usize::MAX);
+            at = comma + 1;
+            let receiver = shape_at(inner, &mut at, calls, accepted);
+            if inner_bytes.get(at) == Some(&b',') {
+                at += 1;
+            }
+            let mut arguments = Vec::new();
+            if inner_bytes.get(at) == Some(&b'[') {
+                let list_end = element_end(inner_bytes, at);
+                let list = &inner[at + 1..list_end.saturating_sub(1)];
+                let mut item = 0;
+                while item < list.len() {
+                    if list.as_bytes()[item] == b'[' || list.as_bytes()[item] == b'0' {
+                        arguments.push(shape_at(list, &mut item, calls, accepted));
+                    } else {
+                        item += 1;
+                    }
+                }
+            }
+            let path = calls.get(id).map(|call| call.path.as_str()).unwrap_or("");
+            if phantom_call(path) == Some(Phantom::Anonymous) {
+                return receiver;
+            }
+            format!("c({receiver};[{}])", arguments.join(","))
+        }
+        b't' | b'm' => {
+            let mut at = 0;
+            while at < inner_bytes.len() && inner_bytes[at] != b'[' {
+                at += 1;
+            }
+            let mut items = Vec::new();
+            if at < inner_bytes.len() {
+                at += 1;
+                let stop = inner_bytes.len().saturating_sub(1);
+                while at < stop {
+                    if inner_bytes[at] == b'[' || inner_bytes[at] == b'0' {
+                        items.push(shape_at(inner, &mut at, calls, accepted));
+                    } else {
+                        at += 1;
+                    }
+                }
+            }
+            format!("{}:[{}]", tag as char, items.join(","))
+        }
+        b'k' => {
+            let mut at = 0;
+            let mut name = String::new();
+            if inner_bytes.first() == Some(&b',') {
+                at += 1;
+            }
+            if inner_bytes.get(at) == Some(&b'"') {
+                let close = inner[at + 1..].find('"').map(|value| value + at + 1).unwrap_or(inner.len());
+                name = inner[at + 1..close].to_string();
+                at = close + 1;
+            }
+            if inner_bytes.get(at) == Some(&b',') {
+                at += 1;
+            }
+            format!("k({name}):{}", shape_at(inner, &mut at, calls, accepted))
+        }
+        _ => body.to_string(),
+    }
+}
 /// The facts for one file, and the record of which parser produced them.
 ///
 /// `--lexer` is the old path unchanged. `--deep` asks for the CST. `auto` runs
