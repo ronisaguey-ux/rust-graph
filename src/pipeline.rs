@@ -897,6 +897,8 @@ mod deep_run {
         accepted_anonymous_symbols: u64,
         /// Named symbols the lexer built out of an ordinary expression.
         accepted_invented_symbols: u64,
+        /// Lexer calls that are a pattern in the source (`Some(x) =>`).
+        accepted_pattern_calls: u64,
     }
 
     impl State {
@@ -921,7 +923,7 @@ mod deep_run {
         /// header carries the format number, so a file from an older writer is
         /// void rather than half-read.
         pub(super) fn save(&self, dir: &Path) -> io::Result<()> {
-            let mut text = format!("rust-graph facts.meta 5 {}\n", bits());
+            let mut text = format!("rust-graph facts.meta 6 {}\n", bits());
             let mut rows: Vec<(&String, &Taken)> = self.records.iter().collect();
             rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
             for (path, taken) in rows {
@@ -931,7 +933,7 @@ mod deep_run {
                     (false, false) => "lexer",
                 };
                 text.push_str(&format!(
-                    "{} {} {} {} {} {} {} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {} {} {} {} {} {}\n",
                     escape(path),
                     parser,
                     taken.errors,
@@ -943,7 +945,8 @@ mod deep_run {
                     taken.accepted.keyword_events,
                     taken.accepted.annotation_targets,
                     taken.accepted.anonymous_symbols,
-                    taken.accepted.invented_symbols
+                    taken.accepted.invented_symbols,
+                    taken.accepted.pattern_calls
                 ));
             }
             let temporary = dir.join("facts.meta.tmp");
@@ -1044,7 +1047,7 @@ mod deep_run {
 
         pub(super) fn report_line(&self, text: &str) -> String {
             format!(
-                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\nAccepted differences: {} lexer-only calls ({} anonymous, {} statement keywords), {} lexer-only value events for a statement keyword, {} lexer assignment targets naming an imported type instead of a binder, {} lexer symbols with no name in the source, {} lexer symbols whose line declares nothing.\n",
+                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\nAccepted differences: {} lexer-only calls ({} anonymous, {} statement keywords), {} lexer-only value events for a statement keyword, {} lexer assignment targets naming an imported type instead of a binder, {} lexer symbols with no name in the source, {} lexer symbols whose line declares nothing, {} lexer calls that are a pattern.\n",
                 self.deep,
                 self.lexer,
                 self.fallbacks,
@@ -1058,7 +1061,8 @@ mod deep_run {
                 self.accepted_keyword_events,
                 self.accepted_annotation_targets,
                 self.accepted_anonymous_symbols,
-                self.accepted_invented_symbols
+                self.accepted_invented_symbols,
+                self.accepted_pattern_calls
             )
         }
 
@@ -1080,7 +1084,7 @@ mod deep_run {
     pub(super) fn load(dir: &Path) -> Option<HashMap<String, Taken>> {
         let text = std::fs::read_to_string(dir.join("facts.meta")).ok()?;
         let mut lines = text.lines();
-        if lines.next()? != format!("rust-graph facts.meta 5 {}", bits()) {
+        if lines.next()? != format!("rust-graph facts.meta 6 {}", bits()) {
             return None;
         }
         let mut out = HashMap::new();
@@ -1103,6 +1107,7 @@ mod deep_run {
                 annotation_targets: fields.next()?.parse().ok()?,
                 anonymous_symbols: fields.next()?.parse().ok()?,
                 invented_symbols: fields.next()?.parse().ok()?,
+                pattern_calls: fields.next()?.parse().ok()?,
             };
             out.insert(
                 path,
@@ -1199,6 +1204,9 @@ pub(crate) struct Accepted {
     /// A named symbol the lexer built out of an ordinary expression: the line it
     /// points at carries no definition keyword for that name.
     pub(crate) invented_symbols: u32,
+    /// A call the lexer read out of a pattern: `Some(x) => ...` is a match arm,
+    /// not a call, and the CST is right not to record one.
+    pub(crate) pattern_calls: u32,
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
@@ -1211,6 +1219,7 @@ impl Accepted {
             + self.annotation_targets
             + self.anonymous_symbols
             + self.invented_symbols
+            + self.pattern_calls
     }
 }
 
@@ -1382,6 +1391,13 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
                 .flat_map(|row| row.calls.iter())
                 .any(|row| name_of(&row.path) == name && near(row.line));
             if !same {
+                // `match self.tok(i) { Some(t) => ... }`: the lexer reads the
+                // arm's pattern as a call, and a pattern is not a call. The
+                // source line says so — the name, its argument list, then `=>`.
+                if !src.is_empty() && is_pattern_call(src, &name, call.line) {
+                    accepted.pattern_calls += 1;
+                    continue;
+                }
                 let detail = format!("call {} line {} in {}", call.path, call.line, symbol.name);
                 return verdict(Some("call"), detail, accepted);
             }
@@ -1515,6 +1531,55 @@ fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts
         ));
     }
     None
+}
+
+
+/// Whether the call the lexer reports on this line is written as a pattern:
+/// `<name>(… )` followed by `=>`. A match arm's pattern binds, it does not call,
+/// and the CST records no call for it.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_pattern_call(src: &str, name: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let mut from = 0;
+    while let Some(at) = text[from..].find(name) {
+        let start = from + at + name.len();
+        let rest = text[start..].trim_start();
+        if !rest.starts_with('(') {
+            from = start;
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut end = None;
+        for (index, ch) in rest.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(end) = end {
+            let tail = rest[end + 1..].trim_start();
+            // A match guard sits between the pattern and the arrow.
+            if tail.starts_with("=>") || tail.contains("=>") && !tail.contains(';') {
+                return true;
+            }
+            // `if let Some(x) = expr` / `while let`: the pattern sits between
+            // `let` and the `=` that starts the value.
+            if tail.starts_with('=') && !tail.starts_with("==") && text[..start].contains("let") {
+                return true;
+            }
+        }
+        from = start;
+    }
+    false
 }
 
 /// Whether a lexer assignment event names an imported type rather than a binder,
