@@ -25,7 +25,7 @@ mod deep_integration;
 #[path = "../src/deep_facts.rs"]
 mod deep_facts;
 
-use deep_facts::{extract, lang_for};
+use deep_facts::{extract, lang_for, lang_for_forced};
 use deep_integration::{parse_file, Lang};
 use facts::{Facts, KIND_CLASS, KIND_FUNCTION, KIND_MODULE};
 
@@ -58,12 +58,21 @@ fn owned(items: &[&str]) -> Vec<String> {
 
 #[test]
 fn the_tags_that_reach_the_cst_path_include_go_and_java() {
-    assert_eq!(lang_for("GO"), Some(Lang::Go));
-    assert_eq!(lang_for("JAVA"), Some(Lang::Java));
-    // Rust gained a table after this file was written; the tags with no table
-    // still answer `None`, and the lexer keeps those files.
+    // Go and Java have tables, but their records still lose the lexer's
+    // artefacts often enough that `auto` keeps the lexer on most real files —
+    // measured on 112 files of Go's net/http: 91 fallbacks, and auto costs 2.6x
+    // the lexer for nothing. They are therefore force-only: `--deep` parses
+    // them, `auto` does not spend a second parse on them.
+    assert_eq!(lang_for("GO"), None);
+    assert_eq!(lang_for("JAVA"), None);
+    assert_eq!(lang_for_forced("GO"), Some(Lang::Go));
+    assert_eq!(lang_for_forced("JAVA"), Some(Lang::Java));
+    // The tags auto does pick.
     assert_eq!(lang_for("RS"), Some(Lang::Rust));
+    assert_eq!(lang_for("PY"), Some(Lang::Python));
+    // A language with no table answers neither.
     assert_eq!(lang_for("C"), None);
+    assert_eq!(lang_for_forced("C"), None);
 }
 
 #[test]
