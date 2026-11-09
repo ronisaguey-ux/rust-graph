@@ -2553,7 +2553,13 @@ impl<'a> Walker<'a> {
             "attribute" | "member_expression" | "subscript" | "subscript_expression" => {
                 let path = self.form_path(id);
                 if path.is_empty() {
-                    "0".to_string()
+                    // `f(x)[0].y`: the base is a call, so there is no path, and
+                    // the value is the base's — a subscript of a value is that
+                    // value. Writing 0 here lost the call's argument.
+                    match self.children(id).first().copied() {
+                        Some(base) => self.form(base),
+                        None => "0".to_string(),
+                    }
                 } else {
                     let mut out = "[\"n\",".to_string();
                     push_string(&mut out, &path);
@@ -2921,8 +2927,14 @@ impl<'a> Walker<'a> {
                     receiver_call = Some(form);
                 } else {
                     // `[...xs].filter(f)`, `handlers[k](x)`: any expression,
-                    // whose calls are facts of their own.
-                    self.form(object);
+                    // whose calls are facts of their own. Its value is also the
+                    // receiver the lexer writes: `(a or b).split('-')` has
+                    // `a or b` there, and dropping it lost every name the
+                    // receiver held.
+                    let value = self.form(object);
+                    if self.path_of(object).is_empty() {
+                        receiver_call = Some(value);
+                    }
                 }
             }
         } else if !matches!(self.kind(callee), "identifier" | "property_identifier" | "type_identifier") {
