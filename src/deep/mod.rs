@@ -14,6 +14,9 @@
 pub mod budget;
 pub mod go;
 pub mod java;
+// The one JavaScript grammar: the same file `deep-grammars` compiles against
+// its runtime shim, so the two paths can never drift apart again.
+#[path = "../../crates/deep-grammars/src/javascript.rs"]
 pub mod javascript;
 pub mod json;
 pub mod json_grammar;
