@@ -317,3 +317,321 @@ fn guard_losses(lexer: &facts::Facts, deep: &facts::Facts) -> Vec<String> {
     }
     out
 }
+
+/// Report one file into `out`; returns whether it had a loss and the tally.
+fn report_file(path: &Path, out: &mut String) -> (bool, Tally) {
+    let bytes = fs::read(path).expect("file");
+    let suffix = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    let lang = lang_of(path).expect("language");
+    let lexer = lexer_facts(&bytes, suffix);
+    let deep = deep_facts(&bytes, lang);
+    let leaves = leaf_texts(&bytes, lang);
+    let strings = string_leaves(&bytes, lang);
+    let a = Counts::of(&lexer);
+    let b = Counts::of(&deep);
+    let lost_symbols = multiset_loss(&symbol_set(&lexer), &symbol_set(&deep));
+    let lost_calls = multiset_loss(&call_set(&lexer), &call_set(&deep));
+    let lost_imports = multiset_loss(&import_set(&lexer), &import_set(&deep));
+    let mut lexer_vars = lexer.vars.clone();
+    let mut deep_vars = deep.vars.clone();
+    lexer_vars.sort();
+    deep_vars.sort();
+    let lost_vars = multiset_loss(&lexer_vars, &deep_vars);
+    let guard = guard_losses(&lexer, &deep);
+    if lost_symbols.is_empty() && lost_calls.is_empty() && lost_imports.is_empty() && lost_vars.is_empty() && guard.is_empty() {
+        return (false, Tally::default());
+    }
+    let deep_calls = call_set(&deep);
+    let deep_symbols = symbol_set(&deep);
+    let deep_modules: BTreeSet<String> = deep.imports.iter().map(|i| i.module.clone()).collect();
+    let (deep_names, deep_aliases): (BTreeSet<&str>, BTreeSet<&str>) = (
+        deep.imports.iter().map(|i| i.name.as_str()).collect(),
+        deep.imports.iter().map(|i| i.alias.as_str()).collect(),
+    );
+    let mut tally = Tally::default();
+    let mut lines = Vec::new();
+    for (name, kind, line) in &lost_symbols {
+        let class = if deep_symbols.iter().any(|(other, other_kind, _)| other == name && other_kind == kind) {
+            "accepted"
+        } else if deep_symbols.iter().any(|(other, _, _)| other == name) {
+            "accepted"
+        } else if leaves.contains(name) {
+            "mapping"
+        } else {
+            "grammar-unseen-token"
+        };
+        tally.charge(class);
+        lines.push(format!("  symbol {name} kind={kind} line={line}: {class}"));
+    }
+    for (name, line) in &lost_calls {
+        let class = classify_call(name, *line, &deep_calls, &leaves, &strings);
+        tally.charge(class);
+        lines.push(format!("  call {name} line={line}: {class}"));
+    }
+    for (line, module, name, alias, _) in &lost_imports {
+        let class = if deep_modules.contains(module) && (deep_names.contains(name.as_str()) || deep_aliases.contains(alias.as_str())) {
+            "resolution"
+        } else if deep_modules.contains(module) {
+            "mapping"
+        } else if leaves.contains(module.rsplit('.').next().unwrap_or(module)) || leaves.contains(module) {
+            "mapping"
+        } else {
+            "grammar-unseen-token"
+        };
+        tally.charge(class);
+        lines.push(format!("  import {module}|{name}|{alias} line={line}: {class}"));
+    }
+    // A variable with a known class is what ties `user.may()` to `User.may`:
+    // the resolver's typed-variable edges come from this table.
+    for (name, class) in &lost_vars {
+        tally.charge("resolution");
+        lines.push(format!("  var {name} = {class}: resolution"));
+    }
+    // The guard's own verdict, attributed.
+    if !guard.is_empty() {
+        tally.guard_files += 1;
+        for cause in &guard {
+            if let Some(rest) = cause.strip_prefix("call ") {
+                let path = rest.split(" line=").next().unwrap_or(rest);
+                let line: u32 = rest.rsplit("line=").next().and_then(|text| text.parse().ok()).unwrap_or(0);
+                match classify_call(path, line, &deep_calls, &leaves, &strings) {
+                    "grammar-interpolation" => tally.guard_interpolation += 1,
+                    "accepted" => tally.guard_phantom += 1,
+                    _ => tally.guard_other += 1,
+                }
+            } else if cause.starts_with("events ") {
+                tally.guard_event += 1;
+            } else {
+                tally.guard_other += 1;
+            }
+        }
+        let mut causes = guard.clone();
+        causes.truncate(3);
+        lines.push(format!("  guard: falls back on {} facts ({causes:?})", guard.len()));
+    }
+    out.push_str(&format!(
+        "{}\n  lexer symbols {} calls {} imports {} | deep symbols {} calls {} imports {}\n  LOST symbols {} calls {} imports {} -> grammar {} mapping {} resolution {} (accepted {} contract differences)\n",
+        path.display(),
+        a.symbols,
+        a.calls,
+        a.imports,
+        b.symbols,
+        b.calls,
+        b.imports,
+        lost_symbols.len(),
+        lost_calls.len(),
+        lost_imports.len(),
+        tally.grammar,
+        tally.mapping,
+        tally.resolution,
+        tally.accepted,
+    ));
+    for line in lines {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    (true, tally)
+}
+
+fn default_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("felicity-run")
+}
+
+fn walk_root(root: &Path) -> (Counts, Counts, Tally, usize, usize) {
+    let mut paths = Vec::new();
+    files(root, &mut paths);
+    paths.sort();
+    let (mut lexer_total, mut deep_total) = (Counts::default(), Counts::default());
+    let mut tally = Tally::default();
+    let (mut lossy, mut parsed) = (0usize, 0usize);
+    let mut out = String::new();
+    for path in &paths {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let suffix = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        let Some(lang) = lang_of(path) else { continue };
+        if langs::by_content(suffix, &bytes[..bytes.len().min(4096)]).is_none() {
+            continue;
+        }
+        parsed += 1;
+        let lexer = lexer_facts(&bytes, suffix);
+        let deep = deep_facts(&bytes, lang);
+        let a = Counts::of(&lexer);
+        let b = Counts::of(&deep);
+        lexer_total.symbols += a.symbols;
+        lexer_total.calls += a.calls;
+        lexer_total.imports += a.imports;
+        deep_total.symbols += b.symbols;
+        deep_total.calls += b.calls;
+        deep_total.imports += b.imports;
+        let mut chunk = String::new();
+        let (had_loss, file_tally) = report_file(path, &mut chunk);
+        if had_loss {
+            lossy += 1;
+            tally.add(&file_tally);
+        }
+        out.push_str(&chunk);
+    }
+    let verbose = std::env::var("FACT_LOSS_FILES").is_ok();
+    if verbose {
+        println!("{out}");
+    } else {
+        // Only the per-file summary lines, still per file.
+        for line in out.lines() {
+            if !line.starts_with("  ") {
+                println!("{line}");
+            }
+        }
+    }
+    (lexer_total, deep_total, tally, lossy, parsed)
+}
+
+/// `FACT_LOSS_DUMP=<a file>`: print every call, import and symbol both paths
+/// read off that file, so a single loss can be looked at directly.
+#[test]
+#[ignore = "reads a file named by FACT_LOSS_DUMP"]
+fn fact_loss_dump_one_file() {
+    let path = PathBuf::from(std::env::var_os("FACT_LOSS_DUMP").expect("FACT_LOSS_DUMP"));
+    let bytes = fs::read(&path).expect("file");
+    let suffix = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    let lang = lang_of(&path).expect("language");
+    let lexer = lexer_facts(&bytes, suffix);
+    let deep = deep_facts(&bytes, lang);
+    println!("== lexer calls ==");
+    for (p, line) in call_set(&lexer) {
+        println!("  {line:5} {p}");
+    }
+    println!("== deep calls ==");
+    for (p, line) in call_set(&deep) {
+        println!("  {line:5} {p}");
+    }
+    println!("== lexer symbols ==");
+    for (n, k, line) in symbol_set(&lexer) {
+        println!("  {line:5} kind={k} {n}");
+    }
+    println!("== deep symbols ==");
+    for (n, k, line) in symbol_set(&deep) {
+        println!("  {line:5} kind={k} {n}");
+    }
+    println!("== module events ==");
+    for (label, facts) in [("lexer", &lexer), ("deep", &deep)] {
+        println!("  {label}: {:?}", facts.symbols.first().map(|symbol| &symbol.events));
+    }
+    println!("== symbol events ==");
+    for (label, facts) in [("lexer", &lexer), ("deep", &deep)] {
+        for symbol in &facts.symbols {
+            if !symbol.events.is_empty() {
+                println!("  {label} {}: {}", symbol.key, symbol.events);
+            }
+        }
+    }
+    println!("== lexer imports ==");
+    for row in import_set(&lexer) {
+        println!("  {row:?}");
+    }
+    println!("== deep imports ==");
+    for row in import_set(&deep) {
+        println!("  {row:?}");
+    }
+}
+
+/// The mapping gaps this harness found on a real tree, pinned on one source.
+/// Each block is a construct where `deep_facts` used to drop a fact the lexer
+/// kept; the assertion is exact equality on calls, imports and symbol names,
+/// so a regression reappears here rather than in a corpus number.
+#[test]
+fn fact_loss_the_mapping_gaps_are_closed() {
+    let source = br#"
+import os
+from pkg.mod import (
+    alpha, beta as gamma, delta)
+
+def outer(items, headers):
+    assert check(items), "why"
+    value = alpha(items) if beta(headers) else gamma(items)
+    span = items[1:min(len(items), 6)]
+    pair = (items := delta(items))
+    handler = lambda key="": os.environ.get(key)
+    table = {k.lower(): v for k, v in (headers or {}).items()}
+    made = make(1, 2)(3) if False else handler("x")
+    return span, pair, table, made
+"#;
+    let lang = Lang::Python;
+    let lexer = lexer_facts(source, "py");
+    let deep = deep_facts(source, lang);
+    let lexer_calls: Vec<String> = call_set(&lexer).into_iter().map(|(p, l)| format!("{p}@{l}")).collect();
+    let deep_calls: Vec<String> = call_set(&deep).into_iter().map(|(p, l)| format!("{p}@{l}")).collect();
+    let missing: Vec<&String> = lexer_calls
+        .iter()
+        // `make(1, 2)(3)`: the one-pass lexer names an anonymous call `.call`.
+        // There is no such name in the source, so the CST has nothing to read.
+        .filter(|call| !call.starts_with(".call@"))
+        .filter(|call| !deep_calls.contains(*call))
+        .collect();
+    assert!(missing.is_empty(), "calls missing from the CST record: {missing:?}\n  lexer: {lexer_calls:?}\n  deep:  {deep_calls:?}");
+    assert_eq!(import_set(&lexer), import_set(&deep), "imports");
+
+    let lexer_names: BTreeSet<(String, u8)> = symbol_set(&lexer).into_iter().map(|(n, k, _)| (n, k)).collect();
+    let deep_names: BTreeSet<(String, u8)> = symbol_set(&deep).into_iter().map(|(n, k, _)| (n, k)).collect();
+    let lost: Vec<&(String, u8)> = lexer_names.iter().filter(|symbol| !deep_names.contains(*symbol)).collect();
+    assert!(lost.is_empty(), "symbols missing from the CST record: {lost:?}");
+
+    // And each construct by name, so a failure says which one.
+    let calls: BTreeSet<String> = deep_calls.iter().map(|call| call.split('@').next().unwrap_or(call).to_string()).collect();
+    for expected in [
+        "alpha",
+        "beta",
+        "gamma",
+        "min",
+        "len",
+        "delta",
+        "os.environ.get",
+        "k.lower",
+        "items",
+        "make",
+        "handler",
+    ] {
+        assert!(calls.iter().any(|call| call == expected || call.ends_with(&format!(".{expected}")) || call == &format!(".{expected}")), "no {expected} call in {calls:?}");
+    }
+    assert!(deep_names.contains(&("handler".to_string(), facts::KIND_FUNCTION)), "an assigned lambda is a definition: {deep_names:?}");
+}
+
+#[test]
+#[ignore = "reads a tree outside this repository; set FACT_LOSS_DIR"]
+fn fact_loss_over_a_real_tree() {    let root = std::env::var_os("FACT_LOSS_DIR").map(PathBuf::from).unwrap_or_else(default_root);
+    assert!(root.is_dir(), "no tree at {}", root.display());
+    let (lexer, deep, tally, lossy, parsed) = walk_root(&root);
+    println!("\n== {} ==", root.display());
+    println!("parsed {parsed} files, {lossy} with a loss");
+    println!(
+        "lexer: symbols {} calls {} imports {}",
+        lexer.symbols, lexer.calls, lexer.imports
+    );
+    println!(
+        "deep:  symbols {} calls {} imports {}   (delta {} / {} / {})",
+        deep.symbols,
+        deep.calls,
+        deep.imports,
+        deep.symbols as i64 - lexer.symbols as i64,
+        deep.calls as i64 - lexer.calls as i64,
+        deep.imports as i64 - lexer.imports as i64,
+    );
+    println!(
+        "lost {} facts: grammar {} mapping {} resolution {} (accepted {} contract differences)",
+        tally.total(),
+        tally.grammar,
+        tally.mapping,
+        tally.resolution,
+        tally.accepted,
+    );
+    println!(
+        "guard: {} files would fall back (interpolation calls {}, lexer-phantom calls {}, events {}, other {})",
+        tally.guard_files,
+        tally.guard_interpolation,
+        tally.guard_phantom,
+        tally.guard_event,
+        tally.guard_other,
+    );
+}
