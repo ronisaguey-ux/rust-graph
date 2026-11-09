@@ -136,6 +136,7 @@ rust_graph_deep::grammar! { C {
         | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
         | &("extern" string) linkage_specification
         | &(IDENT _qualified_tail) macro_qualified_item
+        | &(IDENT parameter_list "{") implicit_function
         | declaration_statement
         | static_assert_statement
         | asm_statement
@@ -155,8 +156,12 @@ rust_graph_deep::grammar! { C {
     _qualified_tail:
         &(declaration_specifiers _declarator "{") function_definition
         | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
+        | &(IDENT parameter_list "{") implicit_function
         | declaration_statement
         | static_assert_statement,
+    /// A definition whose return type is supplied by the macro above it:
+    /// `PyMODINIT_FUNC ENTRY_FUNC_NAME(void) { ... }`.
+    implicit_function: IDENT parameter_list compound_statement,
 
     declaration_statement:
         &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
@@ -330,6 +335,7 @@ rust_graph_deep::grammar! { C {
         add: left "+" | "-" => binary_expression,
         mul: left "*" | "/" | "%" => binary_expression,
         unary: prefix "!" | "~" | "-" | "+" | "*" | "&" => unary_expression,
+        prefix "++" | "--" => update_expression,
         postfix "++" | "--" => update_expression,
         postfix arguments => call_expression,
         postfix subscript => subscript_expression,
@@ -339,6 +345,7 @@ rust_graph_deep::grammar! { C {
 
     _primary:
         &(cast_type) cast_expression
+        | &(user_cast_head (IDENT | NUMBER | STR | CHAR_LITERAL)) user_cast_expression
         | sizeof_expression
         | alignof_expression
         | parenthesized_expression
@@ -351,6 +358,12 @@ rust_graph_deep::grammar! { C {
     _member: IDENT,
     string: STR+,
     cast_expression: cast_type _expression@unary,
+    /// `(PyCFunction) f`: a cast to a typedef name. It is read as a cast only
+    /// when an operand that cannot be a binary operator follows, so `(a) * b`
+    /// stays a multiplication.
+    user_cast_expression: user_cast_head _expression@unary,
+    user_cast_head: "(" user_type_name ")",
+
     cast_type: "(" _cast_type_body ")",
     /// `(int *)`, `(struct s *)` and `(Foo *)`: a keyword type or a typedef name.
     _cast_type_body: type_name | _user_cast_type,
