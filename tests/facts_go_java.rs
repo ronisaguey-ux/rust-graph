@@ -60,8 +60,9 @@ fn owned(items: &[&str]) -> Vec<String> {
 fn the_tags_that_reach_the_cst_path_include_go_and_java() {
     assert_eq!(lang_for("GO"), Some(Lang::Go));
     assert_eq!(lang_for("JAVA"), Some(Lang::Java));
-    // The tags this file does not map still answer `None`: the lexer keeps them.
-    assert_eq!(lang_for("RS"), None);
+    // Rust gained a table after this file was written; the tags with no table
+    // still answer `None`, and the lexer keeps those files.
+    assert_eq!(lang_for("RS"), Some(Lang::Rust));
     assert_eq!(lang_for("C"), None);
 }
 
