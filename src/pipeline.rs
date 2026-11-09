@@ -1405,7 +1405,7 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
             deep.symbols.iter().find(|row| row.name == symbol.name && row.kind == symbol.kind)
         };
         let Some(paired) = paired else { continue };
-        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted) {
+        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted, src) {
             return verdict(Some("event"), detail, accepted);
         }
     }
@@ -1417,7 +1417,7 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
 /// acceptance counters are updated on the way past the same markers `loses`
 /// skips, so there is one implementation of the comparison.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts::Symbol, accepted: &mut Accepted) -> Option<String> {
+fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts::Symbol, accepted: &mut Accepted, src: &str) -> Option<String> {
     let keyword_lines: Vec<u32> = symbol
         .calls
         .iter()
@@ -1456,7 +1456,7 @@ fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts
         // statement is still in the CST's record, with the real name and the
         // same value, so the fact is there and only the invented binder is set
         // aside.
-        if annotation_targets(lexer, &want, &found) {
+        if annotation_targets(lexer, &want, &found) || type_as_target(src, &want, &found) {
             accepted.annotation_targets += 1;
             if let Some(at) = found.iter().position(|row| {
                 row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 && covers_value(&row.1, &want.1).is_ok()
@@ -1499,6 +1499,43 @@ fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts
 
 /// Whether a lexer assignment event names an imported type rather than a binder,
 /// and the CST wrote the same statement with a value that covers it.
+
+/// `var sentinelHandler Handler = noopHandler` — the one-pass lexer takes the
+/// last name before `=` as the binder, so it binds the *type*. The statement is
+/// in the CST's record with the real name and the same value, and the source
+/// line shows both names in that order. Nothing is lost; one binder was
+/// invented, and it is set aside here rather than forcing a fallback on every
+/// Go file that declares a typed variable.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn type_as_target(src: &str, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool {
+    if want.0 != b'a' || src.is_empty() {
+        return false;
+    }
+    let names = quoted_names(&want.1.targets);
+    if names.len() != 1 {
+        return false;
+    }
+    let Some(line) = src.lines().nth(want.1.line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    found.iter().any(|row| {
+        if row.0 != b'a' || (row.1.line as i64 - want.1.line as i64).abs() > 1 {
+            return false;
+        }
+        if row.1.targets == want.1.targets || covers_value(&row.1, &want.1).is_err() {
+            return false;
+        }
+        let deep = quoted_names(&row.1.targets);
+        let Some(deep) = deep.first() else { return false };
+        // The real binder is written first, the name the lexer bound later on
+        // the same line (the type), and the statement assigns something.
+        match (line.find(deep), line.find(&names[0])) {
+            (Some(at), Some(after)) => at < after && line[after..].contains('='),
+            _ => false,
+        }
+    })
+}
+
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn annotation_targets(lexer: &Facts, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool {
     if want.0 != b'a' {
@@ -1521,7 +1558,7 @@ fn annotation_targets(lexer: &Facts, want: &(u8, Shape), found: &[(u8, Shape)]) 
         row.0 == b'a'
             && (row.1.line as i64 - want.1.line as i64).abs() <= 1
             && row.1.targets != want.1.targets
-            && covers_value(&row.1, &want.1).is_ok()
+            && (covers_value(&row.1, &want.1).is_ok() || row.1.value == want.1.value)
     })
 }
 
@@ -1581,6 +1618,30 @@ enum Miss {
 /// set of names the statement binds, and a reader of the record is told which
 /// names by it. The CST reversing them is a difference this guard reports, not
 /// one it papers over.
+
+/// Two target lists name the same binders when they hold the same names, in any
+/// order. `for opcode, arg, pos := range xs` reaches the two readers as the same
+/// three names with different iteration order in one of them, and order carries
+/// no meaning in a binder list — the names do.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn same_targets(deep: &str, lexer: &str) -> bool {
+    if deep == lexer {
+        return true;
+    }
+    let split = |text: &str| -> Vec<String> {
+        let mut out = Vec::new();
+        atoms(text, &mut out);
+        out.retain(|atom| atom.starts_with("n:") || atom.starts_with("k:"));
+        out.sort_unstable();
+        out
+    };
+    let (left, right) = (split(deep), split(lexer));
+    // A list that yields no names is not evidence of equality: the lexer writes
+    // an unquoted binder (`["Dict"]`), and the atom reader only knows quoted
+    // names, so an empty parse must never make two different lists equal.
+    !left.is_empty() && left == right
+}
+
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn covers(deep: &Shape, lexer: &Shape) -> Result<(), Miss> {
     // A lexer statement and the CST node it sits on can disagree by a line (a
@@ -1590,7 +1651,7 @@ fn covers(deep: &Shape, lexer: &Shape) -> Result<(), Miss> {
     if (deep.line as i64 - lexer.line as i64).abs() > 1 {
         return Err(Miss::Line);
     }
-    if deep.targets != lexer.targets {
+    if !same_targets(&deep.targets, &lexer.targets) {
         return Err(Miss::Targets);
     }
     covers_value(deep, lexer)
