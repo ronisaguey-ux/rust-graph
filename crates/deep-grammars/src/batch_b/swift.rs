@@ -67,6 +67,20 @@ rust_graph_deep::grammar! { SWIFT {
     name = "swift";
     lex = lex;
 
+    /// A string's `\(...)` field is code again. `STRING_BODY` is the literal's
+    /// text frame; `INTERPOLATION` is pushed by the field's `\(` and popped by
+    /// the `)` that matches it at the field's own bracket depth, so a call
+    /// written in a field is an ordinary `call_expression` in the tree.
+    modes {
+        STRING_BODY = lex_string_text,
+        INTERPOLATION = lex_interpolation,
+    }
+    switch STRING_START => push STRING_BODY;
+    switch STRING_END => pop;
+    switch STRING_BAD => pop;
+    switch INTERP_OPEN => push INTERPOLATION;
+    switch INTERP_CLOSE => pop;
+
     tokens {
         LPAREN = "(" open parens,
         RPAREN = ")" close parens,
@@ -80,11 +94,24 @@ rust_graph_deep::grammar! { SWIFT {
         STRING = "string",
         /// A string or raw string with no end.
         BAD_LITERAL = "bad_literal" bad,
+        /// The opening quote (and `#`s) of a literal that has a field.
+        STRING_START = "string_start",
+        /// The literal's text between fields.
+        STRING_TEXT = "string_text",
+        /// The closing quote (and `#`s) of a literal with a field.
+        STRING_END = "string_end",
+        /// A literal that cannot close: its frame pops and the parser reports it.
+        STRING_BAD = "bad_string" bad,
+        /// `\(` (or `\#(` in a raw string): code again until the matching `)`.
+        INTERP_OPEN = "interpolation_open" open interpolation,
+        /// The `)` that matches an interpolation's `(`.
+        INTERP_CLOSE = "interpolation_close" close interpolation,
 
         KW_ACTOR = "actor",
         KW_ANY = "any",
         KW_AS = "as",
         KW_ASYNC = "async",
+        KW_ASSOCIATEDTYPE = "associatedtype",
         KW_AWAIT = "await",
         KW_BREAK = "break",
         KW_CASE = "case",
@@ -115,6 +142,7 @@ rust_graph_deep::grammar! { SWIFT {
         KW_RETHROWS = "rethrows",
         KW_RETURN = "return",
         KW_SELF = "self",
+        KW_SET = "set",
         KW_SOME = "some",
         KW_STRUCT = "struct",
         KW_SUBSCRIPT = "subscript",
@@ -196,6 +224,9 @@ rust_graph_deep::grammar! { SWIFT {
         /// A `>` right before another `>`: the first half of `>>`, `>>=`, or a
         /// generic argument list closing right before another.
         GT_JOINED = ">joined",
+        /// A `<` written right against the name before it: `Foo<Bar>`, not
+        /// `a < b`. The grammar reads it only where a type list can open.
+        GENERIC_LT = "<generic",
     }
 
     program: _statement*,
@@ -214,6 +245,8 @@ rust_graph_deep::grammar! { SWIFT {
         | &("deinit") deinitializer_declaration
         | &("import") import_declaration
         | &("typealias") typealias_declaration
+        | &("associatedtype") associated_type_declaration
+        | &(_name ":") labeled_statement
         | if_statement
         | guard_statement
         | while_statement
@@ -235,7 +268,12 @@ rust_graph_deep::grammar! { SWIFT {
     modifier:
         "public" | "private" | "fileprivate" | "internal" | "open" | "final" | "static"
         | "override" | "mutating" | "nonmutating" | "lazy" | "weak" | "unowned" | "required"
-        | "convenience" | "dynamic" | "indirect",
+        | "convenience" | "dynamic" | "indirect"
+        | "private" setter_arguments
+        | "fileprivate" setter_arguments
+        | "internal" setter_arguments,
+    /// `private(set)` and friends: the setter is narrower than the getter.
+    setter_arguments: "(" "set" ")",
     attribute: "@" _name [attribute_arguments],
     attribute_arguments: "(" (_expression %? ",") ")",
 
@@ -255,7 +293,10 @@ rust_graph_deep::grammar! { SWIFT {
     _type_member: enum_case_declaration | _statement,
     enum_case_declaration: "case" (_enum_case % ","),
     _enum_case: _name [enum_case_values],
-    enum_case_values: "(" (_type %? ",") ")",
+    enum_case_values: "(" (_enum_case_value %? ",") ")",
+    _enum_case_value: &(_name ":") labeled_enum_case_value | _type,
+    labeled_enum_case_value: _name ":" _type,
+    associated_type_declaration: "associatedtype" _name [":" _type] [where_clause],
 
     function_declaration: [declaration_modifiers] "func" _name [generic_parameters] parameter_clause ["async"] ["throws" | "rethrows"] ["->" _type] [where_clause] [(block | ";")],
     initializer_declaration: [declaration_modifiers] "init" ["?" | "!"] parameter_clause ["async"] ["throws"] [where_clause] (block | ";"),
@@ -265,12 +306,15 @@ rust_graph_deep::grammar! { SWIFT {
     parameter: simple_parameter | labeled_parameter,
     simple_parameter: _name ":" _type ["..."] ["=" _expression@assign],
     /// `label name: Type`: the label comes first and shadows nothing.
-    labeled_parameter: _name simple_parameter,
+    labeled_parameter: _argument_label simple_parameter,
     property_declaration: [declaration_modifiers] ("let" | "var") (_binding % ","),
-    _binding: _name [":" _type] [block | "=" _expression@assign],
+    /// A binding names one value or destructures a tuple: `let (a, b) = pair`.
+    _binding: _binding_target [":" _type] [block | "=" _expression@assign],
+    _binding_target: _name | parenthesized_expression,
 
-    generic_parameters: "<" (generic_parameter %? ",") _gt,
+    generic_parameters: _generic_open (generic_parameter %? ",") _gt,
     generic_parameter: _name [":" _type],
+    _generic_open: "<" | GENERIC_LT,
     _gt: ">" | GT_JOINED,
 
     // ---- statements ----
@@ -278,30 +322,44 @@ rust_graph_deep::grammar! { SWIFT {
     block: "{" _statement* "}",
     expression_statement: _expression,
 
-    if_statement: "if" _condition block [else_clause],
+    if_statement: "if" _condition_list block [else_clause],
     else_clause: "else" (if_statement | block),
-    guard_statement: "guard" _condition "else" block,
-    while_statement: "while" _condition block,
-    repeat_statement: "repeat" block "while" _condition,
-    for_statement: "for" _for_binding "in" _expression@nilco block,
-    _for_binding: [_for_owner] _name,
+    guard_statement: "guard" _condition_list "else" block,
+    while_statement: "while" _condition_list block,
+    repeat_statement: "repeat" block "while" _condition_list,
+    for_statement: "for" ["try"] ["await"] _for_binding "in" _expression@nilco ["where" _expression@nilco] block,
+    _for_binding: [_for_owner] _binding_target,
     _for_owner: "let" | "var",
-    _condition: binding_condition | _expression@nilco,
+    labeled_statement: _name ":" _statement,
+    _condition_list: _condition ("," _condition)*,
+    _condition: binding_condition | case_condition | _expression@nilco,
     /// `if let x = ...`, `guard var y = ...`: a binding, where the keyword tells
     /// it from a plain condition.
     binding_condition: ("let" | "var") condition_binding,
+    /// `if case let text as String = value`, `guard case .success(let x) = r`.
+    case_condition: "case" _pattern "=" _expression@nilco,
     /// A condition's binding stops before the block: its initializer is entered
     /// above the trailing-closure row, `if foo {` and `if let x = foo {` alike.
-    condition_binding: _name [":" _type] ["=" _expression@nilco],
+    condition_binding: _binding_target [":" _type] ["=" _expression@nilco],
 
     switch_statement: "switch" _expression@nilco switch_body,
     switch_body: "{" switch_case* "}",
-    switch_case: case_label ":" _statement*,
+    switch_case: case_label ["where" _expression@nilco] ":" _statement*,
     case_label: "case" (_pattern % ",") | "default",
-    _pattern: _expression@assign,
+    /// A pattern is an expression or a `let`/`var` destructuring; only case
+    /// labels and `case` conditions ask for one. A tuple pattern is a
+    /// parenthesized expression, which may hold nested `let`s.
+    _pattern: readonly_pattern | _expression@assign,
+    readonly_pattern: ("let" | "var") ["case"] pattern_binding,
+    pattern_binding: _name ["as" _type] | parenthesized_expression ["as" _type],
 
     do_statement: "do" block catch_clause*,
-    catch_clause: "catch" [_name] block,
+    /// `catch`, `catch let error`, `catch let error as E`, `catch E.case`.
+    /// A bare `{` is the clause's body, so a pattern rule never starts with one.
+    catch_clause: "catch" [_catch_binding] block,
+    _catch_binding: typed_catch_binding | catch_path,
+    typed_catch_binding: ("let" | "var") _name ["as" _type],
+    catch_path: _name ("." _name)*,
     defer_statement: "defer" block,
     return_statement: "return" [_expression],
     throw_statement: "throw" _expression,
@@ -340,19 +398,38 @@ rust_graph_deep::grammar! { SWIFT {
     _primary:
         NUMBER | FLOAT | STRING
         | "true" | "false" | "nil" | "self" | "super"
+        | &(_name GENERIC_LT) generic_specialization
         | _name
+        | string_literal
         | parenthesized_expression
         | collection_literal
         | closure
         | implicit_member_expression
         | key_path_expression,
 
+    /// `Endpoint<Item>(...)`: a type list written in expression position.
+    generic_specialization: _name (_generic_open (_type %? ",") _gt)+,
+    /// A literal with a field: its text and its `\(...)` expressions are
+    /// children, so a call written inside one is an ordinary `call_expression`.
+    string_literal: STRING_START _string_body STRING_END,
+    _string_body: (STRING_TEXT | interpolation)*,
+    interpolation: INTERP_OPEN _expression INTERP_CLOSE,
+
     _name: IDENT,
     _property: IDENT | "self" | "init" | "default" | "class",
-    parenthesized_expression: "(" _expression ")",
+    parenthesized_expression: "(" (_paren_item %? ",") ")",
+    _paren_item: readonly_item | _expression@assign,
+    /// `let value` inside a tuple pattern: a binding with no initialiser.
+    readonly_item: ("let" | "var") _name,
     arguments: "(" (_argument %? ",") ")",
-    _argument: &(_name ":") labeled_argument | _argument_value,
-    labeled_argument: _name ":" _argument_value,
+    _argument: &(_argument_label ":") labeled_argument | _argument_value,
+    /// Swift lets an external argument label be a keyword: `data(for: request)`.
+    _argument_label: _name | "for" | "in" | "where" | "case" | "default" | "if" | "else"
+        | "switch" | "func" | "class" | "struct" | "enum" | "protocol" | "extension"
+        | "import" | "return" | "while" | "do" | "catch" | "defer" | "guard" | "break"
+        | "continue" | "throw" | "try" | "as" | "is" | "nil" | "true" | "false" | "self"
+        | "super" | "static" | "private" | "public" | "init" | "subscript" | "typealias",
+    labeled_argument: _argument_label ":" _argument_value,
     _argument_value: ("let" | "var") _name | _expression@assign,
     subscript: "[" (_argument %? ",") "]",
     /// An array or dictionary literal: one node kind, because `[a: b]` and
@@ -360,22 +437,33 @@ rust_graph_deep::grammar! { SWIFT {
     /// group rule cannot look for before it opens the group.
     collection_literal: "[" [collection_body] "]",
     collection_body: ":" | _collection_items,
-    _collection_items: _collection_item ("," _collection_item)*,
-    _collection_item: &(_expression ":") pair_entry | _expression,
-    pair_entry: _expression ":" _expression,
+    _collection_items: _collection_item _collection_more*,
+    /// A separator and the element after it, or a trailing separator alone.
+    /// The bare comma is told from the pair by a predicate, because entering
+    /// the pair and finding no element would record a missing one.
+    _collection_more: &("," _collection_item) "," _collection_item | ",",
+    /// An element, or a `key: value` pair. One rule, because the `:` is one
+    /// token past what a three-token predicate can commit on.
+    _collection_item: _expression [":" _expression],
     implicit_member_expression: "." _property,
     key_path_expression: "\\" ("." _property | _name ("." _property)*),
-    closure: "{" [closure_signature] _statement* "}",
-    closure_signature:
-        &(_closure_parameter_list "in") _closure_parameter_list "in"
-        | &(_closure_parameter_name "in") _closure_parameter_name "in",
+    closure: "{" _closure_item* "}",
+    /// The head `(a, b) in` is told from the body by a predicate, so a body
+    /// that starts with a name (`{ $0 }`) is a statement, not a signature.
+    _closure_item: &(_closure_head "in") closure_signature | _statement,
+    closure_signature: _closure_head "in",
+    _closure_head: _closure_parameter_list | _closure_parameter_names,
     _closure_parameter_list: closure_parameter_group ["->" _type],
     closure_parameter_group: "(" (_name %? ",") ")",
+    _closure_parameter_names: _closure_parameter_name ("," _closure_parameter_name)*,
     _closure_parameter_name: _name ["->" _type],
 
     // ---- types ----
 
-    _type: _type_shape ["->" _type],
+    _type: [_type_attribute] _type_shape ["async"] ["throws"] ["->" _type],
+    /// A type attribute carries no arguments: `@escaping (Data) -> Void`'s
+    /// parentheses are the function type, not an argument list.
+    _type_attribute: "@" _name,
     _type_shape: [_type_modifier] _type_atom _type_suffix*,
     _type_modifier: "some" | "any" | "inout",
     _type_atom: _name | collection_type | tuple_type,
@@ -383,11 +471,17 @@ rust_graph_deep::grammar! { SWIFT {
     /// `[Int]` or `[String: Int]`: one rule, like the literal.
     collection_type: "[" _type [":" _type] "]",
     tuple_type: "(" (_type %? ",") ")",
-    type_arguments: "<" (_type %? ",") _gt,
+    type_arguments: _generic_open (_type %? ",") _gt,
 } }
 
 /// One token at the cursor.
 pub fn lex(c: &mut Cursor) -> Kind {
+    if c.pos() == 0 {
+        // A new file starts outside every string, and whatever state a parse
+        // that stopped inside one left behind is not this file's.
+        STRINGS.with(|frames| frames.borrow_mut().clear());
+        DEPTHS.with(|depths| depths.borrow_mut().clear());
+    }
     match c.peek() {
         b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
             c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
