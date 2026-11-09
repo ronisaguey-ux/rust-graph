@@ -63,6 +63,21 @@ rust_graph_deep::grammar! { RUBY {
     name = "ruby";
     lex = lex;
 
+    /// A double-quoted string or a backtick is text with `#{...}` fields, and a
+    /// field is code again. `BODY` is the text between fields; `FIELD` is the
+    /// code inside one, and it ends at the `}` that matches its own `#{` at the
+    /// field's bracket depth, so `"#{ {a: 1}[:a] }"` closes at its own brace
+    /// and a nested string opens its own frames.
+    modes {
+        BODY = lex_string_body,
+        FIELD = lex_interpolation,
+    }
+    switch STRING_START => push BODY;
+    switch STRING_END => pop;
+    switch BAD_STRING => pop BODY;
+    switch INTERPOLATION_START => push FIELD;
+    switch INTERPOLATION_END => pop;
+
     tokens {
         LPAREN = "(" open parens,
         RPAREN = ")" close parens,
@@ -82,6 +97,18 @@ rust_graph_deep::grammar! { RUBY {
         REGEX = "regex",
         /// A string, symbol, regex or heredoc with no end.
         BAD_LITERAL = "bad_literal" bad,
+        /// The opening quote of a string whose `#{...}` fields are code.
+        STRING_START = "string_start",
+        /// The bytes between two fields.
+        STRING_CONTENT = "string_content",
+        /// The `#{` that opens a field: code again until its own `}`.
+        INTERPOLATION_START = "#{" open interpolation,
+        /// The `}` that closes a field at the field's own bracket depth.
+        INTERPOLATION_END = "interpolation_end" close interpolation,
+        /// The closing quote of such a string.
+        STRING_END = "string_end",
+        /// A string that cannot close before the end of the file.
+        BAD_STRING = "bad_string" bad,
 
         KW_ALIAS = "alias",
         KW_BEGIN = "begin",
@@ -189,10 +216,13 @@ rust_graph_deep::grammar! { RUBY {
     program: _statement*,
 
     _statement:
-        require_statement
+        &(_left_target ",") multiple_assignment
+        | &(_name _command_argument ",") command_call
+        | require_statement
         | alias_statement
         | undef_statement
         | include_statement
+        | singleton_class_definition
         | module_definition
         | class_definition
         | method_definition
@@ -218,6 +248,8 @@ rust_graph_deep::grammar! { RUBY {
     undef_statement: "undef" (_alias_target % ","),
     include_statement: ("include" | "extend" | "prepend") _constant_path ("," _constant_path)*,
 
+    /// `class << self`: reopening the singleton class.
+    singleton_class_definition: "class" "<<" _expression body "end" _modifier*,
     module_definition: "module" _constant_path body "end" _modifier*,
     class_definition: "class" _constant_path ["<" _constant_path] body "end" _modifier*,
     method_definition: "def" method_name [parameters] body rescue_clause* [else_clause] [ensure_clause] "end" _modifier*,
@@ -268,6 +300,33 @@ rust_graph_deep::grammar! { RUBY {
     break_statement: "break" _modifier*,
     next_statement: "next" _modifier*,
     expression_statement: _expression _modifier*,
+
+    /// `a, b = 1, 2`, `a, *rest = xs`, `encoding, = split(:)`: one `=` with a
+    /// list on each side. The comma in the left list is what tells it apart
+    /// from a plain assignment, so the two rules cannot both match.
+    multiple_assignment: _left_list "=" _expression ("," _expression)*,
+    _left_list: _left_target ("," [_left_target])+,
+    _left_target: precedence _primary {
+        index: postfix subscript => element_reference,
+        member: postfix "." _property => member,
+        safe_member: postfix "&." _property => member,
+        scope: postfix "::" _property => scope,
+    },
+
+    /// A call without parentheses: `raise ArgumentError, "no"`, `load(a, **opts)`.
+    /// It takes the comma list as its arguments, which is what tells it apart
+    /// from two statements on one line; a single argument stays an ordinary
+    /// expression statement, which costs the tree a `call` node and no error.
+    command_call: _callable _command_arguments _modifier*,
+    _callable: _name ("." _property | "::" _property)*,
+    _command_arguments: _command_argument ("," _command_argument)+,
+    _command_argument:
+        splat_argument
+        | double_splat_argument
+        | block_argument
+        | &(_expression@bor "=>") arrow_pair
+        | &(_name ":") label_argument
+        | _expression,
 
     /// What follows a statement on its own line: `x if y`, `x while y`,
     /// `value rescue fallback`.
@@ -326,9 +385,14 @@ rust_graph_deep::grammar! { RUBY {
         | yield_expression
         | lambda
         | absolute_constant
+        | interpolated_string
         | "[]",
 
     _literal: NUMBER | STRING | SYMBOL | REGEX | "nil" | "true" | "false",
+    /// A double-quoted string or a backtick: its fields are expressions.
+    interpolated_string: STRING_START _string_body STRING_END,
+    _string_body: (STRING_CONTENT | interpolation)*,
+    interpolation: "#{" _expression INTERPOLATION_END,
     _name: IDENT,
     _variable: INSTANCE_VAR | CLASS_VAR | GLOBAL_VAR,
     super_call: "super" [arguments],
@@ -419,7 +483,8 @@ fn step(c: &mut Cursor) -> Kind {
                 operator(c)
             }
         }
-        b'"' | b'\'' | b'`' => string(c),
+        b'"' | b'`' => string_start(c),
+        b'\'' => string(c),
         b'%' if !ends_operand(c.previous()) && percent_delimiter(c.peek_at(1)) => percent_literal(c),
         b'<' if c.peek_at(1) == b'<' && !ends_operand(c.previous()) && heredoc_start(c) => heredoc(c),
         b'/' if c.peek_at(1) != b'=' && !ends_operand(c.previous()) => {
@@ -597,7 +662,26 @@ fn block_comment(c: &mut Cursor) {
     }
 }
 
-/// A string from its quote, with `#{...}` scanned whole in a double-quoted one.
+thread_local! {
+    /// The quotes of every string body the `BODY` mode is inside, innermost
+    /// last: a nested string in a field restores the outer one on the way out.
+    static STRING_QUOTES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// One frame per open `#{...}` field: the brackets opened inside it and how
+    /// many string bodies were open when it began, so a broken string abandons
+    /// every field it opened.
+    static FIELDS: std::cell::RefCell<Vec<Field>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// What one open interpolation field holds.
+#[derive(Clone, Copy)]
+struct Field {
+    /// Openers minus closers inside the field.
+    depth: u32,
+    /// The string the field was opened in, as the quote stack's depth.
+    string: usize,
+}
+
+/// A single-quoted string: no fields, one token.
 fn string(c: &mut Cursor) -> Kind {
     let quote = c.peek();
     c.bump();
@@ -605,11 +689,7 @@ fn string(c: &mut Cursor) -> Kind {
         match c.peek() {
             0 if c.at_end() => return BAD_LITERAL,
             b'\\' => c.bump_n(2),
-            b'\n' | b'\r' if quote == b'\'' || quote == b'`' => return BAD_LITERAL,
-            b'#' if quote == b'"' && c.peek_at(1) == b'{' => {
-                c.bump_n(2);
-                braces(c);
-            }
+            b'\n' | b'\r' if quote == b'\'' => return BAD_LITERAL,
             byte if byte == quote => {
                 c.bump();
                 return STRING;
@@ -619,33 +699,136 @@ fn string(c: &mut Cursor) -> Kind {
     }
 }
 
-/// The code of a `#{...}` field, up to its matching `}`, with strings and
-/// nested braces balanced. Never fails: an unclosed field runs to the end.
-fn braces(c: &mut Cursor) {
-    let mut depth = 1u32;
-    while !c.at_end() {
-        match c.peek() {
-            b'{' => {
-                depth += 1;
-                c.bump();
-            }
-            b'}' => {
-                depth -= 1;
-                c.bump();
-                if depth == 0 {
-                    return;
-                }
-            }
-            b'"' | b'\'' | b'`' => {
-                string(c);
-            }
-            b'#' if c.peek_at(1) == b'{' => {
-                c.bump_n(2);
-                braces(c);
-            }
-            _ => c.bump(),
+/// Whether a string that opens here has a closing quote anywhere before the
+/// end of the file. A quote that does not is lexed as one bad token at its
+/// line, so a broken string costs its line and the rest of the file still
+/// parses; a real multi-line string closes and takes the mode path.
+fn closes_later(c: &Cursor, quote: u8) -> bool {
+    let rest = c.rest();
+    let mut at = 1;
+    while at < rest.len() {
+        match rest[at] {
+            b'\\' => at += 2,
+            byte if byte == quote => return true,
+            _ => at += 1,
         }
     }
+    false
+}
+
+/// `"` or a backtick: the body is text with fields, so the mode stack takes
+/// over until the closing quote.
+fn string_start(c: &mut Cursor) -> Kind {
+    let quote = c.peek();
+    if !closes_later(c, quote) {
+        c.bump();
+        c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+        return BAD_LITERAL;
+    }
+    c.bump();
+    STRING_QUOTES.with(|quotes| quotes.borrow_mut().push(quote));
+    STRING_START
+}
+
+fn pop_string() {
+    STRING_QUOTES.with(|quotes| {
+        quotes.borrow_mut().pop();
+    });
+}
+
+fn open_field() {
+    let string = STRING_QUOTES.with(|quotes| quotes.borrow().len());
+    FIELDS.with(|fields| fields.borrow_mut().push(Field { depth: 0, string }));
+}
+
+fn close_field() {
+    FIELDS.with(|fields| {
+        fields.borrow_mut().pop();
+    });
+}
+
+/// A string that cannot close ends here: the fields it opened lose their
+/// frames and the mode stack pops through `BODY` on the one bad token.
+fn abandon_string() {
+    let string = STRING_QUOTES.with(|quotes| quotes.borrow().len());
+    FIELDS.with(|fields| {
+        let mut fields = fields.borrow_mut();
+        while fields.last().is_some_and(|field| field.string >= string) {
+            fields.pop();
+        }
+    });
+    pop_string();
+}
+
+fn with_field(change: impl FnOnce(&mut Field)) {
+    FIELDS.with(|fields| {
+        if let Some(field) = fields.borrow_mut().last_mut() {
+            change(field);
+        }
+    });
+}
+
+/// The `BODY` mode: the text of a string, with one `#{` opening a field and the
+/// quote closing the string. Never fails on an unbalanced field: the field's
+/// own `}` is the one at its bracket depth.
+pub fn lex_string_body(c: &mut Cursor) -> Kind {
+    if c.at_end() {
+        abandon_string();
+        return BAD_STRING;
+    }
+    let Some(quote) = STRING_QUOTES.with(|quotes| quotes.borrow().last().copied()) else {
+        // The mode stack and this state disagree: lex code, which cannot lose
+        // a token, and let the parser recover.
+        return step(c);
+    };
+    if c.peek() == quote {
+        c.bump();
+        pop_string();
+        return STRING_END;
+    }
+    if c.peek() == b'#' && c.peek_at(1) == b'{' {
+        c.bump_n(2);
+        open_field();
+        return INTERPOLATION_START;
+    }
+    loop {
+        if c.at_end() {
+            return STRING_CONTENT;
+        }
+        let byte = c.peek();
+        if byte == quote || (byte == b'#' && c.peek_at(1) == b'{') {
+            return STRING_CONTENT;
+        }
+        if byte == b'\\' {
+            c.bump_n(2);
+        } else {
+            c.bump();
+        }
+    }
+}
+
+/// The `FIELD` mode: ordinary code, except that a `}` at the field's own depth
+/// closes it. Deeper, a brace belongs to a hash or a block and is `lex`'s.
+pub fn lex_interpolation(c: &mut Cursor) -> Kind {
+    let Some(field) = FIELDS.with(|fields| fields.borrow().last().copied()) else {
+        return step(c);
+    };
+    if c.at_end() {
+        abandon_string();
+        return BAD_STRING;
+    }
+    if field.depth == 0 && c.peek() == b'}' {
+        c.bump();
+        close_field();
+        return INTERPOLATION_END;
+    }
+    let kind = lex(c);
+    match kind {
+        LPAREN | LBRACKET | LBRACE => with_field(|field| field.depth += 1),
+        RPAREN | RBRACKET | RBRACE => with_field(|field| field.depth = field.depth.saturating_sub(1)),
+        _ => {}
+    }
+    kind
 }
 
 fn percent_delimiter(byte: u8) -> bool {
