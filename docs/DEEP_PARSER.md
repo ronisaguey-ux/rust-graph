@@ -301,8 +301,8 @@ Limits, explicitly:
    pair, then rules; the first rule is the root. Write the hand lexer in the same
    file. The DSL is documented in `crates/rust-graph-deep/src/lib.rs`; what it
    cannot express is listed in `crates/deep-grammars/README.md` §"What the DSL
-   could not express" (layout is runtime; no f-string fields; a choice sees one
-   to three tokens; one kind per rule).
+   could not express" (layout is runtime; a mode stack a token drives, not the
+   parser; a choice sees one to three tokens; one kind per rule).
 2. **Register it** in `crates/deep-grammars/src/lib.rs` (`pub mod <language>;`)
    and, for batches, in the batch `mod.rs`.
 3. **Add fixtures**: `crates/deep-grammars/fixtures/<language>/` with real-shaped
