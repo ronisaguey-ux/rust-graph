@@ -201,6 +201,23 @@ fn same_call(a: &(String, u32), b: &(String, u32)) -> bool {
     last_component(&a.0) == last_component(&b.0)
 }
 
+/// A line that opens a triple-quoted formatted string and does not close it on
+/// the same line. Every interpolation inside it is seeded with this line by the
+/// one-pass lexer's nested lexer, so a call on a later line is stamped here.
+fn opens_multiline_fstring(line: &str) -> bool {
+    ["\"\"\"", "'''"].iter().any(|quote| match line.find(quote) {
+        Some(at) => {
+            let prefix = line[..at].rsplit(|ch: char| !ch.is_ascii_alphabetic()).next().unwrap_or("");
+            let prefix = prefix.to_ascii_lowercase();
+            !prefix.is_empty()
+                && prefix.contains('f')
+                && prefix.chars().all(|ch| matches!(ch, 'f' | 'r' | 'b' | 'u'))
+                && !line[at + 3..].contains(quote)
+        }
+        None => false,
+    })
+}
+
 /// `find(id: K): Promise<T | null>;` inside an interface: a declaration, not a
 /// call, but the one-pass lexer sees `name(` and files a call.
 fn looks_like_signature(line: &str, name: &str) -> bool {
@@ -242,6 +259,9 @@ fn category(name: &'static str) -> &'static str {
         }
         "lexer-receiver-concatenation" => {
             "the lexer builds a call path by concatenating a call expression with its member (`BeautifulSoup().find_all`); the CST emits the two calls it really is (right)"
+        }
+        "lexer-string-line" => {
+            "the one-pass lexer stamps every call inside a formatted string with the string's opening line, because it hands the interpolation to a nested lexer seeded with that line; the CST reads the expression's own line (right)"
         }
         "lexer-signature-as-call" => "the lexer files an interface method signature as a call; the CST knows it is a declaration (right)",
         "lexer-definition-as-call" => "the lexer files a definition as a call; the CST opens a symbol (right)",
@@ -329,6 +349,15 @@ fn classify(report: &mut Report, src: &str) -> Vec<(&'static str, String)> {
         if looks_like_signature(line, &call.0) {
             out.push(("lexer-signature-as-call", format!("{}|{}", call.0, call.1)));
             continue;
+        }
+        // The same call, on the line its string opened: the lexer's nested
+        // lexer is seeded with the string's line, not the expression's.
+        if opens_multiline_fstring(line) {
+            if let Some(at) = deep_calls.iter().position(|deep| same_call(deep, &call) && deep.1 > call.1) {
+                deep_calls.remove(at);
+                out.push(("lexer-string-line", format!("{}|{}", call.0, call.1)));
+                continue;
+            }
         }
         if let Some(at) = deep_calls.iter().position(|deep| same_call(deep, &call) && (deep.1 as i64 - call.1 as i64).abs() <= 1) {
             deep_calls.remove(at);
@@ -419,13 +448,14 @@ fn deep_facts_every_disagreement_is_explained() {
 fn deep_facts_the_fixtures_the_mapping_owns_agree_exactly() {
     // Python has no template strings and no interface bodies, so the two paths
     // must not differ at all except where the lexer concatenates a call
-    // receiver into a path.
+    // receiver into a path, or stamps a call inside a multi-line f-string with
+    // the string's opening line (both are the lexer being less precise).
     let mut differences = Vec::new();
     for path in fixtures("python") {
         let src = fs::read_to_string(&path).expect("fixture");
         let mut report = compare(&path);
         for (kind, detail) in classify(&mut report, &src) {
-            if kind != "cst-call" && kind != "cst-receiver-less" && kind != "lexer-receiver-concatenation" {
+            if kind != "cst-call" && kind != "cst-receiver-less" && kind != "lexer-receiver-concatenation" && kind != "lexer-string-line" {
                 differences.push(format!("{}: {kind} {detail}", path.display()));
             }
         }

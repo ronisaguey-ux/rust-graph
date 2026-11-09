@@ -1431,8 +1431,35 @@ impl<'a> Walker<'a> {
                 Some(body) => self.form(body),
                 None => "0".to_string(),
             },
+            // `f"{a(x)} b{c(y)}"`: the text is not a value, but each field's
+            // expression is, and the one-pass lexer's string reader forms the
+            // same merge of them. So a call written in a field is a fact on
+            // both paths, and a field with no call saves nothing to compare.
+            "f_string" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.kind(child) != "interpolation" {
+                        continue;
+                    }
+                    // `{x!r:>{w}}` holds one expression; the conversion and the
+                    // format spec are text, and their nested fields are
+                    // `interpolation` nodes of their own, so they are reached
+                    // from the spec, not from here.
+                    let value = self.children(child).into_iter().find(|&part| {
+                        !self.is_layout(part) && self.node(part).first_child != NONE && self.kind(part) != "interpolation"
+                    });
+                    if let Some(value) = value {
+                        parts.push(self.form(value));
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             "string" | "string_literal" | "template_string" | "number" | "integer" | "float" | "true" | "false"
-            | "none" | "null" | "undefined" | "regex" | "comment" | "f_string" => "0".to_string(),
+            | "none" | "null" | "undefined" | "regex" | "comment" => "0".to_string(),
             // A keyword reused as an identifier (`match`, `type`, `case`)
             // carries that keyword as its kind; the spelling is the name.
             _ if self.leaf_name(id).is_some() => {
