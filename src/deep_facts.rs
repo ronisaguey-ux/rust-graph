@@ -367,6 +367,24 @@ impl<'a> Walker<'a> {
         events.push_str(text);
     }
 
+    /// True when `id` is a call whose own callee is a name, so that the call it
+    /// records is the value the expression produces: `A()`, `new Foo()`,
+    /// `a.b()`. `f()()` records only `f`, and that value is what gets called,
+    /// not what the expression produces.
+    fn named_call(&self, id: u32) -> bool {
+        if !matches!(self.kind(id), "call" | "call_expression" | "new_expression") {
+            return false;
+        }
+        match self.children(id).into_iter().find(|&child| {
+            !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")")
+        }) {
+            Some(callee) => {
+                callee != id && !matches!(self.kind(callee), "call" | "call_expression" | "new_expression")
+            }
+            None => false,
+        }
+    }
+
     fn push_call(&mut self, path: String, line: u32) -> usize {
         let symbol = self.frame().symbol;
         let calls = &mut self.facts.symbols[symbol].calls;
@@ -1506,6 +1524,14 @@ impl<'a> Walker<'a> {
     }
 
     fn call_form(&mut self, id: u32) -> String {
+        self.call_form_link(id).0
+    }
+
+    /// A call's form, and — when the callee is a name — the index it was
+    /// recorded under together with the receiver it is called on, so the call
+    /// above it can name its receiver without guessing: `A().run` links `.run`
+    /// to `(0, "0")`, the call `A`.
+    fn call_form_link(&mut self, id: u32) -> (String, Option<(u32, String)>) {
         let children = self.children(id);
         let is_new = self.kind(id) == "new_expression";
         let callee = children
@@ -1523,14 +1549,28 @@ impl<'a> Walker<'a> {
             if let Some(list) = children.iter().copied().find(|&child| matches!(self.kind(child), "argument_list" | "arguments")) {
                 self.arguments(list);
             }
-            return inner;
+            return (inner, None);
         }
-        // `f().g()`: the receiver is a call, and it is a fact of its own.
+        // `f().g()`: the receiver is a call, and it is a fact of its own. The
+        // call's own index and receiver go in the slot above it, so the record
+        // says which call produced the receiver: `A().run` records `A`, `.run`
+        // and the link between them. The calls array alone cannot say it — in
+        // `TaintAnalyzer(a, b(), c).run()` the argument `b()` is recorded
+        // between the two — and the path keeps the name the source spells.
+        let mut receiver_call = None;
         if matches!(self.kind(callee), "attribute" | "member_expression") {
             if let Some(&object) = self.children(callee).first() {
-                // `new URL(x).toString()`, `[...xs].filter(f)`: the receiver is
-                // an expression that may hold calls of its own.
-                self.form(object);
+                if self.named_call(object) {
+                    // `new URL(x).toString()`, `A().b()`, `A().b().c()`: a
+                    // receiver that is a call the walk records, whose own
+                    // receiver is carried along so a chain stays readable one
+                    // call at a time.
+                    receiver_call = self.call_form_link(object).1;
+                } else {
+                    // `[...xs].filter(f)`, `handlers[k](x)`: any expression,
+                    // whose calls are facts of their own.
+                    self.form(object);
+                }
             }
         } else if !matches!(self.kind(callee), "identifier" | "property_identifier" | "type_identifier") {
             // `(_SockFilter * len(filters))(*filters)`, `handlers[k](x)` and
@@ -1538,7 +1578,7 @@ impl<'a> Walker<'a> {
             // the calls inside it are facts. A name has none, so it is skipped.
             self.form(callee);
         }
-        let (path, receiver) = self.call_target(callee);
+        let (path, receiver) = self.call_target(callee, receiver_call);
         let line = self.call_line(callee, id);
         let index = self.push_call(path, line);
         let args = children
@@ -1552,12 +1592,14 @@ impl<'a> Walker<'a> {
         }
         out.push(']');
         let _ = is_new;
-        out
+        let link = (index as u32, receiver);
+        (out, Some(link))
     }
 
     /// The called path and the receiver form: `f(x)` -> (`f`, `0`),
-    /// `a.b.c(x)` -> (`a.b.c`, `["n","a.b"]`).
-    fn call_target(&self, callee: u32) -> (String, String) {
+    /// `a.b.c(x)` -> (`a.b.c`, `["n","a.b"]`), `A().b()` -> (`.b`,
+    /// `["c",0,0,[]]`) with the index of the `A` call the walk recorded.
+    fn call_target(&self, callee: u32, receiver_call: Option<(u32, String)>) -> (String, String) {
         match self.kind(callee) {
             "attribute" | "member_expression" => {
                 let children = self.children(callee);
@@ -1569,13 +1611,16 @@ impl<'a> Walker<'a> {
                 } else {
                     format!("{receiver_path}.{name}")
                 };
-                let receiver = if receiver_path.is_empty() {
-                    "0".to_string()
-                } else {
+                let receiver = if !receiver_path.is_empty() {
                     let mut out = "[\"n\",".to_string();
                     push_string(&mut out, &receiver_path);
                     out.push(']');
                     out
+                } else {
+                    match receiver_call {
+                        Some((index, inner)) => format!("[\"c\",{index},{inner},[]]"),
+                        None => "0".to_string(),
+                    }
                 };
                 (path, receiver)
             }
@@ -1591,7 +1636,7 @@ impl<'a> Walker<'a> {
                 });
                 match inner {
                     Some(inner) => {
-                        let (path, _) = self.call_target(inner);
+                        let (path, _) = self.call_target(inner, None);
                         (path, "0".to_string())
                     }
                     None => (String::new(), "0".to_string()),
