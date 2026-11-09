@@ -844,3 +844,295 @@ fn parens_ahead(c: &Cursor) -> bool {
 
 /// The `STRING` mode's step: text between expansions, one expansion, or the
 /// closing quote.
+pub fn lex_string_text(c: &mut Cursor) -> Kind {
+    if top_kind() != Some(FrameKind::String) {
+        // The mode stack and this stack disagree; lexing code cannot lose a
+        // token, and the parser still gets a tree.
+        return lex_sh(c);
+    }
+    if c.at_end() {
+        pop_frame();
+        return STRING_CLOSE;
+    }
+    match c.peek() {
+        b'"' => {
+            c.bump();
+            pop_frame();
+            STRING_CLOSE
+        }
+        b'`' => {
+            c.bump();
+            push_frame(FrameKind::Backtick);
+            BACKTICK_OPEN
+        }
+        b'$' if c.peek_at(1) == b'(' && c.peek_at(2) == b'(' => open_arithmetic(c, 3, 2),
+        b'$' if c.peek_at(1) == b'(' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Substitution);
+            SUBST_OPEN
+        }
+        b'$' if c.peek_at(1) == b'{' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Parameter);
+            PARAMETER_OPEN
+        }
+        b'$' if dollar_starts(c) => variable(c),
+        _ => string_text(c),
+    }
+}
+
+/// The bytes of a string between its expansions. A backslash escapes the next
+/// byte, so `\"` does not close it.
+fn string_text(c: &mut Cursor) -> Kind {
+    let start = c.pos();
+    while !c.at_end() {
+        match c.peek() {
+            b'"' => break,
+            b'`' => break,
+            b'\\' => c.bump_n(2),
+            b'$' if dollar_starts(c) => break,
+            _ => c.bump_char(),
+        }
+    }
+    if c.pos() == start {
+        // A `$` the checks above did not take: consume it so the mode advances.
+        c.bump_char();
+    }
+    STRING_TEXT
+}
+
+/// The `HEREDOC` mode's step: one line of the body, one expansion, or the
+/// delimiter line that ends it.
+pub fn lex_heredoc_body(c: &mut Cursor) -> Kind {
+    let Some(frame) = with_frames(|frames| frames.last().filter(|frame| frame.kind == FrameKind::Heredoc).map(|frame| (frame.delimiter.clone(), frame.strip_tabs, frame.expand))) else {
+        return lex_sh(c);
+    };
+    let (delimiter, strip_tabs, expand) = frame;
+    if c.at_end() {
+        pop_frame();
+        return HEREDOC_END;
+    }
+    if delimiter_line(c, &delimiter, strip_tabs) {
+        consume_line(c);
+        pop_frame();
+        // Another body opened on the same line: its text follows immediately,
+        // in the same mode.
+        if next_body() {
+            return HEREDOC_END_MORE;
+        }
+        return HEREDOC_END;
+    }
+    if expand {
+        match c.peek() {
+            b'`' => {
+                c.bump();
+                push_frame(FrameKind::Backtick);
+                return BACKTICK_OPEN;
+            }
+            b'$' if c.peek_at(1) == b'(' && c.peek_at(2) == b'(' => return open_arithmetic(c, 3, 2),
+            b'$' if c.peek_at(1) == b'(' => {
+                c.bump_n(2);
+                push_frame(FrameKind::Substitution);
+                return SUBST_OPEN;
+            }
+            b'$' if c.peek_at(1) == b'{' => {
+                c.bump_n(2);
+                push_frame(FrameKind::Parameter);
+                return PARAMETER_OPEN;
+            }
+            b'$' if dollar_starts(c) => {
+                variable(c);
+                return VARIABLE;
+            }
+            _ => {}
+        }
+    }
+    // One line, up to the next expansion or the line end. Keeping the token on
+    // the line is what lets the delimiter be recognised at a line start.
+    let start = c.pos();
+    while !c.at_end() {
+        match c.peek() {
+            b'\n' => {
+                c.bump();
+                break;
+            }
+            b'`' if expand => break,
+            b'$' if expand && dollar_starts(c) => break,
+            _ => c.bump_char(),
+        }
+    }
+    if c.pos() == start {
+        c.bump_char();
+    }
+    HEREDOC_TEXT
+}
+
+/// Whether the cursor is at a line that is the delimiter of this body.
+fn delimiter_line(c: &Cursor, delimiter: &[u8], strip_tabs: bool) -> bool {
+    if c.pos() != 0 && c.behind(1) != b'\n' {
+        return false;
+    }
+    let mut at = 0;
+    if strip_tabs {
+        while c.peek_at(at) == b'\t' {
+            at += 1;
+        }
+    }
+    for &byte in delimiter {
+        if c.peek_at(at) != byte {
+            return false;
+        }
+        at += 1;
+    }
+    matches!(c.peek_at(at), b'\n' | b'\r' | 0)
+}
+
+/// The delimiter line, with its line break: the body's last token.
+fn consume_line(c: &mut Cursor) {
+    c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+    c.eat(b'\r');
+    c.eat(b'\n');
+}
+
+/// Start the next queued body, if the line opened more than one.
+fn next_body() -> bool {
+    PENDING.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if pending.is_empty() {
+            return false;
+        }
+        let frame = pending.remove(0);
+        with_frames(|frames| frames.push(frame));
+        true
+    })
+}
+
+/// The `PARAMETER` mode's step: the text of `${...}`, a nested expansion, or the
+/// `}` that closes it.
+pub fn lex_parameter(c: &mut Cursor) -> Kind {
+    if top_kind() != Some(FrameKind::Parameter) {
+        return lex_sh(c);
+    }
+    if c.at_end() {
+        pop_frame();
+        return PARAMETER_TEXT;
+    }
+    match c.peek() {
+        b'}' => {
+            c.bump();
+            pop_frame();
+            PARAMETER_CLOSE
+        }
+        b'`' => {
+            c.bump();
+            push_frame(FrameKind::Backtick);
+            BACKTICK_OPEN
+        }
+        b'$' if c.peek_at(1) == b'(' && c.peek_at(2) == b'(' => open_arithmetic(c, 3, 2),
+        b'$' if c.peek_at(1) == b'(' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Substitution);
+            SUBST_OPEN
+        }
+        b'$' if c.peek_at(1) == b'{' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Parameter);
+            PARAMETER_OPEN
+        }
+        b'$' if dollar_starts(c) => {
+            variable(c);
+            VARIABLE
+        }
+        _ => {
+            let start = c.pos();
+            while !c.at_end() {
+                match c.peek() {
+                    b'}' => break,
+                    b'`' => break,
+                    b'$' if dollar_starts(c) => break,
+                    _ => c.bump_char(),
+                }
+            }
+            if c.pos() == start {
+                c.bump_char();
+            }
+            PARAMETER_TEXT
+        }
+    }
+}
+
+/// The `ARITHMETIC` mode's step: the balanced text, then the `))`.
+pub fn lex_arithmetic(c: &mut Cursor) -> Kind {
+    if top_kind() != Some(FrameKind::Arithmetic) {
+        return lex_sh(c);
+    }
+    if c.at_end() {
+        pop_frame();
+        return ARITHMETIC_BAD;
+    }
+    if c.peek() == b')' && c.peek_at(1) == b')' {
+        c.bump_n(2);
+        pop_frame();
+        return ARITHMETIC_CLOSE;
+    }
+    // The text, up to the `))` that balances the opener. A `(` opens one more
+    // and a `)` closes one; the pair that would close the whole expression is
+    // left for the next step, so one token always advances.
+    let mut depth = top_depth();
+    let start = c.pos();
+    while !c.at_end() {
+        if c.peek() == b')' && c.peek_at(1) == b')' && depth <= 2 {
+            break;
+        }
+        match c.peek() {
+            b'(' => {
+                depth += 1;
+                c.bump();
+            }
+            b')' => {
+                if depth > 2 {
+                    depth -= 1;
+                }
+                c.bump();
+            }
+            _ => c.bump_char(),
+        }
+    }
+    if c.pos() == start {
+        c.bump_char();
+    }
+    ARITHMETIC_TEXT
+}
+
+/// The `TEST` mode's step: `[[ ... ]]` with `<`, `>` and `=` as operators.
+pub fn lex_test(c: &mut Cursor) -> Kind {
+    if top_kind() != Some(FrameKind::Test) {
+        return lex_sh(c);
+    }
+    if c.starts_with(b"]]") {
+        c.bump_n(2);
+        pop_frame();
+        return TEST_CLOSE;
+    }
+    match c.peek() {
+        b'<' | b'>' | b'=' => {
+            c.bump();
+            if c.peek() == b'=' {
+                c.bump();
+            }
+            if c.peek() == b'~' {
+                c.bump();
+            }
+            TEST_OPERATOR
+        }
+        b'!' if c.peek_at(1) == b'=' => {
+            c.bump_n(2);
+            if c.peek() == b'~' {
+                c.bump();
+            }
+            TEST_OPERATOR
+        }
+        _ => lex_sh(c),
+    }
+}
+
