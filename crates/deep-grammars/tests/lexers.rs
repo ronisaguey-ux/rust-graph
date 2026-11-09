@@ -45,13 +45,30 @@ fn python_string_prefixes_are_one_token() {
         assert_eq!(significant(&PYTHON, src), ["identifier", "=", "string_literal", "newline"], "{src:?}");
         assert_eq!(class_of(&PYTHON, src.trim_start_matches("x = ")), Class::Token);
     }
-    // An f-string is not one token: its opening quotes, each `{...}` field and
-    // its closing quotes are tokens, so a field has a span a reader can slice.
-    // The field includes its conversion and format spec, `{w}` and all.
+    // An f-string is not one token: its quotes, the braces of each field, the
+    // code between them and the bytes of a format spec are tokens of their own,
+    // so the expression in a field is lexed as code and parsed. `{a!r:>{w}}`
+    // is a field around `a`, a conversion, a spec, and one nested field.
     let src = r#"x = f"{a!r:>{w}}""#;
     assert_eq!(
         significant(&PYTHON, src),
-        ["identifier", "=", "fstring_start", "fstring_field", "fstring_end", "newline"],
+        [
+            "identifier",
+            "=",
+            "fstring_start",
+            "fstring_field_open",
+            "identifier",
+            "!",
+            "identifier",
+            ":",
+            "fstring_spec_text",
+            "fstring_field_open",
+            "identifier",
+            "fstring_field_close",
+            "fstring_field_close",
+            "fstring_end",
+            "newline",
+        ],
         "{src:?}"
     );
     assert_eq!(class_of(&PYTHON, src.trim_start_matches("x = ")), Class::Token);

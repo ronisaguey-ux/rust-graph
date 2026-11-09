@@ -118,12 +118,17 @@ worked around in the hand lexer rather than by inventing syntax.
    written in the DSL; `layout = NEWLINE INDENT DEDENT;` names three tokens the
    runtime lexer infers, and the rules consume them (`INDENT ... DEDENT`).
    Without that setting Python could not be described at all.
-2. **No lexer states or modes.** Context-sensitive tokens — JS regex versus
-   division, JSX versus `<T>`, `>` `>` versus `>>` — are all decided inside one
-   `fn(&mut Cursor) -> Kind` from `Cursor::previous`, and template/JSX bodies
-   are scanned by that function with a private brace counter. There is no way
-   for the parser to drive a mode stack (no external scanner), which is also
-   why an f-string's `${}` fields stay opaque.
+2. **A mode is coarse, and the parser cannot drive one.** `modes`/`switch`
+   gives the step lexer a stack of steps that a *token* pushes and pops, which
+   is enough for a Python f-string (text, then code in a field, then text) and a
+   heredoc, but there is no external scanner: the parser cannot ask for a mode
+   at a parse position. Context-sensitive tokens that depend on the previous
+   token — JS regex versus division, JSX versus `<T>`, `>` `>` versus `>>` —
+   are still decided inside one `fn(&mut Cursor) -> Kind` from
+   `Cursor::previous`, and template/JSX bodies are scanned by that function
+   with a private brace counter. That is why a JavaScript template literal's
+   `${...}` is one token and its expression is not a subtree, while a Python
+   f-string's field is.
 3. **A decision sees at most three tokens.** `(a, b) =>`, `f<T>(x)` and
    `for (x of y)` are entered via `&(...)` predicates; there is no arbitrary
    lookahead and no conflict priority other than alternative order. A construct
