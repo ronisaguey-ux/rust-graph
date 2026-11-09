@@ -6,11 +6,13 @@
 //! then imports) and an exact tie goes to the CST and says so. `--compare` is
 //! the audit that shows both sides per file without choosing.
 //!
-//! The fixture is measured, not assumed: the two `deep_more` files are wins the
-//! CST finds on the import line (`from a.b import c, d` and `import os.path as
-//! p`), `lossy.py` is a star import the CST's tables do not carry, `tie.py` is
-//! one function with nothing to differ on, and `plain.c` has no CST at all. The
-//! expected counters in the tests are the values this fixture produces.
+//! The fixture is measured, not assumed: `deep_more.ts` is a win the CST finds
+//! on a generic call (`g<number>(x)`, which the one-pass lexer does not record),
+//! `lossy.py` holds a call inside an f-string field the CST's tables still
+//! cannot see, `tie.py` is one function with nothing to differ on, and
+//! `plain.c` has no CST at all. Python now agrees on everything else measured
+//! here, so the split no longer comes from import lists. The expected counters
+//! in the tests are the values this fixture produces.
 #![cfg(all(feature = "deep", feature = "parser"))]
 
 use std::fs;
@@ -20,13 +22,11 @@ use std::process::{Command, Output};
 const BIN: &str = env!("CARGO_BIN_EXE_rust-graph");
 
 const FIXTURE: &[(&str, &str)] = &[
-    // The CST reads both names of a multi-name `from` import; the lexer one.
-    ("deep_more.py", "from a.b import c, d\nfrom a.b import e as f\n\n\ndef g():\n    return c(d, f, e)\n"),
-    // The CST keeps `os.path` and the alias; the lexer one row.
-    ("deep_alias.py", "import os.path as p\n\n\ndef f():\n    return p.join(\"a\", \"b\")\n"),
-    // `from helpers import *`, a tuple assignment and an f-string: shapes the
-    // CST's tables do not cover, so the guard keeps the lexer's record.
-    ("lossy.py", "from helpers import *\n\n\ndef f(x):\n    a, b = g(x), 1\n    return f\"{a}\"\n"),
+    // The CST reads the call behind the type arguments; the lexer stops there.
+    ("deep_more.ts", "import { a, b } from \"./m\";\n\nconst x: number = f(1);\nexport const y = g<number>(x);\n"),
+    // An f-string field is a span, not a subtree, so a call inside it is a fact
+    // only the lexer's record carries; the guard keeps that record.
+    ("lossy.py", "def f(x):\n    return f\"{g(x)}\"\n"),
     // Nothing to differ on: both records weigh the same.
     ("tie.py", "def f(x):\n    return x\n"),
     // No deep parser for C: the lexer stands alone and is not a comparison.
@@ -76,16 +76,16 @@ fn the_paths_object_counts_candidates_and_choices() {
     let tree = Tree::new("counts");
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
-    // Four files had a CST record to weigh, one did not. Three records were the
-    // CST's (two strict wins and one tie), two the lexer's (the lost-fact file
+    // Three files had a CST record to weigh, one did not. Two records were the
+    // CST's (the strict win and the tie), two the lexer's (the lost-fact file
     // and the language with no CST). The totals agree with the rows below.
     assert!(
-        json.contains(r#""paths":{"deep":4,"lexer":1,"chosen_deep":3,"chosen_lexer":2}"#),
+        json.contains(r#""paths":{"deep":3,"lexer":1,"chosen_deep":2,"chosen_lexer":2}"#),
         "the paths object does not match the fixture: {json}"
     );
     // `deep` and `lexer` in the older object still count the emitted record, so
     // the two summaries cannot disagree.
-    assert!(json.contains(r#""deep":{"mode":"auto","deep":3,"lexer":2,"fallbacks":1}"#), "{json}");
+    assert!(json.contains(r#""deep":{"mode":"auto","deep":2,"lexer":2,"fallbacks":1}"#), "{json}");
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn a_strict_win_goes_to_the_cst_and_says_which_count_won() {
     let tree = Tree::new("strict");
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
-    for path in ["deep_more.py", "deep_alias.py"] {
+    for path in ["deep_more.ts"] {
         let row = source_row(&json, path);
         assert!(row.contains("\"path_choice\":\"deep:more\""), "{path}: {row}");
         assert!(row.contains("\"parsed_by\":\"deep\""), "{path}: {row}");
@@ -110,8 +110,9 @@ fn a_lost_fact_keeps_the_lexer_and_is_counted_as_a_fallback() {
     assert!(row.contains("\"path_choice\":\"lexer:fallback\""), "{row}");
     assert!(row.contains("\"parsed_by\":\"lexer\""), "{row}");
     assert!(row.contains("\"deep_fallback\":\"the CST record lost facts the lexer found\""), "{row}");
-    // The star import is only in the lexer's record, so it survives.
-    assert!(json.contains("\"star\":true"), "{json}");
+    // The call inside the f-string field is only in the lexer's record, so it
+    // survives the fallback.
+    assert!(json.contains(r#""calls":[["g",2,null,null,0]]"#), "{json}");
     assert!(json.contains(r#""fallbacks":1"#), "{json}");
 }
 
@@ -141,15 +142,11 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
     // numbers are the fixture's measurements, so a change in either parser
     // moves a line here rather than passing quietly.
     assert!(
-        text.contains("deep_alias.py\tsymbols deep=2 lexer=2 (+0)\tcalls deep=1 lexer=1 (+0)\timports deep=2 lexer=1 (+1)\n"),
+        text.contains("deep_more.ts\tsymbols deep=1 lexer=1 (+0)\tcalls deep=2 lexer=1 (+1)\timports deep=2 lexer=2 (+0)\n"),
         "{text}"
     );
     assert!(
-        text.contains("deep_more.py\tsymbols deep=2 lexer=2 (+0)\tcalls deep=1 lexer=1 (+0)\timports deep=4 lexer=3 (+1)\n"),
-        "{text}"
-    );
-    assert!(
-        text.contains("lossy.py\tsymbols deep=2 lexer=2 (+0)\tcalls deep=1 lexer=1 (+0)\timports deep=0 lexer=1 (-1)\n"),
+        text.contains("lossy.py\tsymbols deep=2 lexer=2 (+0)\tcalls deep=0 lexer=1 (-1)\timports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
     assert!(
@@ -160,9 +157,9 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
         text.contains("tie.py\tsymbols deep=2 lexer=2 (+0)\tcalls deep=0 lexer=0 (+0)\timports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
-    assert!(text.contains("compare: 5 files, 4 with a CST record, 1 lexer-only\n"), "{text}");
+    assert!(text.contains("compare: 4 files, 3 with a CST record, 1 lexer-only\n"), "{text}");
     assert!(
-        text.contains("compare totals: symbols deep=8 lexer=10 (-2), calls deep=3 lexer=4 (-1), imports deep=6 lexer=5 (+1)\n"),
+        text.contains("compare totals: symbols deep=5 lexer=7 (-2), calls deep=2 lexer=3 (-1), imports deep=2 lexer=2 (+0)\n"),
         "{text}"
     );
 
@@ -179,17 +176,17 @@ fn compare_ignores_a_warm_cache_and_leaves_it_alone() {
     // them: its own header word is distinct and it returns before the save.
     let tree = Tree::new("warm-compare");
     let (_, built) = tree.json(&["--stdout", "--deep"]);
-    assert!(built.contains("5 parsed, 0 cached"), "{built}");
+    assert!(built.contains("4 parsed, 0 cached"), "{built}");
     let cache = tree.0.join(".rust-graph");
     let pack = fs::read(cache.join("facts.pack")).unwrap();
     let meta = fs::read_to_string(cache.join("facts.meta")).unwrap();
 
     let out = tree.build(&["--compare"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    // Five rows proves the tree was read: a reused pack records no comparison,
+    // Four rows proves the tree was read: a reused pack records no comparison,
     // so the audit would say `compare: 0 files`.
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("compare: 5 files"), "the comparison trusted the pack: {text}");
+    assert!(text.contains("compare: 4 files"), "the comparison trusted the pack: {text}");
     assert_eq!(fs::read(cache.join("facts.pack")).unwrap(), pack, "the comparison rewrote the pack");
     assert_eq!(fs::read_to_string(cache.join("facts.meta")).unwrap(), meta, "the comparison rewrote the provenance");
     assert_eq!(fs::read(cache.join("facts.pack")).unwrap(), pack, "the comparison rewrote the pack");
@@ -204,10 +201,10 @@ fn the_report_states_the_same_split_as_the_json() {
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let report = fs::read_to_string(out.join("report.md")).unwrap();
     assert!(
-        report.contains("Paths: {\"deep\": 4, \"lexer\": 1, \"chosen_deep\": 3, \"chosen_lexer\": 2}"),
+        report.contains("Paths: {\"deep\": 3, \"lexer\": 1, \"chosen_deep\": 2, \"chosen_lexer\": 2}"),
         "{report}"
     );
     // The older line stays: a report a reader already parses does not change
     // shape to gain the new one.
-    assert!(report.contains("Parsed by: 3 files through the CST, 2 through the lexer, 1 requested CST parses fell back."), "{report}");
+    assert!(report.contains("Parsed by: 2 files through the CST, 2 through the lexer, 1 requested CST parses fell back."), "{report}");
 }
