@@ -2099,5 +2099,20 @@ fn claims_the_line(src: &str, tag: &str, line: u32, name: &str) -> bool {
         "JAVA" => &["class ", "interface ", "enum ", "record ", "void ", "public ", "private ", "protected "],
         _ => &["def ", "function ", "func ", "fn ", "class ", "struct "],
     };
-    keywords.iter().any(|keyword| text.contains(keyword))
+    // The name has to be introduced by the keyword, not merely share the line
+    // with one: on `pub(crate) struct Meter {` the lexer files a symbol named
+    // `pub`, and the line does declare something — just not that.
+    let declared = keywords.iter().any(|keyword| {
+        text.match_indices(keyword).any(|(at, _)| match text[at + keyword.len()..].find(name) {
+            Some(gap) => gap <= 24,
+            None => false,
+        })
+    });
+    // `exports.three = (z) => z`: a name bound by an assignment to a member is
+    // a definition the lexer names and the tree must keep, and it is written
+    // before the `=`, not after a keyword.
+    let assigned = text.match_indices(name).any(|(at, _)| {
+        text[at + name.len()..].trim_start().starts_with('=') || text[at + name.len()..].trim_start().starts_with(":=")
+    });
+    declared || assigned
 }
