@@ -297,7 +297,12 @@ rust_graph_deep::grammar! { C {
     _abstract_declarator: pointer+ [parenthesized_abstract] abstract_suffix*,
     parenthesized_abstract: "(" _abstract_declarator ")",
     abstract_suffix: array_suffix | parameter_list,
-    type_name: declaration_specifiers [user_type_name] [_abstract_declarator],
+    type_name: declaration_specifiers [user_type_name] [_type_abstract_declarator],
+    /// In a type name a parenthesised part may come first: `int (*)(void)` is
+    /// the type of a function pointer, so `sizeof(int (*)(void))` parses.
+    _type_abstract_declarator:
+        pointer+ [parenthesized_abstract] abstract_suffix*
+        | parenthesized_abstract abstract_suffix*,
 
     compound_statement: "{" _statement* "}",
 
