@@ -25,9 +25,16 @@
 //! `?.`, callable references `::`, `!!`, postfix `++`/`--`, object
 //! expressions, string templates (single token), every literal form.
 //!
-//! **Not modelled.** Infix function calls (`1 to 2`, `a shl b`) are not
-//! recognised: the callee is just a name, so `1 to 2` leaves `to 2` as an
-//! error. String templates are single tokens: `$name` and `${...}` are opaque.
+//! **String templates are code.** `"$name ${f(x)}"` is a `string_literal`
+//! over a start token, its text, one `interpolation` per `${...}` field and an
+//! end token, and the mode stack (`modes`/`switch`) hands the bytes after the
+//! opening quote to the string step and the bytes inside a field back to code,
+//! so a call written in a field is an ordinary subtree. `$name` stays one
+//! `template_name` token: there is nothing to recurse into.
+//!
+//! **Not modelled.** Infix function calls are one precedence row, so
+//! `1 to 2` and `version "1.0"` parse, but `a shl b` binds like any other
+//! infix call rather than at Kotlin's own left-associative precedence.
 //! Annotation use-site targets are kept as `@` plus a name. Operator
 //! conventions (`plus`, `get`) and context receivers are not modelled. There
 //! is no `expect`/`actual` pairing or multiplatform source-set logic. A
@@ -49,7 +56,7 @@
 //! `&(_lambda_parameters "->")`; a plain optional parameter list would swallow
 //! the first expression of an implicit-`it` lambda.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
@@ -58,11 +65,34 @@ thread_local! {
     /// Parenthesis and bracket depth, for Kotlin's "a newline inside
     /// parentheses is not a statement end" rule. Reset at the start of a file.
     static DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// Whether each string the `STRING` mode is inside is triple-quoted,
+    /// innermost last: a nested string restores the outer one on the way out.
+    static QUOTES: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+    /// Open brackets inside each `${...}` field, innermost last, so the `}`
+    /// that closes a field is the one at its own depth and a nested string or
+    /// object expression cannot unbalance it.
+    static FIELDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
 rust_graph_deep::grammar! { KOTLIN {
     name = "kotlin";
     lex = lex;
+
+    /// After a string's opening quote the step lexer runs in `STRING`: the
+    /// bytes are text, not code, until the closing quote or a `$`.
+    ///
+    /// `TEMPLATE` is the opposite frame: the lexer pushed it at a `${`, so the
+    /// bytes are code again until the `}` that matches that brace at the
+    /// field's own bracket depth pops it.
+    modes {
+        STRING = lex_string_text,
+        TEMPLATE = lex_template_field,
+    }
+    switch STRING_START => push STRING;
+    switch STRING_END => pop;
+    switch STRING_BAD => pop STRING;
+    switch TEMPLATE_OPEN => push TEMPLATE;
+    switch TEMPLATE_CLOSE => pop;
 
     tokens {
         LPAREN = "(" open parens,
@@ -75,8 +105,20 @@ rust_graph_deep::grammar! { KOTLIN {
         INTEGER = "integer_literal",
         FLOAT = "floating_point_literal",
         CHAR = "character_literal",
-        STRING = "string_literal",
-        RAW_STRING = "raw_string_literal",
+        /// The opening quotes of a string, `"` or `"""`.
+        STRING_START = "string_start",
+        /// The bytes of a string between a template and the next one.
+        STRING_TEXT = "string_text",
+        /// The `${` of a template: code again until the matching `}`.
+        TEMPLATE_OPEN = "template_open" open field,
+        /// The `}` that closes a template field at its own bracket depth.
+        TEMPLATE_CLOSE = "template_close" close field,
+        /// `$name`, which is one token: there is nothing to recurse into.
+        SIMPLE_TEMPLATE = "template_name",
+        /// The closing quotes of a string.
+        STRING_END = "string_end",
+        /// A one-line string that does not close on its line.
+        STRING_BAD = "bad_string" bad,
         /// A string with no end.
         BAD_LITERAL = "bad_literal" bad,
 
@@ -386,7 +428,10 @@ rust_graph_deep::grammar! { KOTLIN {
         | if_statement
         | when_statement
         | try_statement,
-    _literal: INTEGER | FLOAT | CHAR | STRING | RAW_STRING | "true" | "false" | "null",
+    _literal: INTEGER | FLOAT | CHAR | string_literal | "true" | "false" | "null",
+    string_literal: STRING_START _string_part* STRING_END,
+    _string_part: STRING_TEXT | interpolation | SIMPLE_TEMPLATE,
+    interpolation: TEMPLATE_OPEN _expression TEMPLATE_CLOSE,
     subscript: "[" _expression ("," _expression)* "]",
     lambda_literal: "{" lambda_body "}",
     lambda_body: &(_lambda_parameters "->") _lambda_parameters "->" _block_item* | lambda_items,
@@ -420,6 +465,8 @@ rust_graph_deep::grammar! { KOTLIN {
 pub fn lex(c: &mut Cursor) -> Kind {
     if c.pos() == 0 {
         DEPTH.with(|depth| depth.set(0));
+        QUOTES.with(|quotes| quotes.borrow_mut().clear());
+        FIELDS.with(|fields| fields.borrow_mut().clear());
     }
     match c.peek() {
         b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' => {
@@ -465,12 +512,11 @@ pub fn lex(c: &mut Cursor) -> Kind {
             }
             COMMENT
         }
-        b'"' if c.starts_with(b"\"\"\"") => {
-            if raw_string(c) { RAW_STRING } else { BAD_LITERAL }
-        }
         b'"' => {
-            c.bump();
-            if string_body(c) { STRING } else { BAD_LITERAL }
+            let triple = c.starts_with(b"\"\"\"");
+            c.bump_n(if triple { 3 } else { 1 });
+            QUOTES.with(|quotes| quotes.borrow_mut().push(triple));
+            STRING_START
         }
         b'\'' => {
             c.bump();
@@ -500,21 +546,23 @@ pub fn lex(c: &mut Cursor) -> Kind {
 fn ends_statement(kind: Kind) -> bool {
     matches!(
         kind,
-        IDENT | INTEGER | FLOAT | CHAR | STRING | RAW_STRING | BAD_LITERAL | RPAREN
-            | RBRACKET | RBRACE | KW_RETURN | KW_BREAK | KW_CONTINUE | KW_THIS | KW_SUPER
-            | KW_NULL | KW_TRUE | KW_FALSE | INCREMENT | DECREMENT | BANG_BANG
+        IDENT | INTEGER | FLOAT | CHAR | STRING_END | STRING_BAD | SIMPLE_TEMPLATE
+            | BAD_LITERAL | RPAREN | RBRACKET | RBRACE | KW_RETURN | KW_BREAK
+            | KW_CONTINUE | KW_THIS | KW_SUPER | KW_NULL | KW_TRUE | KW_FALSE
+            | INCREMENT | DECREMENT | BANG_BANG
     )
 }
 
 /// Whether the token at the cursor continues the previous line, so that no
-/// statement ends before it.
+/// statement ends before it. `is` and `in` are deliberately absent: a `when`
+/// entry starts with one, and Kotlin style never breaks a line before either.
 fn continues(c: &Cursor) -> bool {
     match c.peek() {
         b'.' | b'?' | b':' | b',' | b'=' | b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>'
         | b'!' | b'&' | b'|' | b')' | b']' | b'}' | b';' | b'{' => true,
         byte if is_word_start(byte) => matches!(
             word_at(c.rest()),
-            b"else" | b"catch" | b"finally" | b"where" | b"by" | b"as" | b"is" | b"in"
+            b"else" | b"catch" | b"finally" | b"where" | b"by" | b"as"
         ),
         _ => false,
     }
@@ -611,92 +659,125 @@ fn keyword(text: &[u8]) -> Kind {
     }
 }
 
-/// A one-line string after its opening quote, with `${...}` and `$name`
-/// templates skipped. False if the line ends first.
-fn string_body(c: &mut Cursor) -> bool {
-    loop {
-        if c.at_end() {
-            return false;
-        }
-        match c.peek() {
-            b'"' => {
-                c.bump();
-                return true;
-            }
-            b'\n' | b'\r' => return false,
-            b'\\' => c.bump_n(2),
-            b'$' if c.peek_at(1) == b'{' => {
-                c.bump_n(2);
-                if !template(c) {
-                    return false;
-                }
-            }
-            _ => c.bump(),
-        }
-    }
+/// The quotes of the innermost string, if the mode stack and this state agree.
+fn quotes() -> Option<bool> {
+    QUOTES.with(|quotes| quotes.borrow().last().copied())
 }
 
-/// The code of a `${...}` template after its brace, with strings skipped and
-/// nested braces balanced. False if it never closes.
-fn template(c: &mut Cursor) -> bool {
-    let mut depth = 1u32;
-    while !c.at_end() {
-        match c.peek() {
-            b'{' => {
-                depth += 1;
-                c.bump();
-            }
-            b'}' => {
-                depth -= 1;
-                c.bump();
-                if depth == 0 {
-                    return true;
-                }
-            }
-            b'"' => {
-                if c.starts_with(b"\"\"\"") {
-                    if !raw_string(c) {
-                        return false;
-                    }
-                } else {
-                    c.bump();
-                    if !string_body(c) {
-                        return false;
-                    }
-                }
-            }
-            b'\'' => {
-                c.bump();
-                if !c.quoted(b'\'', true) {
-                    return false;
-                }
-            }
-            _ => c.bump(),
-        }
-    }
-    false
+fn pop_string() {
+    QUOTES.with(|quotes| {
+        quotes.borrow_mut().pop();
+    });
 }
 
-/// A raw string from its first `"""`, to the closing `"""`.
-fn raw_string(c: &mut Cursor) -> bool {
-    c.bump_n(3);
-    loop {
-        if c.at_end() {
-            return false;
-        }
+/// The `STRING` mode's step: the bytes between templates, the `$` that starts
+/// one, or the closing quotes. A one-line string that reaches its line end is
+/// `STRING_BAD`, which costs its line and pops the mode.
+pub fn lex_string_text(c: &mut Cursor) -> Kind {
+    let Some(triple) = quotes() else {
+        // The mode stack and this state disagree: lexing code cannot lose a
+        // token, and the parser still gets a tree.
+        return lex(c);
+    };
+    if c.at_end() {
+        pop_string();
+        return STRING_BAD;
+    }
+    if triple {
         if c.starts_with(b"\"\"\"") {
             c.bump_n(3);
-            return true;
+            pop_string();
+            return STRING_END;
         }
-        if c.peek() == b'$' && c.peek_at(1) == b'{' {
+    } else if c.peek() == b'"' {
+        c.bump();
+        pop_string();
+        return STRING_END;
+    }
+    if !triple && matches!(c.peek(), b'\n' | b'\r') {
+        c.eat(b'\r');
+        c.bump();
+        pop_string();
+        return STRING_BAD;
+    }
+    if c.peek() == b'$' && c.peek_at(1) == b'{' {
+        c.bump_n(2);
+        // The field's expression is code: the mode stack returns to code here
+        // and `lex_template_field` closes it at the brace matching this one.
+        FIELDS.with(|fields| fields.borrow_mut().push(0));
+        return TEMPLATE_OPEN;
+    }
+    if c.peek() == b'$' && is_word_start(c.peek_at(1)) {
+        c.bump();
+        c.eat_while(is_word_byte);
+        return SIMPLE_TEMPLATE;
+    }
+    // Text up to a template, the closing quotes, or a line end in a one-line
+    // string. `\$` is an escaped dollar and stays text.
+    let start = c.pos();
+    while !c.at_end() {
+        let byte = c.peek();
+        if byte == b'$' && c.peek_at(1) != b'$' {
+            break;
+        }
+        if byte == b'$' {
             c.bump_n(2);
-            if !template(c) {
-                return false;
+            continue;
+        }
+        if triple {
+            if c.starts_with(b"\"\"\"") {
+                break;
             }
+        } else if byte == b'"' || matches!(byte, b'\n' | b'\r') {
+            break;
+        }
+        if byte == b'\\' {
+            c.bump_n(2);
         } else {
             c.bump();
         }
     }
+    if c.pos() == start {
+        // A byte the checks above did not take: consume it so every step
+        // advances.
+        c.bump();
+    }
+    STRING_TEXT
+}
+
+/// The `TEMPLATE` mode's step: ordinary code, except that the `}` matching the
+/// field's own `${` closes it and a line break inside it is not a statement
+/// end (a template holds one expression, never a statement).
+pub fn lex_template_field(c: &mut Cursor) -> Kind {
+    let Some(depth) = FIELDS.with(|fields| fields.borrow().last().copied()) else {
+        return lex(c);
+    };
+    if c.at_end() {
+        pop_string();
+        FIELDS.with(|fields| fields.borrow_mut().pop());
+        return STRING_BAD;
+    }
+    if depth == 0 && c.peek() == b'}' {
+        c.bump();
+        FIELDS.with(|fields| fields.borrow_mut().pop());
+        return TEMPLATE_CLOSE;
+    }
+    let kind = lex(c);
+    match kind {
+        LPAREN | LBRACKET | LBRACE => FIELDS.with(|fields| {
+            if let Some(depth) = fields.borrow_mut().last_mut() {
+                *depth += 1;
+            }
+        }),
+        RPAREN | RBRACKET | RBRACE => FIELDS.with(|fields| {
+            if let Some(depth) = fields.borrow_mut().last_mut() {
+                *depth = depth.saturating_sub(1);
+            }
+        }),
+        LINE_END => return WHITESPACE,
+        _ => {}
+    }
+    kind
 }
 
 /// Decimal, hexadecimal and binary numbers with `_` separators, fractions and
@@ -851,6 +932,73 @@ mod tests {
         assert_eq!(kinds.iter().filter(|kind| **kind == "line_end").count(), 1);
         assert!(fixtures::clean(&KOTLIN, "fun f() = 1\n"));
         assert!(!fixtures::clean(&KOTLIN, "fun f( { }\n"));
+    }
+
+    /// The bytes of each template field, as the tokens the string mode split
+    /// them into. A field that is code again is `template_open`, the expression
+    /// tokens, then `template_close`.
+    #[test]
+    fn a_string_template_is_a_tree_with_fields_as_code() {
+        let kinds = fixtures::tokens(&KOTLIN, "\"n=${items.size}\"\n");
+        assert_eq!(
+            kinds,
+            [
+                "string_start",
+                "string_text",
+                "template_open",
+                "identifier",
+                ".",
+                "identifier",
+                "template_close",
+                "string_end",
+                "line_end"
+            ],
+            "a field's bytes are code, not string text"
+        );
+        let kinds = fixtures::tokens(&KOTLIN, "\"$name and ${f(x)}\"\n");
+        assert_eq!(
+            kinds,
+            [
+                "string_start",
+                "template_name",
+                "string_text",
+                "template_open",
+                "identifier",
+                "(",
+                "identifier",
+                ")",
+                "template_close",
+                "string_end",
+                "line_end"
+            ]
+        );
+    }
+
+    /// A call written in a template is an ordinary call node with its own span,
+    /// so the grammar sees through the interpolation.
+    #[test]
+    fn a_template_field_holds_a_call_node() {
+        let src = "val s = \"x${f(a, 1)}y\"\n";
+        let mut workspace = crate::deep::Workspace::default();
+        workspace.parse(src.as_bytes(), &KOTLIN, &crate::deep::Budget::default()).unwrap();
+        let dump = workspace.tree.sexp(&KOTLIN, true);
+        assert!(dump.contains("(interpolation"), "{dump}");
+        assert!(dump.contains("(call_expression"), "{dump}");
+        let f = src.find("f(a, 1)").unwrap() as u32;
+        let nodes = &workspace.tree.nodes;
+        let call = (0..nodes.len())
+            .find(|&index| KOTLIN.name(nodes[index].kind) == "call_expression")
+            .unwrap_or_else(|| panic!("no call node in {dump}"));
+        assert_eq!((nodes[call].start, nodes[call].end), (f, f + 7), "the call's span is its own bytes:\n{dump}");
+    }
+
+    /// A raw string spans lines and still splits its templates.
+    #[test]
+    fn a_raw_string_spans_lines_and_keeps_its_fields() {
+        let src = "fun f(t: String) = \"\"\"\n|$t\n\"\"\".trimMargin()\n";
+        assert!(fixtures::clean(&KOTLIN, src));
+        let kinds = fixtures::tokens(&KOTLIN, src);
+        assert!(kinds.iter().any(|kind| *kind == "template_name"), "{kinds:?}");
     }
 
 }
