@@ -6,3 +6,4 @@ const namespaced = <a:b>text</a:b>;
 const nested = <div><span/>{f(y)}</div>;
 const fragment = <>before{g(x)}after</>;
 const pair = <ul>{items.map(item => <li key={item.id}>{item.name}</li>)}</ul>;
+const entity = <p>a &amp; b</p>;

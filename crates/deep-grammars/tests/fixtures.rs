@@ -74,7 +74,7 @@ const JAVASCRIPT_VALID: &[(&str, &str)] = &[
     ),
     // JSX: the tag parts are nodes, and each `{...}` is code again.
     ("jsx_attributes.jsx", "function_declaration function_declaration"),
-    ("jsx_elements.jsx", "lexical_declaration lexical_declaration lexical_declaration lexical_declaration lexical_declaration lexical_declaration"),
+    ("jsx_elements.jsx", "lexical_declaration lexical_declaration lexical_declaration lexical_declaration lexical_declaration lexical_declaration lexical_declaration"),
     ("jsx_nested.jsx", "lexical_declaration lexical_declaration"),
     ("jsx_types.tsx", "type_alias_declaration function_declaration lexical_declaration"),
     ("math_stats.js", "function_declaration function_declaration function_declaration lexical_declaration lexical_declaration lexical_declaration expression_statement"),
