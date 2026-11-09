@@ -636,6 +636,14 @@ impl<'a> Walker<'a> {
         match self.kind(child) {
             "assignment" | "assignment_expression" => self.assignment(child, false),
             "augmented_assignment" | "augmented_assignment_expression" => self.assignment(child, true),
+            // `x: T = f()`: the targets are the names and the value is the last
+            // child, as in an assignment. `x: T` alone binds nothing and has no
+            // value, so only the annotated form that carries `=` is read.
+            "annotated" => {
+                if self.children(child).into_iter().any(|part| self.kind(part) == "=") {
+                    self.assignment(child, false);
+                }
+            }
             _ => {
                 let value = self.form(child);
                 if value != "0" {
