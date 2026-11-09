@@ -875,9 +875,329 @@ impl<'a> Walker<'a> {
     // The one-pass lexer reads these two languages as statements over tokens:
     // a `{` after a name opens a block, a `;` (or, in Go, a line end) ends a
     // statement, and every statement is an `a`/`r`/`x` event whose value is the
-    // names and calls in it. The tables above name their definitions and
-    // imports; the statement arms below write those events from the nodes.
+    // names and calls in it. The tree says exactly which statements exist, so
+    // the arms below write the same events from the nodes rather than from a
+    // token run. `decl_value` is the value side: the names the lexer would read
+    // and the calls it would record, in the same shapes.
 
+    /// The declaration's header (everything before its body) as one expression
+    /// statement, which is what the lexer writes when it does not recognize the
+    /// declaration as a class.
+    /// A declaration whose name is dotted (`com.example.web`). The lexer joins
+    /// the segments, so the value carries the joined name and each keyword
+    /// before it as its own name.
+    /// One statement-shaped node, as the lexer writes it: an assignment when
+    /// there is a binder, a return when the word is `return`, an expression
+    /// otherwise.
+    fn decl_statement(&mut self, id: u32) {
+        let value = self.decl_value(id);
+        let line = self.line(id);
+        self.lexer_event(b'x', line, &[], &value, false);
+    }
+
+    /// Emit the event `id` would produce as a statement, if it is one. Returns
+    /// whether it was: a header calls this for its init statement and falls
+    /// back to a plain value for anything else.
+    /// `int total = 0;`, `List<Item> items = f();`, `private Map<...> index;`.
+    /// With an initializer the lexer writes an assignment to the declared name;
+    /// without one the statement is an expression, and the type names are in it.
+    /// The names a Java declaration binds, read the way the lexer reads them:
+    /// every leaf before the initializer's `=`, split at commas, and the last
+    /// name of each part. The commas inside a generic type split too, because
+    /// the lexer's unpacker counts only brackets: `Map<K, List<Item>> items`
+    /// binds `K` and `items` to it.
+    /// Every leaf of a node, in source order.
+    fn collect_leaves(&self, id: u32, out: &mut Vec<u32>) {
+        let mut pending = vec![id];
+        let mut order = Vec::new();
+        while let Some(node) = pending.pop() {
+            let mut child = self.node(node).first_child;
+            let mut kids = Vec::new();
+            while child != NONE {
+                kids.push(child);
+                child = self.node(child).next_sibling;
+            }
+            if kids.is_empty() {
+                order.push(node);
+            } else {
+                for &kid in kids.iter().rev() {
+                    pending.push(kid);
+                }
+            }
+        }
+        out.extend(order);
+    }
+
+    /// `for _, v := range xs { ... }`: the lexer's `{` after the clause is not a
+    /// block (the clause holds a top-level assignment), so the loop is one
+    /// statement and the event's value carries the body's names too.
+    /// `a, b := f()`, `x = y`, `xs[i] += 1`.
+    /// `var zero V` is an expression to the lexer; `var x = f()` is an
+    /// assignment to `x`; a `var (...)` group is one expression statement.
+    /// `if cond {`, `for i := 0; i < n; i++ {`, `switch x {`: every statement the
+    /// lexer writes before the body is written here, one event each, and a
+    /// branch marker for the body.
+    /// The header's values as one expression, or `None` when there is nothing
+    /// but the block left.
+    /// `[]string{"a", "b"}`: the elements, at the line of the first one, which
+    /// is the line the lexer's statement starts on.
+    /// Java keeps a header on one line and reads it as one expression, so the
+    /// whole condition is one `x` event, however many values it holds.
+    /// `case "x":`, `default:`. The lexer files the arm marker and then reads
+    /// the statements after the colon.
+    /// The value the lexer writes for a run of nodes: one merge of them, or the
+    /// single value when there is only one.
+    fn decl_values(&mut self, ids: &[u32]) -> String {
+        let mut parts = Vec::new();
+        for &id in ids {
+            if self.is_layout(id) {
+                continue;
+            }
+            let value = self.decl_value(id);
+            if !value.is_empty() {
+                parts.push(value);
+            }
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
+    /// The names the lexer reads in these nodes, as a flow value. Every leaf
+    /// whose text is a word is a name (the lexer has no keyword table for these
+    /// two grammars: `type`, `package` and `private` are names to it), a
+    /// literal is `0`, and a call is one call in the symbol's table. A dotted
+    /// name (`sync.Mutex`, `this.index`) is written as the path the lexer
+    /// builds from it.
+    fn decl_value(&mut self, id: u32) -> String {
+        let node = self.node(id);
+        if node.first_child == NONE {
+            if node.start == node.end {
+                return String::new();
+            }
+            let text = self.text(id);
+            let first = text[0];
+            if first.is_ascii_digit() || first == b'"' || first == b'\'' || first == b'`' {
+                return "0".to_string();
+            }
+            if first.is_ascii_alphabetic() || first == b'_' {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &String::from_utf8_lossy(text));
+                out.push(']');
+                return out;
+            }
+            return String::new();
+        }
+        let kind = self.kind(id);
+        // A call is a call in the flow form the lexer writes: the index into
+        // the symbol's call table, with the names and arguments beside it.
+        let mut parts = Vec::new();
+        if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression" | "function_type" | "func_literal") {
+            let index = self.decl_call(id);
+            parts.push(format!("[\"c\",{index},0,[]]"));
+        }
+        if matches!(
+            kind,
+            "selector_expression" | "qualified_type" | "field_access" | "dotted_name" | "scoped_identifier"
+                | "scoped_type_identifier" | "nested_type_identifier"
+        ) {
+            let path = self.decl_path(id);
+            if !path.is_empty() {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &path);
+                out.push(']');
+                parts.push(out);
+            }
+        }
+        for child in self.children(id) {
+            let value = self.decl_value(child);
+            if !value.is_empty() {
+                parts.push(value);
+            }
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
+    /// One call, at the line its callee is written on, named the way the source
+    /// spells it. Returns its index in the symbol's call table, which is what
+    /// the flow form's `["c",id,...]` names.
+    fn decl_call(&mut self, id: u32) -> usize {
+        let callee = self.decl_callee(id);
+        let path = self.decl_path(callee);
+        let line = self.line(callee);
+        self.push_call(path, line)
+    }
+
+    /// The callee of a call node: the expression before the argument list.
+    fn decl_callee(&self, id: u32) -> u32 {
+        let children = self.children(id);
+        let kind = self.kind(id);
+        if kind == "object_creation_expression" {
+            return children
+                .iter()
+                .copied()
+                .find(|&child| !matches!(self.kind(child), "new" | "arguments" | "type_arguments"))
+                .unwrap_or(id);
+        }
+        let args = children
+            .iter()
+            .position(|&child| matches!(self.kind(child), "arguments" | "argument_list" | "type_arguments"));
+        let end = args.unwrap_or(children.len());
+        children[..end]
+            .iter()
+            .copied()
+            .rev()
+            .find(|&child| !self.is_layout(child) && !matches!(self.kind(child), "type_arguments" | "type_parameter_list" | "index"))
+            .unwrap_or(id)
+    }
+
+    /// A dotted name built the way the lexer builds one, with the enclosing
+    /// method's receiver spelled `self` as both paths spell it.
+    fn decl_path(&self, id: u32) -> String {
+        match self.kind(id) {
+            "identifier" | "type_identifier" | "field_identifier" | "this" | "super" => {
+                let text = self.text_string(id);
+                let receiver = self.frame().receiver.as_str();
+                if text == "this" || (!receiver.is_empty() && text == receiver) {
+                    "self".to_string()
+                } else {
+                    text
+                }
+            }
+            "selector_expression" | "qualified_type" | "field_access" | "scoped_identifier" | "dotted_name"
+            | "scoped_type_identifier" | "nested_type_identifier" => {
+                let children = self.children(id);
+                let name = children
+                    .iter()
+                    .copied()
+                    .rev()
+                    .find(|&child| {
+                        matches!(self.kind(child), "identifier" | "type_identifier" | "field_identifier" | "this" | "super")
+                    })
+                    .map(|child| self.decl_path(child))
+                    .unwrap_or_default();
+                let base = children
+                    .first()
+                    .copied()
+                    .filter(|&first| self.kind(first) != ".")
+                    .map(|first| self.decl_path(first))
+                    .unwrap_or_default();
+                let base = if base.is_empty() { String::new() } else { format!("{base}.") };
+                format!("{base}{name}")
+            }
+            "method_invocation" => {
+                let children = self.children(id);
+                let args = children.iter().position(|&child| matches!(self.kind(child), "arguments" | "type_arguments"));
+                let end = args.unwrap_or(children.len());
+                let name = children[..end]
+                    .iter()
+                    .copied()
+                    .rev()
+                    .find(|&child| matches!(self.kind(child), "identifier" | "type_identifier" | "field_identifier"))
+                    .map(|child| self.text_string(child))
+                    .unwrap_or_default();
+                let base_at = children[..end].iter().position(|&child| {
+                    matches!(self.kind(child), "identifier" | "type_identifier" | "field_identifier")
+                });
+                let base = base_at
+                    .filter(|&at| at + 1 < end)
+                    .and_then(|at| children.get(at))
+                    .map(|&child| self.decl_path(child))
+                    .unwrap_or_default();
+                let base = if base.is_empty() { String::new() } else { format!("{base}.") };
+                format!("{base}{name}")
+            }
+            "call_expression" => {
+                let callee = self.decl_callee(id);
+                if callee == id {
+                    return String::new();
+                }
+                self.decl_path(callee)
+            }
+            "index_expression" => self.children(id).first().map(|&base| self.decl_path(base)).unwrap_or_default(),
+            // `[]byte(x)`, `*T`, `map[K]V`: a conversion names its type, and the
+            // lexer reads the type's own name as the callee.
+            "array_type" | "pointer_type" | "map_type" | "slice_type" | "channel_type" => self
+                .last_name(id)
+                .or_else(|| self.leaf_name(id))
+                .unwrap_or_default(),
+            "parenthesized_expression" | "unary_expression" | "type_assertion" => self
+                .expression_child(id)
+                .map(|child| self.decl_path(child))
+                .unwrap_or_default(),
+            "generic_type" => self.children(id).first().map(|&base| self.decl_path(base)).unwrap_or_default(),
+            _ => self.leaf_name(id).unwrap_or_default(),
+        }
+    }
+
+    /// The name an assignment target binds: `x`, `this.index`, `xs[0]` -> `xs`
+    /// (`x, y := ...` splits into two children before this is called).
+    fn decl_target(&self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "identifier" | "field_identifier" | "this" | "selector_expression" | "field_access" => {
+                let path = self.decl_path(id);
+                (!path.is_empty()).then_some(path)
+            }
+            "index_expression" => {
+                let path = self.children(id).first().map(|&base| self.decl_path(base)).unwrap_or_default();
+                (!path.is_empty()).then_some(path)
+            }
+            "parenthesized_expression" => self.expression_child(id).and_then(|child| self.decl_target(child)),
+            _ => None,
+        }
+    }
+
+    /// The class a value constructs, by the lexer's convention: a capitalised
+    /// callee, a composite literal's type, or anything after `new`.
+    fn constructed_class(&self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "object_creation_expression" => {
+                let path = self.decl_path(self.decl_callee(id));
+                let last = path.rsplit('.').next().unwrap_or("").to_string();
+                last.starts_with(|ch: char| ch.is_uppercase()).then_some(last)
+            }
+            "call_expression" | "method_invocation" => {
+                // The lexer's convention: a callee whose first *and* last names
+                // are capitalised constructs that class (`Repo()`, `New()`); a
+                // composite literal is not a call and binds nothing.
+                let path = self.decl_path(id);
+                let first = path.split('.').next().unwrap_or("");
+                let last = path.rsplit('.').next().unwrap_or("").to_string();
+                (first.starts_with(|ch: char| ch.is_uppercase())
+                    && last.starts_with(|ch: char| ch.is_uppercase())
+                    && !last.contains('('))
+                .then_some(last)
+            }
+            _ => None,
+        }
+    }
+
+    /// One flow event, written the way `crate::expr` documents it.
+    fn lexer_event(&mut self, tag: u8, line: u32, targets: &[String], value: &str, weak: bool) {
+        let text = match tag {
+            b'a' => {
+                let mut text = format!("[\"a\",{line},[");
+                for (index, name) in targets.iter().enumerate() {
+                    if index > 0 {
+                        text.push(',');
+                    }
+                    push_string(&mut text, name);
+                }
+                text.push_str(&format!("],{value},{}]", u8::from(weak)));
+                text
+            }
+            _ => format!("[\"{}\",{line},{value}]", tag as char),
+        };
+        self.event(&text);
+    }
+
+    /// `func (c *Cache[K, V]) Get`: the receiver's own name and its type's.
     /// Go's statement arms: the declarations the grammar writes as statements,
     /// with the events the one-pass lexer writes for them.
     fn go_enter(&mut self, _id: u32) {}
@@ -906,6 +1226,8 @@ impl<'a> Walker<'a> {
         (name, owner)
     }
 
+    /// The type a receiver declaration names, unwrapping a pointer and taking
+    /// a generic's base name: `*Cache[K, V]` -> `Cache`.
     fn receiver_type(&self, id: u32) -> Option<String> {
         match self.kind(id) {
             "identifier" | "type_identifier" => Some(self.text_string(id)),
@@ -913,27 +1235,6 @@ impl<'a> Walker<'a> {
             "qualified_type" => self.last_name(id),
             _ => None,
         }
-    }
-
-    fn collect_leaves(&self, id: u32, out: &mut Vec<u32>) {
-        let mut pending = vec![id];
-        let mut order = Vec::new();
-        while let Some(node) = pending.pop() {
-            let mut child = self.node(node).first_child;
-            let mut kids = Vec::new();
-            while child != NONE {
-                kids.push(child);
-                child = self.node(child).next_sibling;
-            }
-            if kids.is_empty() {
-                order.push(node);
-            } else {
-                for &kid in kids.iter().rev() {
-                    pending.push(kid);
-                }
-            }
-        }
-        out.extend(order);
     }
 
     fn pattern_names(&self, id: u32) -> Vec<String> {
