@@ -430,3 +430,338 @@ fn head_end(previous: Kind) -> bool {
     matches!(previous, WORD | VARIABLE | STRING | ASSIGNMENT | STRING_CLOSE | SUBST_END | BACKTICK_END | PARAMETER_CLOSE)
 }
 
+pub fn lex_sh(c: &mut Cursor) -> Kind {
+    use crate::deep::syntax::{COMMENT, WHITESPACE};
+    if c.pos() == 0 {
+        // A new file starts outside every mode, and whatever a parse that
+        // stopped inside a heredoc left behind is not this file's.
+        with_frames(|frames| frames.clear());
+        PENDING.with(|pending| pending.borrow_mut().clear());
+    }
+    let byte = c.peek();
+    match byte {
+        b' ' | b'\t' | b'\r' | b'\x0c' => {
+            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\x0c'));
+            WHITESPACE
+        }
+        b'\\' if c.peek_at(1) == b'\n' => {
+            c.bump_n(2);
+            WHITESPACE
+        }
+        b'\\' if c.peek_at(1) == b'\r' => {
+            c.bump_n(2);
+            c.eat(b'\n');
+            WHITESPACE
+        }
+        b'\n' => {
+            c.bump();
+            if start_heredoc() {
+                HEREDOC_BEGIN
+            } else {
+                NEWLINE
+            }
+        }
+        b'#' => {
+            lex::line_comment(c);
+            COMMENT
+        }
+        b'\'' => single_quoted(c),
+        b'"' => string_open(c, 1),
+        b'`' => backtick(c),
+        b'$' => dollar(c),
+        b'(' => {
+            if c.peek_at(1) == b'(' {
+                open_arithmetic(c, 2, 2)
+            } else {
+                c.bump();
+                adjust_depth(1);
+                LPAREN
+            }
+        }
+        b')' => match top_kind() {
+            Some(FrameKind::Substitution) if top_depth() == 0 => {
+                c.bump();
+                pop_frame();
+                SUBST_END
+            }
+            Some(FrameKind::Process) if top_depth() == 0 => {
+                c.bump();
+                pop_frame();
+                PROCESS_CLOSE
+            }
+            _ => {
+                c.bump();
+                adjust_depth(-1);
+                RPAREN
+            }
+        },
+        b'{' if (command_start(c.previous()) || c.previous() == WORD) && matches!(c.peek_at(1), b' ' | b'\t' | b'\n' | b'\r') => {
+            c.bump();
+            LBRACE
+        }
+        b'}' if command_start(c.previous()) && matches!(c.peek_at(1), b' ' | b'\t' | b'\n' | b'\r' | b';') => {
+            c.bump();
+            RBRACE
+        }
+        b'[' if c.peek_at(1) == b'[' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Test);
+            TEST_OPEN
+        }
+        b'<' if c.peek_at(1) == b'(' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Process);
+            PROCESS_OPEN
+        }
+        b'>' if c.peek_at(1) == b'(' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Process);
+            PROCESS_OPEN
+        }
+        b'<' if c.peek_at(1) == b'<' => heredoc_or_herestring(c),
+        b';' if c.peek_at(1) == b';' => {
+            c.bump_n(2);
+            c.eat(b'&');
+            DBL_SEMI
+        }
+        b';' if c.peek_at(1) == b'&' => {
+            c.bump_n(2);
+            DBL_SEMI
+        }
+        b';' => {
+            c.bump();
+            SEMI
+        }
+        b'|' if c.peek_at(1) == b'|' => {
+            c.bump_n(2);
+            OR
+        }
+        b'|' => {
+            c.bump();
+            PIPE
+        }
+        b'&' if c.peek_at(1) == b'&' => {
+            c.bump_n(2);
+            AND
+        }
+        b'&' if c.peek_at(1) == b'>' => {
+            c.bump_n(2);
+            if c.peek() == b'>' {
+                c.bump();
+            }
+            redirect_target(c);
+            REDIRECT
+        }
+        b'&' => {
+            c.bump();
+            AMP
+        }
+        b'!' if !c.peek_at(1).is_ascii_alphanumeric() && c.peek_at(1) != b'=' => {
+            c.bump();
+            BANG
+        }
+        b'>' | b'<' => redirect(c),
+        b'0'..=b'9'
+            if matches!(c.peek_at(1), b'>' | b'<')
+                || (c.peek_at(1).is_ascii_digit() && matches!(c.peek_at(2), b'>' | b'<')) =>
+        {
+            c.eat_while(|byte| byte.is_ascii_digit());
+            c.bump();
+            if c.peek() == b'>' && c.behind(1) == b'>' {
+                c.bump();
+            }
+            if c.peek() == b'&' {
+                c.bump();
+            }
+            redirect_target(c);
+            REDIRECT
+        }
+        _ => word(c),
+    }
+}
+
+/// `'...'`: no expansion and no escaping inside, and a line break is allowed,
+/// which is what makes `awk '...'` and `sed '...'` across lines one token.
+fn single_quoted(c: &mut Cursor) -> Kind {
+    c.bump();
+    while !c.at_end() {
+        if c.peek() == b'\'' {
+            c.bump();
+            return STRING;
+        }
+        c.bump_char();
+    }
+    BAD_STRING
+}
+
+/// `"..."`, and the `$"..."` locale form: the opening quote is one token and
+/// the switch enters `STRING`, so the pieces between the expansions are text.
+fn string_open(c: &mut Cursor, width: usize) -> Kind {
+    c.bump_n(width);
+    push_frame(FrameKind::String);
+    STRING_OPEN
+}
+
+/// `$name`, `$1`, `$?`, `$(`/`$((`, `${`.
+fn dollar(c: &mut Cursor) -> Kind {
+    match c.peek_at(1) {
+        b'(' => {
+            if c.peek_at(2) == b'(' {
+                open_arithmetic(c, 3, 2)
+            } else {
+                c.bump_n(2);
+                push_frame(FrameKind::Substitution);
+                SUBST_OPEN
+            }
+        }
+        b'{' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Parameter);
+            PARAMETER_OPEN
+        }
+        b'\'' => {
+            c.bump();
+            single_quoted(c)
+        }
+        b'"' => string_open(c, 2),
+        _ => variable(c),
+    }
+}
+
+/// A backtick: it closes the innermost backtick frame, or opens one.
+fn backtick(c: &mut Cursor) -> Kind {
+    c.bump();
+    if top_kind() == Some(FrameKind::Backtick) && top_depth() == 0 {
+        pop_frame();
+        BACKTICK_END
+    } else {
+        push_frame(FrameKind::Backtick);
+        BACKTICK_OPEN
+    }
+}
+
+/// `$(( ... ))` and `(( ... ))`: the opener keeps its own token, and the text
+/// is scanned to the `))` that balances it.
+fn open_arithmetic(c: &mut Cursor, width: usize, depth: u32) -> Kind {
+    c.bump_n(width);
+    with_frames(|frames| {
+        let mut frame = Frame::new(FrameKind::Arithmetic);
+        frame.depth = depth;
+        frames.push(frame);
+    });
+    ARITHMETIC_OPEN
+}
+
+/// `>file`, `>>file`, `>&2`, `2>&1`, `<<<word`: one token.
+fn redirect(c: &mut Cursor) -> Kind {
+    let byte = c.peek();
+    c.bump();
+    if c.peek() == byte {
+        c.bump();
+    }
+    if c.peek() == b'&' {
+        c.bump();
+    }
+    redirect_target(c);
+    REDIRECT
+}
+
+/// `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`, and `<<<word` (a here-string).
+fn heredoc_or_herestring(c: &mut Cursor) -> Kind {
+    if c.peek_at(2) == b'<' {
+        c.bump_n(3);
+        redirect_target(c);
+        return REDIRECT;
+    }
+    c.bump_n(2);
+    let mut strip_tabs = false;
+    if c.peek() == b'-' {
+        c.bump();
+        strip_tabs = true;
+    }
+    // `<< EOF` is legal: blanks may sit between the operator and the delimiter.
+    c.eat_while(|byte| byte == b' ' || byte == b'\t');
+    let mut expand = true;
+    // A quoted delimiter keeps its body text: `<<'EOF'`, `<<"EOF"`, `<<\EOF`.
+    // The token still spans the quotes; only the delimiter is unquoted.
+    let delimiter: Vec<u8> = match c.peek() {
+        b'\'' | b'"' => {
+            expand = false;
+            let quote = c.peek();
+            c.bump();
+            let inner = c.pos();
+            let _ = lex::quoted(c, quote);
+            let mut text = c.since(inner).to_vec();
+            if text.last() == Some(&quote) {
+                text.pop();
+            }
+            text
+        }
+        b'\\' => {
+            expand = false;
+            c.bump();
+            let inner = c.pos();
+            c.eat_while(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'|' | b'&' | b'(' | b')' | b'<' | b'>'));
+            c.since(inner).to_vec()
+        }
+        _ => {
+            let inner = c.pos();
+            c.eat_while(|byte| {
+                !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'|' | b'&' | b'(' | b')' | b'<' | b'>' | b'$' | b'`')
+            });
+            c.since(inner).to_vec()
+        }
+    };
+    if delimiter.is_empty() {
+        // No delimiter: not a here-document after all. The word scan took
+        // nothing, so the caller's expectation is the only thing lost.
+        return REDIRECT;
+    }
+    let mut frame = Frame::new(FrameKind::Heredoc);
+    frame.delimiter = delimiter;
+    frame.strip_tabs = strip_tabs;
+    frame.expand = expand;
+    PENDING.with(|pending| pending.borrow_mut().push(frame));
+    HEREDOC_START
+}
+
+/// The line's newline started the first pending body: the frame joins the
+/// lexer's stack and `HEREDOC` takes over.
+fn start_heredoc() -> bool {
+    PENDING.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if pending.is_empty() {
+            return false;
+        }
+        let frame = pending.remove(0);
+        with_frames(|frames| frames.push(frame));
+        true
+    })
+}
+
+/// The target of a redirection: a word, or an `&` and a file descriptor.
+fn redirect_target(c: &mut Cursor) {
+    if c.peek() == b'&' {
+        c.bump();
+        c.eat_while(|byte| byte.is_ascii_digit() || byte == b'-');
+        return;
+    }
+    c.eat_while(|byte| {
+        !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'|' | b'&' | b'(' | b')' | b'<' | b'>')
+    });
+}
+
+/// A `$` form: `$name`, `$1`, `$@`, `$?`.
+fn variable(c: &mut Cursor) -> Kind {
+    c.bump();
+    c.eat_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'@' | b'*' | b'#' | b'?' | b'$' | b'!' | b'-'));
+    VARIABLE
+}
+
+/// Whether the `$` at the cursor starts something rather than standing alone.
+fn dollar_starts(c: &Cursor) -> bool {
+    let next = c.peek_at(1);
+    next.is_ascii_alphanumeric()
+        || matches!(next, b'_' | b'@' | b'*' | b'#' | b'?' | b'$' | b'!' | b'-' | b'(' | b'{')
+}
+
