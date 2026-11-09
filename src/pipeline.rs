@@ -898,7 +898,11 @@ mod deep_run {
         /// Named symbols the lexer built out of an ordinary expression.
         accepted_invented_symbols: u64,
         /// Lexer calls that are a pattern in the source (`Some(x) =>`).
-        accepted_pattern_calls: u64,
+        accepted_positional_calls: u64,
+        /// Lexer events on a line inside a macro body.
+        accepted_positional_events: u64,
+        /// Lexer symbols on a line inside a macro body.
+        accepted_positional_symbols: u64,
     }
 
     impl State {
@@ -923,7 +927,7 @@ mod deep_run {
         /// header carries the format number, so a file from an older writer is
         /// void rather than half-read.
         pub(super) fn save(&self, dir: &Path) -> io::Result<()> {
-            let mut text = format!("rust-graph facts.meta 6 {}\n", bits());
+            let mut text = format!("rust-graph facts.meta 7 {}\n", bits());
             let mut rows: Vec<(&String, &Taken)> = self.records.iter().collect();
             rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
             for (path, taken) in rows {
@@ -933,7 +937,7 @@ mod deep_run {
                     (false, false) => "lexer",
                 };
                 text.push_str(&format!(
-                    "{} {} {} {} {} {} {} {} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
                     escape(path),
                     parser,
                     taken.errors,
@@ -946,7 +950,9 @@ mod deep_run {
                     taken.accepted.annotation_targets,
                     taken.accepted.anonymous_symbols,
                     taken.accepted.invented_symbols,
-                    taken.accepted.pattern_calls
+                    taken.accepted.positional_calls,
+                    taken.accepted.positional_events,
+                    taken.accepted.positional_symbols
                 ));
             }
             let temporary = dir.join("facts.meta.tmp");
@@ -1047,7 +1053,7 @@ mod deep_run {
 
         pub(super) fn report_line(&self, text: &str) -> String {
             format!(
-                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\nAccepted differences: {} lexer-only calls ({} anonymous, {} statement keywords), {} lexer-only value events for a statement keyword, {} lexer assignment targets naming an imported type instead of a binder, {} lexer symbols with no name in the source, {} lexer symbols whose line declares nothing, {} lexer calls that are a pattern.\n",
+                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\nAccepted differences: {} lexer-only calls ({} anonymous, {} statement keywords), {} lexer-only value events for a statement keyword, {} lexer assignment targets naming an imported type instead of a binder, {} lexer symbols with no name in the source, {} lexer symbols whose line declares nothing, {} lexer calls the source writes as a pattern, an attribute or a macro body, {} lexer events and {} lexer symbols on a line inside one.\n",
                 self.deep,
                 self.lexer,
                 self.fallbacks,
@@ -1062,7 +1068,9 @@ mod deep_run {
                 self.accepted_annotation_targets,
                 self.accepted_anonymous_symbols,
                 self.accepted_invented_symbols,
-                self.accepted_pattern_calls
+                self.accepted_positional_calls,
+                self.accepted_positional_events,
+                self.accepted_positional_symbols
             )
         }
 
@@ -1084,7 +1092,7 @@ mod deep_run {
     pub(super) fn load(dir: &Path) -> Option<HashMap<String, Taken>> {
         let text = std::fs::read_to_string(dir.join("facts.meta")).ok()?;
         let mut lines = text.lines();
-        if lines.next()? != format!("rust-graph facts.meta 6 {}", bits()) {
+        if lines.next()? != format!("rust-graph facts.meta 7 {}", bits()) {
             return None;
         }
         let mut out = HashMap::new();
@@ -1107,7 +1115,9 @@ mod deep_run {
                 annotation_targets: fields.next()?.parse().ok()?,
                 anonymous_symbols: fields.next()?.parse().ok()?,
                 invented_symbols: fields.next()?.parse().ok()?,
-                pattern_calls: fields.next()?.parse().ok()?,
+                positional_calls: fields.next()?.parse().ok()?,
+                positional_events: fields.next()?.parse().ok()?,
+                positional_symbols: fields.next()?.parse().ok()?,
             };
             out.insert(
                 path,
@@ -1204,9 +1214,14 @@ pub(crate) struct Accepted {
     /// A named symbol the lexer built out of an ordinary expression: the line it
     /// points at carries no definition keyword for that name.
     pub(crate) invented_symbols: u32,
-    /// A call the lexer read out of a pattern: `Some(x) => ...` is a match arm,
-    /// not a call, and the CST is right not to record one.
-    pub(crate) pattern_calls: u32,
+    /// A call the lexer read out of a position that is not code: a pattern
+    /// (`Some(x) =>`), an attribute (`#[cfg(...)]`) or a macro body, where the
+    /// tokens are data for the macro and the CST is right to record no call.
+    pub(crate) positional_calls: u32,
+    /// A lexer event whose line is inside a macro body.
+    pub(crate) positional_events: u32,
+    /// A lexer symbol whose line is inside a macro body.
+    pub(crate) positional_symbols: u32,
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
@@ -1219,7 +1234,9 @@ impl Accepted {
             + self.annotation_targets
             + self.anonymous_symbols
             + self.invented_symbols
-            + self.pattern_calls
+            + self.positional_calls
+            + self.positional_events
+            + self.positional_symbols
     }
 }
 
@@ -1330,6 +1347,7 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
 #[cfg(all(feature = "deep", feature = "parser"))]
 pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
     let mut accepted = Accepted::default();
+    let macro_lines = macro_body_lines(src);
     let verdict = |loss: Option<&'static str>, detail: String, accepted: Accepted| Verdict { loss, detail, accepted };
     for import in &lexer.imports {
         let same = deep.imports.iter().any(|row| {
@@ -1345,6 +1363,16 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         // `go func() {`, for a function literal, for an `if` header it misreads
         // as a definition. The CST cannot reproduce a name the source does not
         // contain, so asking it to is a demand to invent one.
+        if macro_lines
+            .get(symbol.line.saturating_sub(1) as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            // The line is inside a macro body: its tokens are data for the
+            // macro, and a definition read out of them is not in the source.
+            accepted.positional_symbols += 1;
+            continue;
+        }
         if symbol.name.is_empty() || symbol.name.starts_with("<anonymous>@") {
             accepted.anonymous_symbols += 1;
             continue;
@@ -1394,8 +1422,8 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
                 // `match self.tok(i) { Some(t) => ... }`: the lexer reads the
                 // arm's pattern as a call, and a pattern is not a call. The
                 // source line says so — the name, its argument list, then `=>`.
-                if !src.is_empty() && is_pattern_call(src, &name, call.line) {
-                    accepted.pattern_calls += 1;
+                if !src.is_empty() && is_positional_call(src, &macro_lines, &name, call.line) {
+                    accepted.positional_calls += 1;
                     continue;
                 }
                 let detail = format!("call {} line {} in {}", call.path, call.line, symbol.name);
@@ -1431,7 +1459,7 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
                 })
         };
         let Some(paired) = paired else { continue };
-        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted, src) {
+        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted, src, &macro_lines) {
             return verdict(Some("event"), detail, accepted);
         }
     }
@@ -1443,7 +1471,14 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
 /// acceptance counters are updated on the way past the same markers `loses`
 /// skips, so there is one implementation of the comparison.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts::Symbol, accepted: &mut Accepted, src: &str) -> Option<String> {
+fn uncovered(
+    lexer: &Facts,
+    symbol: &crate::facts::Symbol,
+    paired: &crate::facts::Symbol,
+    accepted: &mut Accepted,
+    src: &str,
+    macro_lines: &[bool],
+) -> Option<String> {
     let keyword_lines: Vec<u32> = symbol
         .calls
         .iter()
@@ -1453,6 +1488,13 @@ fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts
     let mut wanted: Vec<(u8, Shape)> = Vec::new();
     for event in raw_events(&symbol.events) {
         if !matches!(event.tag, b'a' | b'r' | b'x') {
+            continue;
+        }
+        if macro_lines.get(event.line.saturating_sub(1) as usize).copied().unwrap_or(false)
+            || is_attribute_call(src, event.line)
+            || is_declaration_line(src, event.line)
+        {
+            accepted.positional_events += 1;
             continue;
         }
         if event.tag == b'x' && keyword_lines.contains(&event.line) {
@@ -1537,6 +1579,115 @@ fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts
 /// Whether the call the lexer reports on this line is written as a pattern:
 /// `<name>(… )` followed by `=>`. A match arm's pattern binds, it does not call,
 /// and the CST records no call for it.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_positional_call(src: &str, macro_lines: &[bool], name: &str, line: u32) -> bool {
+    is_attribute_call(src, line)
+        || is_declaration_call(src, name, line)
+        || macro_lines.get(line.saturating_sub(1) as usize).copied().unwrap_or(false)
+        || is_pattern_call(src, name, line)
+}
+
+/// `#[cfg(feature = "deep")]`, `#![allow(dead_code)]`: the tokens inside an
+/// attribute are not a call, and the lexer reads `cfg` and `allow` as ones.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_attribute_call(src: &str, line: u32) -> bool {
+    src.lines()
+        .nth(line.saturating_sub(1) as usize)
+        .map(|text| {
+            let text = text.trim_start();
+            (text.starts_with("#[") || text.starts_with("#![")) && text.contains(']')
+        })
+        .unwrap_or(false)
+}
+
+/// Whether this line opens a declaration: `pub fn`, `struct`, `enum`, `def`,
+/// `function`, `class`. A statement event there is the lexer reading the header
+/// as an expression — `pub fn` becomes a merge of two names — and the CST is
+/// right to record no expression at all.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_declaration_line(src: &str, line: u32) -> bool {
+    // The header is what is written before the name's parenthesis or the body's
+    // brace: `pub const fn new`, `pub(crate) struct Cache`, `def parse`.
+    const INTRODUCERS: [&str; 12] = [
+        "fn", "func", "def", "struct", "enum", "trait", "union", "type", "impl", "class", "interface", "module",
+    ];
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    let header = text.split(['(', '{', '=']).next().unwrap_or(text);
+    header.split_whitespace().any(|word| INTRODUCERS.contains(&word))
+}
+
+/// `pub fn lex(c: &mut Cursor)` and `pub struct Marker(u32)` reach the one-pass
+/// lexer as calls: a name, then a parenthesis. The name is being declared, not
+/// called, and the line says so — the declaration keyword is right before it.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_declaration_call(src: &str, name: &str, line: u32) -> bool {
+    const INTRODUCERS: [&str; 12] = [
+        "fn", "func", "def", "struct", "enum", "trait", "type", "union", "class", "interface", "record", "module",
+    ];
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let mut from = 0;
+    while let Some(at) = text[from..].find(name) {
+        let start = from + at;
+        let prefix = text[..start].trim_end();
+        if INTRODUCERS.iter().any(|word| prefix.ends_with(word)) {
+            return true;
+        }
+        from = start + name.len();
+    }
+    false
+}
+
+/// One flag per line: is the line inside the brace body of a macro invocation
+/// (`grammar! { … }`) or a macro definition (`macro_rules! name { … }`)? What a
+/// macro receives is tokens, not code — the lexer reads `_name ("," _name)*`
+/// inside a grammar as calls, and the CST records none because none is there.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn macro_body_lines(src: &str) -> Vec<bool> {
+    let mut out = Vec::new();
+    let mut stack: Vec<bool> = Vec::new();
+    let mut inside = false;
+    let mut tail = String::new();
+    for ch in src.chars() {
+        match ch {
+            '\n' => {
+                out.push(inside);
+                tail.clear();
+            }
+            '{' | '(' | '[' => {
+                let opener = tail.trim_end();
+                // `grammar! { … }`, `matches!(…)`, `#[cfg(…)]`, and
+                // `macro_rules! name { … }`: what these receive is tokens, not
+                // code. The one-pass lexer reads every `name(` inside them as a
+                // call, and the CST records none because none is there.
+                let is_data = opener.ends_with('!')
+                    || opener.ends_with('#')
+                    || opener.contains("macro_rules!");
+                stack.push(is_data);
+                inside = inside || is_data;
+                tail.clear();
+            }
+            '}' | ')' | ']' => {
+                stack.pop();
+                inside = stack.iter().any(|row| *row);
+                tail.clear();
+            }
+            _ => {
+                tail.push(ch);
+                if tail.len() > 120 {
+                    tail.remove(0);
+                }
+            }
+        }
+    }
+    out.push(inside);
+    out
+}
+
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn is_pattern_call(src: &str, name: &str, line: u32) -> bool {
     let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
