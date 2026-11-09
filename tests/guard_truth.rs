@@ -203,17 +203,20 @@ fn an_annotation_name_read_as_a_target_is_an_accepted_difference() {
 /// A real lost call still keeps the lexer's record: the grammar keeps an
 /// f-string as one token, so the call inside it never reaches the CST walk.
 #[test]
-fn a_call_only_the_lexer_saw_falls_back() {
+fn a_call_inside_an_f_string_is_no_longer_a_loss() {
+    // This case used to be the guard's example of a call only the lexer could
+    // see: an f-string field was one opaque token. The Python grammar now parses
+    // the field's expression, so the CST reads the call and the two records
+    // agree — the fixture stays, inverted, so a regression behind this shape
+    // reappears here rather than silently turning the guard back on.
     let source = "def f(x):\n    return f\"{len(x)}\"\n";
     let lexer = lexer_facts(source);
     let deep = deep_facts(source);
     assert!(calls(&lexer).iter().any(|path| path == "len"), "{:?}", calls(&lexer));
-    assert!(!calls(&deep).iter().any(|path| path == "len"), "{:?}", calls(&deep));
+    assert!(calls(&deep).iter().any(|path| path == "len"), "the CST reads a field's calls now: {:?}", calls(&deep));
 
     let verdict = pipeline::loses(&lexer, &deep);
-    assert!(verdict.lost(), "a call the CST cannot see is a loss: {verdict:?}");
-    assert_eq!(verdict.why(), Some("call"));
-    assert!(verdict.detail().contains("len"), "{}", verdict.detail());
+    assert!(!verdict.lost(), "nothing is lost here: {verdict:?}");
 }
 
 /// The control: a file the two readers agree on is not a fallback, and the guard
