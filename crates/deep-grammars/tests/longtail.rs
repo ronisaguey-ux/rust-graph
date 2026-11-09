@@ -81,6 +81,9 @@ const SQL_VALID: &[(&str, &str)] = &[
         "schema.sql",
         "create_table_statement create_table_statement create_index_statement alter_statement create_view_statement",
     ),
+    ("sql_constraints.sql", "create_table_statement create_index_statement alter_statement"),
+    ("sql_cte_window.sql", "with_statement"),
+    ("sql_upsert.sql", "insert_statement update_statement delete_statement"),
 ];
 
 const YAML_VALID: &[(&str, &str)] = &[
@@ -92,6 +95,8 @@ const YAML_VALID: &[(&str, &str)] = &[
 const HTML_VALID: &[(&str, &str)] = &[
     ("dashboard.html", "doctype_node element"),
     ("form.html", "element"),
+    ("html_optional_tags.html", "doctype_node element"),
+    ("html_raw_text.html", "doctype_node element"),
     ("snippet.html", "element"),
 ];
 
@@ -99,6 +104,10 @@ const CSS_VALID: &[(&str, &str)] = &[
     (
         "app.css",
         "at_rule rule_set rule_set rule_set rule_set rule_set at_rule at_rule rule_set",
+    ),
+    (
+        "css_nesting.css",
+        "at_rule at_rule rule_set rule_set rule_set rule_set rule_set at_rule at_rule at_rule at_rule",
     ),
     ("print.css", "at_rule at_rule"),
     ("tokens.css", "rule_set rule_set rule_set rule_set rule_set"),
@@ -223,9 +232,11 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     ("awk_broken.awk", "awk", "begin_block"),
     ("clojure_broken.clj", "clojure", "ns_form definition_form"),
     ("css_broken.css", "css", "rule_set rule_set"),
+    ("css_malformed.css", "css", "rule_set at_rule"),
     ("elixir_broken.ex", "elixir", "module_definition"),
     ("erlang_broken.erl", "erlang", "attribute attribute function_definition"),
     ("html_broken.html", "html", "element"),
+    ("html_malformed.html", "html", "element"),
     ("json_broken_array.json", "json", "object"),
     ("julia_broken.jl", "julia", "function_definition"),
     ("lua_broken.lua", "lua", "local_function"),
@@ -234,6 +245,7 @@ const MALFORMED: &[(&str, &str, &str)] = &[
     ("shell_broken_if.sh", "shell", "simple_command if_clause ERROR"),
     ("solidity_broken.sol", "solidity", "pragma_directive contract_definition"),
     ("sql_broken_insert.sql", "sql", "select_statement insert_statement"),
+    ("sql_malformed.sql", "sql", "select_statement insert_statement create_table_statement"),
     ("tcl_broken.tcl", "tcl", "proc_command"),
     ("yaml_broken.yaml", "yaml", "key_entry"),
     ("zig_broken.zig", "zig", "var_declaration fn_declaration"),
