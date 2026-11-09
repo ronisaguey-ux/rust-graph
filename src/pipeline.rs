@@ -1402,7 +1402,17 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         let paired = if symbol.kind == KIND_MODULE {
             deep.symbols.iter().find(|row| row.kind == KIND_MODULE)
         } else {
-            deep.symbols.iter().find(|row| row.name == symbol.name && row.kind == symbol.kind)
+            // A method is named `__init__` in every class of the file, so the
+            // owner decides which one is the same symbol. Without it a class's
+            // events were compared against another class's and the file was
+            // blamed for an event that was in the record.
+            deep.symbols
+                .iter()
+                .find(|row| {
+                    row.name == symbol.name
+                        && row.kind == symbol.kind
+                        && (symbol.owner.is_empty() || row.owner.is_empty() || row.owner == symbol.owner)
+                })
         };
         let Some(paired) = paired else { continue };
         if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted, src) {
@@ -1443,14 +1453,21 @@ fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts
             (event.tag, shape_event(event.tag, event.line, event.payload, &paired.calls, &mut none))
         })
         .collect();
+    // The exact matches are taken first, all of them, before any statement is
+    // re-read as an artefact. Pairing greedily one want at a time let a
+    // resembling event on the next line consume the row a later want needed,
+    // and the file was blamed for an event that was in the record all along.
+    let mut leftover: Vec<(u8, Shape)> = Vec::new();
     for want in wanted {
-        // The exact match is tried first and always wins: a statement both
-        // readers bind the same way is never re-read as an artefact.
         let exact = found.iter().position(|row| row.0 == want.0 && covers(&row.1, &want.1).is_ok());
-        if let Some(at) = exact {
-            found.swap_remove(at);
-            continue;
+        match exact {
+            Some(at) => {
+                found.swap_remove(at);
+            }
+            None => leftover.push(want),
         }
+    }
+    for want in leftover {
         // A target list that names an imported type instead of a binder is the
         // lexer reading `x: Dict[...] = ...` as an assignment to `Dict`. Its
         // statement is still in the CST's record, with the real name and the
@@ -1458,6 +1475,9 @@ fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts
         // aside.
         if annotation_targets(lexer, &want, &found) || type_as_target(src, &want, &found) {
             accepted.annotation_targets += 1;
+            // Both checks require a covering row before they say yes, so the
+            // statement is in the record either way; the row is retired when it
+            // is still there so a second invented binder cannot claim it.
             if let Some(at) = found.iter().position(|row| {
                 row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 && covers_value(&row.1, &want.1).is_ok()
             }) {
@@ -1511,13 +1531,13 @@ fn type_as_target(src: &str, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool 
     if want.0 != b'a' || src.is_empty() {
         return false;
     }
-    let names = quoted_names(&want.1.targets);
-    if names.len() != 1 {
-        return false;
-    }
     let Some(line) = src.lines().nth(want.1.line.saturating_sub(1) as usize) else {
         return false;
     };
+    let lexer_names = name_list(&want.1.targets);
+    if lexer_names.is_empty() {
+        return false;
+    }
     found.iter().any(|row| {
         if row.0 != b'a' || (row.1.line as i64 - want.1.line as i64).abs() > 1 {
             return false;
@@ -1525,17 +1545,37 @@ fn type_as_target(src: &str, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool 
         if row.1.targets == want.1.targets || covers_value(&row.1, &want.1).is_err() {
             return false;
         }
-        let deep = quoted_names(&row.1.targets);
-        let Some(deep) = deep.first() else { return false };
-        // The real binder is written first, the name the lexer bound later on
-        // the same line (the type), and the statement assigns something.
-        match (line.find(deep), line.find(&names[0])) {
-            (Some(at), Some(after)) => at < after && line[after..].contains('='),
+        let deep_names = name_list(&row.1.targets);
+        let Some(deep) = deep_names.first() else { return false };
+        // `x: Dict[str, int] = ...` / `self.x: Dict[...] = ...`: the binder is
+        // written first, the colon follows it, and the name the lexer bound is
+        // the annotation's type. Both are on this line, in that order.
+        let Some(colon) = line.find(':') else { return false };
+        match (line.find(deep.as_str()), line.find(lexer_names[0].as_str())) {
+            (Some(binder), Some(annotation)) => binder < colon && annotation > colon && line[annotation..].contains('='),
             _ => false,
         }
     })
 }
 
+/// The identifiers in a shape's text, quoted or bare: the lexer writes
+/// `["x"]` and `[x]` for a binder depending on the language.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn name_list(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() || ch == '_' || ch == '.' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn annotation_targets(lexer: &Facts, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool {
     if want.0 != b'a' {
@@ -1629,11 +1669,12 @@ fn same_targets(deep: &str, lexer: &str) -> bool {
         return true;
     }
     let split = |text: &str| -> Vec<String> {
-        let mut out = Vec::new();
-        atoms(text, &mut out);
-        out.retain(|atom| atom.starts_with("n:") || atom.starts_with("k:"));
-        out.sort_unstable();
-        out
+        // The lists are written with quoted names in some languages and bare
+        // names in others (`["name","incoming"]`); the identifiers are the same
+        // either way, and only they decide whether the binders match.
+        let mut names = name_list(text);
+        names.sort_unstable();
+        names
     };
     let (left, right) = (split(deep), split(lexer));
     // A list that yields no names is not evidence of equality: the lexer writes
