@@ -663,17 +663,11 @@ impl<'a, S: ImportSource> Resolver<'a, S> {
         let mut found: Option<(u32, String)> = None;
         for index in returns {
             let index = index?;
-            let path = symbol.calls.get(index as usize)?.path.clone();
-            // A method call's value is not a constructor call; only a name is.
-            if path.contains('.') {
-                return None;
-            }
-            let bound = match self.call(&path, file, owner, facts, scope) {
-                Outcome::Bound(bound) if bound.row.kind == KIND_CLASS || bound.constructor => bound,
-                _ => return None,
-            };
-            let class = (bound.row.file, self.class_name(&bound.row)?);
-            match &found {
+            // Every returned value is a call; what class it produces is the same
+            // question as for a receiver, so it is answered by the same walk:
+            // `A()`, a function whose body names a class, `self.build()`.
+            let class = self.call_class(symbol, index as usize, file, facts, scope, depth + 1)?;
+            let class = (class.0, class.1);            match &found {
                 Some(seen) if *seen != class => return None,
                 _ => found = Some(class),
             }

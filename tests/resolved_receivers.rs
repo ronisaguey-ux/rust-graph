@@ -143,14 +143,40 @@ const HELPERS: &str = "\
 class K:
     def m(self):
         return 1
+
+
+def make_k():
+    return K()
 ";
 
 const MAIN: &str = "\
-from helpers import K
+from helpers import K, make_k
 
 
 def use():
     return K().m()
+
+
+def use_make():
+    return make_k().m()
+";
+
+/// A return that is itself a method call: `build` returns `self.inner()`, and
+/// `inner` names the class. Both hops are decided; the chain closes.
+const RETURN_CHAIN: &str = "\
+class Q:
+    def build(self):
+        return self.inner()
+
+    def inner(self):
+        return Q()
+
+    def go(self):
+        return 4
+
+
+def use():
+    return Q().build().go()
 ";
 
 fn deep_record(source: &str) -> facts::Facts {
@@ -180,7 +206,11 @@ struct Tree(PathBuf);
 
 impl Tree {
     fn new(name: &str, files: &[(&str, &str)]) -> Tree {
-        let dir = std::env::temp_dir().join(format!("rust-graph-receivers-{}-{name}", std::process::id()));
+        // A test per shape at a time: two tests building the same shape in
+        // parallel must not share, or clear, one directory.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("rust-graph-receivers-{}-{name}-{serial}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         for (file, source) in files {
@@ -195,6 +225,10 @@ impl Tree {
 
     fn shapes() -> Tree {
         Tree::new("shapes", &[("shapes.py", SHAPES), ("helpers.py", HELPERS), ("main.py", MAIN)])
+    }
+
+    fn deep_return() -> Tree {
+        Tree::new("deep-return", &[("deepreturn.py", RETURN_CHAIN)])
     }
 
     fn json(&self, extra: &str) -> String {
@@ -324,6 +358,27 @@ fn every_decidable_receiver_ties_and_the_rest_stay_open() {
     // The documented undecidable-in-principle shape: a receiver whose own
     // class the tree never states (`obj` is an untyped parameter).
     assert!(!json.contains("\"callee\":\"shapes.py:B.go\",\"line\":59"), "{json}");
+    // A function imported from another file is bound, but its body lives in
+    // that file and this pass only holds the facts of the file it resolves:
+    // `make_k`'s return class is not readable here, so `.m` stays open.
+    assert!(has_edge(&json, "main.py:use_make", "helpers.py:make_k", 9), "{json}");
+    assert!(!json.contains("\"callee\":\"helpers.py:K.m\",\"line\":9"), "{json}");
+}
+
+/// A function whose return is itself a method call is followed when that
+/// method's return names a class, so `Q().build().go()` closes.
+#[test]
+fn a_return_that_is_a_method_call_is_followed() {
+    let json = Tree::deep_return().json("--deep");
+    for (caller, callee, line, strategy) in [
+        ("deepreturn.py:use", "deepreturn.py:Q.build", 13, "receiver-call"),
+        ("deepreturn.py:use", "deepreturn.py:Q.go", 13, "receiver-return"),
+    ] {
+        assert!(has_edge(&json, caller, callee, line), "missing {caller} -> {callee}:{line}\n{json}");
+        let edge = format!(r#""caller":"{caller}","callee":"{callee}","line":{line}"#);
+        let found = json.lines().find(|row| row.contains(&edge)).unwrap();
+        assert!(found.contains(&format!("\"strategy\":\"{strategy}\"")), "{found}");
+    }
 }
 
 /// Both paths now decide the same links on the same tree; the deep one does it
