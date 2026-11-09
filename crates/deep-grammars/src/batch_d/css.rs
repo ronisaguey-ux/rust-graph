@@ -8,13 +8,10 @@
 //! (`calc`, `var`, `rgb`, ...), `url()` as one token, and comma-separated
 //! lists.
 //!
-//! A name directly before `:` is a declaration's property only when the colon
-//! is followed by a space; a compact `color:red` is therefore still one
-//! identifier, which is why the grammar accepts an identifier where a property
-//! name stands (`property_name: PROPERTY | CUSTOM_PROPERTY | IDENT`). The
-//! structural choice between a declaration and a rule set is then the `;`/`}`
-//! versus the `{`, and the parser backtracks out of a declaration that meets a
-//! block.
+//! A name directly before `:` is a declaration's property when the declaration
+//! ends (`;` or `}`) before a block opens, which is what tells `color:red;`
+//! from the selector `a:hover { }`; the lexer looks ahead for that brace, so a
+//! compact `color:red` is a property just like `color: red`.
 //!
 //! What is missing, named here rather than accepted silently:
 //!

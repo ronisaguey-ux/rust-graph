@@ -12,7 +12,7 @@
 //! with `PARTITION BY`, `ORDER BY`, named windows, `ROWS`/`RANGE`/`GROUPS`
 //! frames), `FILTER (WHERE ...)`, `RETURNING`, `ON CONFLICT ... DO NOTHING` /
 //! `DO UPDATE SET`, `CAST` and the `::` cast, `BETWEEN ... AND`, `IN (...)`,
-//! `LIKE`/`ILIKE`, `IS [NOT] NULL`/`DISTINCT FROM`, `INTERVAL`, `EXISTS`,
+//! `LIKE`/`ILIKE`, `IS [NOT] NULL`, `INTERVAL`, `EXISTS`,
 //! subqueries, table and column constraints (`PRIMARY KEY`, `UNIQUE`,
 //! `FOREIGN KEY ... REFERENCES ... ON DELETE CASCADE`, `CHECK`, `DEFAULT`,
 //! `NOT NULL`, named `CONSTRAINT`s), `CREATE TABLE`/`VIEW`/`INDEX`/`SCHEMA`/
