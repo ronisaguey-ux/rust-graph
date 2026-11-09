@@ -1136,3 +1136,380 @@ pub fn lex_test(c: &mut Cursor) -> Kind {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use crate::deep::syntax::ERROR;
+    use crate::deep::tree::{HAS_ERROR, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    /// Every valid fixture and its top-level node kinds.
+    const VALID: &[(&str, &[&str])] = &[
+        (
+            "shell_constructs.sh",
+            &[
+                "simple_command",
+                "simple_command",
+                "simple_command",
+                "simple_command",
+                "case_clause",
+                "if_clause",
+                "while_clause",
+                "simple_command",
+                "simple_command",
+                "simple_command",
+                "for_clause",
+                "simple_command",
+                "simple_command",
+                "simple_command",
+                "simple_command",
+            ],
+        ),
+        (
+            "shell_heredocs.sh",
+            &[
+                "simple_command",
+                "simple_command",
+                "heredocs",
+                "if_clause",
+                "simple_command",
+                "heredocs",
+                "simple_command",
+                "heredocs",
+                "simple_command",
+                "heredocs",
+                "simple_command",
+                "heredocs",
+                "function_definition",
+                "for_clause",
+                "simple_command",
+                "heredocs",
+            ],
+        ),
+        (
+            "shell_pipeline.sh",
+            &[
+                "simple_command",
+                "simple_command",
+                "simple_command",
+                "simple_command",
+                "simple_command",
+                "paren_function",
+                "paren_function",
+                "paren_function",
+                "paren_function",
+                "paren_function",
+                "simple_command",
+            ],
+        ),
+    ];
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name)
+    }
+
+    pub(super) fn parse(src: &[u8]) -> Workspace {
+        let mut workspace = Workspace::default();
+        workspace
+            .parse(src, &SHELL, &Budget::default())
+            .unwrap_or_else(|_| panic!("shell: input too large"));
+        workspace
+    }
+
+    pub(super) fn errors(workspace: &Workspace) -> usize {
+        let nodes = &workspace.tree.nodes;
+        (0..nodes.len())
+            .filter(|&index| nodes[index].kind == ERROR || nodes[index].flags & HAS_ERROR != 0 && nodes[index].flags & TOKEN != 0)
+            .count()
+    }
+
+    fn top(workspace: &Workspace) -> Vec<&'static str> {
+        let nodes = &workspace.tree.nodes;
+        workspace
+            .tree
+            .children(0)
+            .map(|child| &nodes[child as usize])
+            .filter(|node| node.flags & TOKEN == 0)
+            .map(|node| SHELL.name(node.kind))
+            .collect()
+    }
+
+    fn find<'w>(workspace: &'w Workspace, name: &str) -> Vec<&'w crate::deep::tree::Node> {
+        workspace.tree.nodes.iter().filter(|node| SHELL.name(node.kind) == name).collect()
+    }
+
+    fn sexp(src: &[u8]) -> String {
+        parse(src).tree.sexp(&SHELL, true)
+    }
+
+    #[test]
+    fn fixtures_parse_cleanly() {
+        for (name, expected) in VALID {
+            let path = fixture(name);
+            let src = fs::read(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+            assert!(!src.is_empty(), "{name}: an empty fixture proves nothing");
+            let workspace = parse(&src);
+            assert_eq!(SHELL.name(workspace.tree.root().kind), "program", "{name}: the root's kind changed");
+            assert_eq!(errors(&workspace), 0, "{name}: {} error nodes in a valid file:\n{}", errors(&workspace), workspace.tree.sexp(&SHELL, true));
+            assert_eq!(&top(&workspace), expected, "{name}: top-level kinds:\n{}", workspace.tree.sexp(&SHELL, true));
+        }
+    }
+
+    #[test]
+    fn a_command_substitution_in_a_heredoc_is_a_node_with_its_span() {
+        let src: &[u8] = b"#!/bin/sh\ncat <<EOF\nstart $(date +%s) end\n`whoami`\nEOF\n";
+        let workspace = parse(src);
+        assert_eq!(errors(&workspace), 0, "{}", workspace.tree.sexp(&SHELL, true));
+
+        let substitutions = find(&workspace, "command_substitution");
+        assert_eq!(substitutions.len(), 1, "one $( ) in the body, one node");
+        let node = substitutions[0];
+        let text = &src[node.start as usize..node.end as usize];
+        assert_eq!(text, b"$(date +%s)", "the substitution's span is exactly the substitution");
+
+        // The call inside is its own command node, inside that span.
+        let calls = find(&workspace, "simple_command");
+        assert!(
+            calls.iter().any(|call| call.start >= node.start
+                && call.end <= node.end
+                && &src[call.start as usize..call.end as usize] == b"date +%s"),
+            "no simple_command for `date +%s` inside the substitution:\n{}",
+            workspace.tree.sexp(&SHELL, true)
+        );
+
+        let ticks = find(&workspace, "backtick_substitution");
+        assert_eq!(ticks.len(), 1, "a backtick substitution in a body is a node too");
+        let tick = ticks[0];
+        assert_eq!(&src[tick.start as usize..tick.end as usize], b"`whoami`");
+    }
+
+    #[test]
+    fn a_heredoc_body_is_one_node_per_body() {
+        let src: &[u8] = b"cat <<A <<B\nfirst\nA\nsecond\nB\necho done\n";
+        let workspace = parse(src);
+        assert_eq!(errors(&workspace), 0, "{}", workspace.tree.sexp(&SHELL, true));
+        let bodies = find(&workspace, "heredoc_body");
+        assert_eq!(bodies.len(), 2, "two here-documents, two bodies:\n{}", workspace.tree.sexp(&SHELL, true));
+        assert_eq!(&src[bodies[0].start as usize..bodies[0].end as usize], b"first\nA\n");
+        assert_eq!(&src[bodies[1].start as usize..bodies[1].end as usize], b"second\nB\n");
+    }
+
+    #[test]
+    fn a_stripped_heredoc_ends_at_an_indented_delimiter() {
+        let src: &[u8] = b"if true; then\n\tcat <<-EOF\n\t\tindented body\n\tEOF\nfi\n";
+        let workspace = parse(src);
+        assert_eq!(errors(&workspace), 0, "{}", workspace.tree.sexp(&SHELL, true));
+        let bodies = find(&workspace, "heredoc_body");
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(&src[bodies[0].start as usize..bodies[0].end as usize], b"\t\tindented body\n\tEOF\n");
+    }
+
+    #[test]
+    fn a_quoted_heredoc_does_not_expand() {
+        let src: &[u8] = b"cat <<'EOF'\n$HOME $(date)\nEOF\n";
+        let workspace = parse(src);
+        assert_eq!(errors(&workspace), 0, "{}", workspace.tree.sexp(&SHELL, true));
+        assert!(find(&workspace, "command_substitution").is_empty(), "a quoted delimiter keeps its body text");
+        assert!(find(&workspace, "heredoc_text").len() == 1);
+    }
+
+    #[test]
+    fn a_string_keeps_its_substitution_as_a_node() {
+        let src: &[u8] = b"echo \"version $(git describe --tags) on ${HOST:-local}\"\n";
+        let workspace = parse(src);
+        assert_eq!(errors(&workspace), 0, "{}", workspace.tree.sexp(&SHELL, true));
+        let substitutions = find(&workspace, "command_substitution");
+        assert_eq!(substitutions.len(), 1);
+        let node = substitutions[0];
+        assert_eq!(&src[node.start as usize..node.end as usize], b"$(git describe --tags)");
+        let expansions = find(&workspace, "parameter_expansion");
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(&src[expansions[0].start as usize..expansions[0].end as usize], b"${HOST:-local}");
+    }
+
+    /// Truncated and broken input must still produce a tree: never a panic and
+    /// never a hang. The error lives inside the root.
+    #[test]
+    fn truncated_input_still_produces_a_tree() {
+        let cases: &[&[u8]] = &[
+            b"if true; then\n",
+            b"cat <<EOF\nbody\n",
+            b"cat <<EOF\n",
+            b"cat <<-EOF\n\tbody\n",
+            b"cat <<A <<B\nfirst\nA\n",
+            b"case $x in\na) echo a;;\n",
+            b"echo \"$(date\"\n",
+            b"echo \"unterminated\n",
+            b"echo ${x:-\n",
+            b"echo ${x\n",
+            b"echo $((1 + \n",
+            b"echo `date\n",
+            b"echo <(ls\n",
+            b"[[ -f x\n",
+            b"[[ -f\n",
+            b"for ((i = 0; i < 3; i++))\n",
+            b"function f {\n",
+            b"while read x; do\n",
+            b"echo )\n",
+            b"case x in\n",
+            b"#!/bin/sh\n(\n",
+        ];
+        for src in cases {
+            let workspace = parse(src);
+            assert_eq!(SHELL.name(workspace.tree.root().kind), "program", "{:?}: the root did not survive", String::from_utf8_lossy(src));
+            assert_eq!(workspace.tree.root().end as usize, src.len(), "{:?}: the root did not span the file", String::from_utf8_lossy(src));
+        }
+    }
+
+    #[test]
+    fn every_heredoc_form_parses() {
+        let src: &[u8] = concat!(
+            "cat <<EOF\na\nEOF\n",
+            "cat <<-EOF\n\tb\n\tEOF\n",
+            "cat <<'EOF'\n$c\nEOF\n",
+            "cat <<\"EOF\"\n$d\nEOF\n",
+            "cat <<\\EOF\n$e\nEOF\n",
+            "cat <<EOF | grep x\n$(f) EOF_ON_A_LINE\nEOF\n",
+            "for x in a b; do\n\tcat <<EOF\n\t$((x + 1))\nEOF\ndone\n",
+            "f() {\n\tcat <<EOF\n${g:-$(h)}\nEOF\n}\n",
+        )
+        .as_bytes();
+        let workspace = parse(src);
+        assert_eq!(errors(&workspace), 0, "{}", workspace.tree.sexp(&SHELL, true));
+        assert_eq!(find(&workspace, "heredoc_body").len(), 8);
+    }
+
+    #[test]
+    fn a_case_array_and_arithmetic_are_nodes() {
+        let src: &[u8] = concat!(
+            "arr=(one \"two\" $(three))\n",
+            "case $1 in\n  (a|b) echo ab ;;\n  c) echo c ;;\n  *) echo other\n",
+            "esac\n",
+            "[[ -f \"$f\" && $x =~ ^(a|b)$ ]]\n",
+            "n=$((1 + 2 * (3 + 4)))\n",
+            "for ((i = 0; i < 3; i++)); do echo $i; done\n",
+            "diff <(sort a) <(sort b)\n",
+        )
+        .as_bytes();
+        let workspace = parse(src);
+        assert_eq!(errors(&workspace), 0, "{}", workspace.tree.sexp(&SHELL, true));
+        assert_eq!(find(&workspace, "array").len(), 1);
+        assert_eq!(find(&workspace, "case_item").len(), 3);
+        assert_eq!(find(&workspace, "test_expression").len(), 1);
+        assert_eq!(find(&workspace, "arithmetic").len(), 2);
+        assert_eq!(find(&workspace, "process_substitution").len(), 2);
+    }
+
+    /// Prints the top-level kinds of every fixture, so the table above is
+    /// written from what the grammar produced rather than guessed.
+    #[test]
+    #[ignore]
+    fn dump_top_level_kinds() {
+        for (name, _) in VALID {
+            let src = fs::read(fixture(name)).unwrap();
+            let workspace = parse(&src);
+            println!(
+                "{name}: complete={} errors={} top={}",
+                workspace.tree.nodes.len() > 0 && errors(&workspace) == 0,
+                errors(&workspace),
+                top(&workspace).join(" ")
+            );
+            if errors(&workspace) > 0 {
+                println!("{}", workspace.tree.sexp(&SHELL, true));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_one_script() {
+        let cases: &[&[u8]] = &[
+            b"cleanup()\n{\n\trm -f ${perfdata}\n\ttrap - EXIT TERM INT\n\texit $glb_err\n}\n",
+            b"cleanup()\n{\n\techo hi\n}\n",
+            b"f() { echo hi; }\n",
+            b"get_canonical_version()\n{\n\tIFS=.\n\tset -- $1\n\techo $((100000 * $1 + 100 * $2 + $3))\n}\n",
+        ];
+        for case in cases {
+            let workspace = parse(case);
+            println!("ONE {:?} => errors {} {}", String::from_utf8_lossy(case), errors(&workspace), workspace.tree.sexp(&SHELL, true));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_error_context() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus-sh");
+        let mut names: Vec<PathBuf> = fs::read_dir(&directory).unwrap().map(|entry| entry.unwrap().path()).filter(|path| path.is_file()).collect();
+        names.sort();
+        let mut shown = 0;
+        for path in &names {
+            let src = fs::read(path).unwrap();
+            let workspace = parse(&src);
+            if errors(&workspace) == 0 {
+                continue;
+            }
+            let at = workspace.tree.nodes.iter().find(|node| node.kind == ERROR).map_or(0, |node| node.start as usize);
+            let line_start = src[..at.min(src.len())].iter().rposition(|&byte| byte == b'\n').map_or(0, |index| index + 1);
+            let line_end = src[at.min(src.len())..].iter().position(|&byte| byte == b'\n').map_or(src.len(), |index| index + at);
+            println!("FILE {} at {}", path.file_name().unwrap().to_string_lossy(), at);
+            println!("LINE {:?}", String::from_utf8_lossy(&src[line_start..line_end.min(src.len())]));
+            let from = line_start.saturating_sub(200);
+            let to = (line_end + 120).min(src.len());
+            println!("CONTEXT {:?}", String::from_utf8_lossy(&src[from..to]));
+            shown += 1;
+            if shown == 6 {
+                break;
+            }
+        }
+    }
+
+    /// The measured corpus: every `.sh` under the directory the environment
+    /// names is parsed and counted. Real scripts are the only evidence that the
+    /// grammar is not shaped around its own fixtures.
+    #[test]
+    #[ignore]
+    fn real_shell_corpus() {
+        let directory = std::env::var("SH_CORPUS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus-sh"));
+        let mut names: Vec<PathBuf> = fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("{directory:?}: {error}"))
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_file())
+            .collect();
+        names.sort();
+        let mut clean = 0;
+        let mut total = 0;
+        let mut broken: Vec<(String, usize, String)> = Vec::new();
+        for path in &names {
+            let src = fs::read(path).unwrap();
+            if src.len() > 1 << 20 {
+                continue;
+            }
+            total += 1;
+            let workspace = parse(&src);
+            let count = errors(&workspace);
+            if count == 0 {
+                clean += 1;
+            } else {
+                let at = workspace
+                    .tree
+                    .nodes
+                    .iter()
+                    .find(|node| node.kind == ERROR)
+                    .map_or(0, |node| node.start as usize);
+                let line = src[..at.min(src.len())].iter().filter(|&&byte| byte == b'\n').count() + 1;
+                let snippet = String::from_utf8_lossy(&src[at.saturating_sub(40).min(src.len())..(at + 60).min(src.len())]).into_owned();
+                broken.push((path.file_name().unwrap().to_string_lossy().into_owned(), line, snippet.replace('\n', "\\n")));
+            }
+        }
+        broken.sort_by_key(|(_, _, snippet)| snippet.clone());
+        println!("{clean} of {total} shell files parse with no error node");
+        for (name, line, snippet) in broken.iter().take(12) {
+            println!("  {name}:{line}: {snippet}");
+        }
+    }
+}
