@@ -770,6 +770,9 @@ mod deep_run {
         /// Why the emitted record won: `"tie"`, `"lexer"` (the lexer had more
         /// facts) or `""` (the CST had more, or there was nothing to compare).
         pub(super) why: &'static str,
+        /// Lexer artefacts accepted in place of a reproduction: a named call
+        /// that is not in the source, or a statement read as an expression.
+        pub(super) accepted: super::Accepted,
     }
 
     thread_local! {
@@ -882,6 +885,14 @@ mod deep_run {
         lexer_only: u64,
         fallbacks: u64,
         reused: u64,
+        /// Lexer calls with no name in the source (`.call`).
+        accepted_anonymous_calls: u64,
+        /// Lexer calls to a statement keyword (`assert`).
+        accepted_keyword_calls: u64,
+        /// Lexer `x` events for a statement keyword read as an expression.
+        accepted_keyword_events: u64,
+        /// Lexer assignment events whose target is an imported type name.
+        accepted_annotation_targets: u64,
     }
 
     impl State {
@@ -906,7 +917,7 @@ mod deep_run {
         /// header carries the format number, so a file from an older writer is
         /// void rather than half-read.
         pub(super) fn save(&self, dir: &Path) -> io::Result<()> {
-            let mut text = format!("rust-graph facts.meta 2 {}\n", bits());
+            let mut text = format!("rust-graph facts.meta 4 {}\n", bits());
             let mut rows: Vec<(&String, &Taken)> = self.records.iter().collect();
             rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
             for (path, taken) in rows {
@@ -916,13 +927,17 @@ mod deep_run {
                     (false, false) => "lexer",
                 };
                 text.push_str(&format!(
-                    "{} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {} {} {}\n",
                     escape(path),
                     parser,
                     taken.errors,
                     u8::from(taken.compared),
                     taken.why,
-                    escape(taken.fallback.as_deref().unwrap_or(""))
+                    escape(taken.fallback.as_deref().unwrap_or("")),
+                    taken.accepted.anonymous_calls,
+                    taken.accepted.keyword_calls,
+                    taken.accepted.keyword_events,
+                    taken.accepted.annotation_targets
                 ));
             }
             let temporary = dir.join("facts.meta.tmp");
@@ -974,6 +989,10 @@ mod deep_run {
             row.push_str(parsed_by);
             row.push('"');
             if let Some(taken) = taken {
+                self.accepted_anonymous_calls += u64::from(taken.accepted.anonymous_calls);
+                self.accepted_keyword_calls += u64::from(taken.accepted.keyword_calls);
+                self.accepted_keyword_events += u64::from(taken.accepted.keyword_events);
+                self.accepted_annotation_targets += u64::from(taken.accepted.annotation_targets);
                 if taken.errors > 0 {
                     row.push_str(&format!(",\"deep_errors\":{}", taken.errors));
                 }
@@ -1008,8 +1027,19 @@ mod deep_run {
 
         pub(super) fn report_line(&self, text: &str) -> String {
             format!(
-                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\n",
-                self.deep, self.lexer, self.fallbacks, self.compared, self.lexer_only, self.deep, self.lexer
+                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\nAccepted differences: {} lexer-only calls ({} anonymous, {} statement keywords), {} lexer-only value events for a statement keyword, {} lexer assignment targets naming an imported type instead of a binder.\n",
+                self.deep,
+                self.lexer,
+                self.fallbacks,
+                self.compared,
+                self.lexer_only,
+                self.deep,
+                self.lexer,
+                self.accepted_anonymous_calls + self.accepted_keyword_calls,
+                self.accepted_anonymous_calls,
+                self.accepted_keyword_calls,
+                self.accepted_keyword_events,
+                self.accepted_annotation_targets
             )
         }
 
@@ -1031,7 +1061,7 @@ mod deep_run {
     pub(super) fn load(dir: &Path) -> Option<HashMap<String, Taken>> {
         let text = std::fs::read_to_string(dir.join("facts.meta")).ok()?;
         let mut lines = text.lines();
-        if lines.next()? != format!("rust-graph facts.meta 2 {}", bits()) {
+        if lines.next()? != format!("rust-graph facts.meta 4 {}", bits()) {
             return None;
         }
         let mut out = HashMap::new();
@@ -1046,10 +1076,23 @@ mod deep_run {
                 "lexer" => "lexer",
                 _ => "",
             };
-            let reason = unescape(fields.next().unwrap_or(""));
+            let reason = unescape(fields.next()?);
+            let accepted = super::Accepted {
+                anonymous_calls: fields.next()?.parse().ok()?,
+                keyword_calls: fields.next()?.parse().ok()?,
+                keyword_events: fields.next()?.parse().ok()?,
+                annotation_targets: fields.next()?.parse().ok()?,
+            };
             out.insert(
                 path,
-                Taken { deep: parser == "deep", compared, errors, fallback: (!reason.is_empty()).then_some(reason), why },
+                Taken {
+                    deep: parser == "deep",
+                    compared,
+                    errors,
+                    fallback: (!reason.is_empty()).then_some(reason),
+                    why,
+                    accepted,
+                },
             );
         }
         Some(out)
@@ -1100,24 +1143,106 @@ fn weight(facts: &Facts) -> [u64; 3] {
     [facts.symbols.len() as u64, calls, facts.imports.len() as u64]
 }
 
-/// Whether the CST record lost anything the lexer's found.
+/// The lexer facts a CST record is allowed not to reproduce.
+///
+/// The one-pass lexer has artefacts of its own: it names a call whose callee is
+/// a value `.call`, it reads a statement keyword as an expression
+/// (`assert (a, b) == c` becomes a call to `assert`), and it reads an
+/// annotation's type as an assignment target (`x: Dict[str, int] = {}` binds
+/// `Dict`). A fact layer must not invent those to agree with the lexer, so they
+/// are accepted — and counted, so a reader sees what was set aside rather than
+/// taking silence for agreement. Only a target that names a name the file
+/// *imports* is read that way: a name the file binds is a binder, and a
+/// statement whose names disagree for any other reason is a loss.
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Accepted {
+    /// `f(x)(y)`: the callee is the value `f(x)`, so the lexer names the call
+    /// `.call`. No such name is written in the source.
+    pub(crate) anonymous_calls: u32,
+    /// `assert (a, b) == c`: the lexer reads a statement keyword as a callee.
+    pub(crate) keyword_calls: u32,
+    /// An `x` event the lexer wrote because it read a keyword statement as an
+    /// expression. The calls on that line are still compared through the call
+    /// table, so only the value-flow event is set aside.
+    pub(crate) keyword_events: u32,
+    /// `x: Dict[str, int] = {...}`: the lexer reads the annotation's type name
+    /// as the assignment target. The name is imported, not bound, and the CST
+    /// wrote the statement's real target with the same value, so no binding was
+    /// lost — the lexer invented one.
+    pub(crate) annotation_targets: u32,
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+impl Accepted {
+    /// Everything set aside for this file, of every kind.
+    pub(crate) fn total(self) -> u32 {
+        self.anonymous_calls + self.keyword_calls + self.keyword_events + self.annotation_targets
+    }
+}
+
+/// How the two records compare: a loss, or the lexer artefacts accepted in its
+/// place. A loss keeps the lexer's record; an acceptance is counted and does
+/// not decide anything.
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[derive(Default, Clone, Debug)]
+pub(crate) struct Verdict {
+    loss: Option<&'static str>,
+    /// The fact that tripped the check, in the reader's own words: the import,
+    /// the call, the binding, or the event with both records' payloads. Empty
+    /// when nothing was lost. Written on the fallback path only, so a file the
+    /// CST keeps pays nothing for it.
+    detail: String,
+    accepted: Accepted,
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+impl Verdict {
+    pub(crate) fn lost(&self) -> bool {
+        self.loss.is_some()
+    }
+
+    /// Which check fired, for a test or a reader of the report.
+    pub(crate) fn why(&self) -> Option<&'static str> {
+        self.loss
+    }
+
+    /// The fact behind `why`, empty when nothing was lost.
+    pub(crate) fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    pub(crate) fn accepted(&self) -> Accepted {
+        self.accepted
+    }
+}
+
+/// Whether the CST record lost anything the lexer's found, and which lexer
+/// artefacts were accepted instead.
 ///
 /// The deep walk is the better reader where its tables cover a construct, but
 /// where a grammar or a table has not reached one it can silently see less than
 /// the one-pass lexer — `from m import *`, `a, b = f(x), 1`, `f"{x}"` are three
 /// the differential fixtures do not carry. `auto` therefore compares the two
 /// records and keeps the lexer's when the CST's is missing something: fewer
-/// imports, a named symbol the lexer had, a call, or a flow event. A loss is
-/// recorded as a fallback rather than hidden, and `--deep` skips the comparison
-/// because the user asked for the CST.
+/// imports, a named symbol the lexer had, a call, a typed variable, or a flow
+/// event. A loss is recorded as a fallback rather than hidden, and `--deep`
+/// skips the comparison because the user asked for the CST.
+///
+/// The `Verdict` carries the fact that tripped the check so a fallback can be
+/// read rather than counted, and the lexer artefacts accepted instead, so the
+/// report says how much was set aside.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn loses(lexer: &Facts, deep: &Facts) -> bool {
+pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
+    let accepted = Accepted::default();
+    let verdict = |loss: Option<&'static str>, detail: String, accepted: Accepted| Verdict { loss, detail, accepted };
     for import in &lexer.imports {
         let same = deep.imports.iter().any(|row| {
             row.module == import.module && row.name == import.name && row.alias == import.alias && row.kind == import.kind
         });
         if !same {
-            return true;
+            let detail = format!("import {} name {} alias {}", import.module, import.name, import.alias);
+            return verdict(Some("import"), detail, accepted);
         }
     }
     for symbol in lexer.symbols.iter().filter(|symbol| symbol.kind != KIND_MODULE) {
@@ -1126,7 +1251,8 @@ fn loses(lexer: &Facts, deep: &Facts) -> bool {
             .iter()
             .any(|row| row.name == symbol.name && row.kind == symbol.kind);
         if !same {
-            return true;
+            let detail = format!("symbol {} kind {} line {}", symbol.name, symbol.kind, symbol.line);
+            return verdict(Some("symbol"), detail, accepted);
         }
     }
     let name_of = |path: &str| path.rsplit('.').next().unwrap_or(path).to_string();
@@ -1140,7 +1266,8 @@ fn loses(lexer: &Facts, deep: &Facts) -> bool {
                 .flat_map(|row| row.calls.iter())
                 .any(|row| name_of(&row.path) == name && near(row.line));
             if !same {
-                return true;
+                let detail = format!("call {} line {} in {}", call.path, call.line, symbol.name);
+                return verdict(Some("call"), detail, accepted);
             }
         }
     }
@@ -1148,8 +1275,10 @@ fn loses(lexer: &Facts, deep: &Facts) -> bool {
         facts.symbols.iter().map(|symbol| symbol.events.matches(marker).count()).sum()
     };
     for marker in ["[\"a\",", "[\"r\",", "[\"x\","] {
-        if events(deep, marker) < events(lexer, marker) {
-            return true;
+        let (found, wanted) = (events(deep, marker), events(lexer, marker));
+        if found < wanted {
+            let detail = format!("event {} count {} < {}", marker, found, wanted);
+            return verdict(Some("event"), detail, accepted);
         }
     }
     // A value the lexer read and the CST wrote as a constant on the same line.
@@ -1172,11 +1301,12 @@ fn loses(lexer: &Facts, deep: &Facts) -> bool {
             if deep_values.iter().any(|(deep_marker, deep_line, deep_constant)| {
                 *deep_marker == marker && *deep_line == line && *deep_constant
             }) {
-                return true;
+                let detail = format!("event {} line {} in {}: the CST wrote the value as 0", marker as char, line, symbol.name);
+                return verdict(Some("event"), detail, accepted);
             }
         }
     }
-    false
+    verdict(None, String::new(), accepted)
 }
 
 /// The `["r",line,value]` and `["x",line,value]` events in a record, as
@@ -1285,9 +1415,13 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
         return deep;
     }
     if mode == PathMode::Auto {
-        if loses(&lexer, &deep) {
+        let verdict = loses(&lexer, &deep);
+        if verdict.lost() {
             let fallback = Some("the CST record lost facts the lexer found".to_string());
-            deep_run::record(path, deep_run::Taken { compared: true, fallback, ..deep_run::Taken::default() });
+            deep_run::record(
+                path,
+                deep_run::Taken { compared: true, fallback, accepted: verdict.accepted(), ..deep_run::Taken::default() },
+            );
             return lexer;
         }
         let why = match weight(&deep).cmp(&weight(&lexer)) {
@@ -1296,11 +1430,17 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
             std::cmp::Ordering::Less => {
                 // The lexer read more than the CST did: keep it, and say so,
                 // but this is not a fallback — nothing was lost.
-                deep_run::record(path, deep_run::Taken { compared: true, why: "lexer", ..deep_run::Taken::default() });
+                deep_run::record(
+                    path,
+                    deep_run::Taken { compared: true, why: "lexer", accepted: verdict.accepted(), ..deep_run::Taken::default() },
+                );
                 return lexer;
             }
         };
-        deep_run::record(path, deep_run::Taken { deep: true, compared: true, errors: cst.errors, fallback: None, why });
+        deep_run::record(
+            path,
+            deep_run::Taken { deep: true, compared: true, errors: cst.errors, fallback: None, why, accepted: verdict.accepted() },
+        );
         return deep;
     }
     deep_run::record(path, deep_run::Taken { deep: true, errors: cst.errors, fallback: None, why: "", ..deep_run::Taken::default() });
