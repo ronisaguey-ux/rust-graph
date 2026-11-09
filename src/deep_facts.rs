@@ -1509,22 +1509,29 @@ impl<'a> Walker<'a> {
                 Some(body) => self.form(body),
                 None => "0".to_string(),
             },
-            // `f"{a(x)} b{c(y)}"`: the text is not a value, but each field's
-            // expression is, and the one-pass lexer's string reader forms the
-            // same merge of them. So a call written in a field is a fact on
-            // both paths, and a field with no call saves nothing to compare.
-            "f_string" => {
+            // `f"{a(x)} b{c(y)}"` and `` `a${h(x)}b${g(y)}` ``: the text is not
+            // a value, but each field's expression is, and the one-pass lexer's
+            // string reader forms the same merge of them. So a call written in
+            // a field is a fact on both paths, and a field with no call saves
+            // nothing to compare.
+            "f_string" | "template_string" => {
+                // Python's replacement field is `interpolation`, JavaScript's
+                // is `template_substitution`; everything else is the same
+                // shape, and a template with no substitution is still `0`.
+                let field = if kind == "f_string" { "interpolation" } else { "template_substitution" };
                 let mut parts = Vec::new();
                 for child in self.children(id) {
-                    if self.kind(child) != "interpolation" {
+                    if self.kind(child) != field {
                         continue;
                     }
                     // `{x!r:>{w}}` holds one expression; the conversion and the
                     // format spec are text, and their nested fields are
                     // `interpolation` nodes of their own, so they are reached
-                    // from the spec, not from here.
+                    // from the spec, not from here. A template substitution's
+                    // nested substitutions live inside a nested `template_string`
+                    // node, which `form` reaches as the substitution's value.
                     let value = self.children(child).into_iter().find(|&part| {
-                        !self.is_layout(part) && self.node(part).first_child != NONE && self.kind(part) != "interpolation"
+                        !self.is_layout(part) && self.node(part).first_child != NONE && self.kind(part) != field
                     });
                     if let Some(value) = value {
                         parts.push(self.form(value));
@@ -1536,7 +1543,7 @@ impl<'a> Walker<'a> {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
-            "string" | "string_literal" | "template_string" | "number" | "integer" | "float" | "true" | "false"
+            "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment" => "0".to_string(),
             // A keyword reused as an identifier (`match`, `type`, `case`)
             // carries that keyword as its kind; the spelling is the name.
