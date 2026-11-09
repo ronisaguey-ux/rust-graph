@@ -336,7 +336,9 @@ rust_graph_deep::grammar! { CPP {
     _default_parameter: declaration_specifiers [_declarator],
 
     _declarator_or_abstract: pointer* [direct_declarator] abstract_suffix*,
-    _abstract_declarator: pointer* [parenthesized_abstract] abstract_suffix*,
+    /// It always starts with a `*`, so a `(` after a type id is an argument
+    /// list and not an abstract declarator.
+    _abstract_declarator: pointer+ [parenthesized_abstract] abstract_suffix*,
     parenthesized_abstract: "(" _abstract_declarator ")",
     abstract_suffix: array_suffix | parameter_list,
 
