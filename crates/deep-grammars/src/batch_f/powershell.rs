@@ -839,3 +839,217 @@ fn here_string(c: &mut Cursor) -> Kind {
     BAD_STRING
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::batch_f::harness;
+    use crate::deep::syntax::ERROR;
+    use crate::deep::tree::{HAS_ERROR, TOKEN};
+    use crate::deep::Budget;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    const VALID: &[(&str, &[&str])] = &[
+        (
+            "Build.ps1",
+            &[
+                "param_declaration",
+                "function_definition",
+                "pipeline",
+                "foreach_statement",
+                "pipeline",
+                "if_statement",
+                "for_statement",
+            ],
+        ),
+        ("Deploy.ps1", &["using_statement", "class_definition", "pipeline", "pipeline"]),
+        (
+            "Report.ps1",
+            &[
+                "function_definition",
+                "pipeline",
+                "do_statement",
+                "while_statement",
+                "pipeline",
+                "pipeline",
+            ],
+        ),
+        (
+            "ps1_expressions.ps1",
+            &[
+                "param_declaration",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "foreach_statement",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+            ],
+        ),
+        (
+            "ps1_objects.ps1",
+            &["using_statement", "pipeline", "pipeline", "enum_definition", "class_definition", "function_definition", "function_definition"],
+        ),
+        (
+            "ps1_strings.ps1",
+            &[
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+                "pipeline",
+            ],
+        ),
+    ];
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/longtail3/powershell").join(name)
+    }
+
+    fn errors(src: &[u8]) -> usize {
+        let mut workspace = crate::deep::Workspace::default();
+        workspace.parse(src, &POWERSHELL, &Budget::default()).unwrap();
+        let nodes = &workspace.tree.nodes;
+        (0..nodes.len())
+            .filter(|&index| nodes[index].kind == ERROR || nodes[index].flags & HAS_ERROR != 0 && nodes[index].flags & TOKEN != 0)
+            .count()
+    }
+
+    #[test]
+    fn valid_fixtures() {
+        harness::check_valid("powershell", &POWERSHELL, VALID);
+    }
+
+    #[test]
+    fn malformed_keeps_the_root() {
+        harness::check_malformed("malformed", "powershell_broken.ps1", &POWERSHELL, &["function_definition"]);
+    }
+
+    #[test]
+    fn a_subexpression_in_a_string_is_a_node_with_its_span() {
+        let src: &[u8] = b"Write-Host \"version $($app.Version) on $env:COMPUTERNAME\"\n";
+        let mut workspace = crate::deep::Workspace::default();
+        workspace.parse(src, &POWERSHELL, &Budget::default()).unwrap();
+        assert_eq!(errors(src), 0, "{}", workspace.tree.sexp(&POWERSHELL, true));
+        let nodes = &workspace.tree.nodes;
+        let subexpressions: Vec<&crate::deep::tree::Node> =
+            nodes.iter().filter(|node| POWERSHELL.name(node.kind) == "subexpression").collect();
+        assert_eq!(subexpressions.len(), 1, "{}", workspace.tree.sexp(&POWERSHELL, true));
+        let node = subexpressions[0];
+        assert_eq!(&src[node.start as usize..node.end as usize], b"$($app.Version)");
+        assert_eq!(&src[..1], b"W");
+    }
+
+    #[test]
+    fn a_subexpression_in_code_is_a_node() {
+        let src: &[u8] = b"$count = $(Get-ChildItem -Path . | Measure-Object).Count\n";
+        let mut workspace = crate::deep::Workspace::default();
+        workspace.parse(src, &POWERSHELL, &Budget::default()).unwrap();
+        assert_eq!(errors(src), 0, "{}", workspace.tree.sexp(&POWERSHELL, true));
+        let nodes = &workspace.tree.nodes;
+        let node = nodes.iter().find(|node| POWERSHELL.name(node.kind) == "subexpression").expect("a subexpression node");
+        assert_eq!(&src[node.start as usize..node.end as usize], b"$(Get-ChildItem -Path . | Measure-Object)");
+    }
+
+    #[test]
+    fn splatting_and_literals_are_nodes() {
+        let src: &[u8] = b"$args = @('a', 'b')\n$map = @{ Name = 'x'; Count = 2 }\nGet-Item @args\n";
+        let mut workspace = crate::deep::Workspace::default();
+        workspace.parse(src, &POWERSHELL, &Budget::default()).unwrap();
+        assert_eq!(errors(src), 0, "{}", workspace.tree.sexp(&POWERSHELL, true));
+        let nodes = &workspace.tree.nodes;
+        let names: Vec<&'static str> = nodes.iter().map(|node| POWERSHELL.name(node.kind)).collect();
+        assert!(names.contains(&"array_literal"), "{:?}", workspace.tree.sexp(&POWERSHELL, true));
+        assert!(names.contains(&"hashtable_literal"));
+        assert!(names.contains(&"splat"));
+    }
+
+    /// Truncated and broken input must still produce a tree: never a panic and
+    /// never a hang.
+    #[test]
+    fn truncated_input_still_produces_a_tree() {
+        let cases: &[&[u8]] = &[
+            b"function Test- {\n",
+            b"if ($x) {\n",
+            b"$x = $(Get-Date\n",
+            b"$s = \"unterminated\n",
+            b"$h = @\"\nunterminated\n",
+            b"class C {\n",
+            b"param(\n",
+            b"$x = @{\n",
+            b"$x = @(\n",
+            b"foreach ($i in 1..10) {\n",
+            b"try {\n",
+            b"switch ($x) {\n",
+        ];
+        for src in cases {
+            let mut workspace = crate::deep::Workspace::default();
+            workspace.parse(src, &POWERSHELL, &Budget::default()).unwrap();
+            assert_eq!(POWERSHELL.name(workspace.tree.root().kind), "script", "{:?}", String::from_utf8_lossy(src));
+            assert_eq!(workspace.tree.root().end as usize, src.len());
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_top_level_kinds() {
+        harness::dump("powershell", &POWERSHELL);
+        harness::dump("malformed", &POWERSHELL);
+    }
+
+    /// The measured corpus: every `.ps1` under the directory is parsed and
+    /// counted.
+    #[test]
+    #[ignore]
+    fn real_powershell_corpus() {
+        let directory = std::env::var("PS1_CORPUS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus-ps1"));
+        let mut names: Vec<PathBuf> = fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("{directory:?}: {error}"))
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_file() && !path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')))
+            .collect();
+        names.sort();
+        let mut clean = 0;
+        let mut total = 0;
+        for path in &names {
+            let src = fs::read(path).unwrap();
+            total += 1;
+            if errors(&src) == 0 {
+                clean += 1;
+            } else {
+                println!("{}: {} error nodes", path.file_name().unwrap().to_string_lossy(), errors(&src));
+            }
+        }
+        println!("{clean} of {total} PowerShell files parse with no error node");
+    }
+
+    #[test]
+    fn lexes_a_parameter_an_operator_and_a_variable() {
+        use crate::deep::lexer::{lex, Tokens};
+        let src = b"Get-Item -Path $p -eq 1";
+        let mut tokens = Tokens::default();
+        lex(src, &POWERSHELL, &mut tokens);
+        let kinds: Vec<&str> = (0..tokens.len())
+            .map(|i| POWERSHELL.name(tokens.kind[i]))
+            .filter(|kind| *kind != "whitespace")
+            .collect();
+        assert_eq!(kinds, ["identifier", "parameter", "variable", "-eq", "number"]);
+    }
+}
