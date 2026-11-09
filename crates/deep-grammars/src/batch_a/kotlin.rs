@@ -245,7 +245,17 @@ rust_graph_deep::grammar! { KOTLIN {
     }
 
     kotlin_file: _top*,
-    _top: package_header | import_header | _declaration | LINE_END | ";",
+    /// A script (`.kts`) has statements where a `.kt` file has declarations.
+    /// Only the shapes a build script uses are modelled — a dotted call, its
+    /// arguments, its trailing lambda, or a plain assignment — and never a bare
+    /// block, so a broken declaration is recovered inside itself instead of
+    /// being re-read as a top-level statement.
+    _top: package_header | import_header | _declaration | script_statement | LINE_END | ";",
+    script_statement: _script_head [arguments] [lambda_literal] ["=" _expression],
+    /// A plain identifier starts a script statement. A contextual keyword does
+    /// not: `data class X` and `abstract class X` are declarations, and a start
+    /// set that both shares cannot be decided.
+    _script_head: IDENT ("." _name)*,
 
     package_header: "package" _qualified_name,
     import_header: "import" _qualified_name ["as" _name],
@@ -333,7 +343,10 @@ rust_graph_deep::grammar! { KOTLIN {
     annotations: annotation+,
 
     type_parameters: "<" (type_parameter %? ",") _gt,
-    type_parameter: [modifiers] _name [":" _type],
+    /// Variance is its own alternative rather than a modifier: `out` is also a
+    /// legal name, and one optional prefix that both a modifier and a name can
+    /// start cannot be decided by the first token.
+    type_parameter: "in" _name [":" _type] | "out" _name [":" _type] | [annotations] _name [":" _type],
     type_arguments: "<" (_type_argument %? ",") _gt,
     _type_argument: "*" | _type,
     _gt: ">" | GT_JOINED,
@@ -349,12 +362,12 @@ rust_graph_deep::grammar! { KOTLIN {
         | while_statement
         | do_statement
         | for_statement
-        | return_statement
-        | throw_statement
         | break_statement
         | continue_statement
         | expression_statement,
 
+    /// `return` and `throw` are primaries as well as statements: `a ?: return x`
+    /// and `list.map { it ?: throw ... }` put them where an expression goes.
     labeled_statement: _name "@" _statement,
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
     while_statement: "while" parenthesized_expression _statement,
@@ -400,6 +413,7 @@ rust_graph_deep::grammar! { KOTLIN {
         type_test: postfix "is" _type => is_expression,
         postfix NOT_IS _type => is_expression,
         cast: postfix "as" ["?"] _type => as_expression,
+        infix: left _name => infix_expression,
         range: left ".." | "..<" => range_expression,
         add: left "+" | "-" => binary_expression,
         mul: left "*" | "/" | "%" => binary_expression,
@@ -427,7 +441,9 @@ rust_graph_deep::grammar! { KOTLIN {
         | object_expression
         | if_statement
         | when_statement
-        | try_statement,
+        | try_statement
+        | return_statement
+        | throw_statement,
     _literal: INTEGER | FLOAT | CHAR | string_literal | "true" | "false" | "null",
     string_literal: STRING_START _string_part* STRING_END,
     _string_part: STRING_TEXT | interpolation | SIMPLE_TEMPLATE,
@@ -448,8 +464,11 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix type_arguments => generic_type,
         postfix "." _name => qualified_type,
     },
-    _type_head: _name | function_type,
+    _type_head: &(receiver_function_type) receiver_function_type | _name | function_type,
     function_type: function_parameters "->" _type,
+    /// A function type with a receiver: `Config.() -> Unit`, the parameter that
+    /// makes `config { }` work.
+    receiver_function_type: _name ["?"] "." function_parameters "->" _type,
     function_parameters: "(" (_type %? ",") ")",
 
     _name:
@@ -544,9 +563,12 @@ pub fn lex(c: &mut Cursor) -> Kind {
 
 /// Whether a line break after a token of this kind may end a statement.
 fn ends_statement(kind: Kind) -> bool {
+    if is_name(kind) {
+        return true;
+    }
     matches!(
         kind,
-        IDENT | INTEGER | FLOAT | CHAR | STRING_END | STRING_BAD | SIMPLE_TEMPLATE
+        INTEGER | FLOAT | CHAR | STRING_END | STRING_BAD | SIMPLE_TEMPLATE
             | BAD_LITERAL | RPAREN | RBRACKET | RBRACE | KW_RETURN | KW_BREAK
             | KW_CONTINUE | KW_THIS | KW_SUPER | KW_NULL | KW_TRUE | KW_FALSE
             | INCREMENT | DECREMENT | BANG_BANG
@@ -571,6 +593,21 @@ fn continues(c: &Cursor) -> bool {
 fn word_at(rest: &[u8]) -> &[u8] {
     let end = rest.iter().position(|byte| !is_word_byte(*byte)).unwrap_or(rest.len());
     &rest[..end]
+}
+
+/// Whether a token is one `_name` accepts. Every contextual keyword is a name
+/// in Kotlin, so `val value = 1` ends its line like any identifier does.
+fn is_name(kind: Kind) -> bool {
+    matches!(
+        kind,
+        IDENT | KW_ABSTRACT | KW_ACTUAL | KW_ANNOTATION | KW_BY | KW_COMPANION | KW_CONST
+            | KW_CONSTRUCTOR | KW_CONTEXT | KW_CROSSINLINE | KW_DATA | KW_DELEGATE | KW_DYNAMIC
+            | KW_ENUM | KW_EXPECT | KW_EXTERNAL | KW_FIELD | KW_FINAL | KW_GET | KW_INFIX
+            | KW_INIT | KW_INLINE | KW_INNER | KW_INTERNAL | KW_LATEINIT | KW_NOINLINE | KW_OPEN
+            | KW_OPERATOR | KW_OUT | KW_OVERRIDE | KW_PRIVATE | KW_PROTECTED | KW_PUBLIC
+            | KW_REIFIED | KW_SEALED | KW_SET | KW_SUSPEND | KW_TAILREC | KW_VALUE | KW_VARARG
+            | KW_WHERE
+    )
 }
 
 #[inline]
@@ -999,6 +1036,62 @@ mod tests {
         assert!(fixtures::clean(&KOTLIN, src));
         let kinds = fixtures::tokens(&KOTLIN, src);
         assert!(kinds.iter().any(|kind| *kind == "template_name"), "{kinds:?}");
+    }
+
+    /// Malformed and truncated input must give a tree with the error inside it,
+    /// never a panic and never a hang: every prefix of every corpus file at a
+    /// character boundary is parsed here.
+    #[test]
+    fn every_prefix_of_a_corpus_file_still_builds_its_tree() {
+        let dir = fixtures::fixtures().join("kotlin_corpus");
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        for name in &names {
+            let src = std::fs::read_to_string(dir.join(name)).unwrap();
+            let cuts: Vec<usize> = src.char_indices().map(|(at, _)| at).filter(|at| at % 5 == 0).chain(std::iter::once(src.len())).collect();
+            for at in cuts {
+                let head = &src[..at];
+                let mut workspace = crate::deep::Workspace::default();
+                let outcome = workspace.parse(head.as_bytes(), &KOTLIN, &crate::deep::Budget::default()).unwrap_or_else(|_| panic!("{name} at {at}: too large"));
+                assert!(outcome.complete(), "{name} at {at}: a truncated file must still finish");
+                assert_eq!(KOTLIN.name(workspace.tree.root().kind), "kotlin_file", "{name} at {at}: the root must survive");
+            }
+        }
+    }
+
+    /// Real files, not the eight hand-written fixtures: every one in
+    /// `fixtures/kotlin_corpus` must parse with no error node. The count is the
+    /// measurement the report quotes.
+    #[test]
+    fn kotlin_corpus_is_clean() {
+        let dir = fixtures::fixtures().join("kotlin_corpus");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("{dir:?}: {error}"))
+            .filter(|entry| entry.as_ref().map(|entry| entry.file_type().map(|kind| kind.is_file()).unwrap_or(false)).unwrap_or(false))
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert!(names.len() >= 8, "the corpus is at least eight realistic files, not {}", names.len());
+        let mut dirty = Vec::new();
+        for name in &names {
+            let src = std::fs::read(dir.join(name)).unwrap();
+            let src = std::str::from_utf8(&src).unwrap();
+            if !fixtures::clean(&KOTLIN, src) {
+                dirty.push(name.clone());
+            }
+        }
+        println!("kotlin_corpus: {}/{} clean", names.len() - dirty.len(), names.len());
+        if !dirty.is_empty() {
+            let mut text = String::new();
+            for name in &dirty {
+                let src = std::fs::read(dir.join(name)).unwrap();
+                let src = std::str::from_utf8(&src).unwrap();
+                let mut workspace = crate::deep::Workspace::default();
+                workspace.parse(src.as_bytes(), &KOTLIN, &crate::deep::Budget::default()).unwrap();
+                text.push_str(&format!("\n{dname}:{dump}\n", dname = name, dump = workspace.tree.sexp(&KOTLIN, true)));
+            }
+            panic!("{} of {} corpus files are not clean:\n{}", dirty.len(), names.len(), text);
+        }
     }
 
 }
