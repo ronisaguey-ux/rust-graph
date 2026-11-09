@@ -975,49 +975,71 @@ fn heredoc(c: &mut Cursor) -> Kind {
         return BAD_LITERAL;
     }
     at += 1;
+    if quote == b'\'' {
+        return nowdoc_body(c, at, &marker);
+    }
+    c.bump_n(at);
+    HEREDOC_MARKERS.with(|markers| markers.borrow_mut().push(marker));
+    HEREDOC_START
+}
+
+/// The body of a nowdoc: every line up to the marker's line, terminator and all,
+/// as one token.
+fn nowdoc_body(c: &mut Cursor, body: usize, marker: &[u8]) -> Kind {
+    let rest = c.rest();
+    let mut line = body;
     loop {
-        if at >= rest.len() {
-            c.bump_n(rest.len());
-            return BAD_LITERAL;
+        let mut at = line;
+        while matches!(rest.get(at), Some(b' ' | b'\t')) {
+            at += 1;
         }
-        let line_start = at;
-        let mut line_end = at;
-        while line_end < rest.len() && rest[line_end] != b'\n' {
-            line_end += 1;
-        }
-        let line = &rest[line_start..line_end];
-        let lead = line.iter().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
-        let body = &line[lead..];
-        let body = body.strip_suffix(b";").unwrap_or(body);
-        if trim_end(body) == marker {
-            c.bump_n(line_start + lead + marker_len);
+        if rest.get(at..).is_some_and(|tail| tail.starts_with(marker)) && !rest.get(at + marker.len()).is_some_and(|byte| is_word_byte(*byte)) {
+            c.bump_n(at + marker.len());
             return STRING;
         }
-        if line_end >= rest.len() {
-            c.bump_n(rest.len());
-            return BAD_LITERAL;
+        match rest[line..].iter().position(|&byte| byte == b'\n') {
+            Some(offset) => line += offset + 1,
+            None => {
+                c.bump_n(rest.len());
+                return BAD_LITERAL;
+            }
         }
-        at = line_end + 1;
     }
 }
 
-fn trim_end(mut bytes: &[u8]) -> &[u8] {
-    while let [rest @ .., last] = bytes {
-        if matches!(last, b' ' | b'\t' | b'\r') {
-            bytes = rest;
-        } else {
-            break;
-        }
+/// `(int)`, `(string)`, `(array)` and the rest, as one token.
+fn cast(c: &mut Cursor) -> Option<Kind> {
+    let rest = c.rest();
+    let mut at = 1;
+    while matches!(rest.get(at), Some(b' ' | b'\t')) {
+        at += 1;
     }
-    bytes
+    let start = at;
+    while rest.get(at).is_some_and(|byte| is_word_byte(*byte)) {
+        at += 1;
+    }
+    let word = rest.get(start..at)?;
+    while matches!(rest.get(at), Some(b' ' | b'\t')) {
+        at += 1;
+    }
+    if rest.get(at) != Some(&b')') {
+        return None;
+    }
+    let known = matches!(
+        word,
+        b"int" | b"integer" | b"float" | b"double" | b"string" | b"binary" | b"bool" | b"boolean" | b"array" | b"object" | b"unset"
+    );
+    if !known {
+        return None;
+    }
+    c.bump_n(at + 1);
+    Some(CAST)
 }
 
 fn number(c: &mut Cursor) -> Kind {
     if c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X' | b'b' | b'B' | b'o' | b'O') {
-        let radix = c.peek_at(1).to_ascii_lowercase();
         c.bump_n(2);
         c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-        let _ = radix;
         return NUMBER;
     }
     let mut float = false;
@@ -1072,7 +1094,10 @@ fn operator(c: &mut Cursor) -> Kind {
         (b'&', b'=', _) => (AMP_EQ, 2),
         (b'|', b'=', _) => (PIPE_EQ, 2),
         (b'^', b'=', _) => (CARET_EQ, 2),
-        (b'(', ..) => (LPAREN, 1),
+        (b'(', ..) => match cast(c) {
+            Some(kind) => (kind, 0),
+            None => (LPAREN, 1),
+        },
         (b')', ..) => (RPAREN, 1),
         (b'[', ..) => (LBRACKET, 1),
         (b']', ..) => (RBRACKET, 1),
@@ -1105,4 +1130,138 @@ fn operator(c: &mut Cursor) -> Kind {
     };
     c.bump_n(width);
     kind
+}
+
+#[cfg(test)]
+mod real_world {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::PHP;
+    use crate::deep::syntax::ERROR;
+    use crate::deep::tree::{HAS_ERROR, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    fn php_files(root: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(root) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                php_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "php") {
+                out.push(path);
+            }
+        }
+    }
+
+    fn errors_of(src: &[u8]) -> Vec<(usize, usize)> {
+        let mut workspace = Workspace::default();
+        let Ok(outcome) = workspace.parse(src, &PHP, &Budget::default()) else { return Vec::new() };
+        assert!(outcome.complete(), "the parse did not finish");
+        let nodes = &workspace.tree.nodes;
+        (0..nodes.len())
+            .filter(|&index| nodes[index].kind == ERROR || nodes[index].flags & HAS_ERROR != 0 && nodes[index].flags & TOKEN != 0)
+            .map(|index| (nodes[index].start as usize, nodes[index].end as usize))
+            .collect()
+    }
+
+    /// `(clean files, total files, one sample per bucket, buckets by the first
+    /// word of a failing file's first error)`.
+    fn census(root: &Path) -> (usize, usize, Vec<String>, Vec<(usize, String, String)>) {
+        let mut files = Vec::new();
+        php_files(root, &mut files);
+        files.sort();
+        let mut clean = 0usize;
+        let mut samples = Vec::new();
+        let mut histogram: BTreeMap<String, (usize, String)> = BTreeMap::new();
+        for path in &files {
+            let Ok(src) = fs::read(path) else { continue };
+            let text = String::from_utf8_lossy(&src);
+            let errors = errors_of(&src);
+            if errors.is_empty() {
+                clean += 1;
+                continue;
+            }
+            let (start, end) = errors[0];
+            let snippet: String = text.get(start..end).unwrap_or("").chars().take(70).collect();
+            let key = snippet.split_whitespace().next().unwrap_or("<empty>").to_string();
+            let entry = histogram.entry(key).or_insert((0, format!("{}: {:?}", path.display(), snippet)));
+            entry.0 += 1;
+            if samples.len() < 30 {
+                samples.push(format!("{}: {:?}", path.display(), snippet));
+            }
+        }
+        let mut rows: Vec<(usize, String, String)> = histogram.into_iter().map(|(key, (count, sample))| (count, key, sample)).collect();
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        (clean, files.len(), samples, rows)
+    }
+
+    /// The real-world measure: how many files of a PHP corpus parse with no
+    /// error node, and what the first error of each remaining file is.
+    ///
+    /// `PHP_CORPUS=<dir> cargo test -p deep-grammars -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn census_of_a_real_php_corpus() {
+        let root = std::env::var("PHP_CORPUS").unwrap_or_else(|_| "/tmp/opencode/php-corpus".to_string());
+        let (clean, total, _samples, rows) = census(Path::new(&root));
+        println!("php corpus {root}: {clean}/{total} files parse with no error node");
+        for (count, key, sample) in rows.iter().take(25) {
+            println!("{count:5}  {key:28} first: {:?}", sample.replace('\n', "\\n"));
+        }
+        assert!(total > 0, "{root}: no PHP files");
+    }
+
+    /// One file, its error nodes and the path that leads to each, with the line
+    /// each starts on: `PHP_TRACE=<file> cargo test ... --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn trace_one_file() {
+        let Ok(path) = std::env::var("PHP_TRACE") else { return };
+        let src = fs::read(&path).unwrap();
+        let text = String::from_utf8_lossy(&src).into_owned();
+        let mut workspace = Workspace::default();
+        workspace.parse(&src, &PHP, &Budget::default()).unwrap();
+        let nodes = &workspace.tree.nodes;
+        let mut parent = vec![0usize; nodes.len()];
+        let mut open: Vec<usize> = vec![0];
+        for index in 1..nodes.len() {
+            while open.len() > 1 && nodes[*open.last().unwrap()].subtree_end as usize <= index {
+                open.pop();
+            }
+            parent[index] = *open.last().unwrap();
+            open.push(index);
+        }
+        let line_of = |at: usize| text[..at.min(text.len())].bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let mut shown = 0;
+        for (index, node) in nodes.iter().enumerate() {
+            if !(node.kind == ERROR || node.flags & HAS_ERROR != 0 && node.flags & TOKEN != 0) {
+                continue;
+            }
+            let mut ancestors = Vec::new();
+            let mut at = index;
+            while at != 0 {
+                at = parent[at];
+                ancestors.push(PHP.name(nodes[at].kind));
+            }
+            ancestors.reverse();
+            println!(
+                "line {}: {:?} in [{}]",
+                line_of(node.start as usize),
+                text.get(node.start as usize..node.end as usize).unwrap_or("").chars().take(120).collect::<String>(),
+                ancestors.join(" > ")
+            );
+            shown += 1;
+            if shown == 25 {
+                break;
+            }
+        }
+        println!("{shown} error nodes in {} nodes", nodes.len());
+    }
+
+    #[test]
+    fn the_census_reads_an_empty_directory_as_zero() {
+        assert_eq!(census(Path::new("/nonexistent/php")).1, 0);
+    }
 }
