@@ -13,11 +13,14 @@
 //! What is a definition, a call or an import is per language and written down as
 //! data (`PY_DEFS`, `JS_DEFS`, `RS_DEFS`, `GO_DEFS`, `JAVA_DEFS`, ...), selected
 //! by [`kinds`]; the walk itself is language neutral. Python, JavaScript,
-//! TypeScript, TSX, Rust, Go and Java have tables, and Rust's live in their own
-//! region below. JSON has empty tables on purpose: a data file's only fact is
-//! the module symbol, so [`lang_for`] answers `None` for it and the lexer path
-//! is kept. The other grammars fall back to the module symbol until their table
-//! is written.
+//! TypeScript, TSX, Rust, Go, Java, C and C++ have tables, and Rust's and the
+//! C family's walk arms live in their own regions below. JSON has empty tables
+//! on purpose: a data file's only fact is the module symbol, so [`lang_for`]
+//! answers `None` for it and the lexer path is kept. C and C++ also answer
+//! `None` from `lang_for`: their tables feed `tests/facts_c_cpp.rs` and the
+//! `--compare` audit, but the differential gate does not yet prefer the CST
+//! record for enough real files. The other grammars fall back to the module
+//! symbol until their table is written.
 //!
 //! Requires the `deep` and `parser` features: the Cst comes from
 //! `deep_integration`, which names the runtime's kind table, and the runtime
@@ -162,6 +165,63 @@ const JSON_DEFS: &[Def] = &[];
 const JSON_CALLS: &[&str] = &[];
 const JSON_IMPORTS: &[&str] = &[];
 
+// -- C and C++ (L4). The name of a C definition is inside its declarator, so
+// -- [`Walker::c_function`] reads it; these tables say which nodes are
+// -- definitions at all, and which nodes are calls and imports.
+
+/// C definitions the lexer files as symbols: a function with a body, in each
+/// of the shapes the grammar needs for a declared or macro-supplied return
+/// type. A prototype is not here — it has no body and the lexer opens nothing.
+const C_DEFS: &[Def] = &[
+    Def { kind: "function_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "user_function_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "bare_user_function_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "implicit_function", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+
+/// C calls: one call expression, with a name, a `->`/`.` member or an index as
+/// its callee; the walking of the callee is [`Walker::c_callee`].
+const C_CALLS: &[&str] = &["call_expression"];
+
+/// C imports: the preprocessor is trivia, so the only import node that could
+/// exist never does. The table names the token the grammar calls it, and
+/// [`Walker::c_imports`] reads the directive lines from the source.
+const C_IMPORTS: &[&str] = &["preprocessor"];
+
+/// C++ definitions: C's, plus the class, namespace, constructor, destructor and
+/// out-of-line method forms. `template_declaration` is not here: it wraps the
+/// item it declares, and the wrapped node opens the symbol.
+const CPP_DEFS: &[Def] = &[
+    Def { kind: "function_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "plain_user_function", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "specified_user_function", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "scoped_user_function", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "scoped_member_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "scoped_destructor_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "constructor_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "destructor_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "class_specifier", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "namespace_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+];
+
+/// C++ calls. `new` is a call to the type it constructs, which is what the
+/// lexer reads after the `new` keyword.
+const CPP_CALLS: &[&str] = &["call_expression", "new_expression"];
+
+/// C++ imports, as C's: `#include` is a directive line, not a node.
+const CPP_IMPORTS: &[&str] = &["preprocessor"];
+
+/// The visible declaration wrappers, each owning a declarator the plain
+/// `declaration_statement` does not: a user type (`bare_user_declaration`), a
+/// typedef name, a specifier-qualified one, or a C++ constructor declaration.
+const C_DECLARATIONS: &[&str] = &[
+    "bare_user_declaration",
+    "specified_user_declaration",
+    "typedef_user_declaration",
+    "constructor_declaration",
+];
+
+
 /// Everything the walk needs to know about one language.
 /// Python's soft keywords: `match x:` is a statement, `match.group` is an
 /// attribute of a name, and only the position tells them apart. This grammar
@@ -173,6 +233,13 @@ fn kinds(lang: Lang) -> Kinds {
         Lang::Python => {
             Kinds { definitions: PY_DEFS, calls: PY_CALLS, imports: PY_IMPORTS, soft: PY_SOFT, family: Family::Plain }
         }
+        Lang::C | Lang::Cpp => Kinds {
+            definitions: if lang == Lang::Cpp { CPP_DEFS } else { C_DEFS },
+            calls: if lang == Lang::Cpp { CPP_CALLS } else { C_CALLS },
+            imports: if lang == Lang::Cpp { CPP_IMPORTS } else { C_IMPORTS },
+            soft: &[],
+            family: Family::Plain,
+        },
         Lang::Rust => {
             Kinds { definitions: RS_DEFS, calls: RS_CALLS, imports: RS_IMPORTS, soft: &[], family: Family::Rust }
         }
@@ -204,6 +271,8 @@ fn tag(lang: Lang) -> &'static str {
         Lang::TypeScript | Lang::Tsx => "TS",
         Lang::Go => "GO",
         Lang::Java => "JAVA",
+        Lang::C => "C",
+        Lang::Cpp => "CPP",
     }
 }
 
@@ -3522,6 +3591,202 @@ impl<'a> Walker<'a> {
             "call_expression" | "macro_invocation" => Some(String::new()),
             "struct_expression" => self.children(id).first().map(|&name| self.path_of(name)),
             "generic_function" => self.children(id).into_iter().find(|&child| self.kind(child) != "type_arguments").map(|child| self.path_of(child)),
+            _ => None,
+        }
+    }
+
+    // -- C and C++ ----------------------------------------------------------
+    //
+    // C and C++ are read here, not through the Python/JS arms above. The
+    // declarations are specifier runs over a declarator (the name is inside
+    // `direct_declarator`, not a child the shared `Def` can name), a class is
+    // `class_specifier`/`struct_or_union_specifier` because the grammar shares
+    // one rule between `class`, `struct` and `union`, and a method's owner is
+    // the enclosing class or namespace. Everything below is reached only when
+    // [`Self::is_c`] is true, so no other language can see it.
+
+    /// The runtime's language name for a C-family grammar. The grammar, not the
+    /// lexer tag, is what decides: `CPP` is C++ here and nothing else.
+    fn is_c(&self) -> bool {
+        matches!(self.language.name, "c" | "cpp")
+    }
+
+    /// Nodes C and C++ own. `false` hands the node to the shared walk.
+    fn c_function(&mut self, id: u32) {
+        let children = self.children(id);
+        let declarator = children.iter().copied().find(|&child| self.kind(child) == "direct_declarator");
+        let name = declarator
+            .and_then(|node| self.first_identifier(node))
+            .or_else(|| self.child_of_kind(id, "identifier").map(|node| self.text_string(node)))
+            .or_else(|| {
+                self.child_of_kind(id, "scoped_type_name")
+                    .and_then(|node| self.c_path(node))
+                    .and_then(|path| path.rsplit('.').next().map(str::to_string))
+            });
+        let Some(name) = name else { return };
+        let line = self.line(id);
+        let params = declarator
+            .and_then(|node| self.child_of_kind(node, "parameter_list"))
+            .or_else(|| children.iter().copied().find(|&child| self.kind(child) == "parameter_list"))
+            .map(|list| self.c_params(list))
+            .unwrap_or_default();
+        let owner = if self.frame().container { self.frame().class.clone() } else { String::new() };
+        let index = self.add_symbol(name.clone(), owner.clone(), KIND_FUNCTION, line, params);
+        self.stack.push(Frame { node: id, symbol: index, class: owner, receiver: String::new(), container: false, defines: Some(index) });
+    }
+
+    /// A parameter list as the lexer reads it: the last name of each
+    /// comma-separated group, with `void` standing for no parameter.
+    fn c_params(&self, list: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut group: Vec<String> = Vec::new();
+        for child in self.children(list) {
+            if self.kind(child) == "," {
+                if let Some(name) = group.pop() {
+                    if name != "void" {
+                        out.push(name);
+                    }
+                }
+                group.clear();
+                continue;
+            }
+            group.extend(self.c_words_of(child));
+        }
+        if let Some(name) = group.pop() {
+            if name != "void" {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// `class A : public B {`, `struct s {`, `union u {`: a container whose
+    /// members take its name as their owner. A declaration with no body is a
+    /// use of the type, not a definition, and the lexer opens no symbol for it.
+    fn c_class(&mut self, id: u32) {
+        if self.child_of_kind(id, "class_body").is_none() && self.child_of_kind(id, "struct_body").is_none() {
+            return;
+        }
+        let Some(name_node) = self.child_of_kind(id, "identifier") else { return };
+        let name = self.text_string(name_node);
+        if name.is_empty() {
+            return;
+        }
+        let line = self.line(id);
+        let mut bases = Vec::new();
+        if let Some(clause) = self.child_of_kind(id, "base_clause") {
+            for child in self.children(clause) {
+                if matches!(self.kind(child), "plain_type_name" | "scoped_type_name" | "user_type_name") {
+                    let path = self.c_path(child).unwrap_or_default();
+                    if let Some(last) = path.rsplit('.').next().filter(|last| !last.is_empty()) {
+                        bases.push(last.to_string());
+                    }
+                }
+            }
+        }
+        let index = self.add_symbol(name.clone(), String::new(), KIND_CLASS, line, Vec::new());
+        self.facts.symbols[index].bases = bases;
+        let symbol = self.frame().symbol;
+        self.stack.push(Frame { node: id, symbol, class: name, receiver: String::new(), container: true, defines: Some(index) });
+    }
+
+    /// `namespace app { ... }`: the lexer files a namespace as a class, and its
+    /// members take the namespace as their owner.
+    fn c_namespace(&mut self, id: u32) {
+        let Some(name_node) = self.child_of_kind(id, "identifier") else { return };
+        let name = self.text_string(name_node);
+        let line = self.line(id);
+        let index = self.add_symbol(name.clone(), String::new(), KIND_CLASS, line, Vec::new());
+        let symbol = self.frame().symbol;
+        self.stack.push(Frame { node: id, symbol, class: name, receiver: String::new(), container: true, defines: Some(index) });
+    }
+
+    /// `int x = 0;`, `Square box = Square(4);`, `std::string name_;`: the
+    /// lexer reads the statement, so a declarator with an initializer is an
+    /// assignment event and a declarator without one is the words of the
+    /// declaration. `typedef struct {...} T;` is the same shape.
+    fn c_words_form(&self, id: u32) -> String {
+        self.c_words_form_skipping(id, &[])
+    }
+
+    /// The same, without descending into the named subtrees: a struct's body is
+    /// its members' statements, not part of the declaration that holds it.
+    fn c_words_form_skipping(&self, id: u32, skip: &[&str]) -> String {
+        let words = self.c_words_of_skipping(id, skip);
+        if words.is_empty() {
+            return "0".to_string();
+        }
+        let mut out = "[\"m\",[".to_string();
+        for (index, word) in words.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str("[\"n\",");
+            push_string(&mut out, word);
+            out.push(']');
+        }
+        out.push_str("]]");
+        out
+    }
+
+    fn c_words_of(&self, id: u32) -> Vec<String> {
+        self.c_words_of_skipping(id, &[])
+    }
+
+    fn c_words_of_skipping(&self, id: u32, skip: &[&str]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            if skip.contains(&self.kind(node)) {
+                continue;
+            }
+            let item = self.node(node);
+            if item.first_child == NONE {
+                if let Some(name) = self.leaf_name(node) {
+                    out.push(name);
+                }
+                continue;
+            }
+            let kids = self.children(node);
+            for child in kids.into_iter().rev() {
+                stack.push(child);
+            }
+        }
+        out
+    }
+
+    /// The merge of every value-bearing child, in order.
+    fn c_path(&self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "field_expression" | "qualified_expression" => {
+                let name = self.member_name(id);
+                let object = self.children(id).into_iter().next()?;
+                let base = self.path_of(object);
+                Some(if base.is_empty() { format!(".{name}") } else { format!("{base}.{name}") })
+            }
+            "plain_type_name" | "user_type_name" => {
+                let child = self.children(id).into_iter().next()?;
+                let path = self.path_of(child);
+                (!path.is_empty()).then_some(path)
+            }
+            "scoped_type_name" => {
+                let mut out = String::new();
+                for child in self.children(id) {
+                    if self.kind(child) == "template_arguments" {
+                        continue;
+                    }
+                    let part = if matches!(self.kind(child), "::") {
+                        ".".to_string()
+                    } else {
+                        self.path_of(child)
+                    };
+                    if part.is_empty() {
+                        continue;
+                    }
+                    out.push_str(&part);
+                }
+                (!out.is_empty()).then_some(out)
+            }
             _ => None,
         }
     }
