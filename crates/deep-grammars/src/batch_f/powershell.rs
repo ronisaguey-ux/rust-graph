@@ -589,3 +589,253 @@ fn type_before_static(c: &Cursor) -> bool {
 
 /// `-eq`, `-and`, or a parameter `-Path`. The operator table is checked first,
 /// so an operator name is never a parameter.
+fn dash_word(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    c.bump();
+    let length = 1 + c.eat_while(|byte| byte.is_ascii_alphanumeric());
+    let text = &start[..length];
+    match text {
+        b"-eq" => EQ,
+        b"-ne" => NE,
+        b"-lt" => LT,
+        b"-gt" => GT,
+        b"-le" => LE,
+        b"-ge" => GE,
+        b"-like" => LIKE,
+        b"-notlike" => NOTLIKE,
+        b"-match" => MATCH_OP,
+        b"-notmatch" => NOTMATCH,
+        b"-contains" => CONTAINS,
+        b"-in" => IN,
+        b"-and" => AND,
+        b"-or" => OR,
+        b"-not" => NOT,
+        b"-replace" => REPLACE,
+        b"-split" => SPLIT_OP,
+        b"-join" => JOIN_OP,
+        b"-is" => IS_OP,
+        b"-isnot" => ISNOT_OP,
+        b"-as" => AS_OP,
+        b"-" => MINUS,
+        _ => PARAM,
+    }
+}
+
+fn word(c: &mut Cursor) -> Kind {
+    let begin = c.pos();
+    let rest = c.rest();
+    c.eat_while(is_name_byte);
+    // A cmdlet name keeps its dash: `Get-Item`, `Write-Output`.
+    while c.peek() == b'-' && c.peek_at(1).is_ascii_alphabetic() {
+        c.bump();
+        c.eat_while(is_name_byte);
+    }
+    // A scope qualifier keeps its colon: `global:deactivate`,
+    // `Function:prompt`, `env:PATH` as a bare word.
+    if c.peek() == b':' && c.peek_at(1) != b':' && is_word_start(c.peek_at(1)) {
+        c.bump();
+        c.eat_while(is_name_byte);
+        while c.peek() == b'-' && c.peek_at(1).is_ascii_alphabetic() {
+            c.bump();
+            c.eat_while(is_name_byte);
+        }
+    }
+    let length = c.pos() - begin;
+    let text = &rest[..length];
+    // `hidden [int]$x` and `static [string]$y`: a class modifier is a token of
+    // its own, so the member cannot be read as `hidden[int]`.
+    if matches!(text, b"hidden" | b"static") {
+        let mut at = 0;
+        while matches!(c.peek_at(at), b' ' | b'\t') {
+            at += 1;
+        }
+        if c.peek_at(at) == b'[' {
+            return CLASS_MODIFIER;
+        }
+    }
+    // `[switch]$x`: inside brackets the type name is a name, not the keyword.
+    if text == b"switch" && c.peek() == b']' {
+        return IDENT;
+    }
+    keyword(text)
+}
+
+fn keyword(text: &[u8]) -> Kind {
+    // PowerShell is case-insensitive: `If`, `Param` and `Function` are keywords
+    // as much as `if`, `param` and `function`.
+    let mut lower = [0u8; 16];
+    let length = text.len().min(lower.len());
+    for (slot, byte) in lower.iter_mut().zip(text.iter()) {
+        *slot = byte.to_ascii_lowercase();
+    }
+    let text = if text.len() <= lower.len() { &lower[..length] } else { text };
+    match text {
+        b"function" => KW_FUNCTION,
+        b"filter" => KW_FILTER,
+        b"class" => KW_CLASS,
+        b"enum" => KW_ENUM,
+        b"extends" => KW_EXTENDS,
+        b"using" => KW_USING,
+        b"param" => KW_PARAM,
+        b"return" => KW_RETURN,
+        b"throw" => KW_THROW,
+        b"break" => KW_BREAK,
+        b"continue" => KW_CONTINUE,
+        b"if" => KW_IF,
+        b"elseif" => KW_ELSEIF,
+        b"else" => KW_ELSE,
+        b"foreach" => KW_FOREACH,
+        b"for" => KW_FOR,
+        b"while" => KW_WHILE,
+        b"do" => KW_DO,
+        b"until" => KW_UNTIL,
+        b"in" => KW_IN,
+        b"switch" => KW_SWITCH,
+        b"default" => KW_DEFAULT,
+        b"try" => KW_TRY,
+        b"catch" => KW_CATCH,
+        b"finally" => KW_FINALLY,
+        b"trap" => KW_TRAP,
+        b"begin" => KW_BEGIN,
+        b"process" => KW_PROCESS,
+        b"end" => KW_END,
+        b"namespace" => KW_NAMESPACE,
+        b"module" => KW_MODULE,
+        b"assembly" => KW_ASSEMBLY,
+        b"string" => KW_STRING_TYPE,
+        b"int" => KW_INT_TYPE,
+        b"bool" => KW_BOOL_TYPE,
+        b"object" => KW_OBJECT_TYPE,
+        _ => IDENT,
+    }
+}
+
+/// `$name`, `$env:PATH`, `${weird name}`, `$true`, and `$(`: a subexpression,
+/// which is code again until the `)` that matches it.
+fn variable(c: &mut Cursor) -> Kind {
+    if c.peek_at(1) == b'(' {
+        c.bump_n(2);
+        push_frame(FrameKind::Subexpression);
+        return SUBEXP_OPEN;
+    }
+    c.bump();
+    if c.peek() == b'{' {
+        c.bump();
+        c.eat_while(|byte| byte != b'}' && byte != b'\n');
+        c.eat(b'}');
+        return VARIABLE;
+    }
+    c.eat_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'?'));
+    let text = c.since(0);
+    if text.eq_ignore_ascii_case(b"$true") {
+        return KW_TRUE;
+    }
+    if text.eq_ignore_ascii_case(b"$false") {
+        return KW_FALSE;
+    }
+    if text.eq_ignore_ascii_case(b"$null") {
+        return KW_NULL;
+    }
+    VARIABLE
+}
+
+/// `'...'`: no expansion, and `''` is an escaped quote.
+fn single_quoted(c: &mut Cursor) -> Kind {
+    c.bump();
+    while !c.at_end() {
+        if c.peek() == b'\'' {
+            c.bump();
+            if c.peek() == b'\'' {
+                c.bump();
+                continue;
+            }
+            return LITERAL_STRING;
+        }
+        c.bump_char();
+    }
+    BAD_STRING
+}
+
+/// `"`: the switch enters `STRING`, so `$name` and `$( )` inside are nodes.
+fn expanding_string(c: &mut Cursor) -> Kind {
+    c.bump();
+    push_frame(FrameKind::String);
+    STRING_OPEN
+}
+
+/// The `STRING` mode's step: text, one expansion, or the closing quote.
+pub fn lex_string_text(c: &mut Cursor) -> Kind {
+    if top_kind() != Some(FrameKind::String) {
+        // The mode stack and this stack disagree; lexing code cannot lose a
+        // token, and the parser still gets a tree.
+        return lex_powershell(c);
+    }
+    if c.at_end() {
+        pop_frame();
+        return STRING_BAD;
+    }
+    match c.peek() {
+        b'"' => {
+            c.bump();
+            if c.peek() == b'"' {
+                // `""` inside an expanding string is one literal quote.
+                c.bump();
+                return STRING_TEXT;
+            }
+            pop_frame();
+            STRING_CLOSE
+        }
+        b'$' if c.peek_at(1) == b'(' => {
+            c.bump_n(2);
+            push_frame(FrameKind::Subexpression);
+            SUBEXP_OPEN
+        }
+        b'$' if is_word_start(c.peek_at(1)) || c.peek_at(1) == b'{' => {
+            string_variable(c);
+            VARIABLE
+        }
+        _ => {
+            let start = c.pos();
+            while !c.at_end() {
+                match c.peek() {
+                    b'"' => break,
+                    b'`' => c.bump_n(2),
+                    b'$' if is_word_start(c.peek_at(1)) || c.peek_at(1) == b'(' || c.peek_at(1) == b'{' => break,
+                    _ => c.bump_char(),
+                }
+            }
+            if c.pos() == start {
+                c.bump_char();
+            }
+            STRING_TEXT
+        }
+    }
+}
+
+/// A `$name` inside a string: the bytes are the same as in code.
+fn string_variable(c: &mut Cursor) {
+    c.bump();
+    if c.peek() == b'{' {
+        c.bump();
+        c.eat_while(|byte| byte != b'}' && byte != b'\n' && byte != b'"');
+        c.eat(b'}');
+        return;
+    }
+    c.eat_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'));
+}
+
+/// `@"` or `@'` at a line end, through the `"@` or `'@` that starts a line.
+fn here_string(c: &mut Cursor) -> Kind {
+    let quote = c.peek_at(1);
+    let close = if quote == b'"' { b'"' } else { b'\'' };
+    c.bump_n(2);
+    while !c.at_end() {
+        if c.behind(1) == b'\n' && c.peek() == close && c.peek_at(1) == b'@' {
+            c.bump_n(2);
+            return STRING;
+        }
+        c.bump_char();
+    }
+    BAD_STRING
+}
+
