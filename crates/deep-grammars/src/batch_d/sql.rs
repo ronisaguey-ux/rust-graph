@@ -237,74 +237,220 @@ rust_graph_deep::grammar! { SQL {
 
     program: _statement*,
 
-    _statement: (select_statement | insert_statement | update_statement | delete_statement | create_table_statement | create_view_statement | create_index_statement | alter_statement | drop_statement | with_statement) [";"],
+    _statement:
+        (
+            with_statement
+            | select_statement
+            | insert_statement
+            | update_statement
+            | delete_statement
+            | create_table_statement
+            | create_view_statement
+            | create_index_statement
+            | create_schema_statement
+            | create_sequence_statement
+            | create_type_statement
+            | create_extension_statement
+            | create_function_statement
+            | alter_statement
+            | drop_statement
+            | truncate_statement
+            | comment_statement
+            | set_statement
+            | transaction_statement
+        )
+        [";"],
 
-    with_statement: "WITH" ["RECURSIVE"] (common_table_expression %? ",") select_statement,
-    common_table_expression: _entity "AS" paren_expression,
+    // ---- statements ----
 
-    select_statement: "SELECT" ["DISTINCT" | "ALL"] (select_item %? ",") [from_clause] [where_clause] [group_clause] [having_clause] [order_clause] [limit_clause] [set_operator select_statement],
-    select_item: "*" | _expression ["AS"] [alias],
+    with_statement: "WITH" ["RECURSIVE"] (common_table_expression % ",") _with_body,
+    _with_body: select_statement | insert_statement | update_statement | delete_statement,
+    common_table_expression: _entity [column_list] "AS" cte_body,
+    cte_body: "(" (select_statement | insert_statement | update_statement | delete_statement) ")",
+
+    select_statement:
+        "SELECT"
+        ["DISTINCT" ["ON" column_list] | "ALL"]
+        (select_item % ",")
+        [from_clause]
+        [where_clause]
+        [group_clause]
+        [having_clause]
+        [window_clause]
+        [set_operator select_statement]
+        [order_clause]
+        [limit_clause],
+    select_item: "*" | qualified_star | _expression ["AS"] [alias],
+    qualified_star: _entity "." "*",
     alias: _entity,
     set_operator: "UNION" ["ALL"] | "INTERSECT" | "EXCEPT",
 
-    from_clause: "FROM" (table_reference %? ","),
+    from_clause: "FROM" (table_reference % ","),
     table_reference: table_name [["AS"] alias] (join_clause)*,
-    table_name: _entity [call_arguments] | paren_expression,
-    join_clause: [("INNER" | "LEFT" | "RIGHT" | "FULL" | "CROSS") ["OUTER"]] "JOIN" table_name [["AS"] alias] [join_condition],
+    table_name: ["LATERAL"] (_entity [call_arguments] | paren_expression) ,
+    join_clause:
+        ["NATURAL"] [("INNER" | "LEFT" | "RIGHT" | "FULL") ["OUTER"] | "CROSS"] "JOIN" table_name [["AS"] alias] [join_condition],
     join_condition: "ON" _expression | "USING" column_list,
 
     where_clause: "WHERE" _expression,
-    group_clause: "GROUP" "BY" (_expression %? ","),
+    group_clause: "GROUP" "BY" (_expression % ","),
     having_clause: "HAVING" _expression,
-    order_clause: "ORDER" "BY" (order_item %? ","),
-    order_item: _expression ["ASC" | "DESC"],
-    limit_clause: "LIMIT" NUMBER ["OFFSET" NUMBER],
+    order_clause: "ORDER" "BY" (order_item % ","),
+    order_item: _expression ["ASC" | "DESC"] [nulls_order],
+    nulls_order: "NULLS" ("FIRST" | "LAST"),
+    limit_clause: "LIMIT" (_expression | "ALL") ["OFFSET" _expression],
 
-    insert_statement: "INSERT" "INTO" table_name [column_list] ("VALUES" (value_row %? ",") | select_statement),
-    value_row: "(" (_expression %? ",") ")",
-    update_statement: "UPDATE" table_name "SET" (assignment %? ",") [where_clause],
+    window_clause: "WINDOW" (window_definition % ","),
+    window_definition: _entity "AS" window_specification,
+    window_specification: "(" [window_name] [window_partition] [window_order] [frame_clause] ")",
+    window_name: _entity,
+    window_partition: "PARTITION" "BY" (_expression % ","),
+    window_order: "ORDER" "BY" (order_item % ","),
+    frame_clause: frame_unit ("BETWEEN" frame_bound "AND" frame_bound | frame_bound),
+    frame_unit: "ROWS" | "RANGE" | "GROUPS",
+    frame_bound: "UNBOUNDED" ("PRECEDING" | "FOLLOWING") | "CURRENT" "ROW" | _expression@addition ("PRECEDING" | "FOLLOWING"),
+
+    insert_statement:
+        "INSERT" "INTO" table_name [column_list] (_insert_body)
+        [on_conflict_clause] [returning_clause],
+    _insert_body: "VALUES" (value_row % ",") | "DEFAULT" "VALUES" | select_statement,
+    value_row: "(" (_expression % ",") ")",
+    on_conflict_clause:
+        "ON" "CONFLICT" [conflict_target] ["WHERE" _expression] "DO" conflict_action,
+    conflict_target: "(" (_expression % ",") ")",
+    conflict_action: "NOTHING" | "UPDATE" "SET" (assignment % ",") ["WHERE" _expression],
+
+    update_statement: "UPDATE" table_name "SET" (assignment % ",") [from_clause] [where_clause] [returning_clause],
     assignment: _column "=" _expression,
-    delete_statement: "DELETE" "FROM" table_name [where_clause],
+    delete_statement: "DELETE" "FROM" table_name [using_clause] [where_clause] [returning_clause],
+    using_clause: "USING" (table_reference % ","),
+    returning_clause: "RETURNING" (returning_item % ","),
+    returning_item: "*" | qualified_star | _expression ["AS"] [alias],
 
-    create_table_statement: "CREATE" "TABLE" ["IF" "NOT" "EXISTS"] _entity [table_body | "AS" select_statement],
-    create_view_statement: "CREATE" "VIEW" _entity "AS" select_statement,
-    create_index_statement: "CREATE" ["UNIQUE"] "INDEX" ["IF" "NOT" "EXISTS"] _entity "ON" _entity column_list,
-    table_body: "(" (column_definition %? ",") ")",
+    create_table_statement:
+        "CREATE" ["TEMP" | "TEMPORARY"] "TABLE" ["IF" "NOT" "EXISTS"] _entity [table_body | "AS" select_statement],
+    table_body: "(" (table_item % ",") ")",
+    table_item: column_definition | table_constraint,
+    table_constraint:
+        ["CONSTRAINT" _entity]
+        (
+            "PRIMARY" "KEY" column_list
+            | "UNIQUE" column_list
+            | "FOREIGN" "KEY" column_list "REFERENCES" _entity [column_list] (referential_action)*
+            | "CHECK" check_body
+        ),
     column_definition: _column data_type (column_constraint)*,
-    data_type: _type_name [type_arguments] ["WITH" "TIME" "ZONE"],
-    _type_name: IDENT | QUOTED_IDENT | "TEXT",
-    type_arguments: "(" (NUMBER %? ",") ")",
-    check_body: "(" _expression ")",
     column_constraint:
-        "PRIMARY" "KEY"
+        "PRIMARY" "KEY" ["AUTOINCREMENT"]
         | "NOT" "NULL"
         | "NULL"
         | "UNIQUE"
-        | "REFERENCES" _entity [column_list]
+        | "REFERENCES" _entity [column_list] (referential_action)*
         | "DEFAULT" _expression
         | "CHECK" check_body
+        | "COLLATE" _entity
+        | "GENERATED" ["ALWAYS"] "AS" "IDENTITY"
         | "CONSTRAINT" _entity,
+    referential_action:
+        "ON" ("DELETE" | "UPDATE") ("CASCADE" | "RESTRICT" | "NO" "ACTION" | "SET" "NULL" | "SET" "DEFAULT"),
+    check_body: "(" _expression ")",
 
-    alter_statement: "ALTER" "TABLE" _entity (alter_action %? ","),
-    alter_action: "ADD" ["COLUMN"] column_definition | "DROP" ["COLUMN"] _column | "RENAME" ["COLUMN"] _column "TO" _column,
-    drop_statement: "DROP" ("TABLE" | "VIEW" | "INDEX") ["IF" "EXISTS"] _entity ["CASCADE"],
+    data_type: _type_name [type_arguments] (_type_word)* [array_suffixes],
+    _type_name: IDENT | QUOTED_IDENT | "TEXT",
+    _type_word: "WITH" "TIME" "ZONE" | "PRECISION" | "VARYING" | "UNSIGNED" | "SIGNED" | "ZEROFILL",
+    type_arguments: "(" (NUMBER % ",") ")",
+    array_suffixes: ARRAY_SUFFIX [array_suffixes],
+
+    create_view_statement:
+        "CREATE" [OR_REPLACE] ["TEMP" | "TEMPORARY"] "VIEW" ["IF" "NOT" "EXISTS"] _entity [column_list] "AS" select_statement,
+    create_index_statement:
+        "CREATE" ["UNIQUE"] "INDEX" ["CONCURRENTLY"] ["IF" "NOT" "EXISTS"] [_entity] "ON" _entity ["USING" _entity]
+        index_column_list [where_clause],
+    index_column_list: "(" (index_item % ",") ")",
+    index_item: _expression ["ASC" | "DESC"],
+
+    create_schema_statement: "CREATE" "SCHEMA" ["IF" "NOT" "EXISTS"] _entity,
+    create_sequence_statement: "CREATE" "SEQUENCE" ["IF" "NOT" "EXISTS"] _entity (sequence_option)*,
+    sequence_option: ("AS" data_type | "START" ["WITH"] NUMBER | "INCREMENT" ["BY"] NUMBER | "OWNED" "BY" _entity | "CACHE" NUMBER | "CYCLE" | "NO" "CYCLE"),
+    create_type_statement: "CREATE" "TYPE" _entity "AS" "ENUM" enum_values,
+    enum_values: "(" (STRING % ",") ")",
+    create_extension_statement: "CREATE" "EXTENSION" ["IF" "NOT" "EXISTS"] _entity ["WITH" "SCHEMA" _entity],
+    create_function_statement:
+        "CREATE" [OR_REPLACE] ("FUNCTION" | "PROCEDURE") _entity [call_arguments] (function_option)*,
+    function_option:
+        "RETURNS" ("TABLE" table_body | data_type)
+        | "LANGUAGE" _entity
+        | "AS" STRING
+        | "IMMUTABLE"
+        | "STABLE"
+        | "VOLATILE"
+        | "STRICT"
+        | "SECURITY" ("DEFINER" | "INVOKER")
+        | "COST" NUMBER
+        | "ROWS" NUMBER
+        | "SET" _entity "=" _expression,
+
+    alter_statement: "ALTER" ("TABLE" | "INDEX" | "VIEW") _entity (alter_action % ","),
+    alter_action:
+        add_column_action
+        | add_constraint_action
+        | drop_column_action
+        | rename_column_action
+        | rename_object_action
+        | alter_column_action
+        | set_action,
+    add_column_action: "ADD" ["COLUMN"] ["IF" "NOT" "EXISTS"] column_definition,
+    add_constraint_action: "ADD" table_constraint,
+    drop_column_action: "DROP" ["COLUMN"] ["IF" "EXISTS"] _column ["CASCADE" | "RESTRICT"],
+    rename_column_action: "RENAME" ["COLUMN"] _column "TO" _column,
+    rename_object_action: "RENAME" "TO" _entity,
+    alter_column_action:
+        "ALTER" ["COLUMN"] _column
+        ("SET" ("DEFAULT" _expression | "NOT" "NULL" | "TYPE" data_type | "STATISTICS" NUMBER)
+            | "DROP" ("DEFAULT" | "NOT" "NULL")),
+    set_action: "SET" ("SCHEMA" _entity | "TABLESPACE" _entity | "LOGGED" | "UNLOGGED"),
+
+    drop_statement:
+        "DROP"
+        ("TABLE" | "VIEW" | "INDEX" | "SCHEMA" | "SEQUENCE" | "TYPE" | "FUNCTION")
+        ["IF" "EXISTS"] _entity ["CASCADE" | "RESTRICT"],
+    truncate_statement: "TRUNCATE" [ "TABLE"] _entity,
+    comment_statement: "COMMENT" "ON" ("TABLE" | "VIEW" | "COLUMN" | "INDEX" | "SCHEMA" | "TYPE") _entity ["." _column] "IS" STRING,
+    set_statement: "SET" ("TIME" "ZONE" _expression | assignment | ("SESSION" | "LOCAL") assignment),
+    transaction_statement:
+        "BEGIN" ["TRANSACTION"]
+        | "COMMIT" ["TRANSACTION"]
+        | "ROLLBACK" ["TRANSACTION"]
+        | "START" "TRANSACTION",
+
+    // ---- expressions ----
 
     _expression: precedence _primary {
-        left "OR" => logical_expression,
-        left "AND" => logical_expression,
-        left "=" | "!=" | "<>" | "<" | ">" | "<=" | ">=" => comparison,
-        postfix "IS" ["NOT"] ["NULL"] => is_null,
-        left "NOT" "IN" => comparison,
-        left "IN" => comparison,
-        left "NOT" "LIKE" => comparison,
-        left "LIKE" | "BETWEEN" => comparison,
-        left "||" => concatenation,
-        left "+" | "-" => arithmetic,
-        left "*" | "/" | "%" => arithmetic,
-        prefix "-" | "+" | "NOT" => unary,
-        postfix call_arguments => call,
-        postfix member_expression => member,
+        or: left "OR" => logical_expression,
+        and: left "AND" => logical_expression,
+        comparison: left "=" | "!=" | "<>" | "<" | ">" | "<=" | ">=" => comparison,
+        is_null: postfix "IS" ["NOT"] ["NULL"] => is_null,
+        pattern: left "LIKE" | "ILIKE" => comparison,
+        negated_pattern: left "NOT" "LIKE" | "NOT" "ILIKE" => comparison,
+        membership: left "IN" => comparison,
+        negated_membership: left "NOT" "IN" => comparison,
+        between: left "BETWEEN" => between_expression,
+        negated_between: left "NOT" "BETWEEN" => between_expression,
+        concatenation: left "||" => concatenation,
+        addition: left "+" | "-" => arithmetic,
+        multiplication: left "*" | "/" | "%" => arithmetic,
+        negation: prefix "-" | "+" | "NOT" => unary,
+        json_access: left "->" | "->>" => member,
+        cast: postfix "::" data_type => cast_expression,
+        filter: postfix filter_clause => filter_expression,
+        window: postfix over_clause => window_expression,
+        call: postfix call_arguments => call,
+        member: postfix member_expression => member,
     },
+
+    filter_clause: "FILTER" filter_body,
+    filter_body: "(" "WHERE" _expression ")",
+    over_clause: "OVER" (window_specification | window_name),
 
     member_expression: "." _column,
 
@@ -313,24 +459,41 @@ rust_graph_deep::grammar! { SQL {
         | _entity
         | paren_expression
         | case_expression
-        | cast_expression
+        | cast_expression_call
         | "EXISTS" paren_expression
-        | interval_expression,
+        | interval_expression
+        | any_expression
+        | extract_expression,
 
+    literal: NUMBER | STRING | "NULL" | "TRUE" | "FALSE" | PLACEHOLDER,
     paren_expression: "(" (select_statement | _expression ("," _expression)*) ")",
-    column_list: "(" (_column %? ",") ")",
-    case_expression: "CASE" [ _expression] case_when+ ["ELSE" _expression] "END",
+    column_list: "(" (_column % ",") ")",
+    case_expression: "CASE" [ _expression] (case_when)+ ["ELSE" _expression] "END",
     case_when: "WHEN" _expression "THEN" _expression,
-    cast_expression: "CAST" cast_body,
+    cast_expression_call: "CAST" cast_body,
     cast_body: "(" _expression "AS" data_type ")",
     interval_expression: "INTERVAL" (STRING | NUMBER) _interval_unit,
     _interval_unit: IDENT,
+    any_expression: ("ANY" | "SOME" | "ALL") paren_expression,
+    extract_expression: "EXTRACT" extract_body,
+    extract_body: "(" _interval_unit "FROM" _expression ")",
 
-    call_arguments: "(" ["DISTINCT"] [call_item ("," call_item)*] ")",
-    call_item: "*" | _expression,
-    literal: NUMBER | STRING | "NULL",
-    _entity: IDENT | QUOTED_IDENT,
-    _column: IDENT | QUOTED_IDENT,
+    call_arguments: "(" ["DISTINCT"] [(_call_item) ("," _call_item)*] ")",
+    _call_item: "*" | _expression,
+
+    _entity: IDENT | QUOTED_IDENT | soft_keyword,
+    _column: IDENT | QUOTED_IDENT | soft_keyword,
+    /// A keyword that is also a common column name (`type`, `language`,
+    /// `key`, ...). It is a keyword only where a statement or a clause starts
+    /// with it, and an identifier everywhere a name can stand.
+    soft_keyword:
+        "TYPE" | "LANGUAGE" | "TEXT" | "TIME" | "COMMENT" | "KEY" | "ROW" | "ROWS" | "RANGE" | "GROUPS"
+        | "FIRST" | "LAST" | "ACTION" | "CACHE" | "CYCLE" | "INCREMENT" | "OWNED" | "STORED"
+        | "GENERATED" | "ALWAYS" | "IDENTITY" | "SECURITY" | "STRICT" | "STABLE" | "VOLATILE"
+        | "IMMUTABLE" | "MATERIALIZED" | "AUTHORIZATION" | "STATISTICS" | "TABLESPACE"
+        | "ZEROFILL" | "LOCAL" | "SESSION" | "LOGGED" | "UNLOGGED" | "VARYING" | "PRECISION"
+        | "UNSIGNED" | "SIGNED" | "ENUM" | "EXTENSION" | "SEQUENCE" | "SCHEMA" | "VIEW" | "INDEX"
+        | "TEMP" | "TEMPORARY",
 } }
 
 pub fn lex_sql(c: &mut Cursor) -> Kind {
@@ -622,3 +785,122 @@ fn keyword(upper: &[u8]) -> Kind {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use crate::deep::tree::{Node, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    struct Parsed {
+        src: Vec<u8>,
+        workspace: Workspace,
+    }
+
+    impl Parsed {
+        fn fixture(name: &str) -> Parsed {
+            let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/longtail/sql").join(name);
+            let src = std::fs::read(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"));
+            let mut workspace = Workspace::default();
+            workspace.parse(&src, &super::SQL, &Budget::default()).unwrap();
+            Parsed { src, workspace }
+        }
+
+        fn node(&self, index: usize) -> Node {
+            self.workspace.tree.nodes[index]
+        }
+
+        fn kind(&self, index: usize) -> &'static str {
+            super::SQL.name(self.node(index).kind)
+        }
+
+        fn is_token(&self, index: usize) -> bool {
+            self.node(index).flags & TOKEN != 0
+        }
+
+        fn text(&self, index: usize) -> &str {
+            let node = self.node(index);
+            std::str::from_utf8(&self.src[node.start as usize..node.end as usize]).expect("utf8 fixture")
+        }
+
+        fn of_kind(&self, kind: &str) -> Vec<usize> {
+            (1..self.workspace.tree.nodes.len())
+                .filter(|&index| !self.is_token(index) && self.kind(index) == kind)
+                .collect()
+        }
+
+        fn leaves_of_kind(&self, kind: &str) -> Vec<usize> {
+            (1..self.workspace.tree.nodes.len())
+                .filter(|&index| self.is_token(index) && self.kind(index) == kind)
+                .collect()
+        }
+
+        fn errors(&self) -> usize {
+            use crate::deep::syntax::ERROR;
+            use crate::deep::tree::HAS_ERROR;
+            (0..self.workspace.tree.nodes.len())
+                .filter(|&index| self.node(index).kind == ERROR || (self.is_token(index) && self.node(index).flags & HAS_ERROR != 0))
+                .count()
+        }
+    }
+
+    #[test]
+    fn a_cte_query_keeps_its_ctes_windows_and_between_nodes() {
+        let parsed = Parsed::fixture("sql_cte_window.sql");
+        assert_eq!(parsed.errors(), 0, "the fixture must parse cleanly");
+        assert_eq!(parsed.of_kind("common_table_expression").len(), 2, "two CTEs, `recent` and `ranked`");
+        let windows = parsed.of_kind("window_expression");
+        assert_eq!(windows.len(), 3, "RANK, SUM and AVG each carry an OVER clause");
+        let first = &parsed.workspace.tree.nodes[windows[0]];
+        let text = &parsed.src[first.start as usize..first.end as usize];
+        assert!(text.starts_with(b"RANK() OVER (PARTITION BY"), "{:?}", String::from_utf8_lossy(text));
+        let between = parsed.of_kind("between_expression");
+        assert_eq!(between.len(), 1, "`r.retired BETWEEN 1 AND 3` is one between_expression");
+        let span = &parsed.workspace.tree.nodes[between[0]];
+        assert_eq!(&parsed.src[span.start as usize..span.end as usize], b"r.retired BETWEEN 1");
+    }
+
+    #[test]
+    fn a_block_comment_and_a_doubled_quote_literal_are_not_code() {
+        let parsed = Parsed::fixture("sql_cte_window.sql");
+        let strings: Vec<&str> = parsed.leaves_of_kind("string").iter().map(|&index| parsed.text(index)).collect();
+        assert!(strings.contains(&"'it''s quoted'"), "the doubled quote stays inside one string: {strings:?}");
+        assert_eq!(parsed.errors(), 0, "the quote inside the block comment is not a string");
+    }
+
+    #[test]
+    fn on_conflict_and_returning_are_nodes_with_spans() {
+        let parsed = Parsed::fixture("sql_upsert.sql");
+        assert_eq!(parsed.errors(), 0);
+        let clauses = parsed.of_kind("on_conflict_clause");
+        assert_eq!(clauses.len(), 1);
+        let node = parsed.workspace.tree.nodes[clauses[0]];
+        let text = &parsed.src[node.start as usize..node.end as usize];
+        assert!(text.starts_with(b"ON CONFLICT (login) DO UPDATE"), "{:?}", String::from_utf8_lossy(text));
+        assert!(text.ends_with(b"EXCLUDED.email"), "{:?}", String::from_utf8_lossy(text));
+        assert_eq!(parsed.of_kind("returning_clause").len(), 3, "one RETURNING per mutation");
+    }
+
+    #[test]
+    fn table_constraints_are_nodes() {
+        let parsed = Parsed::fixture("sql_constraints.sql");
+        assert_eq!(parsed.errors(), 0);
+        let constraints = parsed.of_kind("table_constraint");
+        assert_eq!(constraints.len(), 4, "three in CREATE TABLE and one added by ALTER TABLE");
+        let names: Vec<&str> = constraints.iter().map(|&index| parsed.text(index).split_whitespace().next().unwrap()).collect();
+        assert_eq!(names, ["CONSTRAINT", "FOREIGN", "CHECK", "CONSTRAINT"]);
+        let actions = parsed.of_kind("referential_action");
+        assert_eq!(actions.len(), 3, "two ON DELETE/ON UPDATE clauses plus the named foreign key's");
+    }
+
+    #[test]
+    fn every_prefix_of_the_fixtures_parses_or_errors_without_panicking() {
+        for name in ["sql_cte_window.sql", "sql_upsert.sql", "sql_constraints.sql"] {
+            let parsed = Parsed::fixture(name);
+            for end in (0..parsed.src.len()).step_by(7).chain(std::iter::once(parsed.src.len())) {
+                let mut workspace = Workspace::default();
+                workspace.parse(&parsed.src[..end], &super::SQL, &Budget::default()).unwrap();
+            }
+        }
+    }
+}
