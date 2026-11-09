@@ -844,14 +844,21 @@ impl<'a> Walker<'a> {
             | "expression_list" => {
                 self.children(id).into_iter().filter_map(|child| self.value_path(child)).collect()
             }
-            // NOTE: a Python multi-target assignment is an `expression_list`
-            // here (`a, b = g(x), 1`), and mapping it would emit the `a` event
-            // the lexer writes. It is left unmapped on purpose: this file's
-            // record would then be kept by `auto` for a file whose f-string
-            // return the CST cannot read (`["r",3,0]` where the lexer has
-            // `["r",3,["n","a"]]`), and `pipeline::loses` compares event
-            // *counts*, so it cannot see that loss. Fixing the guard first is
-            // the condition; see the report.
+            // The left side of a Python multi-target assignment (`a, b = g(x),
+            // 1`) is a `pattern_list` here, and this arm maps it, so the
+            // `["a",2,["a","b"],...]` event the lexer writes is written here
+            // too. The arm has always listed the kind, but the note it carried
+            // said the mapping was left out because `pipeline::loses` compared
+            // event *counts* and so could not see the value the CST cannot read
+            // on such a file's f-string return (`["r",3,0]` where the lexer
+            // follows `["r",3,["n","a"]]`); with a count-only guard, mapping the
+            // target would have kept that record. That condition is now met:
+            // the guard compares targets and value shapes, so the same file
+            // falls back on the value it lost. `tests/guard_truth.rs` checks
+            // both halves — the target kind is `pattern_list` and both names
+            // reach the record — and the full suite is green with the mapping
+            // on. The `expression_list` in the arm above is the *value* form,
+            // read by `form`, and adds nothing to a target.
             // `x: Dict[str, int] = {}`: the target is the name inside the
             // annotation, not the annotation. Reading it keeps the event an
             // assignment (`["a",...]`) instead of a bare expression (`["x",...]`).
