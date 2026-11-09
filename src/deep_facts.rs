@@ -880,6 +880,41 @@ impl<'a> Walker<'a> {
     // token run. `decl_value` is the value side: the names the lexer would read
     // and the calls it would record, in the same shapes.
 
+    /// Java's statement arms, in the same shape as Go's.
+    fn java_enter(&mut self, _id: u32) {}
+
+    fn go_enter(&mut self, id: u32) {
+        match self.kind(id) {
+            // Top-level declarations are statements to the lexer, exactly as a
+            // block's are: `var version = "0.1.0"` is an assignment on the
+            // module symbol.
+            "source_file" => self.go_statements(id),
+            // `package shop`, `type Repo struct {...}`: a declaration the lexer
+            // keeps as a statement. Its value is the whole header, so a field
+            // name in it is a name the lexer read on that line too.
+            "package_clause" | "type_declaration" => self.decl_statement(id),
+            // A struct field is its own statement to the lexer, because `struct
+            // {` opened a block: `Name string` sits on the module symbol.
+            "field_declaration" => self.decl_statement(id),
+            // An interface method is a statement there too: `Get(id int) (...)`.
+            "method_elem" => self.decl_statement(id),
+            // `~int | ~int64` in a generic constraint is a statement of its own.
+            "type_elem" => self.decl_statement(id),
+            // `[]string{"GET /"}`: the `{` after `]string` opens a block to the
+            // lexer, so the literal's elements are a statement on their own.
+            "literal_value" => self.go_literal(id),
+            "block" => self.go_statements(id),
+            "for_statement" => match self.child_of_kind(id, "range_clause") {
+                Some(_) => self.go_range_loop(id),
+                None => self.go_header(id),
+            },
+            "if_statement" | "expression_switch_statement" | "type_switch_statement" | "switch_statement"
+            | "select_statement" => self.go_header(id),
+            "expression_case" | "default_case" | "type_case" | "communication_case" => self.go_case(id),
+            _ => {}
+        }
+    }
+
     /// The declaration's header (everything before its body) as one expression
     /// statement, which is what the lexer writes when it does not recognize the
     /// declaration as a class.
@@ -895,9 +930,28 @@ impl<'a> Walker<'a> {
         self.lexer_event(b'x', line, &[], &value, false);
     }
 
+    fn go_statements(&mut self, block: u32) {
+        for child in self.children(block) {
+            self.go_statement(child);
+        }
+    }
+
     /// Emit the event `id` would produce as a statement, if it is one. Returns
     /// whether it was: a header calls this for its init statement and falls
     /// back to a plain value for anything else.
+    fn go_statement(&mut self, id: u32) -> bool {
+        match self.kind(id) {
+            "short_var_declaration" | "assignment_statement" => self.go_assign(id),
+            "return_statement" => self.go_return(id),
+            "var_declaration" | "const_declaration" => self.go_var(id),
+            "call_expression" | "defer_statement" | "go_statement" | "inc_statement" | "send_statement" => {
+                self.decl_statement(id)
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// `int total = 0;`, `List<Item> items = f();`, `private Map<...> index;`.
     /// With an initializer the lexer writes an assignment to the declared name;
     /// without one the statement is an expression, and the type names are in it.
@@ -931,20 +985,181 @@ impl<'a> Walker<'a> {
     /// `for _, v := range xs { ... }`: the lexer's `{` after the clause is not a
     /// block (the clause holds a top-level assignment), so the loop is one
     /// statement and the event's value carries the body's names too.
+    fn go_range_loop(&mut self, id: u32) {
+        let mut targets = Vec::new();
+        if let Some(clause) = self.child_of_kind(id, "range_clause") {
+            for child in self.children(clause) {
+                if matches!(self.text_string(child).as_str(), ":=" | "=") {
+                    break;
+                }
+                if self.is_layout(child) {
+                    continue;
+                }
+                if self.kind(child) == "expression_list" {
+                    for part in self.children(child) {
+                        if let Some(target) = self.decl_target(part) {
+                            targets.push(target);
+                        }
+                    }
+                } else if let Some(target) = self.decl_target(child) {
+                    targets.push(target);
+                }
+            }
+        }
+        let value = self.decl_value(id);
+        let line = self.line(id);
+        self.lexer_event(b'a', line, &targets, &value, false);
+        self.event("[\"b\"]");
+    }
+
     /// `a, b := f()`, `x = y`, `xs[i] += 1`.
+    fn go_assign(&mut self, id: u32) {
+        let children = self.children(id);
+        let split = children.iter().position(|&child| {
+            self.node(child).first_child == NONE
+                && matches!(self.text_string(child).as_str(), "=" | ":=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=")
+        });
+        let Some(at) = split else { return };
+        let operator = self.text_string(children[at]);
+        let targets: Vec<String> = children[..at]
+            .iter()
+            .filter(|&&child| !self.is_layout(child))
+            .filter_map(|&child| self.decl_target(child))
+            .collect();
+        if targets.len() == 1 {
+            if let Some(class) = children.get(at + 1).and_then(|&value| self.constructed_class(value)) {
+                self.facts.vars.push((targets[0].clone(), class));
+            }
+        }
+        let value = self.decl_values(&children[at + 1..]);
+        let line = self.line(id);
+        let weak = !matches!(operator.as_str(), "=" | ":=");
+        self.lexer_event(b'a', line, &targets, &value, weak);
+    }
+
+    fn go_return(&mut self, id: u32) {
+        let children = self.children(id);
+        let rest: Vec<u32> = children.into_iter().skip(1).collect();
+        let value = self.decl_values(&rest);
+        let line = self.line(id);
+        self.lexer_event(b'r', line, &[], &value, false);
+    }
+
     /// `var zero V` is an expression to the lexer; `var x = f()` is an
     /// assignment to `x`; a `var (...)` group is one expression statement.
+    fn go_var(&mut self, id: u32) {
+        let children = self.children(id);
+        if children.iter().any(|&child| self.kind(child) == "var_spec_list") {
+            return self.decl_statement(id);
+        }
+        let Some(spec) = children.iter().copied().find(|&child| matches!(self.kind(child), "var_spec" | "const_spec"))
+        else {
+            return self.decl_statement(id);
+        };
+        let parts = self.children(spec);
+        let Some(equal) = parts.iter().position(|&child| self.kind(child) == "=") else {
+            return self.decl_statement(id);
+        };
+        let target = parts.first().and_then(|&name| self.decl_target(name)).into_iter().collect::<Vec<_>>();
+        let value = self.decl_values(&parts[equal + 1..]);
+        let line = self.line(id);
+        self.lexer_event(b'a', line, &target, &value, false);
+    }
+
     /// `if cond {`, `for i := 0; i < n; i++ {`, `switch x {`: every statement the
     /// lexer writes before the body is written here, one event each, and a
     /// branch marker for the body.
+    fn go_header(&mut self, id: u32) {
+        for child in self.children(id) {
+            if self.is_layout(child) {
+                continue;
+            }
+            let kind = self.kind(child);
+            if matches!(kind, "block" | "else_clause" | "literal_value" | "field_declaration_list") {
+                continue;
+            }
+            if self.go_statement(child) {
+                continue;
+            }
+            let value = self.decl_value(child);
+            let line = self.line(child);
+            self.lexer_event(b'x', line, &[], &value, false);
+        }
+        // `switch v := f(x); v {` and `if v := f(x); p(v) {`: the lexer writes
+        // one condition event over the whole header as well, and a value that
+        // holds the names of all of it covers that event.
+        if let Some(value) = self.header_value(id) {
+            let line = self.line(id);
+            self.lexer_event(b'x', line, &[], &value, false);
+        }
+        self.event("[\"b\"]");
+    }
+
     /// The header's values as one expression, or `None` when there is nothing
     /// but the block left.
+    fn header_value(&mut self, id: u32) -> Option<String> {
+        let mut parts = Vec::new();
+        for child in self.children(id) {
+            if self.is_layout(child) {
+                continue;
+            }
+            let kind = self.kind(child);
+            if matches!(
+                kind,
+                "block" | "else_clause" | "literal_value" | "field_declaration_list" | "switch_block"
+                    | "catch_clause" | "finally_clause"
+            ) {
+                continue;
+            }
+            let value = self.decl_value(child);
+            if !value.is_empty() && value != "0" {
+                parts.push(value);
+            }
+        }
+        match parts.len() {
+            0 => None,
+            1 => parts.pop(),
+            _ => Some(format!("[\"m\",[{}]]", parts.join(","))),
+        }
+    }
+
     /// `[]string{"a", "b"}`: the elements, at the line of the first one, which
     /// is the line the lexer's statement starts on.
+    fn go_literal(&mut self, id: u32) {
+        let line = self
+            .children(id)
+            .into_iter()
+            .find(|&child| !matches!(self.kind(child), "{" | "}" | ","))
+            .map(|child| self.line(child))
+            .unwrap_or_else(|| self.line(id));
+        let value = self.decl_value(id);
+        self.lexer_event(b'x', line, &[], &value, false);
+    }
+
     /// Java keeps a header on one line and reads it as one expression, so the
     /// whole condition is one `x` event, however many values it holds.
     /// `case "x":`, `default:`. The lexer files the arm marker and then reads
     /// the statements after the colon.
+    fn go_case(&mut self, id: u32) {
+        self.event("[\"e\"]");
+        let children = self.children(id);
+        let colon = children.iter().position(|&child| {
+            self.node(child).first_child == NONE && self.text(child) == b":"
+        });
+        let after = colon.map(|at| at + 1).unwrap_or(children.len());
+        for child in children[after..].iter().copied() {
+            if self.is_layout(child) {
+                continue;
+            }
+            if self.go_statement(child) {
+                continue;
+            }
+            let value = self.decl_value(child);
+            let line = self.line(child);
+            self.lexer_event(b'x', line, &[], &value, false);
+        }
+    }
+
     /// The value the lexer writes for a run of nodes: one merge of them, or the
     /// single value when there is only one.
     fn decl_values(&mut self, ids: &[u32]) -> String {
@@ -1198,13 +1413,6 @@ impl<'a> Walker<'a> {
     }
 
     /// `func (c *Cache[K, V]) Get`: the receiver's own name and its type's.
-    /// Go's statement arms: the declarations the grammar writes as statements,
-    /// with the events the one-pass lexer writes for them.
-    fn go_enter(&mut self, _id: u32) {}
-
-    /// Java's statement arms, in the same shape as Go's.
-    fn java_enter(&mut self, _id: u32) {}
-
     fn go_receiver(&self, list: u32) -> (String, String) {
         let Some(param) = self.children(list).into_iter().find(|&child| self.kind(child) == "parameter_declaration")
         else {
