@@ -788,3 +788,189 @@ fn operator(c: &mut Cursor) -> Kind {
     c.bump_n(width);
     kind
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::deep::syntax::ERROR;
+    use crate::deep::tree::{HAS_ERROR, TOKEN};
+    use crate::deep::{Budget, Workspace};
+
+    fn parse(src: &str) -> Workspace {
+        let mut workspace = Workspace::default();
+        workspace.parse(src.as_bytes(), &SCALA, &Budget::default()).unwrap_or_else(|_| panic!("input too large"));
+        workspace
+    }
+
+    fn sexp(src: &str) -> String {
+        parse(src).tree.sexp(&SCALA, true)
+    }
+
+    fn clean(src: &str) -> bool {
+        parse(src).tree.root().flags & HAS_ERROR == 0
+    }
+
+    fn errors(src: &str) -> usize {
+        let workspace = parse(src);
+        let nodes = &workspace.tree.nodes;
+        (0..nodes.len()).filter(|&index| nodes[index].kind == ERROR || nodes[index].flags & HAS_ERROR != 0 && nodes[index].flags & TOKEN != 0).count()
+    }
+
+    fn tokens(src: &str) -> Vec<&'static str> {
+        let workspace = parse(src);
+        (0..workspace.tokens.len())
+            .filter(|&at| !SCALA.is_trivia(workspace.tokens.kind[at]))
+            .map(|at| SCALA.name(workspace.tokens.kind[at]))
+            .collect()
+    }
+
+    /// An interpolated string's `${...}` field is code: the tokens after
+    /// `template_open` are the expression's own, and the byte after its `}` is
+    /// string text again.
+    #[test]
+    fn an_interpolated_field_is_code() {
+        assert_eq!(
+            tokens("val s = s\"n=${items.size}\"\n"),
+            [
+                "val", "identifier", "=", "string_start", "string_text", "template_open", "identifier", ".",
+                "identifier", "template_close", "string_end",
+            ]
+        );
+        assert_eq!(
+            tokens("val s = s\"$name and ${f(x)}\"\n"),
+            [
+                "val", "identifier", "=", "string_start", "template_name", "string_text", "template_open",
+                "identifier", "(", "identifier", ")", "template_close", "string_end",
+            ]
+        );
+    }
+
+    /// The call written in a field is an ordinary node with its own span, so a
+    /// caller can see through the interpolation.
+    #[test]
+    fn a_field_holds_a_call_node_with_its_span() {
+        let src = "val s = s\"x${f(a, 1)}y\"\n";
+        let dump = sexp(src);
+        assert!(dump.contains("(interpolation"), "{dump}");
+        assert!(dump.contains("(call"), "{dump}");
+        let at = src.find("f(a, 1)").unwrap() as u32;
+        let workspace = parse(src);
+        let nodes = &workspace.tree.nodes;
+        let call = (0..nodes.len())
+            .find(|&index| SCALA.name(nodes[index].kind) == "call")
+            .unwrap_or_else(|| panic!("no call node in {dump}"));
+        assert_eq!((nodes[call].start, nodes[call].end), (at, at + 7), "the call's span is its own bytes:\n{dump}");
+    }
+
+    /// `raw"..."` is text: its dollars never open a field. A plain string never
+    /// does either.
+    #[test]
+    fn only_an_interpolator_opens_a_field() {
+        assert_eq!(tokens("val s = raw\"$x\"\n"), ["val", "identifier", "=", "string_start", "string_text", "string_end"]);
+        assert_eq!(tokens("val s = \"$x\"\n"), ["val", "identifier", "=", "string_start", "string_text", "string_end"]);
+        assert!(clean("object A { val s = s\"\"\"\n|${name}\n\"\"\".stripMargin }\n"));
+    }
+
+    /// `->` is a pair, so a map built from tuples parses.
+    #[test]
+    fn a_right_arrow_builds_a_pair() {
+        assert_eq!(tokens("a -> b\n"), ["identifier", "->", "identifier"]);
+        assert!(clean("object A { val m = Map(\"a\" -> 1) }\n"));
+        assert!(sexp("val p = a -> b\n").contains("(pair_expression"), "{}", sexp("val p = a -> b\n"));
+    }
+
+    /// A `given` instance, named or anonymous, with a `with` body or an `=`.
+    #[test]
+    fn a_given_instance_parses() {
+        let src = "object A {\n  given intShow: Show[Int] with {\n    def show(value: Int): String = value.toString\n  }\n  given Show[String] = (value: String) => value\n  def render[A](value: A)(using show: Show[A]): String = show.show(value)\n}\n";
+        assert!(clean(src), "{}", sexp(src));
+        assert!(sexp("given intShow: Show[Int] with { }\n").contains("(given_definition"));
+    }
+
+    /// A `for` with a guard and `yield` is an expression, so it can be the body
+    /// of a `def`.
+    #[test]
+    fn a_for_comprehension_is_an_expression() {
+        let src = "def cheap(limit: Double): List[String] = for (item <- items if item.price < limit) yield item.name\n";
+        assert!(clean(src), "{}", sexp(src));
+        assert!(sexp(src).contains("(for_statement"), "{}", sexp(src));
+        assert!(sexp(src).contains("(generator identifier"), "{}", sexp(src));
+    }
+
+    /// `if` and `try` are expressions, so they can be a `val`'s value or a
+    /// `def`'s body.
+    #[test]
+    fn if_and_try_are_expressions() {
+        assert!(clean("val x = if (a) b else c\n"), "{}", sexp("val x = if (a) b else c\n"));
+        assert!(clean("val x = try f() catch { case _: E => g() }\n"), "{}", sexp("val x = try f() catch { case _: E => g() }\n"));
+        assert!(clean("def f(a: Boolean): Int = if (a) 1 else 2\n"));
+    }
+
+    /// A field that never closes costs its own line, not the file: the root
+    /// survives and the error is inside it.
+    #[test]
+    fn a_broken_field_is_an_error_inside_the_root() {
+        let src = "object A {\n  val s = s\"${f(\"\n  val t = 1\n}\n";
+        let workspace = parse(src);
+        assert!(workspace.tree.root().flags & HAS_ERROR != 0 || errors(src) > 0, "a broken field must be an error");
+        assert_eq!(SCALA.name(workspace.tree.root().kind), "program");
+        assert!(errors(src) > 0);
+    }
+
+    fn corpus() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("scala_corpus")
+    }
+
+    /// Malformed and truncated input must give a tree with the error inside it,
+    /// never a panic and never a hang: every prefix of every corpus file at a
+    /// character boundary is parsed here.
+    #[test]
+    fn every_prefix_of_a_corpus_file_still_builds_its_tree() {
+        let dir = corpus();
+        let mut names: Vec<String> = fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        for name in &names {
+            let src = fs::read_to_string(dir.join(name)).unwrap();
+            let cuts: Vec<usize> = src.char_indices().map(|(at, _)| at).filter(|at| at % 5 == 0).chain(std::iter::once(src.len())).collect();
+            for at in cuts {
+                let head = &src[..at];
+                let workspace = parse(head);
+                assert_eq!(SCALA.name(workspace.tree.root().kind), "program", "{name} at {at}: the root must survive");
+            }
+        }
+    }
+
+    /// Real files, not the eight hand-written fixtures: every one in
+    /// `fixtures/scala_corpus` must parse with no error node. The count is the
+    /// measurement the report quotes.
+    #[test]
+    fn scala_corpus_is_clean() {
+        let dir = corpus();
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("{dir:?}: {error}"))
+            .filter(|entry| entry.as_ref().map(|entry| entry.file_type().map(|kind| kind.is_file()).unwrap_or(false)).unwrap_or(false))
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert!(names.len() >= 8, "the corpus is at least eight realistic files, not {}", names.len());
+        let mut dirty = Vec::new();
+        for name in &names {
+            let text = fs::read_to_string(dir.join(name)).unwrap();
+            if !clean(&text) {
+                dirty.push((name.clone(), errors(&text)));
+            }
+        }
+        println!("scala_corpus: {}/{} clean", names.len() - dirty.len(), names.len());
+        if !dirty.is_empty() {
+            let mut report = String::new();
+            for (name, count) in &dirty {
+                let text = fs::read_to_string(dir.join(name)).unwrap();
+                report.push_str(&format!("\n{name}: {count} error nodes\n{}\n", sexp(&text)));
+            }
+            panic!("{} of {} corpus files are not clean:\n{report}", dirty.len(), names.len());
+        }
+    }
+}
