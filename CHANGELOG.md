@@ -5,6 +5,31 @@ Ubuntu 24.04.4 LTS, Intel Core i7-8550U, 8 cores, `x86_64-unknown-linux-musl`,
 rustc 1.99.1. The commands that produced them are in `docs/DEEP_PARSER.md`
 §10 and §11.
 
+## [0.2.2] - 2026-11-09
+
+### Fixed
+
+- **A chained call keeps its receiver's arguments.** `Path(path).resolve()`
+  wrote the receiver as `["c",0,0,[]]` — the call without its arguments — so a
+  reader had the outer call and a receiver that looked empty. The receiver is
+  now the inner call's own form. Measured on the Felicity corpus: the lost-call
+  fallbacks on Go's chain-heavy files fell from 57 to 23, and the Python shape
+  `A(x).b()` stopped producing a difference at all.
+- **Python keyword arguments carry their value.** `f(default=True)` wrote `0`
+  for every argument after the first: the grammar spells the `=` as a child of
+  the keyword argument, and `True`, `False` and `None` are keywords to the
+  parser while the one-pass lexer reads them as names. Both are read now, so
+  the argument, its name and its value reach the record.
+- **A bare annotation is an event.** `rule_id: str` in a class body binds
+  nothing and produced no record, while the lexer files an event for it; every
+  dataclass-shaped class lost that event and forced a fallback.
+- **`fn default()` has a name.** `default` is a contextual keyword in Rust and
+  the definition came out anonymous.
+- **A name the source does not declare is not a loss.** `pub(crate) struct
+  Meter` made the lexer file a symbol named `pub`, and the guard read the line
+  as declaring it because it also declares `Meter`. A claimed name now has to
+  follow its declaration keyword or be written before an `=`.
+
 ## [0.2.1] - 2026-11-09
 
 ### Fixed
