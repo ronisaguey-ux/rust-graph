@@ -16,7 +16,7 @@ beside it. Numbers are in the measurement table, never in the prose.
 | `crates/deep-lex` | the hand lexer crate | see its `README.md` |
 | `crates/deep-tables` | LR(1)/LALR(1) table generator for the `tables` path | see its `README.md` |
 | `crates/rust-graph-deep` | the `grammar!` proc macro (`check.rs`, `decide.rs`, `emit.rs`, `tables/`) | `grammar!` |
-| `crates/deep-grammars` | 30 grammars in the `grammar!` DSL, their lexers, and the fixtures | `Language` statics |
+| `crates/deep-grammars` | 43 `grammar!` blocks (40 of the 42 languages), their lexers, and the fixtures | `Language` statics |
 | `crates/deep-rt` | the unified runtime: descent driver, GLR driver, arena, recovery, budgets, incremental re-parse | `Workspace::parse` |
 | `src/deep` | a path copy of the descent runtime that `crates/deep-grammars` compiles against today (`crates/deep-grammars/src/deep.rs` includes it by `#[path]`) | `Workspace::parse` |
 | `src/deep_integration.rs` | the `parser`-feature bridge from the graph build to the parser | `parse_file` |
@@ -293,7 +293,7 @@ Limits, explicitly:
 
 ## 7. Adding a language
 
-### 7.1 The `grammar!` route (what all 30 grammars here use)
+### 7.1 The `grammar!` route (what all 43 `grammar!` blocks here use)
 
 1. **Write `crates/deep-grammars/src/<language>.rs`.** A `grammar! { NAME { … } }`
    block: `name`, `lex = <step fn>`, optional `layout = NEWLINE INDENT DEDENT`,
@@ -374,102 +374,219 @@ and `shrink_drives_the_real_runtime_to_the_trigger_byte` builds a real
 `Language` whose lexer panics on one byte and shrinks a 40-byte input to that
 single byte through the workspace, the lexer and the parser.
 
-## 10. Measurements
+## 10. Measured on 2026-11-08
 
-All numbers below are from this worktree on the development box, in a debug
-build unless stated. "Inputs" is mutated inputs checked, not fixtures.
+Machine: Ubuntu 24.04.4 LTS, Intel Core i7-8550U, 8 cores,
+`x86_64-unknown-linux-musl`, rustc 1.99.1. Every number below came from a run in
+this worktree on that date, and the command is printed above the numbers it
+produced. Tree-sitter is not installed on this machine and there is no C
+compiler, so the 2× comparison has no ratio here (§10.5).
 
-### 10.1 Fuzz run
+### 10.1 Workspace tests
 
-Command:
+```sh
+cargo test --workspace
+```
 
-```bash
-cargo build -p deep-fuzz
-for l in $(target/x86_64-unknown-linux-musl/debug/deep-fuzz languages | cut -f1); do
-  target/x86_64-unknown-linux-musl/debug/deep-fuzz fuzz --lang "$l" --seconds 30 --seed 20261108
+| result | value |
+|:--|--:|
+| passed | 416 |
+| failed | 0 |
+| ignored | 19 |
+| suites | 60 |
+| wall clock | 86.15 s |
+| exit status | 0 |
+
+The 19 ignored tests are diagnostic dump/probe helpers
+(`batch_*::tests::dump_*`, `probe`, `*::tests::dump_top_level_kinds`).
+
+### 10.2 Deep-feature tests
+
+```sh
+cargo test --workspace --features "deep parser"
+```
+
+| result | value |
+|:--|--:|
+| passed | 718 |
+| failed | 0 |
+| ignored | 20 |
+| suites | 62 |
+| wall clock | 110.68 s |
+| exit status | 0 |
+
+The twentieth ignore is `the_parser_gate_needs_a_release_build`; in a debug
+build the 2× gate is listed as ignored by design.
+
+### 10.3 Release binaries
+
+```sh
+cargo build --release
+stat -c '%s %n' target/x86_64-unknown-linux-musl/release/rust-graph
+sha256sum target/x86_64-unknown-linux-musl/release/rust-graph
+
+cargo build --release --features "deep parser"
+stat -c '%s %n' target/x86_64-unknown-linux-musl/release/rust-graph \
+    target/x86_64-unknown-linux-musl/release/rust-graph-deep-scan \
+    target/x86_64-unknown-linux-musl/release/rust-graph-deep-bench
+```
+
+| binary | bytes | note |
+|:--|--:|:--|
+| `rust-graph`, default | 837,496 | sha256 `60a554b0f2d3116042ca0be3360c8514a68a3386df67782658257bc10e820b7c` |
+| `rust-graph`, `deep parser` | 1,577,280 | 1.88× the default |
+| `rust-graph-deep-scan` | 2,089,096 | `--features parser` |
+| `rust-graph-deep-bench` | 526,456 | harness |
+
+The default release binary is byte-identical to the one recorded in
+`crates/deep-bench/default-build.sha256`, so the features add code only when
+they are on.
+
+### 10.4 What the CST costs
+
+Building the graph over the Python standard library, alternating which parser
+runs first, pinned to one CPU, 7 rounds each:
+
+```sh
+for r in 1 2 3 4 5 6 7; do
+  for m in lexer deep; do
+    taskset -c 7 /usr/bin/time -f 'wall=%e rss_kb=%M' \
+      target/x86_64-unknown-linux-musl/release/rust-graph build /usr/lib/python3.12 \
+      --no-cache --stdout --$m > /dev/null
+  done
 done
 ```
 
-One process per language (so a crash would not stop the rest); `--lang all`
-walks the same registry with the same per-language streams and produces the same
-verdicts. The seed is folded with the language name
-(`main.rs::mix`), so a language's stream depends on `--seed` and its name, not
-on which other languages ran.
+The build reports 566 Python files. Wall clock and peak RSS, median of 7:
 
-Seed fixtures: every valid and malformed fixture in
-`crates/deep-grammars/fixtures/` for the language, up to 8 per language, plus
-the 7 hostile seeds in `crates/deep-fuzz/corpus/seeds/`.
+| parser | wall | peak RSS |
+|:--|--:|--:|
+| `--lexer` | 2.10 s | 7,940 kB |
+| `--deep` | 4.03 s | 7,888 kB |
+| ratio | **1.92×** | 1.00× |
 
-| language | inputs | panics | hangs | unreachable | memory | worst ms | max nodes |
-|:--|--:|--:|--:|--:|--:|--:|--:|
-| awk | 127,862 | 0 | 0 | 0 | 0 | 4 | 2843 |
-| c | 71,528 | 0 | 0 | 0 | 0 | 45 | 1668 |
-| clojure | 95,111 | 0 | 0 | 0 | 0 | 14 | 2152 |
-| cpp | 33,874 | 0 | 0 | 0 | 0 | 52 | 2547 |
-| csharp | 46,376 | 0 | 0 | 0 | 0 | 31 | 1685 |
-| css | 70,057 | 0 | 0 | 0 | 0 | 22 | 2345 |
-| elixir | 90,165 | 0 | 0 | 0 | 0 | 6 | 3449 |
-| erlang | 117,882 | 0 | 0 | 0 | 0 | 10 | 2083 |
-| go | 105,549 | 0 | 0 | 0 | 0 | 13 | 1694 |
-| html | 279,644 | 0 | 0 | 0 | 0 | 9 | 377 |
-| java | 69,643 | 0 | 0 | 0 | 0 | 36 | 2384 |
-| javascript | 61,866 | 0 | 0 | 0 | 0 | 26 | 2431 |
-| json | 85,215 | 0 | 0 | 0 | 0 | 36 | 788 |
-| julia | 71,263 | 0 | 0 | 0 | 0 | 44 | 3067 |
-| kotlin | 52,340 | 0 | 0 | 0 | 0 | 37 | 1669 |
-| lua | 46,903 | 0 | 0 | 0 | 0 | 46 | 3330 |
-| objc | 72,368 | 0 | 0 | 0 | 0 | 14 | 2553 |
-| perl | 93,956 | 0 | 0 | 0 | 0 | 5 | 2710 |
-| php | 108,853 | 0 | 0 | 0 | 0 | 20 | 2443 |
-| python | 35,368 | 0 | 0 | 0 | 0 | 25 | 2537 |
-| r | 76,866 | 0 | 0 | 0 | 0 | 65 | 2880 |
-| ruby | 101,124 | 0 | 0 | 0 | 0 | 12 | 2876 |
-| scala | 127,476 | 0 | 0 | 0 | 0 | 4 | 2436 |
-| shell | 122,926 | 0 | 0 | 0 | 0 | 4 | 2317 |
-| solidity | 134,192 | 0 | 0 | 0 | 0 | 4 | 1675 |
-| sql | 87,063 | 0 | 0 | 0 | 0 | 60 | 1669 |
-| swift | 42,448 | 0 | 0 | 0 | 0 | 31 | 2441 |
-| tcl | 307,218 | 0 | 0 | 0 | 0 | 3 | 267 |
-| typescript | 72,408 | 0 | 0 | 0 | 0 | 13 | 2491 |
-| yaml | 143,383 | 0 | 0 | 0 | 0 | 15 | 1933 |
-| zig | 63,094 | 0 | 0 | 0 | 0 | 31 | 2169 |
-| **total (31)** | **3,014,021** | **0** | **0** | **0** | **0** | **65** | **3,449** |
+One file, 1 MiB of Python, released build, 3 runs each (the test prints its own
+numbers; peak RSS is the high-water mark of the process during that phase):
 
-Peak RSS for the whole run: 3.8 MB (the process peak; the cap is 512 MB).
-The worst input took 65 ms; the parser's clock budget is 2 s, so the slowest
-input was 3.3% of the hang threshold.
+```sh
+cargo test --release --features "deep parser" --test deep_facts -- --nocapture deep_facts_measure
+```
 
-### 10.2 Corpus check
+| phase | time | peak RSS |
+|:--|--:|--:|
+| lexer parse | 230.6 ms | 4,096 kB |
+| deep parse | 88.3 ms | — |
+| deep extract | 170.3 ms | — |
+| deep parse + extract | 258.6 ms | 29,428 kB |
 
-Command:
+So the CST is 1.92× the wall clock of the whole graph build on this corpus, and
+its own peak on a 1 MiB file is 7.2× the lexer's. The whole-build RSS is flat
+because the workspace is reused per file; the per-file tree is the cost.
 
-```bash
-target/x86_64-unknown-linux-musl/debug/deep-fuzz corpus --dir crates/deep-grammars/fixtures
+### 10.5 The 2× Tree-sitter comparison
+
+`crates/deep-bench` is the harness. On this machine the Tree-sitter side cannot
+exist: `cc`, `gcc`, `clang`, `tree-sitter` and `pkg-config` are all missing and
+there is no `libtree-sitter`, so `bench/build-tsdrv.sh` cannot run. The harness
+refuses rather than printing a number:
+
+```sh
+DEEP_SCAN=target/x86_64-unknown-linux-musl/release/rust-graph-deep-scan \
+target/x86_64-unknown-linux-musl/release/rust-graph-deep-bench compare \
+    --tree-sitter /nonexistent/tsdrv \
+    --deep crates/deep-bench/adapters/deep-scan.sh \
+    --list /tmp/rg-corpus-python.list --rounds 3
+```
+
+```text
+rust-graph-deep-bench: --tree-sitter: /nonexistent/tsdrv does not exist; Tree-sitter is not installed here and there is no C compiler to build it from source, so no ratio can be measured.
+  toolchain: cc=missing gcc=missing clang=missing tree-sitter=missing
+```
+
+Exit status `2`. **No 2× ratio was measured here.** The deep-side numbers over
+the same 568-file, 10,606,992-byte Python manifest:
+
+```sh
+sh crates/deep-bench/make-corpus.sh /usr/lib/python3.12 py > /tmp/rg-corpus-python.list
+target/x86_64-unknown-linux-musl/release/rust-graph-deep-bench corpus --list /tmp/rg-corpus-python.list
+DEEP_SCAN=target/x86_64-unknown-linux-musl/release/rust-graph-deep-scan \
+target/x86_64-unknown-linux-musl/release/rust-graph-deep-bench memory \
+    --deep crates/deep-bench/adapters/deep-scan.sh --list /tmp/rg-corpus-python.list
 ```
 
 | measure | value |
 |:--|--:|
-| files checked | 233 |
-| files skipped (unknown extension) | 0 |
-| worst parse | 5 ms (debug build) |
-| exit status | 0 |
+| manifest files | 568 |
+| manifest bytes | 10,606,992 |
+| manifest sha256 | `ed50a8865c51da8609af0a4532419342331e3a48bf1798de5f382a9027dc2c57` |
+| best parse | 349.1 ms |
+| throughput | 30.4 MB/s |
+| clean files (no ERROR) | 568 / 568 |
+| error bytes | 0 (0.000 %) |
+| nodes | 1,845,610 (0.174 per byte) |
+| max depth | 29 |
+| peak RSS | 14,004 kB (13.7 MB) |
 
-### 10.3 Repository checks
+### 10.6 Fuzz
 
-| measure | command | value |
-|:--|:--|--:|
-| fuzzer tests | `cargo test -p deep-fuzz` | 30 tests: 26 unit and 4 integration, all pass |
-| fixture files checked | `find crates/deep-grammars/fixtures -type f | wc -l` | 233 |
-| fuzzable languages | `deep-fuzz languages | wc -l` | 31 |
-| `deep-fuzz` debug binary | `ls -l target/x86_64-unknown-linux-musl/debug/deep-fuzz` | 15,454,688 bytes (14.7 MiB, debug) |
+One process per language, 30 s each, deterministic seed:
 
-### 10.4 Numbers measured elsewhere
+```sh
+cargo build -p deep-fuzz
+for l in python c javascript java csharp shell; do
+  target/x86_64-unknown-linux-musl/debug/deep-fuzz fuzz --lang "$l" --seconds 30 --seed 20261108
+done
+```
 
-| number | where it comes from | command |
-|:--|:--|:--|
-| 8.7× / 8.6× faster than Tree-sitter (python-a / python-b) | repo `README.md` parser gate table, 2026-11-08 | `cargo test --release --features parser --test parser_gate` |
-| 100.0 % clean on 200 Python stdlib files | `crates/deep-conformance/README.md` measured run | `deep-conformance scan/summary/gates` |
-| 19.85 MB/s aggregate Python | same | same |
+| language | inputs | panics | hangs | unreachable | memory | worst ms | max nodes | peak MB |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|
+| python | 28,540 | 0 | 0 | 0 | 0 | 54 | 2,537 | 3.3 |
+| c | 96,259 | 0 | 0 | 0 | 0 | 33 | 1,668 | 2.4 |
+| javascript | 56,483 | 0 | 0 | 0 | 0 | 30 | 2,431 | 3.4 |
+| java | 54,496 | 0 | 0 | 0 | 0 | 98 | 2,384 | 2.5 |
+| csharp | 44,599 | 0 | 0 | 0 | 0 | 135 | 1,685 | 2.8 |
+| shell | 40,445 | 0 | 0 | 0 | 0 | 47 | 2,317 | 2.0 |
+| **total** | **320,822** | **0** | **0** | **0** | **0** | **135** | **2,537** | **3.4** |
 
-Those three are quoted, not re-measured here; they need a corpus, a release
-build and (for the speed gate) a C compiler and network.
+Every process exited `0`. The fixture corpus check:
+
+```sh
+target/x86_64-unknown-linux-musl/debug/deep-fuzz corpus --dir crates/deep-grammars/fixtures
+```
+
+```text
+checked	233
+skipped	52
+worst_ms	8
+```
+
+### 10.7 Conformance over a real Python corpus
+
+The corpus is the Ubuntu 24.04 Python 3.12 standard library, 10,606,992 bytes of
+`.py`, release build with the `deep-grammars` feature:
+
+```sh
+cargo build --release -p deep-conformance --features deep-grammars
+target/x86_64-unknown-linux-musl/release/deep-conformance scan --root /usr/lib/python3.12 --out /tmp/rg-report-python.json
+target/x86_64-unknown-linux-musl/release/deep-conformance summary --report /tmp/rg-report-python.json
+target/x86_64-unknown-linux-musl/release/deep-conformance gates --report /tmp/rg-report-python.json
+```
+
+| measure | value |
+|:--|--:|
+| files scanned | 569 (625 skipped, unknown extension) |
+| measured | 568 |
+| clean | 568 / 568 (`100.0 %`) |
+| error bytes | 0 |
+| p50 / p95 / max parse | 0.525 / 3.544 / 9.998 ms |
+| nodes per byte | 0.1740 |
+| aggregate throughput | 18.71 MB/s (floor 15) |
+| peak RSS | 3.0 MB after `zoneinfo/_zoneinfo.py` (limit 2 GiB) |
+| cold start | 0.066 ms (limit 1 ms) |
+
+`summary` and `gates` both exited `0`; every gate line printed `PASS`. The one
+unmeasured file is a single PowerShell script below the 10-file floor.
+
+These numbers replace the earlier "measured elsewhere" table: the 8.7×
+Tree-sitter ratio and the 19.85 MB/s Python run quoted in previous revisions
+were not reproduced on this machine and are not claimed here.
