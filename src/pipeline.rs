@@ -1361,6 +1361,179 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
     verdict(None, String::new(), accepted)
 }
 
+/// What one flow event says, reduced to what the lexer and the CST must agree
+/// on: the assignment targets (empty for `r`/`x`) and the value's form with the
+/// call table's numbering erased.
+#[cfg(all(feature = "deep", feature = "parser"))]
+struct Shape {
+    line: u32,
+    targets: String,
+    value: String,
+}
+
+/// Why a deep event does not cover a lexer event. A reason, not a sentence: the
+/// caller has the payloads and writes the line a reader sees.
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Miss {
+    /// No event of that marker on a line the two readers can both mean.
+    Line,
+    /// The statement binds different names.
+    Targets,
+    /// The CST wrote the value as the constant `0`.
+    Constant,
+    /// A name the lexer read is not in the CST's value.
+    Name,
+    /// A call the lexer read is not in the CST's value.
+    Call,
+}
+
+/// Whether a deep event covers a lexer event with the same marker.
+///
+/// The value is compared by *containment*, not by association: both payloads
+/// are flattened to the atoms they name (a name, a keyword's name, a call, a
+/// constant), and every name and keyword the lexer read must be in the CST's
+/// value, with at least as many calls and constants. Association does not
+/// survive the flattening. A name or a call the CST dropped is a loss even when
+/// the event count and the shape both agree; a literal may be dropped, since the
+/// one-pass lexer drops them in call arguments too. A value the CST wrote as the
+/// constant `0` is the loss this guard exists for: the grammar keeps `f"{a}"` as
+/// one token, so no field is left to read.
+///
+/// The one name that may be missing is a type argument: the lexer reads
+/// `g<number>(x)` as a merge of three names and the CST as a call to `g` with one
+/// argument, so `number` is a token the one-pass reader flattened into a name,
+/// not a value the call carries. That tolerance is exactly a merge read as a
+/// call — nothing else is excused, so a call the lexer read and the CST read as
+/// a name is still a loss.
+///
+/// The targets are compared as written: a `for`/assignment target list is the
+/// set of names the statement binds, and a reader of the record is told which
+/// names by it. The CST reversing them is a difference this guard reports, not
+/// one it papers over.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn covers(deep: &Shape, lexer: &Shape) -> Result<(), Miss> {
+    // A lexer statement and the CST node it sits on can disagree by a line (a
+    // signature stamped where it ends against where it starts), so an event is
+    // paired near its line, never across the file: a duplicate target on
+    // another line must not stand in for the event that lost its value.
+    if (deep.line as i64 - lexer.line as i64).abs() > 1 {
+        return Err(Miss::Line);
+    }
+    if deep.targets != lexer.targets {
+        return Err(Miss::Targets);
+    }
+    covers_value(deep, lexer)
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn covers_value(deep: &Shape, lexer: &Shape) -> Result<(), Miss> {
+    if lexer.value == "0" {
+        return Ok(());
+    }
+    if deep.value == "0" {
+        return Err(Miss::Constant);
+    }
+    let mut wanted = Vec::new();
+    let mut found = Vec::new();
+    atoms(&lexer.value, &mut wanted);
+    atoms(&deep.value, &mut found);
+    let mut missing: Vec<&String> = Vec::new();
+    for name in wanted.iter().filter(|atom| atom.starts_with("n:") || atom.starts_with("k:")) {
+        match found.iter().position(|row| row == name) {
+            Some(at) => {
+                found.swap_remove(at);
+            }
+            None => missing.push(name),
+        }
+    }
+    if !missing.is_empty() {
+        // A merge the CST read as a call: the lexer flattened a call's tokens
+        // into names, and its type arguments are not in the call's record. A
+        // keyword name is never excused — both readers write a keyword's name
+        // inside the call, so one missing there is a loss.
+        let merged_as_call = matches!(value_form(&lexer.value), "m" | "t") && value_form(&deep.value) == "c";
+        if !merged_as_call || missing.iter().any(|name| name.starts_with("k:")) {
+            return Err(Miss::Name);
+        }
+    }
+    for (kind, miss) in [("call", Miss::Call), ("0", Miss::Call)] {
+        let wanted = wanted.iter().filter(|atom| *atom == kind).count();
+        let found = found.iter().filter(|atom| *atom == kind).count();
+        if found < wanted {
+            return Err(miss);
+        }
+    }
+    Ok(())
+}
+
+/// The top-level form of a value: `n` (a name), `c` (a call), `t`/`m` (a list or
+/// a merge), `k` (a keyword argument), `0` (a constant).
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn value_form(value: &str) -> &str {
+    let end = value.find([':', '(', '[']).unwrap_or(value.len());
+    &value[..end]
+}
+
+/// Every atom inside a shape, flattened through the combining forms: names and
+/// keyword names as themselves, calls as `call`, constants as `0`. Association
+/// does not survive the flattening, so `a and b and c` read as one merge and as
+/// nested merges compares equal.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn atoms(shape: &str, out: &mut Vec<String>) {
+    if let Some(rest) = shape.strip_prefix("c(") {
+        out.push("call".to_string());
+        let inner = rest.strip_suffix(')').unwrap_or(rest);
+        if let Some((receiver, arguments)) = inner.split_once(';') {
+            atoms(receiver, out);
+            let arguments = arguments.strip_prefix('[').unwrap_or(arguments);
+            let arguments = arguments.strip_suffix(']').unwrap_or(arguments);
+            for item in split_items(arguments) {
+                atoms(item, out);
+            }
+        }
+        return;
+    }
+    if let Some(rest) = shape.strip_prefix("m:[").or_else(|| shape.strip_prefix("t:[")) {
+        let inner = rest.strip_suffix(']').unwrap_or(rest);
+        for item in split_items(inner) {
+            atoms(item, out);
+        }
+        return;
+    }
+    if let Some(rest) = shape.strip_prefix("k(") {
+        if let Some((name, value)) = rest.split_once("):") {
+            out.push(format!("k:{name}"));
+            atoms(value, out);
+            return;
+        }
+    }
+    out.push(shape.to_string());
+}
+
+/// Split a shape list at commas that are not inside a nested shape.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn split_items(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (at, byte) in text.bytes().enumerate() {
+        match byte {
+            b'[' | b'(' | b'{' => depth += 1,
+            b']' | b')' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(&text[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&text[start..]);
+    out.retain(|item| !item.is_empty());
+    out
+}
+
+
 /// The `["r",line,value]` and `["x",line,value]` events in a record, as
 /// `(marker, line, is_constant)`. Those two kinds end with their value, so a
 /// payload of exactly `0` is the constant form; every other payload is a value
