@@ -342,8 +342,9 @@ rust_graph_deep::grammar! { PYTHON {
     /// `{x!r:>{w}}`: the braces keep their own tokens, and what is between
     /// them is ordinary Python — a call in a field is a `call` node like any
     /// other. `=` is the debug form (`{x=}`), `!r` the conversion, and the
-    /// format spec is text with fields of its own.
-    interpolation: FSTRING_FIELD_OPEN [_expressions] [_fstring_debug] [BANG _name] [COLON [_fstring_spec]] FSTRING_FIELD_CLOSE,
+    /// format spec is text with fields of its own. The expression is required:
+    /// Python has no empty field, so `f"{}"` is an error node, not a field.
+    interpolation: FSTRING_FIELD_OPEN _expressions [_fstring_debug] [BANG _name] [COLON [_fstring_spec]] FSTRING_FIELD_CLOSE,
     _fstring_debug: ASSIGN [_expression],
     _fstring_spec: (FSTRING_SPEC_TEXT | interpolation)+,
     parenthesized_expression: "(" (_list_item %? ",") ")",
