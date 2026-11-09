@@ -7,7 +7,8 @@
 //! - [`TYPESCRIPT`]: `<` is always an operator, so `<T>x` is a type assertion
 //!   and `Map<K, V>` a type argument list.
 //! - [`JAVASCRIPT`] and [`TSX`]: `<` where an operand starts opens a JSX
-//!   element, which the lexer scans as one token with its braces balanced.
+//!   element, whose tags, attributes and expressions the lexer turns into
+//!   tokens, so the element is a subtree and every `{...}` part is code.
 //!
 //! This module is the TypeScript face of that shared grammar; it adds no rules
 //! of its own. Splitting the definition in two would duplicate 550 rules to

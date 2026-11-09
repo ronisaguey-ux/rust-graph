@@ -103,12 +103,15 @@ type assertions, `implements`).
 
 **JavaScript / TypeScript — partly modelled.** A template literal's `${...}` is
 parsed as expressions: the substitution is a `template_substitution` node and a
-call in it is a `call_expression`. A JSX element is one token for
-`JAVASCRIPT`/`TSX`: its children and attribute expressions are not nodes.
-A regular expression is one token. The tree is Tree-sitter-shaped but not
-Tree-sitter's tree. Automatic semicolon insertion is modelled as optional
-semicolons, so a restricted production (`return` then a value on the next line)
-reads as one statement, not two.
+call in it is a `call_expression`. A JSX element is parsed too, for
+`JAVASCRIPT`/`TSX`: the opening element, its attributes, the children and the
+closing element are nodes, `{...}` is a `jsx_expression` whose content is
+ordinary code, `<A.B/>` is a `nested_identifier` and `<a:b/>` a
+`jsx_namespace_name`. Text children and quoted attribute values stay tokens and
+their entities are not decoded. A regular expression is one token. The tree is
+Tree-sitter-shaped but not Tree-sitter's tree. Automatic semicolon insertion is
+modelled as optional semicolons, so a restricted production (`return` then a
+value on the next line) reads as one statement, not two.
 
 ## What the DSL could not express
 
@@ -126,10 +129,14 @@ worked around in the hand lexer rather than by inventing syntax.
    at a parse position. Context-sensitive tokens that depend on the previous
    token — JS regex versus division, JSX versus `<T>`, `>` `>` versus `>>` —
    are still decided inside one `fn(&mut Cursor) -> Kind` from
-   `Cursor::previous`, and template/JSX bodies are scanned by that function
-   with a private brace counter. That is why a JavaScript template literal's
-   `${...}` is one token and its expression is not a subtree, while a Python
-   f-string's field is.
+   `Cursor::previous`. A JSX element also needs a state per open tag while a
+   template's mode frames may already be open, so the JavaScript lexer keeps a
+   second, hand-written frame stack beside the mode stack and the two
+   interleave: a `{` in a tag or between children is ordinary code again with
+   its own matching `}` as a token of the JSX state, and the flags say which
+   frame was entered first. That is why a template's substitution and a JSX
+   expression both parse, while a Python f-string's field needs only the mode
+   stack.
 3. **A decision sees at most three tokens.** `(a, b) =>`, `f<T>(x)` and
    `for (x of y)` are entered via `&(...)` predicates; there is no arbitrary
    lookahead and no conflict priority other than alternative order. A construct
