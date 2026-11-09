@@ -388,10 +388,6 @@ impl<'a> Walker<'a> {
         }
         match kind {
             "expression_statement" => self.expression_statement(id),
-            // `assert f(x), "why"`: the one-pass lexer reads the line as an
-            // expression statement and files its calls; the CST must not drop
-            // them just because the statement has a keyword.
-            "assert_statement" => self.expression_statement(id),
             "return_statement" => self.return_statement(id),
             "variable_declarator" if self.is_js() => self.declarator(id),
             "public_field_definition" | "field_definition" | "property_signature" if self.is_js() => {
@@ -401,7 +397,6 @@ impl<'a> Walker<'a> {
             // `raise E(x) from c(y)`, `assert a(v), b(v)`, `del xs[k(v)]`:
             // every value-bearing child is read, not only the first.
             "raise_statement" | "assert_statement" | "delete_statement" => self.statement_values(id),
-            "throw_statement" | "raise_statement" | "decorator" => self.expression_statement(id),
             // `pass`, `break`, `continue`: the one-pass lexer reads the word as
             // an expression and files an `x` event for it, so the CST does too.
             // The module symbol is emitted only when it has events, so losing
@@ -523,11 +518,28 @@ impl<'a> Walker<'a> {
         let name = named.unwrap_or_else(|| format!("<anonymous>@{line}"));
         let owner = if self.frame().container { self.frame().class.clone() } else { String::new() };
         let mut params = def.params.map(|kind| self.child_of_kind(id, kind)).flatten().map(|node| self.params(id, node)).unwrap_or_default();
+        // `x = lambda k: f(k)`: the lambda's own parameter list is where the
+        // names are, since this binding carries no `parameters` rule.
+        if params.is_empty() {
+            if let Some(list) = self.child_of_kind(id, "lambda_parameters") {
+                params = self.params(id, list);
+            }
+        }
         if params.first().is_some_and(|first| matches!(first.as_str(), "self" | "cls" | "this")) {
             params.remove(0);
         }
         let index = self.add_symbol(name, owner.clone(), KIND_FUNCTION, line, params);
         self.stack.push(Frame { node: id, symbol: index, class: owner, container: false, defines: Some(index) });
+        // A binding whose body is a lambda (`x = lambda k: f(k)`) is a
+        // definition the grammar writes as one node: nothing else in the walk
+        // reads that lambda, so its body is read here, as this symbol's return.
+        if let Some(lambda) = self.child_of_kind(id, "lambda") {
+            let at = self.line(lambda);
+            let value = self.form(lambda);
+            if value != "0" {
+                self.event(&format!("[\"r\",{at},{value}]"));
+            }
+        }
     }
 
     /// The name a definition node carries, if any.
@@ -1055,68 +1067,33 @@ impl<'a> Walker<'a> {
 
     fn python_import(&mut self, id: u32) {
         let line = self.line(id);
-        // `from m import (a, b)` and `import a, b`: the grammar wraps the
-        // names it lists in an `import_list`, so the clause's own children are
-        // not the names. Flattening it here is what makes a multi-line import
-        // read the same as a single-line one.
-        let mut children = Vec::new();
-        for child in self.children(id) {
-            if matches!(self.kind(child), "import_list" | "parenthesized_expression" | "parenthesized_list") {
-                children.extend(self.children(child));
-            } else {
-                children.push(child);
-            }
+        let children = self.children(id);
+        if self.kind(id) == "import_from_statement" {
+            // `from <module> import <bindings>`. The module may be relative
+            // (`.`, `..pkg.mod`) and the bindings may sit in a parenthesised
+            // `import_list`, which is one list of names, not a wrapper to skip.
+            let module_at = children
+                .iter()
+                .position(|&child| matches!(self.kind(child), "dotted_name" | "identifier" | "relative_import"));
+            let module = module_at.map(|at| self.text_string(children[at])).unwrap_or_default();
+            let bindings = module_at.map(|at| &children[at + 1..]).unwrap_or(&children[..]);
+            self.import_bindings(bindings, &module, line);
+            return;
         }
-        let from = self.kind(id) == "import_from_statement";
-        let mut module = String::new();
-        let mut seen_from = false;
+        // `import a.b as c, d`: each clause is a module and an optional alias.
+        // The alias is a name of its own, not the module of the next clause.
         let mut index = 0;
         while index < children.len() {
             let child = children[index];
-            match self.kind(child) {
-                "import_list" => {
-                    let inner = self.children(child);
-                    self.import_bindings(&inner, &module, line);
-                }
-                "wildcard_import" | "*" => {
-                    self.facts.imports.push(Import { line, module: module.clone(), kind: IMPORT_STAR, ..Import::default() });
-                }
-                "aliased_import" => {
-                    let inner = self.children(child);
-                    let Some(&name_node) = inner.first() else {
-                        index += 1;
-                        continue;
-                    };
-                    let name = self.text_string(name_node);
-                    let alias = inner
-                        .last()
-                        .filter(|&&last| last != name_node)
-                        .map(|&last| self.text_string(last))
-                        .unwrap_or_else(|| name.clone());
-                    self.facts.imports.push(Import { line, module: module.clone(), name, alias, kind: IMPORT_MODULE });
-                }
-                "dotted_name" | "identifier" => {
-                    // Inside `import (a, b as c)` the grammar does not wrap the
-                    // pair in `aliased_import`: the alias is the name after
-                    // `as`, already written by the arm above. Reading it again
-                    // would invent an import of `c` from `c`.
-                    if index > 0 && self.kind(children[index - 1]) == "as" {
-                        index += 1;
-                        continue;
-                    }
-                    let name = self.text_string(child);
-                    let aliased = children.get(index + 1).is_some_and(|&next| self.kind(next) == "as");
-                    let alias = if aliased {
-                        children.get(index + 2).map(|&next| self.text_string(next)).unwrap_or_else(|| name.clone())
-                    } else {
-                        name.clone()
-                    };
-                    self.facts.imports.push(Import { line, module: module.clone(), name, alias, kind: IMPORT_MODULE });
-                    if aliased {
-                        index += 2;
-                    }
-                }
-                _ => {}
+            let aliased = index > 0 && self.kind(children[index - 1]) == "as";
+            if !aliased && matches!(self.kind(child), "dotted_name" | "identifier") {
+                let module = self.text_string(child);
+                let alias = children
+                    .get(index + 2)
+                    .filter(|_| children.get(index + 1).is_some_and(|&n| self.kind(n) == "as"))
+                    .map(|&n| self.text_string(n))
+                    .unwrap_or_else(|| module.clone());
+                self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
             }
             index += 1;
         }
@@ -1345,11 +1322,17 @@ impl<'a> Walker<'a> {
                 }
             }
             // `z: "Thing"` with no value: the statement is the annotation, and
-            // the name in it is what the lexer reads as the expression.
-            "annotated" => match self.children(id).first() {
-                Some(&first) => self.form(first),
-                None => "0".to_string(),
-            },
+            // the name in it is what the lexer reads as the expression. With a
+            // value (`z: "Thing" = f()`) the value is what the statement is.
+            "annotated" => {
+                let children = self.children(id);
+                let has_value = children.iter().any(|&child| self.kind(child) == "=");
+                match (has_value, children.last()) {
+                    (true, Some(&last)) => self.form(last),
+                    (false, Some(&first)) => self.form(first),
+                    _ => "0".to_string(),
+                }
+            }
             // `path := f(x)`: a walrus expression is the value, and the name
             // is a binding.
             "named_expression" => {
