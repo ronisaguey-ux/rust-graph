@@ -1392,16 +1392,7 @@ fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts
     for want in wanted {
         // The exact match is tried first and always wins: a statement both
         // readers bind the same way is never re-read as an artefact.
-        let mut miss = Miss::Line;
-        let exact = found.iter().position(|row| match covers(&row.1, &want.1) {
-            Ok(()) => true,
-            Err(reason) => {
-                if row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 {
-                    miss = reason;
-                }
-                false
-            }
-        });
+        let exact = found.iter().position(|row| row.0 == want.0 && covers(&row.1, &want.1).is_ok());
         if let Some(at) = exact {
             found.swap_remove(at);
             continue;
@@ -1420,17 +1411,29 @@ fn uncovered(lexer: &Facts, symbol: &crate::facts::Symbol, paired: &crate::facts
             }
             continue;
         }
-        let near = found.iter().find(|row| row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1);
-        let other = match near {
-            Some(row) => format!("line {} targets {} value {}", row.1.line, row.1.targets, row.1.value),
-            None => "no event of that marker within one line".to_string(),
-        };
-        let why = match miss {
-            Miss::Line => "no event on a line both readers can mean",
-            Miss::Targets => "the statement binds different names",
-            Miss::Constant => "the CST wrote the value as the constant 0",
-            Miss::Name => "a name the lexer read is not in the CST's value",
-            Miss::Call => "a call or constant the lexer read is not in the CST's value",
+        // The candidate a reader would compare against: a nearby event with the
+        // same marker and targets when there is one, so the reason names the
+        // closest thing the CST wrote rather than an event on another statement.
+        let near = found
+            .iter()
+            .find(|row| row.0 == want.0 && row.1.targets == want.1.targets && (row.1.line as i64 - want.1.line as i64).abs() <= 1)
+            .or_else(|| found.iter().find(|row| row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1));
+        let (other, why) = match near {
+            Some(row) => {
+                let miss = match covers(&row.1, &want.1) {
+                    Ok(()) => Miss::Line,
+                    Err(miss) => miss,
+                };
+                let why = match miss {
+                    Miss::Line => "no event on a line both readers can mean",
+                    Miss::Targets => "the statement's target list differs (names or order)",
+                    Miss::Constant => "the CST wrote the value as the constant 0",
+                    Miss::Name => "a name the lexer read is not in the CST's value",
+                    Miss::Call => "a call or constant the lexer read is not in the CST's value",
+                };
+                (format!("line {} targets {} value {}", row.1.line, row.1.targets, row.1.value), why)
+            }
+            None => ("no event of that marker within one line".to_string(), "no event on a line both readers can mean"),
         };
         return Some(format!(
             "event {} line {} targets {} in {} ({why}): lexer {}; CST {}",
