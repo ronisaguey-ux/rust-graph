@@ -171,7 +171,9 @@ fn a_paired_element_has_text_children_a_self_closing_child_and_expression_childr
     assert_eq!(parsed.text(parsed.find("jsx_element", "<span/>")), "<span/>");
     assert_eq!(parsed.span(parsed.find("call_expression", "f(y)")), parsed.bytes_of("f(y)"));
 
-    // Text stays a text token: `text` inside the namespaced pair.
+    // Text stays a text token and an entity in it is not decoded.
+    assert_eq!(parsed.text(parsed.find_token("jsx_text", "a &amp; b")), "a &amp; b");
+    // `text` inside the namespaced pair.
     let text = parsed.find_token("jsx_text", "text");
     let namespaced = parsed.span(parsed.find("jsx_element", "<a:b>text</a:b>"));
     assert!((namespaced.0..namespaced.1).contains(&parsed.span(text).0), "the text is the namespaced pair's child");
