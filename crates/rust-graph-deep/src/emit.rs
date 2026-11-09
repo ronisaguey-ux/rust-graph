@@ -185,6 +185,13 @@ impl<'c> Emitter<'c> {
                 Action::Pop => {
                     let _ = write!(out, " {token} => MODES.with(|stack| {{ stack.borrow_mut().pop(); }}),");
                 }
+                Action::PopTo(mode) => {
+                    let level = self.mode_level(mode);
+                    let _ = write!(
+                        out,
+                        " {token} => MODES.with(|stack| {{ let mut stack = stack.borrow_mut(); while let Some(top) = stack.pop() {{ if top == {level} {{ break; }} }} }}),"
+                    );
+                }
             }
         }
         let _ = write!(out, " _ => {{}} }} kind }}");

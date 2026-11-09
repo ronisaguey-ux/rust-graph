@@ -46,10 +46,22 @@
 //! `modes` and `switch` give the step lexer a mode stack: the macro generates a
 //! wrapper that dispatches on the current mode and applies the switch declared
 //! for the token it just produced. A heredoc is `switch HEREDOC_START => BODY;`
-//! and `switch HEREDOC_BODY => pop;`, an f-string's field `push`/`pop`. State
-//! that belongs to a mode (a heredoc's delimiter, a brace depth) still lives in
-//! that mode's step function: a `Cursor` sees the bytes from the cursor on, not
-//! the token before it.
+//! and `switch HEREDOC_BODY => pop;`, an f-string's field `push`/`pop`.
+//!
+//! A switch is one of `=> MODE` (replace the top frame), `=> push MODE` (a
+//! frame on top of it), `=> pop` (drop one) or `=> pop MODE` (drop frames until
+//! *and including* `MODE`, so one token can undo a nested pair: a replacement
+//! field that cannot close ends its own frame and the string's in one bad
+//! token, and the mode stack cannot be left holding a frame the step lexer has
+//! already abandoned).
+//!
+//! State that belongs to a mode (a heredoc's delimiter, a brace depth) still
+//! lives in that mode's step function: a `Cursor` sees the bytes from the cursor
+//! on, not the token before it. So does the field depth of an f-string: the
+//! step function pushes a frame when it returns the token whose switch enters
+//! the mode, and pops it when it returns the one that leaves, which keeps one
+//! frame per nesting level — an outer field's depth survives a nested f-string
+//! because the nested frames are separate entries of the same stack.
 //!
 //! The macro emits a kind constant per token and per named rule (`pair` ->
 //! `PAIR`), the kind table, `pub static JSON: Language`, and `parse_<rule>`
