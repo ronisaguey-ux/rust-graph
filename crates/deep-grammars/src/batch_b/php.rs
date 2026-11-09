@@ -68,11 +68,18 @@
 //!   two rules rather than one labelled alternative.
 //!
 //! Not modelled, and named rather than silently dropped: an intersection type
-//! (`A&B`; list-typed `A|B` and `?A` are), property hooks (PHP 8.4),
+//! (`A&B`; union types `A|B` and nullable `?A` are), property hooks (PHP 8.4),
 //! `__halt_compiler`, and short open tags (`<?`); `<?xml` at the top of a file
 //! is inline HTML, which is what makes ignoring `<?` the safe choice. An `&`
 //! after a parameter's type is a reference, which is the reading that matters:
 //! `array &$options` is everywhere, `Countable&Traversable $x` is not.
+//!
+//! Measured, with `PHP_CORPUS=<dir> cargo test -p deep-grammars -- --ignored
+//! --nocapture`: 5048 of 5053 files of WordPress, Guzzle, Laravel, Symfony
+//! Console, PHPUnit, Composer, phpseclib and Doctrine parse with no error
+//! node; the five that remain are the intersection types above. The same
+//! WordPress and Guzzle files were 436 of 1553 before this grammar handled
+//! `?>`, the interpolation and the older declaration forms.
 
 use std::cell::RefCell;
 
@@ -686,7 +693,7 @@ pub fn lex_php(c: &mut Cursor) -> Kind {
             c.eat_while(is_word_byte);
             VARIABLE
         }
-        /// `$$name` is one variable-variable token.
+        // `$$name` is one variable-variable token.
         b'$' if c.peek_at(1) == b'$' && is_word_start(c.peek_at(2)) => {
             c.bump_n(2);
             c.eat_while(is_word_byte);
