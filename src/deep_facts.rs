@@ -11,13 +11,13 @@
 //! so nesting, qualified names and call arguments are facts, not inference.
 //!
 //! What is a definition, a call or an import is per language and written down as
-//! data (`PY_DEFS`, `JS_DEFS`, `RS_DEFS`, `PY_CALLS`, `RS_CALLS`, ...), selected
+//! data (`PY_DEFS`, `JS_DEFS`, `RS_DEFS`, `GO_DEFS`, `JAVA_DEFS`, ...), selected
 //! by [`kinds`]; the walk itself is language neutral. Python, JavaScript,
-//! TypeScript and TSX have tables, and Rust's live in their own region below.
-//! JSON has empty tables on purpose: a data file's only fact is the module
-//! symbol, so [`lang_for`] answers `None` for it and the lexer path is kept.
-//! The other grammars fall back to the module symbol until their table is
-//! written.
+//! TypeScript, TSX, Rust, Go and Java have tables, and Rust's live in their own
+//! region below. JSON has empty tables on purpose: a data file's only fact is
+//! the module symbol, so [`lang_for`] answers `None` for it and the lexer path
+//! is kept. The other grammars fall back to the module symbol until their table
+//! is written.
 //!
 //! Requires the `deep` and `parser` features: the Cst comes from
 //! `deep_integration`, which names the runtime's kind table, and the runtime
@@ -49,11 +49,20 @@ struct Kinds {
     /// this grammar, so `match.group(1)` carries the `match` kind, not
     /// `identifier`; the mapping reads the leaf's text as the name it is.
     soft: &'static [&'static str],
-    /// `true` for the brace languages whose declarations are `const x = ...`.
-    js: bool,
-    /// `true` for Rust: `impl` names itself from its type, `use` is a path
-    /// import, and the flow events are expressions, not statements.
-    rust: bool,
+    /// Which family's declaration shape the grammar writes. They differ in
+    /// where a name sits and how a statement is spelled, and nothing else.
+    family: Family,
+}
+
+/// How a grammar spells its statements. `Plain` is every language whose
+/// declarations this file has no table for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Plain,
+    Js,
+    Rust,
+    Go,
+    Java,
 }
 
 /// One definition node kind: where its name sits, where its parameters sit and
@@ -65,31 +74,63 @@ struct Def {
     name: &'static [&'static str],
     /// The child holding the parameter list, if the header has one.
     params: Option<&'static str>,
+    /// Which occurrence of `params` is the list: Go puts a method's receiver
+    /// first (`func (c *Cache) Get(key K)`), so its own list is the second.
+    params_nth: u8,
+    /// The name is the last child of a `name` kind rather than the first. Java
+    /// writes the return type first: `Item find(int id)`.
+    name_last: bool,
+    /// The owner is the receiver's type, read off the first parameter list
+    /// (Go's method receiver).
+    receiver: bool,
     /// `true` for a container whose members take its name as an owner.
     container: bool,
 }
 
 const PY_DEFS: &[Def] = &[
-    Def { kind: "class_definition", name: &["identifier"], params: Some("argument_list"), container: true },
-    Def { kind: "function_definition", name: &["identifier"], params: Some("parameters"), container: false },
+    Def { kind: "class_definition", name: &["identifier"], params: Some("argument_list"), params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_definition", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 
 const JS_DEFS: &[Def] = &[
-    Def { kind: "class_declaration", name: &["identifier"], params: Some("class_heritage"), container: true },
-    Def { kind: "class", name: &["identifier"], params: Some("class_heritage"), container: true },
-    Def { kind: "interface_declaration", name: &["type_identifier", "identifier"], params: None, container: true },
-    Def { kind: "enum_declaration", name: &["identifier", "type_identifier"], params: None, container: true },
-    Def { kind: "function_declaration", name: &["identifier"], params: Some("formal_parameters"), container: false },
-    Def { kind: "generator_function_declaration", name: &["identifier"], params: Some("formal_parameters"), container: false },
-    Def { kind: "method_definition", name: &["property_identifier", "identifier"], params: Some("formal_parameters"), container: false },
-    Def { kind: "function_expression", name: &["identifier"], params: Some("formal_parameters"), container: false },
-    Def { kind: "arrow_function", name: &[], params: Some("formal_parameters"), container: false },
+    Def { kind: "class_declaration", name: &["identifier"], params: Some("class_heritage"), params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "class", name: &["identifier"], params: Some("class_heritage"), params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "interface_declaration", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["identifier", "type_identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "generator_function_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "method_definition", name: &["property_identifier", "identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "function_expression", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "arrow_function", name: &[], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+
+/// Go has no class declaration: a `struct` or `interface` is a type, and the
+/// lexer keeps it as a statement. A `func` with a receiver list is a method, and
+/// its owner is the receiver's type.
+const GO_DEFS: &[Def] = &[
+    Def { kind: "function_declaration", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "method_declaration", name: &["identifier"], params: Some("parameter_list"), params_nth: 1, name_last: false, receiver: true, container: false },
+];
+
+/// Java's `class`, `interface`, `enum`, `record` and `@interface` are the
+/// containers the lexer opens a class frame for; a method's name is the last
+/// identifier in its header, because the return type comes first.
+const JAVA_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "interface_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "record_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "annotation_type_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "method_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: true, receiver: false, container: false },
+    Def { kind: "constructor_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 
 const PY_CALLS: &[&str] = &["call"];
 const JS_CALLS: &[&str] = &["call_expression", "new_expression"];
 const PY_IMPORTS: &[&str] = &["import_statement", "import_from_statement"];
 const JS_IMPORTS: &[&str] = &["import_statement", "export_statement"];
+const GO_IMPORTS: &[&str] = &["import_declaration"];
+const JAVA_IMPORTS: &[&str] = &["import_declaration"];
 
 // -- Rust and JSON (L3). Tables and walk arms live together below so a field
 // -- adding another language touches one region, not this one.
@@ -99,12 +140,12 @@ const JS_IMPORTS: &[&str] = &["import_statement", "export_statement"];
 /// it. A trait's methods take the trait as their owner, which is why a trait is
 /// a container and a struct (no methods of its own in the grammar) is too.
 const RS_DEFS: &[Def] = &[
-    Def { kind: "struct_item", name: &["type_identifier", "identifier"], params: None, container: true },
-    Def { kind: "enum_item", name: &["type_identifier", "identifier"], params: None, container: true },
-    Def { kind: "union_item", name: &["type_identifier", "identifier"], params: None, container: true },
-    Def { kind: "trait_item", name: &["type_identifier", "identifier"], params: None, container: true },
-    Def { kind: "mod_item", name: &["identifier"], params: None, container: true },
-    Def { kind: "function_item", name: &["identifier"], params: Some("parameters"), container: false },
+    Def { kind: "struct_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "union_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "trait_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "mod_item", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_item", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 
 /// Rust calls. A macro invocation is not a call to the lexer — `assert_eq!(a)`
@@ -129,16 +170,27 @@ const PY_SOFT: &[&str] = &["match", "case", "type", "_"];
 
 fn kinds(lang: Lang) -> Kinds {
     match lang {
-        Lang::Python => Kinds { definitions: PY_DEFS, calls: PY_CALLS, imports: PY_IMPORTS, soft: PY_SOFT, js: false, rust: false },
-        Lang::Rust => Kinds { definitions: RS_DEFS, calls: RS_CALLS, imports: RS_IMPORTS, soft: &[], js: false, rust: true },
-        Lang::Json => Kinds { definitions: JSON_DEFS, calls: JSON_CALLS, imports: JSON_IMPORTS, soft: &[], js: false, rust: false },
-        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
-            Kinds { definitions: JS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: &[], js: true, rust: false }
+        Lang::Python => {
+            Kinds { definitions: PY_DEFS, calls: PY_CALLS, imports: PY_IMPORTS, soft: PY_SOFT, family: Family::Plain }
         }
+        Lang::Rust => {
+            Kinds { definitions: RS_DEFS, calls: RS_CALLS, imports: RS_IMPORTS, soft: &[], family: Family::Rust }
+        }
+        Lang::Json => {
+            Kinds { definitions: JSON_DEFS, calls: JSON_CALLS, imports: JSON_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+            Kinds { definitions: JS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: &[], family: Family::Js }
+        }
+        // Go and Java write their statements and their calls themselves: the
+        // lexer's statement model is mirrored by `decl_value` rather than by
+        // `form`, so the generic arms below are not reached.
+        Lang::Go => Kinds { definitions: GO_DEFS, calls: &[], imports: GO_IMPORTS, soft: &[], family: Family::Go },
+        Lang::Java => Kinds { definitions: JAVA_DEFS, calls: &[], imports: JAVA_IMPORTS, soft: &[], family: Family::Java },
         // The other grammars have no definition table here yet; the walk still
         // returns a record with the module symbol, which is what the caller
         // falls back on. Named so a caller can tell "no facts" from "empty file".
-        _ => Kinds { definitions: &[], calls: &[], imports: &[], soft: &[], js: false, rust: false },
+        _ => Kinds { definitions: &[], calls: &[], imports: &[], soft: &[], family: Family::Plain },
     }
 }
 
@@ -168,6 +220,9 @@ struct Frame {
     /// lexer does: `class A: X = f()` puts that call on the module.
     symbol: usize,
     class: String,
+    /// Go's method receiver's own name (`c` in `func (c *Cache) Get`). The
+    /// lexer spells `c.mu` as `self.mu`, so the path builder does too.
+    receiver: String,
     container: bool,
     defines: Option<usize>,
 }
@@ -195,6 +250,8 @@ pub fn lang_for(tag: &str) -> Option<Lang> {
         "JS" => Some(Lang::JavaScript),
         "TS" => Some(Lang::TypeScript),
         "RS" => Some(Lang::Rust),
+        "GO" => Some(Lang::Go),
+        "JAVA" => Some(Lang::Java),
         // JSON stays out: a data file has no symbols, calls or imports to
         // read, so the CST would add the module symbol the lexer already
         // writes and nothing else. See `tests/facts_rust_json.rs`.
@@ -220,7 +277,7 @@ impl<'a> Walker<'a> {
             kinds: kinds(lang),
             line_starts: line_starts(src),
             facts,
-            stack: vec![Frame { node: tree.root, symbol: 0, class: String::new(), container: false, defines: None }],
+            stack: vec![Frame { node: tree.root, symbol: 0, class: String::new(), receiver: String::new(), container: false, defines: None }],
             bound: Vec::new(),
         }
     }
@@ -322,10 +379,20 @@ impl<'a> Walker<'a> {
     }
 
     fn child_of_kind(&self, id: u32, kind: &str) -> Option<u32> {
+        self.nth_child_of_kind(id, kind, 0)
+    }
+
+    /// The `nth` child of a kind, in order: Go writes a method's receiver list
+    /// before its parameter list, so the list a definition wants is the second.
+    fn nth_child_of_kind(&self, id: u32, kind: &str, nth: usize) -> Option<u32> {
+        let mut seen = 0;
         let mut child = self.node(id).first_child;
         while child != NONE {
             if self.kind(child) == kind {
-                return Some(child);
+                if seen == nth {
+                    return Some(child);
+                }
+                seen += 1;
             }
             child = self.node(child).next_sibling;
         }
@@ -438,7 +505,7 @@ impl<'a> Walker<'a> {
 
     fn enter(&mut self, id: u32) {
         let kind = self.kind(id);
-        if self.kinds.rust && self.enter_rust(id) {
+        if self.is_rust() && self.enter_rust(id) {
             return;
         }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
@@ -448,6 +515,20 @@ impl<'a> Walker<'a> {
         if self.has_kind(id, self.kinds.imports) {
             self.import(id);
             return;
+        }
+        // Go and Java write a statement where Python writes an expression and
+        // JavaScript a declarator; their arms are the lexer's statement model,
+        // read off the tree, and none of them is any arm below.
+        match self.kinds.family {
+            Family::Go => {
+                self.go_enter(id);
+                return;
+            }
+            Family::Java => {
+                self.java_enter(id);
+                return;
+            }
+            Family::Plain | Family::Js | Family::Rust => {}
         }
         match kind {
             "expression_statement" => self.expression_statement(id),
@@ -517,6 +598,15 @@ impl<'a> Walker<'a> {
 
     fn leave(&mut self, id: u32) {
         let kind = self.kind(id);
+        if matches!(self.kinds.family, Family::Go | Family::Java) {
+            if self.frame().node == id {
+                let frame = self.stack.pop().expect("a frame to pop");
+                if let Some(index) = frame.defines {
+                    self.facts.symbols[index].end_line = self.end_line(id);
+                }
+            }
+            return;
+        }
         // `(a) => f(a)`: the body is an expression, not a block, so nothing in
         // the walk below would read it. It is this function's return value.
         if kind == "arrow_function" && self.frame().node == id {
@@ -528,7 +618,7 @@ impl<'a> Walker<'a> {
                 }
             }
         }
-        if self.kinds.rust {
+        if self.is_rust() {
             self.leave_rust(id);
         }
         if matches!(
@@ -554,7 +644,13 @@ impl<'a> Walker<'a> {
     }
 
     fn is_js(&self) -> bool {
-        self.kinds.js
+        self.kinds.family == Family::Js
+    }
+
+    /// `true` for Rust: `impl` names itself from its type, `use` is a path
+    /// import, and the flow events are expressions, not statements.
+    fn is_rust(&self) -> bool {
+        self.kinds.family == Family::Rust
     }
 
     // -- definitions --------------------------------------------------------
@@ -572,7 +668,7 @@ impl<'a> Walker<'a> {
             // A class body writes onto the enclosing symbol; only its methods
             // take the class name as an owner.
             let symbol = self.frame().symbol;
-            self.stack.push(Frame { node: id, symbol, class: name, container: true, defines: Some(index) });
+            self.stack.push(Frame { node: id, symbol, class: name, receiver: String::new(), container: true, defines: Some(index) });
             return;
         }
         let named = self
@@ -583,7 +679,24 @@ impl<'a> Walker<'a> {
             });
         let name = named.unwrap_or_else(|| format!("<anonymous>@{line}"));
         let owner = if self.frame().container { self.frame().class.clone() } else { String::new() };
-        let mut params = def.params.map(|kind| self.child_of_kind(id, kind)).flatten().map(|node| self.params(id, node)).unwrap_or_default();
+        // Go: a method's receiver decides its owner, and the receiver's name is
+        // what the lexer spells `self` for inside the body.
+        let (receiver, receiver_owner) = if def.receiver {
+            def.params
+                .map(|kind| self.nth_child_of_kind(id, kind, 0))
+                .flatten()
+                .map(|list| self.go_receiver(list))
+                .unwrap_or_default()
+        } else {
+            (String::new(), String::new())
+        };
+        let owner = if receiver_owner.is_empty() { owner } else { receiver_owner };
+        let mut params = def
+            .params
+            .map(|kind| self.nth_child_of_kind(id, kind, def.params_nth as usize))
+            .flatten()
+            .map(|node| self.params(id, node))
+            .unwrap_or_default();
         // `x = lambda k: f(k)`: the lambda's own parameter list is where the
         // names are, since this binding carries no `parameters` rule.
         if params.is_empty() {
@@ -595,7 +708,7 @@ impl<'a> Walker<'a> {
             params.remove(0);
         }
         let index = self.add_symbol(name, owner.clone(), KIND_FUNCTION, line, params);
-        self.stack.push(Frame { node: id, symbol: index, class: owner, container: false, defines: Some(index) });
+        self.stack.push(Frame { node: id, symbol: index, class: owner, receiver, container: false, defines: Some(index) });
         // A binding whose body is a lambda (`x = lambda k: f(k)`) is a
         // definition the grammar writes as one node: nothing else in the walk
         // reads that lambda, so its body is read here, as this symbol's return.
@@ -610,6 +723,15 @@ impl<'a> Walker<'a> {
 
     /// The name a definition node carries, if any.
     fn def_name(&self, id: u32, def: &Def) -> Option<String> {
+        if def.name_last {
+            // Java writes the return type before the name: `Item find(int id)`.
+            let node = self
+                .children(id)
+                .into_iter()
+                .filter(|&child| def.name.contains(&self.kind(child)))
+                .next_back()?;
+            return Some(self.text_string(node));
+        }
         if let Some(node) = def.name.iter().find_map(|kind| self.child_of_kind(id, *kind)) {
             return Some(self.text_string(node));
         }
@@ -629,14 +751,24 @@ impl<'a> Walker<'a> {
 
     fn bases(&self, id: u32) -> Vec<String> {
         let mut out = Vec::new();
-        let Some(heritage) = self
+        // Java writes the superclass and the interfaces in two clauses, so every
+        // heritage child is read, not only the first.
+        let heritage: Vec<u32> = self
             .children(id)
             .into_iter()
-            .find(|&child| matches!(self.kind(child), "argument_list" | "class_heritage" | "implements_clause"))
-        else {
+            .filter(|&child| {
+                matches!(
+                    self.kind(child),
+                    "argument_list" | "class_heritage" | "implements_clause" | "superclass" | "super_interfaces"
+                        | "extends_interfaces"
+                )
+            })
+            .collect();
+        if heritage.is_empty() {
             return out;
-        };
-        let mut walk = vec![heritage];
+        }
+        // Source order: the stack pops the last pushed first.
+        let mut walk: Vec<u32> = heritage.into_iter().rev().collect();
         while let Some(node) = walk.pop() {
             for child in self.children(node) {
                 match self.kind(child) {
@@ -672,7 +804,8 @@ impl<'a> Walker<'a> {
         last
     }
 
-    /// `def f(a, b=1, *c)`, `function f(a, {b}, ...c)`, `(a, b) => {}`.
+    /// `def f(a, b=1, *c)`, `function f(a, {b}, ...c)`, `(a, b) => {}`,
+    /// `func f(id int)`, `Item find(int id)`.
     fn params(&self, def: u32, list: u32) -> Vec<String> {
         let mut out = Vec::new();
         let list_kind = self.kind(list);
@@ -680,6 +813,9 @@ impl<'a> Walker<'a> {
         if list_kind == "class_heritage" {
             return out;
         }
+        // Java and C-family declarations are `type name`, so the name is the
+        // last identifier of the parameter, not the first (which is the type).
+        let type_first = self.kinds.family == Family::Java;
         for child in self.children(list) {
             let kind = self.kind(child);
             match kind {
@@ -687,7 +823,7 @@ impl<'a> Walker<'a> {
                 "parameter" | "identifier" | "required_parameter" | "optional_parameter" | "rest_parameter"
                 | "typed_parameter" | "default_parameter" | "typed_default_parameter" | "list_splat_pattern"
                 | "dictionary_splat_pattern" => {
-                    if let Some(name) = self.first_identifier(child) {
+                    if let Some(name) = self.parameter_name(child, type_first) {
                         out.push(name);
                     }
                 }
@@ -695,7 +831,7 @@ impl<'a> Walker<'a> {
                     out.extend(self.pattern_names(child));
                 }
                 _ => {
-                    if let Some(name) = self.first_identifier(child) {
+                    if let Some(name) = self.parameter_name(child, type_first) {
                         out.push(name);
                     }
                 }
@@ -717,6 +853,87 @@ impl<'a> Walker<'a> {
             child = self.node(child).next_sibling;
         }
         None
+    }
+
+    /// The parameter's own name: the first identifier of a `name type` list
+    /// (Go) and the last of a `type name` one (Java, `List<Item> items`).
+    fn parameter_name(&self, id: u32, type_first: bool) -> Option<String> {
+        if !type_first {
+            return self.first_identifier(id);
+        }
+        let mut leaves = Vec::new();
+        self.collect_leaves(id, &mut leaves);
+        leaves
+            .into_iter()
+            .filter(|&leaf| matches!(self.kind(leaf), "identifier"))
+            .next_back()
+            .map(|leaf| self.text_string(leaf))
+    }
+
+    // -- Go and Java --------------------------------------------------------
+    //
+    // The one-pass lexer reads these two languages as statements over tokens:
+    // a `{` after a name opens a block, a `;` (or, in Go, a line end) ends a
+    // statement, and every statement is an `a`/`r`/`x` event whose value is the
+    // names and calls in it. The tables above name their definitions and
+    // imports; the statement arms below write those events from the nodes.
+
+    /// Go's statement arms: the declarations the grammar writes as statements,
+    /// with the events the one-pass lexer writes for them.
+    fn go_enter(&mut self, _id: u32) {}
+
+    /// Java's statement arms, in the same shape as Go's.
+    fn java_enter(&mut self, _id: u32) {}
+
+    fn go_receiver(&self, list: u32) -> (String, String) {
+        let Some(param) = self.children(list).into_iter().find(|&child| self.kind(child) == "parameter_declaration")
+        else {
+            return (String::new(), String::new());
+        };
+        let children = self.children(param);
+        let name = children
+            .iter()
+            .copied()
+            .find(|&child| self.kind(child) == "identifier")
+            .map(|child| self.text_string(child))
+            .unwrap_or_default();
+        let owner = children
+            .iter()
+            .copied()
+            .rev()
+            .find_map(|child| self.receiver_type(child))
+            .unwrap_or_default();
+        (name, owner)
+    }
+
+    fn receiver_type(&self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "identifier" | "type_identifier" => Some(self.text_string(id)),
+            "pointer_type" | "generic_type" => self.children(id).into_iter().find_map(|child| self.receiver_type(child)),
+            "qualified_type" => self.last_name(id),
+            _ => None,
+        }
+    }
+
+    fn collect_leaves(&self, id: u32, out: &mut Vec<u32>) {
+        let mut pending = vec![id];
+        let mut order = Vec::new();
+        while let Some(node) = pending.pop() {
+            let mut child = self.node(node).first_child;
+            let mut kids = Vec::new();
+            while child != NONE {
+                kids.push(child);
+                child = self.node(child).next_sibling;
+            }
+            if kids.is_empty() {
+                order.push(node);
+            } else {
+                for &kid in kids.iter().rev() {
+                    pending.push(kid);
+                }
+            }
+        }
+        out.extend(order);
     }
 
     fn pattern_names(&self, id: u32) -> Vec<String> {
@@ -934,7 +1151,7 @@ impl<'a> Walker<'a> {
             .unwrap_or_default();
         let index = self.add_symbol(name.to_string(), owner.clone(), KIND_FUNCTION, line, params);
         let body = self.children(node).into_iter().rev().find(|&child| !self.is_layout(child));
-        self.stack.push(Frame { node, symbol: index, class: owner, container: false, defines: Some(index) });
+        self.stack.push(Frame { node, symbol: index, class: owner, receiver: String::new(), container: false, defines: Some(index) });
         if let Some(body) = body {
             if !matches!(self.kind(body), "block" | "statement_block") {
                 let at = self.line(body);
@@ -1111,6 +1328,8 @@ impl<'a> Walker<'a> {
     fn import(&mut self, id: u32) {
         let kind = self.kind(id);
         match kind {
+            "import_declaration" if self.kinds.family == Family::Go => self.go_import(id),
+            "import_declaration" if self.kinds.family == Family::Java => self.java_import(id),
             "import_statement" | "import_from_statement" => {
                 if self.is_js() {
                     self.js_import(id);
@@ -1135,6 +1354,76 @@ impl<'a> Walker<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// `import ("fmt"; str "strings")`: one import per spec, the module as
+    /// written and the alias the spec binds — an explicit name, or the last
+    /// path segment. Go gives all of them the import clause's line, as the
+    /// lexer does, because the clause is the statement.
+    fn go_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut specs = Vec::new();
+        let mut walk = vec![id];
+        while let Some(node) = walk.pop() {
+            for child in self.children(node) {
+                if self.kind(child) == "import_spec" {
+                    specs.push(child);
+                } else if matches!(self.kind(child), "import_spec_list") {
+                    walk.push(child);
+                }
+            }
+        }
+        for spec in specs {
+            let children = self.children(spec);
+            let Some(string) = children
+                .iter()
+                .copied()
+                .find(|&child| matches!(self.kind(child), "interpreted_string_literal" | "raw_string_literal"))
+            else {
+                continue;
+            };
+            let module = self.string_value(string);
+            let alias = children
+                .iter()
+                .copied()
+                .find(|&child| self.kind(child) == "identifier")
+                .map(|child| self.text_string(child))
+                .unwrap_or_else(|| module.rsplit('/').next().unwrap_or(&module).to_string());
+            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+        }
+    }
+
+    /// `import java.util.List;` binds the last segment; `import java.io.*;`
+    /// binds the package, which is a star import with no local name.
+    fn java_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut parts = Vec::new();
+        let mut star = false;
+        for child in self.children(id) {
+            if self.kind(child) == "*" {
+                star = true;
+                continue;
+            }
+            // The segments are read by their text, not their kind: `when`,
+            // `module` and `record` are contextual keywords this grammar gives
+            // their own kind, and an import of `Mockito.when` names one.
+            if let Some(name) = self.leaf_name(child) {
+                if name == "import" || (name == "static" && parts.is_empty()) {
+                    continue;
+                }
+                parts.push(name);
+            }
+        }
+        let module = parts.join(".");
+        if module.is_empty() {
+            return;
+        }
+        if star {
+            self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
+        } else {
+            let alias = parts.last().cloned().unwrap_or_default();
+            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
         }
     }
 
@@ -1307,7 +1596,7 @@ impl<'a> Walker<'a> {
     /// ```
     fn form(&mut self, id: u32) -> String {
         let kind = self.kind(id);
-        if self.kinds.rust {
+        if self.is_rust() {
             if let Some(out) = self.rust_form(id) {
                 return out;
             }
@@ -1799,7 +2088,7 @@ impl<'a> Walker<'a> {
         if let Some(name) = self.soft_name(id) {
             return name;
         }
-        if self.kinds.rust {
+        if self.is_rust() {
             if let Some(path) = self.rust_path(id) {
                 return path;
             }
@@ -1962,7 +2251,7 @@ impl<'a> Walker<'a> {
             self.facts.symbols[index].bases.push(base);
         }
         let symbol = self.frame().symbol;
-        self.stack.push(Frame { node: id, symbol, class: name, container: true, defines: Some(index) });
+        self.stack.push(Frame { node: id, symbol, class: name, receiver: String::new(), container: true, defines: Some(index) });
     }
 
     /// The spelled name of a type node: `Reader`, `Reader<'a>`, `fmt::Display`.
