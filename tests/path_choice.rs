@@ -8,16 +8,20 @@
 //!
 //! The fixture is measured, not assumed: `deep_more.ts` is a win the CST finds
 //! on a generic call (`g<number>(x)`, which the one-pass lexer does not record),
-//! `opaque.js` holds a call inside a JSX element's attribute, which the
-//! JavaScript grammar keeps as one token, `tie.py` is one function with nothing
-//! to differ on, and `plain.c` has no CST at all. The expected counters in the
+//! `opaque.js` holds a call inside a JSX element's child expression, which the
+//! fact reader does not descend into, `tie.py` is one function with nothing to
+//! differ on, and `plain.c` has no CST at all. The expected counters in the
 //! tests are the values this fixture produces.
 //!
 //! `lossy.js` used to be the fallback case: a call inside a template literal's
 //! `${...}`, which the grammar kept as one token. The grammar parses a
-//! substitution now, so that file is a tie (`deep:tie`, `calls deep=1 lexer=1`)
-//! and the fallback moved to the JSX gap, which is still open. The counters
-//! below are a fresh measurement of the moved fixture, not the old numbers.
+//! substitution now, so that file is a tie (`deep:tie`, `calls deep=1 lexer=1`).
+//! The JSX gap moved twice: the grammar now parses the element and every
+//! `{...}` part, so the old attribute-arrow fixture is a tie too, but the fact
+//! reader (`src/deep_facts.rs`) still reads a JSX element's first child as its
+//! value, so a call inside a bare child expression is a fact only the lexer
+//! records. `opaque.js` is that shape, re-measured; the counters below are the
+//! values this fixture produces, not the old ones.
 #![cfg(all(feature = "deep", feature = "parser"))]
 
 use std::fs;
@@ -29,9 +33,10 @@ const BIN: &str = env!("CARGO_BIN_EXE_rust-graph");
 const FIXTURE: &[(&str, &str)] = &[
     // The CST reads the call behind the type arguments; the lexer stops there.
     ("deep_more.ts", "import { a, b } from \"./m\";\n\nconst x: number = f(1);\nexport const y = g<number>(x);\n"),
-    // A JSX element is one token to the deep grammar, so a call inside its
-    // attribute is a fact only the lexer's record carries; the guard keeps it.
-    ("opaque.js", "function panel(x) {\n  return <button onClick={() => handle(x)}>press</button>;\n}\n"),
+    // The CST parses the element's `{...}` part, but the fact reader stops at
+    // the element's first child, so a call in a bare child expression is a
+    // fact only the lexer's record carries; the guard keeps it.
+    ("opaque.js", "function panel(x) {\n  return <button label={handle(x)}>press</button>;\n}\n"),
     // Nothing to differ on: both records weigh the same.
     ("tie.py", "def f(x):\n    return x\n"),
     // No deep parser for C: the lexer stands alone and is not a comparison.
@@ -117,8 +122,8 @@ fn a_lost_fact_keeps_the_lexer_and_is_counted_as_a_fallback() {
     // The reason names the fact, so a reader never has to re-run both paths to
     // find out what the CST missed.
     assert!(row.contains("\"deep_fallback\":\"the CST lost a call"), "{row}");
-    // The call inside the JSX attribute is only in the lexer's record, so it
-    // survives the fallback.
+    // The call inside the JSX child expression is only in the lexer's record,
+    // so it survives the fallback.
     assert!(json.contains(r#""calls":[["handle",2,null,null,0]]"#), "{json}");
     assert!(json.contains(r#""fallbacks":1"#), "{json}");
 }

@@ -67,7 +67,9 @@ fn lang_of(path: &Path) -> Lang {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some("py") => Lang::Python,
         Some("js") => Lang::JavaScript,
+        Some("jsx") => Lang::JavaScript,
         Some("ts") => Lang::TypeScript,
+        Some("tsx") => Lang::Tsx,
         other => panic!("no deep language for {other:?} in {}", path.display()),
     }
 }
@@ -191,6 +193,16 @@ fn line_text<'a>(src: &'a str, line: u32) -> &'a str {
     src.lines().nth(line.saturating_sub(1) as usize).unwrap_or("")
 }
 
+/// A call written inside a JSX `{...}` value on a line that also opens an
+/// element: the reader stops at the element's first child, so only the lexer's
+/// record carries the call until it has a JSX arm.
+fn jsx_expression_call(line: &str, name: &str) -> bool {
+    let Some(tag) = line.find('<') else { return false };
+    let Some(open) = line.find('{') else { return false };
+    let Some(call) = line.find(&format!("{name}(")) else { return false };
+    tag < open && open < call
+}
+
 fn last_component(path: &str) -> &str {
     path.trim_start_matches('.').rsplit('.').next().unwrap_or(path)
 }
@@ -272,6 +284,9 @@ fn category(name: &'static str) -> &'static str {
         "grammar-template-interpolation" => {
             "the deep grammar keeps a template string as one token, so a call inside `${...}` is invisible to it; the lexer's string interpolation reads it. A gap in the grammar, not in the mapping"
         }
+        "cst-jsx-expression" => {
+            "a call inside a JSX `{...}` value: the grammar has the `jsx_expression` node with the call in it, but the fact reader stops at the element's first child, so only the lexer's record carries the call. A gap in the reader, not in the grammar"
+        }
         other => other,
     }
 }
@@ -349,6 +364,10 @@ fn classify(report: &mut Report, src: &str) -> Vec<(&'static str, String)> {
         }
         if looks_like_signature(line, &call.0) {
             out.push(("lexer-signature-as-call", format!("{}|{}", call.0, call.1)));
+            continue;
+        }
+        if jsx_expression_call(line, &call.0) {
+            out.push(("cst-jsx-expression", format!("{}|{}", call.0, call.1)));
             continue;
         }
         // The same call, on the line its string opened: the lexer's nested
