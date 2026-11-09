@@ -202,6 +202,9 @@ rust_graph_deep::grammar! { RUST {
     visibility_modifier: "pub" [visibility_restriction],
     visibility_restriction: "(" ("crate" | "self" | "super" | "in" _simple_path) ")",
 
+    // `fn default()` is legal Rust: `default` is a contextual keyword, and a
+    // function may be named by it. The name node keeps its own kind, so the
+    // fact layer reads both.
     function_item: [visibility_modifier] _fn_qualifiers "fn" _name [type_parameters] parameters ["->" _type] [where_clause] (block | ";"),
     parameters: "(" (_any_parameter %? ",") ")",
     _any_parameter: attribute_item* (self_parameter | parameter | variadic_parameter),

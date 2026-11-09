@@ -148,7 +148,7 @@ const RS_DEFS: &[Def] = &[
     Def { kind: "union_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "trait_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "mod_item", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
-    Def { kind: "function_item", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "function_item", name: &["identifier", "default"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 
 /// Rust calls. A macro invocation is not a call to the lexer — `assert_eq!(a)`
@@ -1881,6 +1881,25 @@ impl<'a> Walker<'a> {
             "annotated" => {
                 if self.children(child).into_iter().any(|part| self.kind(part) == "=") {
                     self.assignment(child, false);
+                } else {
+                    // `rule_id: str` binds nothing, but the lexer reads the
+                    // name and the annotation as one expression and files an
+                    // event for it. Emitting nothing here lost that event in
+                    // every dataclass-shaped class body.
+                    let mut parts = Vec::new();
+                    for part in self.children(child) {
+                        if self.is_layout(part) || self.kind(part) == ":" {
+                            continue;
+                        }
+                        let value = self.form(part);
+                        if value != "0" {
+                            parts.push(value);
+                        }
+                    }
+                    if !parts.is_empty() {
+                        let line = self.line(child);
+                        self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                    }
                 }
             }
             _ => {
