@@ -25,6 +25,16 @@ rustc 1.99.1. The commands that produced them are in `docs/DEEP_PARSER.md`
   dataclass-shaped class lost that event and forced a fallback.
 - **`fn default()` has a name.** `default` is a contextual keyword in Rust and
   the definition came out anonymous.
+- **A method is paired by its owner, and its binders compare as a set.** Every
+  class has an `__init__`, so the guard compared one class's events against
+  another's and blamed the file for an event that was in the record. Binder
+  lists also compared as raw text, which the languages spell differently
+  (`["name","incoming"]` against `["incoming","name"]`).
+- **A pattern is not a call.** `match x { Some(t) => … }` and
+  `if let Some(t) = …` made the lexer file a call to `Some`; the CST records a
+  pattern. The line settles it, and the difference is counted as its own class
+  instead of forcing a fallback.
+
 - **A name the source does not declare is not a loss.** `pub(crate) struct
   Meter` made the lexer file a symbol named `pub`, and the guard read the line
   as declaring it because it also declares `Meter`. A claimed name now has to
