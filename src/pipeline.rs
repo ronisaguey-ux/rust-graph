@@ -548,7 +548,7 @@ pub fn build(options: &Options) -> io::Result<()> {
     let mut old = old_path.as_deref().and_then(open_old_pack); #[cfg(all(feature = "deep", feature = "parser"))] let old_meta = cache_dir.as_ref().and_then(|dir| deep_run::load(dir));
     let pack_path = scratch.file("facts.pack");
     let mut index = Index::default(); #[cfg(all(feature = "deep", feature = "parser"))] let mut parser_state = deep_run::State::default();
-    let entries = parse_pass(options, &paths, &mut old, &pack_path, &mut index, &mut totals)?; #[cfg(all(feature = "deep", feature = "parser"))] { parser_state.absorb(); parser_state.merge(old_meta); }
+    let entries = parse_pass(options, &paths, &mut old, &pack_path, &mut index, &mut totals)?; #[cfg(all(feature = "deep", feature = "parser"))] { parser_state.absorb(); parser_state.merge(old_meta); if deep_run::compare_mode() { deep_run::print_compare()?; return Ok(()); } }
     drop(old);
     drop(paths);
     index.seal();
@@ -673,6 +673,9 @@ pub enum PathMode {
     Auto,
     Deep,
     Lexer,
+    /// Parse both ways, print the per-file difference, choose nothing. An
+    /// audit, not a build: no graph is written and no cache is kept.
+    Compare,
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
@@ -682,6 +685,7 @@ impl PathMode {
             PathMode::Auto => "auto",
             PathMode::Deep => "deep",
             PathMode::Lexer => "lexer",
+            PathMode::Compare => "compare",
         }
     }
 }
@@ -732,6 +736,7 @@ mod deep_run {
         match MODE.load(Ordering::Relaxed) {
             1 => PathMode::Deep,
             2 => PathMode::Lexer,
+            3 => PathMode::Compare,
             _ => PathMode::Auto,
         }
     }
@@ -744,34 +749,137 @@ mod deep_run {
             PathMode::Auto => 1,
             PathMode::Deep => 2,
             PathMode::Lexer => 3,
+            // A comparison run is never a cache producer or consumer: its own
+            // word means the pack and the provenance file it meets are both
+            // void, so an audit always reads the tree as it stands.
+            PathMode::Compare => 4,
         }
     }
 
     /// What one file's facts went through.
     #[derive(Clone, Default)]
     pub(super) struct Taken {
+        /// The emitted record is the CST's.
         pub(super) deep: bool,
+        /// Both records existed and were weighed against each other.
+        pub(super) compared: bool,
         /// The CST's own count of `ERROR` nodes: recovery, not a fallback.
         pub(super) errors: u32,
         /// Written only when the deep path was expected and not taken.
         pub(super) fallback: Option<String>,
+        /// Why the emitted record won: `"tie"`, `"lexer"` (the lexer had more
+        /// facts) or `""` (the CST had more, or there was nothing to compare).
+        pub(super) why: &'static str,
     }
 
     thread_local! {
         // Pass one decides and pass two renders; a `String` and a flag per
         // parsed file is the whole cost.
         static RECORDS: RefCell<Vec<(String, Taken)>> = const { RefCell::new(Vec::new()) };
+        // Only `--compare` writes here: one row per file with both weights.
+        static COMPARED: RefCell<Vec<Compared>> = const { RefCell::new(Vec::new()) };
     }
 
     pub(super) fn record(path: &str, taken: Taken) {
         RECORDS.with(|records| records.borrow_mut().push((path.to_string(), taken)));
     }
 
+    /// One file's audit row: its weight on each path, and the CST's errors.
+    pub(super) struct Compared {
+        path: String,
+        /// `None` when this build has no CST for the language, or the CST
+        /// returned no tree: the lexer stood alone and there is nothing to
+        /// compare.
+        deep: Option<[u64; 3]>,
+        lexer: [u64; 3],
+        errors: u32,
+    }
+
+    pub(super) fn record_compare(path: &str, deep: Option<([u64; 3], u32)>, lexer: [u64; 3]) {
+        let row = Compared { path: path.to_string(), deep: deep.map(|pair| pair.0), lexer, errors: deep.map_or(0, |pair| pair.1) };
+        COMPARED.with(|rows| rows.borrow_mut().push(row));
+    }
+
+    pub(super) fn compare_mode() -> bool {
+        get() == PathMode::Compare
+    }
+
+    /// Print the audit: one line per file with both paths' counts and the
+    /// difference, then the totals. No winner is picked and nothing is built.
+    pub(super) fn print_compare() -> io::Result<()> {
+        let mut rows = COMPARED.with(|rows| std::mem::take(&mut *rows.borrow_mut()));
+        rows.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
+        let mut totals = [0u64; 6];
+        let mut compared = 0usize;
+        for row in &rows {
+            match row.deep {
+                Some(deep) => {
+                    compared += 1;
+                    for side in 0..3 {
+                        totals[side * 2] += deep[side];
+                        totals[side * 2 + 1] += row.lexer[side];
+                    }
+                    write!(
+                        out,
+                        "{}\tsymbols deep={} lexer={} ({:+})\tcalls deep={} lexer={} ({:+})\timports deep={} lexer={} ({:+})",
+                        row.path,
+                        deep[0],
+                        row.lexer[0],
+                        deep[0] as i64 - row.lexer[0] as i64,
+                        deep[1],
+                        row.lexer[1],
+                        deep[1] as i64 - row.lexer[1] as i64,
+                        deep[2],
+                        row.lexer[2],
+                        deep[2] as i64 - row.lexer[2] as i64
+                    )?;
+                    if row.errors > 0 {
+                        write!(out, "\tcst errors={}", row.errors)?;
+                    }
+                    writeln!(out)?;
+                }
+                None => {
+                    for side in 0..3 {
+                        totals[side * 2 + 1] += row.lexer[side];
+                    }
+                    writeln!(
+                        out,
+                        "{}\tno CST record\tsymbols lexer={}\tcalls lexer={}\timports lexer={}",
+                        row.path, row.lexer[0], row.lexer[1], row.lexer[2]
+                    )?;
+                }
+            }
+        }
+        writeln!(out, "compare: {} files, {compared} with a CST record, {} lexer-only", rows.len(), rows.len() - compared)?;
+        writeln!(
+            out,
+            "compare totals: symbols deep={} lexer={} ({:+}), calls deep={} lexer={} ({:+}), imports deep={} lexer={} ({:+})",
+            totals[0],
+            totals[1],
+            totals[0] as i64 - totals[1] as i64,
+            totals[2],
+            totals[3],
+            totals[2] as i64 - totals[3] as i64,
+            totals[4],
+            totals[5],
+            totals[4] as i64 - totals[5] as i64
+        )?;
+        out.flush()
+    }
+
     #[derive(Default)]
     pub(super) struct State {
         records: HashMap<String, Taken>,
+        /// Files whose emitted record is the CST's. This is `chosen_deep`.
         deep: u64,
+        /// Files whose emitted record is the lexer's. This is `chosen_lexer`.
         lexer: u64,
+        /// Files both paths ran on: `paths.deep`.
+        compared: u64,
+        /// Files only the lexer could take: `paths.lexer`.
+        lexer_only: u64,
         fallbacks: u64,
         reused: u64,
     }
@@ -794,9 +902,11 @@ mod deep_run {
             }
         }
 
-        /// The provenance for every file in the pack, for the next build.
+        /// The provenance for every file in the pack, for the next build. The
+        /// header carries the format number, so a file from an older writer is
+        /// void rather than half-read.
         pub(super) fn save(&self, dir: &Path) -> io::Result<()> {
-            let mut text = format!("rust-graph facts.meta {}\n", bits());
+            let mut text = format!("rust-graph facts.meta 2 {}\n", bits());
             let mut rows: Vec<(&String, &Taken)> = self.records.iter().collect();
             rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
             for (path, taken) in rows {
@@ -806,10 +916,12 @@ mod deep_run {
                     (false, false) => "lexer",
                 };
                 text.push_str(&format!(
-                    "{} {} {} {}\n",
+                    "{} {} {} {} {} {}\n",
                     escape(path),
                     parser,
                     taken.errors,
+                    u8::from(taken.compared),
+                    taken.why,
                     escape(taken.fallback.as_deref().unwrap_or(""))
                 ));
             }
@@ -839,6 +951,25 @@ mod deep_run {
             };
             // The row was built closed; open it again for the parser fields.
             row.truncate(row.len() - 1);
+            if let Some(taken) = taken {
+                if taken.compared {
+                    self.compared += 1;
+                } else {
+                    self.lexer_only += 1;
+                }
+                let choice = match (taken.deep, taken.why) {
+                    (true, "tie") => Some("deep:tie"),
+                    (true, _) => Some("deep:more"),
+                    (false, _) if taken.fallback.is_some() => Some("lexer:fallback"),
+                    (false, "lexer") => Some("lexer:more"),
+                    (false, _) => None,
+                };
+                if let Some(choice) = choice {
+                    row.push_str(",\"path_choice\":\"");
+                    row.push_str(choice);
+                    row.push('"');
+                }
+            }
             row.push_str(",\"parsed_by\":\"");
             row.push_str(parsed_by);
             row.push('"');
@@ -864,13 +995,21 @@ mod deep_run {
                 self.deep,
                 self.lexer,
                 self.fallbacks
+            )?;
+            // Which path each file's facts came from, in one object. `deep` and
+            // `lexer` here are candidates (a CST record existed / the lexer
+            // stood alone); `chosen_*` is the outcome per file.
+            write!(
+                out,
+                ",\"paths\":{{\"deep\":{},\"lexer\":{},\"chosen_deep\":{},\"chosen_lexer\":{}}}",
+                self.compared, self.lexer_only, self.deep, self.lexer
             )
         }
 
         pub(super) fn report_line(&self, text: &str) -> String {
             format!(
-                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\n",
-                self.deep, self.lexer, self.fallbacks
+                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\n",
+                self.deep, self.lexer, self.fallbacks, self.compared, self.lexer_only, self.deep, self.lexer
             )
         }
 
@@ -892,7 +1031,7 @@ mod deep_run {
     pub(super) fn load(dir: &Path) -> Option<HashMap<String, Taken>> {
         let text = std::fs::read_to_string(dir.join("facts.meta")).ok()?;
         let mut lines = text.lines();
-        if lines.next()? != format!("rust-graph facts.meta {}", bits()) {
+        if lines.next()? != format!("rust-graph facts.meta 2 {}", bits()) {
             return None;
         }
         let mut out = HashMap::new();
@@ -901,10 +1040,16 @@ mod deep_run {
             let path = unescape(fields.next()?);
             let parser = fields.next()?;
             let errors: u32 = fields.next()?.parse().ok()?;
+            let compared = fields.next()? == "1";
+            let why = match fields.next()? {
+                "tie" => "tie",
+                "lexer" => "lexer",
+                _ => "",
+            };
             let reason = unescape(fields.next().unwrap_or(""));
             out.insert(
                 path,
-                Taken { deep: parser == "deep", errors, fallback: (!reason.is_empty()).then_some(reason) },
+                Taken { deep: parser == "deep", compared, errors, fallback: (!reason.is_empty()).then_some(reason), why },
             );
         }
         Some(out)
@@ -945,7 +1090,17 @@ mod deep_run {
     }
 }
 
-/// Whether the CST record lost anything the lexer's found on this file.
+/// The three counts two records are weighed by, in order: symbols, then calls,
+/// then imports. A record is "better" when the first count that differs is
+/// larger, so a CST that finds one more symbol wins even if the lexer found
+/// three more calls — a missing definition is the costlier loss.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn weight(facts: &Facts) -> [u64; 3] {
+    let calls: u64 = facts.symbols.iter().map(|symbol| symbol.calls.len() as u64).sum();
+    [facts.symbols.len() as u64, calls, facts.imports.len() as u64]
+}
+
+/// Whether the CST record lost anything the lexer's found.
 ///
 /// The deep walk is the better reader where its tables cover a construct, but
 /// where a grammar or a table has not reached one it can silently see less than
@@ -1002,10 +1157,18 @@ fn loses(lexer: &Facts, deep: &Facts) -> bool {
 
 /// The facts for one file, and the record of which parser produced them.
 ///
-/// `--lexer` is the old path unchanged. `--deep` asks for the CST. `auto` takes
-/// the CST where `deep_facts` can read facts off it, then checks the record
-/// against the lexer's and keeps the lexer's when the CST lost a fact — with the
-/// reason recorded, so a downgrade is counted and never silent.
+/// `--lexer` is the old path unchanged. `--deep` asks for the CST. `auto` runs
+/// both where `deep_facts` can read a tree, and then decides:
+///
+/// 1. if the CST record lost any fact the lexer found (`loses`), the lexer's
+///    record is kept and the loss is a counted fallback;
+/// 2. otherwise the record with the larger weight wins — symbols, then calls,
+///    then imports (`weight`), the first difference deciding;
+/// 3. an exact tie goes to the CST, and the row says `"path_choice":"deep:tie"`
+///    so a reader can see the coin was not silently flipped.
+///
+/// `--compare` runs both and records their weights without choosing; the build
+/// prints the audit and stops before writing anything.
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts {
     use gate::deep_integration::{self, Lang};
@@ -1027,20 +1190,46 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
         // so the lexer is the choice and not a fallback.
         let fallback = (mode == PathMode::Deep).then(|| format!("no deep parser for {}", language.tag));
         deep_run::record(path, deep_run::Taken { fallback, ..deep_run::Taken::default() });
-        return parser::parse(bytes, language);
+        let lexer = parser::parse(bytes, language);
+        if mode == PathMode::Compare {
+            deep_run::record_compare(path, None, weight(&lexer));
+        }
+        return lexer;
     };
     let lexer = parser::parse(bytes, language);
     let Some(cst) = deep_integration::parse_file(bytes, lang) else {
         let fallback = Some("the deep parser returned no tree".to_string());
         deep_run::record(path, deep_run::Taken { fallback, ..deep_run::Taken::default() });
+        if mode == PathMode::Compare {
+            deep_run::record_compare(path, None, weight(&lexer));
+        }
         return lexer;
     };
     let deep = deep_facts::extract(bytes, &cst, lang);
-    if mode == PathMode::Auto && loses(&lexer, &deep) {
-        let fallback = Some("the CST record lost facts the lexer found".to_string());
-        deep_run::record(path, deep_run::Taken { fallback, ..deep_run::Taken::default() });
-        return lexer;
+    if mode == PathMode::Compare {
+        // No choice: both records are weighed and the audit decides nothing.
+        deep_run::record_compare(path, Some((weight(&deep), cst.errors)), weight(&lexer));
+        return deep;
     }
-    deep_run::record(path, deep_run::Taken { deep: true, errors: cst.errors, fallback: None });
+    if mode == PathMode::Auto {
+        if loses(&lexer, &deep) {
+            let fallback = Some("the CST record lost facts the lexer found".to_string());
+            deep_run::record(path, deep_run::Taken { compared: true, fallback, ..deep_run::Taken::default() });
+            return lexer;
+        }
+        let why = match weight(&deep).cmp(&weight(&lexer)) {
+            std::cmp::Ordering::Greater => "",
+            std::cmp::Ordering::Equal => "tie",
+            std::cmp::Ordering::Less => {
+                // The lexer read more than the CST did: keep it, and say so,
+                // but this is not a fallback — nothing was lost.
+                deep_run::record(path, deep_run::Taken { compared: true, why: "lexer", ..deep_run::Taken::default() });
+                return lexer;
+            }
+        };
+        deep_run::record(path, deep_run::Taken { deep: true, compared: true, errors: cst.errors, fallback: None, why });
+        return deep;
+    }
+    deep_run::record(path, deep_run::Taken { deep: true, errors: cst.errors, fallback: None, why: "", ..deep_run::Taken::default() });
     deep
 }

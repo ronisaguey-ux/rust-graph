@@ -41,7 +41,7 @@ fn options(args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--no-cache" => options.no_cache = true,
             "--max-files" => options.max_files = number(args.next(), "--max-files")? as usize,
             "--max-file-bytes" => options.max_file_bytes = number(args.next(), "--max-file-bytes")?,
-            #[cfg(all(feature = "deep", feature = "parser"))] "--deep" | "--lexer" => { if options.path != pipeline::PathMode::Auto { return Err("choose one of --deep and --lexer, not both".to_string()); } options.path = if arg == "--deep" { pipeline::PathMode::Deep } else { pipeline::PathMode::Lexer }; },
+            #[cfg(all(feature = "deep", feature = "parser"))] "--deep" | "--lexer" | "--compare" => { if options.path != pipeline::PathMode::Auto { return Err("choose one of --deep and --lexer, not both".to_string()); } options.path = match arg.as_str() { "--deep" => pipeline::PathMode::Deep, "--lexer" => pipeline::PathMode::Lexer, _ => pipeline::PathMode::Compare }; },
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             path if root.is_none() => root = Some(PathBuf::from(path)),
             extra => return Err(format!("unexpected argument {extra}")),
@@ -97,4 +97,5 @@ use crate::pipeline::gate::*;
 #[cfg(all(feature = "deep", feature = "parser"))]
 const USAGE_DEEP: &str = "       --deep    parse through the CST wherever this build has one for the language
        --lexer   parse through the one-pass lexer everywhere
-       (default: the CST where it is available, the lexer otherwise)";
+       --compare parse both ways, print the per-file difference and exit without choosing
+       (default: the heaviest record per file — the CST unless it lost a fact or the lexer found more)";
