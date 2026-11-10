@@ -2573,7 +2573,12 @@ impl<'a> Walker<'a> {
                     out
                 }
             }
-            "attribute" | "member_expression" | "subscript" | "subscript_expression" => {
+            // `field_expression` is Rust's spelling of the same path; without
+            // this arm `self.skipped_groups == 0` read both sides as the
+            // constant and the name left the record.
+            "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression"
+            // `Ordering::Acquire` in an argument list is a path, not a constant.
+            | "scoped_identifier" | "scoped_type_identifier" => {
                 let path = self.form_path(id);
                 if path.is_empty() {
                     // `f(x)[0].y`: the base is a call, so there is no path, and
