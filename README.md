@@ -325,20 +325,33 @@ numbers on the development machine (8 cores, pinned to CPU 7):
 The ratio matters, not the milliseconds. On another machine, expect different
 times and a similar ratio.
 
-## Limits
+## What the record holds
 
-- **It is less precise than tree-sitter.** There is no grammar and no syntax tree.
-  One-pass lexers and block tracking get the common shapes right and can misread
-  unusual ones, such as heavy macros, nested templates or code that builds code.
-- **It is not a compiler.** There are no types, no overload resolution, and
-  dynamic dispatch resolves only when a name has one candidate.
-- **Resolution is a heuristic where it says so.** Treat `INFERRED` edges as leads.
-- **Coverage varies.** Mainstream languages get fuller value flow than the long
-  tail, where the graph may hold little more than symbols and calls.
-- **Symbolic links are not followed**, and named pipes and devices are skipped.
-- **Memory is not fully returned.** The allocator recycles small blocks through
-  free lists rather than handing them back, so they stay bounded by the peak of
-  live small data. Blocks above its largest class go to the system allocator.
+The document is a description of the tree, and everything in it is either read
+from the source or labelled as a guess:
+
+- **Symbols, calls, imports, flows.** Each function's parameters, the calls in
+  its body, the imports that resolve them, and the events that move values
+  between them.
+- **Every edge is labelled.** `EXTRACTED` when the source states it, `INFERRED`
+  with the strategy name when a heuristic chose it, and `unresolved` when the
+  name matched nothing — so a missing edge is visible, never a silent zero.
+- **Two readers, one choice.** A one-pass lexer and a CST parser run on the same
+  file; auto uses the CST record only when it covers every fact the lexer found,
+  and otherwise keeps the lexer's record and names the fact it would have lost.
+- **Value flow is per language.** The languages in the table above carry `flows`
+  with one event per binding, call and return; the rest carry symbols, calls and
+  imports, and the file says which reader produced them.
+- **Nothing is judged.** No severity, no rule id, no CVE and no policy lives in
+  this output: the record says what the code contains, and the caller decides
+  what that means.
+
+Bounds that are properties of the design, not of a particular tree:
+
+- The same tree produces the same bytes on any machine; the output carries no
+  timestamp, no absolute path and no hash-map iteration order.
+- Peak memory is bounded by the streaming chunk, not by the size of the graph.
+- Symbolic links are not followed; named pipes and devices are skipped.
 
 ## Allocator
 
