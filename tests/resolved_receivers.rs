@@ -32,7 +32,7 @@ mod resolve;
 mod deep;
 #[path = "../src/deep_integration.rs"]
 mod deep_integration;
-#[path = "../src/deep_facts.rs"]
+#[path = "../src/deep_facts/mod.rs"]
 mod deep_facts;
 
 use std::fs;
