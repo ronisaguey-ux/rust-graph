@@ -140,7 +140,7 @@ fn rust_a_struct_a_trait_an_impl_and_a_use_are_every_record_they_should_be() {
     // receiver a call is written on is part of the form.
     assert_eq!(
         facts.symbols[5].events,
-        r#"["x",14,["c",0,["n","ctx"],[["c",1,["n","self.name"],[]]]]],["x",15,["c",2,0,[["n","ctx"]]]]"#
+        r#"["x",14,["c",0,["n","ctx"],[["c",1,["n","self.name"],[]]]]],["x",15,["c",2,0,[["n","ctx"],["n","self"]]]]"#
     );
     // A struct literal is two events, as the one-pass lexer writes it: the
     // name on the struct's line and the fields on the first field's line.
