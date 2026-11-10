@@ -142,9 +142,11 @@ fn rust_a_struct_a_trait_an_impl_and_a_use_are_every_record_they_should_be() {
         facts.symbols[5].events,
         r#"["x",14,["c",0,["n","ctx"],[["c",1,["n","self.name"],[]]]]],["x",15,["c",2,0,[["n","ctx"]]]]"#
     );
+    // A struct literal is two events, as the one-pass lexer writes it: the
+    // name on the struct's line and the fields on the first field's line.
     assert_eq!(
         facts.symbols[7].events,
-        r#"["x",21,["m",[["n","Widget"],["m",[["m",[["n","name"],["c",0,["n","name"],[]]]]]]]]]"#
+        r#"["x",21,["n","Widget"]],["x",21,["t",[["m",[["n","name"],["c",0,["n","name"],[]]]]]]]"#
     );
 
     // `use ... as ...` is one import with the local name; a plain `use` binds

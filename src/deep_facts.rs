@@ -148,7 +148,7 @@ const RS_DEFS: &[Def] = &[
     Def { kind: "union_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "trait_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "mod_item", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
-    Def { kind: "function_item", name: &["identifier", "default"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "function_item", name: &["identifier", "default", "raw", "auto", "safe", "union", "macro_rules"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 
 /// Rust calls. A macro invocation is not a call to the lexer — `assert_eq!(a)`
@@ -532,6 +532,11 @@ impl<'a> Walker<'a> {
         // `x` without a keyword list per language. A soft keyword is the
         // exception: `match` spelled that way is a name unless the grammar
         // built a statement out of it, and a statement is a node, not a leaf.
+        // `true` and `false` are literals, not punctuation: the lexer reads
+        // them as names (Rust) or constants, but never as nothing.
+        if matches!(self.kind(id), "true" | "false") {
+            return false;
+        }
         if self.kind(id).as_bytes() == text {
             // Python spells its three constants as keywords, and the lexer
             // reads each of them as a name: `default=True` is
@@ -1907,6 +1912,11 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            // `Pool { … }`: the lexer stamps one event on the struct's line for
+            // its name and another on the first field's line for the fields.
+            // One merged event on the first line matched neither, and every
+            // function returning a struct literal fell back.
+            _ if self.is_rust() && self.kind(child) == "struct_expression" => self.rust_struct_events(child),
             _ => {
                 let value = self.form(child);
                 if value != "0" {
@@ -2824,6 +2834,14 @@ impl<'a> Walker<'a> {
                     1 => parts.remove(0),
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
+            }
+            // Rust's lexer has no keyword table for these: `true` is a name.
+            "true" | "false" if self.is_rust() => {
+                let text = self.text_string(id);
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &text);
+                out.push(']');
+                out
             }
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment" => "0".to_string(),
@@ -3872,6 +3890,47 @@ impl<'a> Walker<'a> {
             "0".to_string()
         } else {
             format!("[\"m\",[{}]]", items.join(","))
+        }
+    }
+
+
+    /// The two events the lexer writes for a struct literal.
+    fn rust_struct_events(&mut self, id: u32) {
+        let children = self.children(id);
+        let line = self.line(id);
+        if let Some(&name) = children.first() {
+            let path = self.path_of(name);
+            if !path.is_empty() {
+                let mut text = "[\"n\",".to_string();
+                push_string(&mut text, &path);
+                text.push(']');
+                self.event(&format!("[\"x\",{line},{text}]"));
+            }
+        }
+        for child in children.iter().skip(1) {
+            if self.kind(*child) != "field_initializer_list" {
+                continue;
+            }
+            let mut parts = Vec::new();
+            for field in self.children(*child) {
+                if self.is_layout(field) {
+                    continue;
+                }
+                let value = self.form(field);
+                if value != "0" {
+                    parts.push(value);
+                }
+            }
+            if parts.is_empty() {
+                continue;
+            }
+            let field_line = self
+                .children(*child)
+                .into_iter()
+                .find(|&field| !self.is_layout(field))
+                .map(|field| self.line(field))
+                .unwrap_or(line);
+            self.event(&format!("[\"x\",{field_line},[\"t\",[{}]]]", parts.join(",")));
         }
     }
 
