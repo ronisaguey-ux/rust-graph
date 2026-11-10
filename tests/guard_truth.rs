@@ -40,7 +40,7 @@ mod resolve;
 mod sha256;
 #[path = "../src/deep/mod.rs"]
 mod deep;
-#[path = "../src/deep_facts.rs"]
+#[path = "../src/deep_facts/mod.rs"]
 mod deep_facts;
 #[path = "../src/pipeline.rs"]
 mod pipeline;
