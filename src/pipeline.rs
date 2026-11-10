@@ -1646,8 +1646,46 @@ fn uncovered(
 fn is_positional_call(src: &str, macro_lines: &[bool], name: &str, line: u32) -> bool {
     is_attribute_call(src, line)
         || is_declaration_call(src, name, line)
+        || is_visibility_call(src, line, name)
+        || is_variant_declaration(src, line)
         || macro_lines.get(line.saturating_sub(1) as usize).copied().unwrap_or(false)
         || is_pattern_call(src, name, line)
+}
+
+/// `pub(crate) fn f()`: `pub` is a visibility marker, not a callee. The lexer
+/// reads `pub(` as a call and the CST records none, which is a difference in
+/// spelling rather than a lost fact.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_visibility_call(src: &str, line: u32, name: &str) -> bool {
+    name == "pub"
+        && src
+            .lines()
+            .nth(line.saturating_sub(1) as usize)
+            .is_some_and(|text| text.trim_start().starts_with("pub("))
+}
+
+/// `Open(u8),` in an enum body declares a variant whose payload is a type: the
+/// line is a declaration, and the parenthesis holds a type name, not arguments.
+/// The trailing comma is what separates it from a tail expression `Some(x)`.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_variant_declaration(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim();
+    if !text.ends_with("),") {
+        return false;
+    }
+    let Some(open) = text.find('(') else {
+        return false;
+    };
+    let name = text[..open].trim();
+    let payload = &text[open + 1..text.len() - 2];
+    !name.is_empty()
+        && name.chars().next().is_some_and(char::is_uppercase)
+        && !name.contains(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        && !payload.is_empty()
+        && payload.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == ' ' || ch == ',')
 }
 
 /// `#[cfg(feature = "deep")]`, `#![allow(dead_code)]`: the tokens inside an
