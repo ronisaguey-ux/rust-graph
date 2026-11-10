@@ -1665,8 +1665,11 @@ fn is_attribute_call(src: &str, line: u32) -> bool {
 fn is_declaration_line(src: &str, line: u32) -> bool {
     // The header is what is written before the name's parenthesis or the body's
     // brace: `pub const fn new`, `pub(crate) struct Cache`, `def parse`.
-    const INTRODUCERS: [&str; 12] = [
+    const INTRODUCERS: [&str; 13] = [
         "fn", "func", "def", "struct", "enum", "trait", "union", "type", "impl", "class", "interface", "module",
+        // `pub mod budget;` is a declaration too, and the lexer reads the two
+        // words as an expression.
+        "mod",
     ];
     let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
         return false;
