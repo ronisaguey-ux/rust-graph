@@ -1517,6 +1517,8 @@ fn uncovered(
             || is_pattern_line(src, event.line)
             || (event.tag == b'x' && is_let_else_line(src, event.line))
             || (event.tag == b'a' && is_control_cast_line(src, event.line))
+            || (event.tag == b'x' && is_struct_pattern_condition(src, event.line))
+            || (event.tag == b'x' && is_else_if_let_line(src, event.line))
         {
             accepted.positional_events += 1;
             continue;
@@ -1675,7 +1677,7 @@ fn is_pattern_line(src: &str, line: u32) -> bool {
         return false;
     };
     let text = text.trim_start();
-    let Some((pat, tail)) = text.split_once("=>") else {
+    let Some((pat, _tail)) = text.split_once("=>") else {
         return false;
     };
     if pat.contains(';') {
@@ -1692,8 +1694,7 @@ fn is_pattern_line(src: &str, line: u32) -> bool {
     if depth != 0 {
         return false;
     }
-    let tail = tail.split("//").next().unwrap_or("").trim();
-    tail == "{" || tail == "{}" || tail.is_empty()
+    true
 }
 
 /// `let Pat = expr else {`: the lexer reads the header as an expression
@@ -1709,7 +1710,7 @@ fn is_let_else_line(src: &str, line: u32) -> bool {
         return false;
     }
     let text = text.split("//").next().unwrap_or("").trim_end();
-    text.ends_with('{') && text.contains("else")
+    text.contains(" else ")
 }
 
 /// An `if` or `while` header with a type cast: `if self.pair[i as usize] == NONE {`.
@@ -1725,6 +1726,40 @@ fn is_control_cast_line(src: &str, line: u32) -> bool {
     (text.starts_with("if ") || text.starts_with("while "))
         && text.contains(" as ")
         && text.split("//").next().unwrap_or("").trim_end().ends_with('{')
+}
+
+/// An `if let` or `while let` with a struct pattern:
+/// `if let Event::Start { forward_parent, .. } = self.events[...] {`.
+/// The one-pass lexer reads `{` in the pattern as opening the `if` body,
+/// emits the pattern fields as expression statements inside a fake block,
+/// and closes it at `}`, before reading the remainder of the line.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_struct_pattern_condition(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    let is_let = text.starts_with("if let ") || text.starts_with("while let ");
+    if !is_let {
+        return false;
+    }
+    let Some((header, _)) = text.split_once('=') else {
+        return false;
+    };
+    header.contains('{') && header.contains('}')
+}
+
+/// `} else if let ...`: the lexer does not recognize `else if let`, so it merges
+/// the condition header, the body statement, and the statement following the block
+/// into a single expression event on the header's line. The CST records the condition
+/// and each inner/outer statement on its own line.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_else_if_let_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    text.contains("else if let ")
 }
 
 /// `pub fn lex(c: &mut Cursor)` and `pub struct Marker(u32)` reach the one-pass

@@ -534,7 +534,7 @@ impl<'a> Walker<'a> {
         // built a statement out of it, and a statement is a node, not a leaf.
         // `true` and `false` are literals, not punctuation: the lexer reads
         // them as names (Rust) or constants, but never as nothing.
-        if matches!(self.kind(id), "true" | "false") {
+        if matches!(self.kind(id), "true" | "false" | "self" | "this" | "super" | "_") {
             return false;
         }
         if self.kind(id).as_bytes() == text {
@@ -2571,7 +2571,7 @@ impl<'a> Walker<'a> {
             return out;
         }
         match kind {
-            "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" => {
+            "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" | "_" => {
                 let text = self.text_string(id);
                 let text = if text == "this" { "self".to_string() } else { text };
                 if text.is_empty() {
@@ -2583,6 +2583,18 @@ impl<'a> Walker<'a> {
                     out
                 }
             }
+            "lifetime" => {
+                let text = self.text_string(id);
+                let text = text.trim_start_matches('\'').trim_start_matches("r#");
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, text);
+                    out.push(']');
+                    out
+                }
+            }
             // `field_expression` is Rust's spelling of the same path; without
             // this arm `self.skipped_groups == 0` read both sides as the
             // constant and the name left the record.
@@ -2590,7 +2602,7 @@ impl<'a> Walker<'a> {
             // `Ordering::Acquire` in an argument list is a path, not a constant.
             | "scoped_identifier" | "scoped_type_identifier" => {
                 let path = self.form_path(id);
-                if path.is_empty() {
+                if path.is_empty() || path.starts_with('.') {
                     // `f(x)[0].y`: the base is a call, so there is no path, and
                     // the value is the base's — a subscript of a value is that
                     // value. Writing 0 here lost the call's argument.
@@ -3119,7 +3131,7 @@ impl<'a> Walker<'a> {
     fn form_path(&mut self, id: u32) -> String {
         let kind = self.kind(id);
         let children = self.children(id);
-        if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression") {
+        if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression") {
             if let Some(&object) = children.first() {
                 // A receiver can be any expression; nothing is recorded for a
                 // plain name, so this costs a walk and never a wrong fact.
@@ -3720,7 +3732,7 @@ impl<'a> Walker<'a> {
                     None => Some("0".to_string()),
                 }
             }
-            "tuple_expression" | "array_expression" => {
+            "tuple_expression" | "array_expression" | "tuple_type" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 Some(if items.is_empty() { "0".to_string() } else { self.tuple_form(&items) })
             }
@@ -3740,11 +3752,48 @@ impl<'a> Walker<'a> {
                 }
                 Some(children.first().map(|&first| self.form(first)).unwrap_or_else(|| "0".to_string()))
             }
+            "break_expression" | "continue_expression" => {
+                let word = if self.kind(id) == "break_expression" { "break" } else { "continue" };
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.is_empty() {
+                    Some(format!("[\"n\",\"{word}\"]"))
+                } else {
+                    let mut parts = vec![format!("[\"n\",\"{word}\"]")];
+                    for item in items {
+                        let value = self.form(item);
+                        if value != "0" {
+                            parts.push(value);
+                        }
+                    }
+                    Some(if parts.len() == 1 { parts.pop().unwrap() } else { format!("[\"m\",[{}]]", parts.join(",")) })
+                }
+            }
             // A token tree is the macro's argument list; its names and nested
             // calls are values, its punctuation is not.
             "token_tree" => Some(self.rust_tt_value(id)),
             "if_expression" | "else_clause" | "block" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                Some(match items.as_slice() {
+                    [] => "0".to_string(),
+                    [one] => self.form(*one),
+                    _ => self.merge_form(&items),
+                })
+            }
+            "match_expression" => {
+                let mut parts = vec!["[\"n\",\"match\"]".to_string()];
+                for child in self.children(id) {
+                    if self.kind(child) == "match" {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        parts.push(value);
+                    }
+                }
+                Some(if parts.len() == 1 { parts.pop().unwrap() } else { format!("[\"m\",[{}]]", parts.join(",")) })
+            }
+            "match_block" | "match_arm" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child) && self.kind(child) != "=>").collect();
                 Some(match items.as_slice() {
                     [] => "0".to_string(),
                     [one] => self.form(*one),
@@ -3829,6 +3878,15 @@ impl<'a> Walker<'a> {
                     None => (String::new(), "0".to_string()),
                 }
             }
+            "tuple_expression" | "parenthesized_expression" => {
+                let items: Vec<u32> = self.children(callee).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.len() == 1 {
+                    let formed = self.form(items[0]);
+                    (".call".to_string(), formed)
+                } else {
+                    (String::new(), "0".to_string())
+                }
+            }
             _ => (self.path_of(callee), "0".to_string()),
         }
     }
@@ -3860,35 +3918,71 @@ impl<'a> Walker<'a> {
     /// everything else is a value. The tokens are not code to the parser, but
     /// they are arguments to a macro that will evaluate them, so the calls in
     /// them are facts.
+    fn rust_tt_path(&self, kids: &[u32], at: &mut usize) -> String {
+        let mut path = String::new();
+        while *at < kids.len() {
+            let node = kids[*at];
+            let kind = self.kind(node);
+            let text = self.text_string(node);
+            if matches!(kind, "identifier" | "scoped_identifier" | "type_identifier" | "self" | "this" | "super") {
+                if !path.is_empty() && !path.ends_with('.') {
+                    break;
+                }
+                path.push_str(&text);
+                *at += 1;
+            } else if text == "." || text == "::" {
+                if path.is_empty() || path.ends_with('.') {
+                    break;
+                }
+                path.push('.');
+                *at += 1;
+            } else {
+                break;
+            }
+        }
+        if path.ends_with('.') {
+            path.pop();
+            *at -= 1;
+        }
+        path
+    }
+
+    /// Macro invocations and calls inside a macro's argument list: the calls in
+    /// them are facts.
     fn rust_tt_value(&mut self, id: u32) -> String {
-        let kids: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+        let kids = self.children(id);
         let mut parts = Vec::new();
         let mut at = 0;
         while at < kids.len() {
-            let node = kids[at];
-            let kind = self.kind(node);
-            let named = matches!(kind, "identifier" | "scoped_identifier" | "type_identifier");
-            if named {
-                if let Some(&next) = kids.get(at + 1) {
-                    if self.kind(next) == "token_tree" {
-                        let path = {
-                            let path = self.path_of(node);
-                            if path.is_empty() { self.text_string(node) } else { path }
-                        };
-                        let line = self.line(node);
-                        let index = self.push_call(path, line);
-                        let args = self.rust_tt_value(next);
-                        parts.push(format!("[\"c\",{index},0,[{args}]]"));
-                        at += 2;
-                        continue;
-                    }
+            let start = at;
+            let path = self.rust_tt_path(&kids, &mut at);
+            if !path.is_empty() {
+                if at + 1 < kids.len() && self.kind(kids[at]) == "!" && self.kind(kids[at + 1]) == "token_tree" {
+                    let args = self.rust_tt_value(kids[at + 1]);
+                    parts.push(format!("[\"m\",[[\"n\",\"{path}\"],{args}]]"));
+                    at += 2;
+                    continue;
                 }
+                if at < kids.len() && self.kind(kids[at]) == "token_tree" {
+                    let line = self.line(kids[at]);
+                    let index = self.push_call(path.clone(), line);
+                    let receiver = match path.rsplit_once('.') {
+                        Some((head, _)) if !head.is_empty() => format!("[\"n\",\"{head}\"]"),
+                        _ => "0".to_string(),
+                    };
+                    let args = self.rust_tt_value(kids[at]);
+                    parts.push(format!("[\"c\",{index},{receiver},[{args}]]"));
+                    at += 1;
+                    continue;
+                }
+                parts.push(format!("[\"n\",\"{path}\"]"));
+                continue;
             }
-            // A literal is a `0` to the lexer, and the guard counts them: the
-            // arguments of `assert_eq!(1, 2, "x", f())` are three constants and
-            // a call on both sides.
-            parts.push(self.form(node));
-            at += 1;
+            let node = kids[start];
+            if !self.is_layout(node) {
+                parts.push(self.form(node));
+            }
+            at = start + 1;
         }
         match parts.len() {
             0 => "0".to_string(),
