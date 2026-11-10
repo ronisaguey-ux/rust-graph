@@ -3129,13 +3129,16 @@ impl<'a> Walker<'a> {
     /// A dotted path, recording the calls on the way: `urlparse(x).netloc` has
     /// a call under the attribute, and that call is a fact.
     fn form_path(&mut self, id: u32) -> String {
+        let path = self.path_of(id);
         let kind = self.kind(id);
         let children = self.children(id);
-        if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression") {
-            if let Some(&object) = children.first() {
-                // A receiver can be any expression; nothing is recorded for a
-                // plain name, so this costs a walk and never a wrong fact.
-                self.form(object);
+        if !path.is_empty() && !path.starts_with('.') {
+            if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression") {
+                if let Some(&object) = children.first() {
+                    // A receiver can be any expression; nothing is recorded for a
+                    // plain name, so this costs a walk and never a wrong fact.
+                    self.form(object);
+                }
             }
         }
         // `name[len(prefix):]`: the index is an expression of its own.
@@ -3146,7 +3149,7 @@ impl<'a> Walker<'a> {
                 }
             }
         }
-        self.path_of(id)
+        path
     }
 
     /// The line a call is written on. For `path\n  .replace(...)` that is the
@@ -3736,12 +3739,32 @@ impl<'a> Walker<'a> {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 Some(if items.is_empty() { "0".to_string() } else { self.tuple_form(&items) })
             }
-            // `|_| self.string()`: the body is what the closure yields.
-            "closure_expression" => match self.children(id).into_iter().rev().find(|&child| !self.is_layout(child)) {
-                Some(body) if !matches!(self.kind(body), "block") => Some(self.form(body)),
-                Some(_) => Some("0".to_string()),
-                None => Some("0".to_string()),
-            },
+            // `|x| self.string()`: the parameters and body form the closure value.
+            "closure_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child) && self.kind(child) != "move" && self.kind(child) != "async").collect();
+                let mut parts = Vec::new();
+                for item in items {
+                    if self.kind(item) == "closure_parameters" {
+                        let params: Vec<u32> = self.children(item).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                        for param in params {
+                            let value = self.form(param);
+                            if value != "0" {
+                                parts.push(value);
+                            }
+                        }
+                    } else if !matches!(self.kind(item), "block") {
+                        let value = self.form(item);
+                        if value != "0" {
+                            parts.push(value);
+                        }
+                    }
+                }
+                Some(match parts.as_slice() {
+                    [] => "0".to_string(),
+                    [one] => one.clone(),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                })
+            }
             // `value >>= 7` / `bytes += src.len()`: the lexer reads the target
             // as the value, but the right side is still evaluated and its calls
             // are facts — reading only the target dropped `src.len` here.
@@ -3850,6 +3873,8 @@ impl<'a> Walker<'a> {
                 let formed = self.form(object);
                 if receiver.is_empty() {
                     (format!(".{name}"), formed)
+                } else if receiver.starts_with('.') {
+                    (format!("{receiver}.{name}"), formed)
                 } else {
                     let mut text = "[\"n\",".to_string();
                     push_string(&mut text, &receiver);

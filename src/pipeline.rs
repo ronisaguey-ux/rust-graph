@@ -1244,9 +1244,10 @@ impl Accepted {
 /// of reading the statement as an expression. Only a bare path counts:
 /// `match.group` is an attribute of a name and a real call.
 #[cfg(all(feature = "deep", feature = "parser"))]
-const KEYWORD_STATEMENTS: [&str; 25] = [
+const KEYWORD_STATEMENTS: [&str; 26] = [
     "assert", "return", "yield", "await", "throw", "raise", "del", "delete", "new", "sizeof", "defined", "if", "elif",
     "else", "for", "foreach", "while", "until", "unless", "switch", "try", "except", "finally", "with", "do",
+    "match",
 ];
 
 /// A lexer call with no name in the source for the CST to read.
@@ -1554,14 +1555,14 @@ fn uncovered(
     for want in wanted {
         let exact = found
             .iter()
-            .position(|row| row.0 == want.0 && row.1.line == want.1.line && covers(&row.1, &want.1).is_ok())
-            .or_else(|| found.iter().position(|row| row.0 == want.0 && covers(&row.1, &want.1).is_ok()))
+            .position(|row| row.0 == want.0 && row.1.line == want.1.line && covers(&row.1, &want.1, src).is_ok())
+            .or_else(|| found.iter().position(|row| row.0 == want.0 && covers(&row.1, &want.1, src).is_ok()))
             .or_else(|| {
                 if want.0 == b'x' && want.1.targets.is_empty() {
                     found.iter().position(|row| {
                         row.0 == b'a'
                             && (row.1.line as i64 - want.1.line as i64).abs() <= 1
-                            && covers_value(&row.1, &want.1).is_ok()
+                            && covers_value(&row.1, &want.1, src).is_ok()
                     })
                 } else {
                     None
@@ -1580,13 +1581,13 @@ fn uncovered(
         // statement is still in the CST's record, with the real name and the
         // same value, so the fact is there and only the invented binder is set
         // aside.
-        if annotation_targets(lexer, &want, &found) || type_as_target(src, &want, &found) {
+        if annotation_targets(lexer, &want, &found, src) || type_as_target(src, &want, &found) {
             accepted.annotation_targets += 1;
             // Both checks require a covering row before they say yes, so the
             // statement is in the record either way; the row is retired when it
             // is still there so a second invented binder cannot claim it.
             if let Some(at) = found.iter().position(|row| {
-                row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 && covers_value(&row.1, &want.1).is_ok()
+                row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 && covers_value(&row.1, &want.1, src).is_ok()
             }) {
                 found.swap_remove(at);
             }
@@ -1601,7 +1602,7 @@ fn uncovered(
             .or_else(|| found.iter().find(|row| row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1));
         let (other, why) = match near {
             Some(row) => {
-                let miss = match covers(&row.1, &want.1) {
+                let miss = match covers(&row.1, &want.1, src) {
                     Ok(()) => Miss::Line,
                     Err(miss) => miss,
                 };
@@ -1901,7 +1902,7 @@ fn type_as_target(src: &str, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool 
         if row.0 != b'a' || (row.1.line as i64 - want.1.line as i64).abs() > 1 {
             return false;
         }
-        if row.1.targets == want.1.targets || covers_value(&row.1, &want.1).is_err() {
+        if row.1.targets == want.1.targets || covers_value(&row.1, &want.1, src).is_err() {
             return false;
         }
         let deep_names = name_list(&row.1.targets);
@@ -1936,7 +1937,7 @@ fn name_list(text: &str) -> Vec<String> {
     out
 }
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn annotation_targets(lexer: &Facts, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool {
+fn annotation_targets(lexer: &Facts, want: &(u8, Shape), found: &[(u8, Shape)], src: &str) -> bool {
     if want.0 != b'a' {
         return false;
     }
@@ -1957,7 +1958,7 @@ fn annotation_targets(lexer: &Facts, want: &(u8, Shape), found: &[(u8, Shape)]) 
         row.0 == b'a'
             && (row.1.line as i64 - want.1.line as i64).abs() <= 1
             && row.1.targets != want.1.targets
-            && (covers_value(&row.1, &want.1).is_ok() || row.1.value == want.1.value)
+            && (covers_value(&row.1, &want.1, src).is_ok() || row.1.value == want.1.value)
     })
 }
 
@@ -2043,7 +2044,7 @@ fn same_targets(deep: &str, lexer: &str) -> bool {
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn covers(deep: &Shape, lexer: &Shape) -> Result<(), Miss> {
+fn covers(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
     // A lexer statement and the CST node it sits on can disagree by a line (a
     // signature stamped where it ends against where it starts), so an event is
     // paired near its line, never across the file: a duplicate target on
@@ -2054,11 +2055,11 @@ fn covers(deep: &Shape, lexer: &Shape) -> Result<(), Miss> {
     if !same_targets(&deep.targets, &lexer.targets) {
         return Err(Miss::Targets);
     }
-    covers_value(deep, lexer)
+    covers_value(deep, lexer, src)
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn covers_value(deep: &Shape, lexer: &Shape) -> Result<(), Miss> {
+fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
     if lexer.value == "0" {
         return Ok(());
     }
@@ -2086,6 +2087,19 @@ fn covers_value(deep: &Shape, lexer: &Shape) -> Result<(), Miss> {
                 found.swap_remove(at);
             }
             None => missing.push(name),
+        }
+    }
+    if !missing.is_empty() {
+        let line_text = src.lines().nth(lexer.line.saturating_sub(1) as usize).unwrap_or("");
+        if line_text.contains("b'") {
+            missing.retain(|name| {
+                let bare = name.strip_prefix("n:").unwrap_or(name);
+                let is_byte_artefact = bare == "b"
+                    || (bare.starts_with('x')
+                        && bare.len() <= 4
+                        && bare[1..].chars().all(|c| c.is_ascii_hexdigit()));
+                !is_byte_artefact
+            });
         }
     }
     if !missing.is_empty() {
@@ -2338,6 +2352,14 @@ fn shape_at(
             let path = call.map(|call| call.path.as_str()).unwrap_or("");
             if phantom_call(path) == Some(Phantom::Anonymous) {
                 return receiver;
+            }
+            if phantom_call(path) == Some(Phantom::Keyword) {
+                let name = call.map(|call| call.path.as_str()).unwrap_or("");
+                return if arguments.is_empty() {
+                    format!("n:{name}")
+                } else {
+                    format!("m:[n:{name},{}]", arguments.join(","))
+                };
             }
             if let Some(call) = call {
                 let name = call.path.rsplit('.').next().unwrap_or(&call.path);
