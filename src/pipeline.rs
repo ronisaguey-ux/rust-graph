@@ -1044,10 +1044,16 @@ mod deep_run {
             // agreement.
             write!(
                 out,
-                ",\"accepted\":{{\"anonymous_call\":{},\"keyword_call\":{},\"keyword_event\":{}}}",
+                ",\"accepted\":{{\"anonymous_call\":{},\"keyword_call\":{},\"keyword_event\":{},\"annotation_target\":{},\"anonymous_symbol\":{},\"invented_symbol\":{},\"positional_call\":{},\"positional_event\":{},\"positional_symbol\":{}}}",
                 self.accepted_anonymous_calls,
                 self.accepted_keyword_calls,
-                self.accepted_keyword_events
+                self.accepted_keyword_events,
+                self.accepted_annotation_targets,
+                self.accepted_anonymous_symbols,
+                self.accepted_invented_symbols,
+                self.accepted_positional_calls,
+                self.accepted_positional_events,
+                self.accepted_positional_symbols
             )
         }
 
