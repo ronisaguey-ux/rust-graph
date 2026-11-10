@@ -27,7 +27,8 @@
 //! (`src/deep`) is what the `parser` feature compiles.
 
 mod c_family;
-mod go_java;
+mod go;
+mod java;
 mod rust;
 
 use crate::deep::syntax::Language;
