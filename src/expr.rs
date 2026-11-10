@@ -252,8 +252,11 @@ impl Emit<'_> {
             }
         }
         self.pos += 1;
+        // A string with nothing interpolated in it is a constant, not an
+        // absence: `name: "{"` is a field holding a value, and dropping the
+        // value would leave the field's name standing for the whole pair.
         let value = match count {
-            0 => String::new(),
+            0 => "0".to_string(),
             1 => parts,
             _ => format!("[\"m\",[{parts}]]"),
         };
@@ -450,7 +453,9 @@ mod tests {
 
     #[test]
     fn operators_and_format_strings_combine_values() {
-        assert_eq!(form("py", "'s ' + a + b").0, r#"["m",[["n","a"],["n","b"]]]"#);
+        // A string with nothing interpolated is the constant it is: it used to
+        // vanish from the sum while a lone string was already 0.
+        assert_eq!(form("py", "'s ' + a + b").0, r#"["m",[0,["n","a"],["n","b"]]]"#);
         assert_eq!(form("py", "f'{a} {b.c}'").0, r#"["m",[["n","a"],["n","b.c"]]]"#);
         assert_eq!(form("js", "`x ${a}`").0, r#"["n","a"]"#);
     }

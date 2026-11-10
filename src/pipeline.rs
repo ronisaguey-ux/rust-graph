@@ -2303,7 +2303,8 @@ fn shape_event(
 ) -> Shape {
     if tag != b'a' {
         let mut pos = 0;
-        return Shape { line, targets: String::new(), value: shape_at(payload, &mut pos, calls, accepted, src, macro_lines) };
+        let value = shape_at(payload, &mut pos, calls, accepted, src, macro_lines);
+        return Shape { line, targets: String::new(), value: strip_literal_prefixes(value, src, line) };
     }
     let targets_end = element_end(payload.as_bytes(), 0);
     let targets = payload[..targets_end].to_string();
@@ -2312,7 +2313,47 @@ fn shape_event(
         pos += 1;
     }
     let value = shape_at(payload, &mut pos, calls, accepted, src, macro_lines);
-    Shape { line, targets, value }
+    Shape { line, targets, value: strip_literal_prefixes(value, src, line) }
+}
+
+/// `b' '`, `b"x"`, `r"..."`, `br#"..."#`, `c"..."`, `f"..."`: the one-pass
+/// lexer reads the literal prefix as a name and the CST reads a single literal
+/// token. A name that is exactly a prefix and sits in front of its quote on
+/// that line names nothing, so neither path is asked to agree on it.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn strip_literal_prefixes(mut value: String, src: &str, line: u32) -> String {
+    if !value.contains("[\"n\",\"") {
+        return value;
+    }
+    let text = match src.lines().nth(line.saturating_sub(1) as usize) {
+        Some(text) => text,
+        None => return value,
+    };
+    for prefix in ["br", "b", "r", "c", "f"] {
+        if !text.contains(&format!("{prefix}'")) && !text.contains(&format!("{prefix}\"") ) {
+            continue;
+        }
+        let atom = format!("[\"n\",\"{prefix}\"]");
+        while let Some(at) = value.find(&atom) {
+            let end = at + atom.len();
+            let before_comma = at > 0 && value.as_bytes()[at - 1] == b',';
+            let after_comma = value.as_bytes().get(end) == Some(&b',');
+            if before_comma {
+                value.replace_range(at - 1..end, "");
+            } else if after_comma {
+                value.replace_range(at..end + 1, "");
+            } else {
+                value.replace_range(at..end, "");
+            }
+            while value.contains("[[]]") {
+                value = value.replace("[[]]", "[]");
+            }
+            if value.trim_matches(|c| c == '[' || c == ']').is_empty() {
+                return value;
+            }
+        }
+    }
+    value
 }
 
 /// The form of one value at `pos`, with call numbering erased: a call
