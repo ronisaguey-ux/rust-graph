@@ -22,7 +22,7 @@ mod json;
 mod deep;
 #[path = "../src/deep_integration.rs"]
 mod deep_integration;
-#[path = "../src/deep_facts.rs"]
+#[path = "../src/deep_facts/mod.rs"]
 mod deep_facts;
 
 use deep_facts::{extract, lang_for, lang_for_forced};
