@@ -1391,7 +1391,13 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
             accepted.invented_symbols += 1;
             continue;
         }
-        let same = deep.symbols.iter().any(|row| row.name == symbol.name && row.kind == symbol.kind);
+        // `mod tests { fn f() }`: the CST spells the symbol `tests.f` because the
+        // module is its owner; the one-pass lexer files it under `f`. Same
+        // definition, two spellings, so a dotted suffix counts.
+        let same = deep.symbols.iter().any(|row| {
+            row.kind == symbol.kind
+                && (row.name == symbol.name || row.name.ends_with(&format!(".{}", symbol.name)))
+        });
         if !same {
             let detail = format!("symbol {} kind {} line {}", symbol.name, symbol.kind, symbol.line);
             return verdict(Some("symbol"), detail, accepted);
