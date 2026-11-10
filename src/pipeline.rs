@@ -706,7 +706,7 @@ pub(crate) mod gate {
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
-#[path = "deep_facts.rs"]
+#[path = "deep_facts/mod.rs"]
 mod deep_facts;
 
 /// The parser this run is using, and the per-file record of what each file
