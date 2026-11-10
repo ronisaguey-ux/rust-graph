@@ -1459,7 +1459,12 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
                 })
         };
         let Some(paired) = paired else { continue };
-        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted, src, &macro_lines) {
+        // The lexer does not open a symbol for `const fn` or for a closure, so a
+        // whole impl body can land in the module's symbol while the CST files it
+        // under the method. For the module, every symbol's events are the
+        // module's: the fact is in the file either way.
+        let extra: &[crate::facts::Symbol] = if symbol.kind == KIND_MODULE { &deep.symbols } else { &[] };
+        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted, src, &macro_lines, extra) {
             return verdict(Some("event"), detail, accepted);
         }
     }
@@ -1478,6 +1483,7 @@ fn uncovered(
     accepted: &mut Accepted,
     src: &str,
     macro_lines: &[bool],
+    extra: &[crate::facts::Symbol],
 ) -> Option<String> {
     let keyword_lines: Vec<u32> = symbol
         .calls
@@ -1511,6 +1517,15 @@ fn uncovered(
             (event.tag, shape_event(event.tag, event.line, event.payload, &paired.calls, &mut none))
         })
         .collect();
+    for other in extra.iter().filter(|row| row.name != paired.name || row.owner != paired.owner) {
+        for event in raw_events(&other.events) {
+            if !matches!(event.tag, b'a' | b'r' | b'x') {
+                continue;
+            }
+            let mut none = Accepted::default();
+            found.push((event.tag, shape_event(event.tag, event.line, event.payload, &other.calls, &mut none)));
+        }
+    }
     // The exact matches are taken first, all of them, before any statement is
     // re-read as an artefact. Pairing greedily one want at a time let a
     // resembling event on the next line consume the row a later want needed,
