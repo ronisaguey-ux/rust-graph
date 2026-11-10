@@ -1884,7 +1884,12 @@ impl<'a> Walker<'a> {
             _ if self.is_rust() && self.kind(child) == "assignment_expression" => {
                 self.assignment(child, false)
             }
-            "augmented_assignment" | "augmented_assignment_expression" => self.assignment(child, true),
+            "augmented_assignment" | "augmented_assignment_expression" | "compound_assignment_expr" => self.assignment(child, true),
+            _ if self.is_rust()
+                && matches!(
+                    self.kind(child),
+                    "if_expression" | "while_expression" | "loop_expression" | "for_expression" | "match_expression"
+                ) => {}
             // `x: T = f()`: the targets are the names and the value is the last
             // child, as in an assignment. `x: T` alone binds nothing and has no
             // value, so only the annotated form that carries `=` is read.
@@ -2033,11 +2038,16 @@ impl<'a> Walker<'a> {
         }
         let line = self.line(id);
         let targets = self.assignment_targets(first);
-        self.assignment_parts(targets, last, line, augmented);
+        let weak = augmented || matches!(self.kind(first), "subscript" | "subscript_expression" | "index_expression");
+        self.assignment_parts(targets, last, line, weak);
     }
 
     fn assignment_targets(&self, id: u32) -> Vec<String> {
         match self.kind(id) {
+            "subscript" | "subscript_expression" | "index_expression" => {
+                let base = self.children(id).first().copied().unwrap_or(id);
+                self.assignment_targets(base)
+            }
             "pattern_list" | "tuple_pattern" | "array_pattern" | "list_pattern" | "tuple" | "list"
             | "expression_list" => {
                 self.children(id).into_iter().filter_map(|child| self.value_path(child)).collect()
@@ -3482,7 +3492,7 @@ impl<'a> Walker<'a> {
     /// field names are its own, so neither is read as a binder.
     fn rust_pattern_names(&self, id: u32) -> Vec<String> {
         match self.kind(id) {
-            "identifier" | "shorthand_field_identifier" | "self" => vec![self.text_string(id)],
+            "identifier" | "shorthand_field_identifier" | "self" | "_" => vec![self.text_string(id)],
             "mut_pattern" | "ref_pattern" | "reference_pattern" => self.first_identifier(id).into_iter().collect(),
             "tuple_struct_pattern" => {
                 self.children(id).into_iter().skip(1).flat_map(|child| self.rust_pattern_names(child)).collect()
@@ -3733,6 +3743,17 @@ impl<'a> Walker<'a> {
             // A token tree is the macro's argument list; its names and nested
             // calls are values, its punctuation is not.
             "token_tree" => Some(self.rust_tt_value(id)),
+            "if_expression" | "else_clause" | "block" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                Some(match items.as_slice() {
+                    [] => "0".to_string(),
+                    [one] => self.form(*one),
+                    _ => self.merge_form(&items),
+                })
+            }
+            "expression_statement" => {
+                Some(self.expression_child(id).map(|child| self.form(child)).unwrap_or_else(|| "0".to_string()))
+            }
             _ => None,
         }
     }

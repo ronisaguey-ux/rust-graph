@@ -1443,6 +1443,21 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         }
     }
     for symbol in &lexer.symbols {
+        if symbol.kind != KIND_MODULE {
+            if macro_lines
+                .get(symbol.line.saturating_sub(1) as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if symbol.name.is_empty() || symbol.name.starts_with("<anonymous>@") {
+                continue;
+            }
+            if !src.is_empty() && !claims_the_line(src, &lexer.tag, symbol.line, &symbol.name) {
+                continue;
+            }
+        }
         let paired = if symbol.kind == KIND_MODULE {
             deep.symbols.iter().find(|row| row.kind == KIND_MODULE)
         } else {
@@ -1499,6 +1514,9 @@ fn uncovered(
         if macro_lines.get(event.line.saturating_sub(1) as usize).copied().unwrap_or(false)
             || is_attribute_call(src, event.line)
             || is_declaration_line(src, event.line)
+            || is_pattern_line(src, event.line)
+            || (event.tag == b'x' && is_let_else_line(src, event.line))
+            || (event.tag == b'a' && is_control_cast_line(src, event.line))
         {
             accepted.positional_events += 1;
             continue;
@@ -1507,14 +1525,14 @@ fn uncovered(
             accepted.keyword_events += 1;
             continue;
         }
-        wanted.push((event.tag, shape_event(event.tag, event.line, event.payload, &symbol.calls, &mut *accepted)));
+        wanted.push((event.tag, shape_event(event.tag, event.line, event.payload, &symbol.calls, &mut *accepted, src, macro_lines)));
     }
     let mut found: Vec<(u8, Shape)> = raw_events(&paired.events)
         .into_iter()
         .filter(|event| matches!(event.tag, b'a' | b'r' | b'x'))
         .map(|event| {
             let mut none = Accepted::default();
-            (event.tag, shape_event(event.tag, event.line, event.payload, &paired.calls, &mut none))
+            (event.tag, shape_event(event.tag, event.line, event.payload, &paired.calls, &mut none, src, macro_lines))
         })
         .collect();
     for other in extra.iter().filter(|row| row.name != paired.name || row.owner != paired.owner) {
@@ -1523,7 +1541,7 @@ fn uncovered(
                 continue;
             }
             let mut none = Accepted::default();
-            found.push((event.tag, shape_event(event.tag, event.line, event.payload, &other.calls, &mut none)));
+            found.push((event.tag, shape_event(event.tag, event.line, event.payload, &other.calls, &mut none, src, macro_lines)));
         }
     }
     // The exact matches are taken first, all of them, before any statement is
@@ -1532,7 +1550,21 @@ fn uncovered(
     // and the file was blamed for an event that was in the record all along.
     let mut leftover: Vec<(u8, Shape)> = Vec::new();
     for want in wanted {
-        let exact = found.iter().position(|row| row.0 == want.0 && covers(&row.1, &want.1).is_ok());
+        let exact = found
+            .iter()
+            .position(|row| row.0 == want.0 && row.1.line == want.1.line && covers(&row.1, &want.1).is_ok())
+            .or_else(|| found.iter().position(|row| row.0 == want.0 && covers(&row.1, &want.1).is_ok()))
+            .or_else(|| {
+                if want.0 == b'x' && want.1.targets.is_empty() {
+                    found.iter().position(|row| {
+                        row.0 == b'a'
+                            && (row.1.line as i64 - want.1.line as i64).abs() <= 1
+                            && covers_value(&row.1, &want.1).is_ok()
+                    })
+                } else {
+                    None
+                }
+            });
         match exact {
             Some(at) => {
                 found.swap_remove(at);
@@ -1632,6 +1664,67 @@ fn is_declaration_line(src: &str, line: u32) -> bool {
     let text = text.trim_start();
     let header = text.split(['(', '{', '=']).next().unwrap_or(text);
     header.split_whitespace().any(|word| INTRODUCERS.contains(&word))
+}
+
+/// A match arm header: `pat => {`, `pat => {}`, or `pat =>` opening a block.
+/// The pattern is not an expression statement, and the CST is right to record
+/// no statement event for it.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_pattern_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    let Some((pat, tail)) = text.split_once("=>") else {
+        return false;
+    };
+    if pat.contains(';') {
+        return false;
+    }
+    let mut depth = 0i32;
+    for ch in pat.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return false;
+    }
+    let tail = tail.split("//").next().unwrap_or("").trim();
+    tail == "{" || tail == "{}" || tail.is_empty()
+}
+
+/// `let Pat = expr else {`: the lexer reads the header as an expression
+/// statement that merges the value and the `else` block, while the CST records
+/// the binding and visits the block's statements.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_let_else_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    if !text.starts_with("let ") {
+        return false;
+    }
+    let text = text.split("//").next().unwrap_or("").trim_end();
+    text.ends_with('{') && text.contains("else")
+}
+
+/// An `if` or `while` header with a type cast: `if self.pair[i as usize] == NONE {`.
+/// The one-pass lexer reads `as` inside the header as Python's `with ... as target:`
+/// and files an assignment event to the comparison operand. The CST correctly
+/// records the condition as an expression statement.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_control_cast_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    (text.starts_with("if ") || text.starts_with("while "))
+        && text.contains(" as ")
+        && text.split("//").next().unwrap_or("").trim_end().ends_with('{')
 }
 
 /// `pub fn lex(c: &mut Cursor)` and `pub struct Marker(u32)` reach the one-pass
@@ -2120,10 +2213,18 @@ fn event_at(events: &str, start: usize, end: usize) -> Option<RawEvent<'_>> {
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn shape_event(tag: u8, line: u32, payload: &str, calls: &[crate::facts::Call], accepted: &mut Accepted) -> Shape {
+fn shape_event(
+    tag: u8,
+    line: u32,
+    payload: &str,
+    calls: &[crate::facts::Call],
+    accepted: &mut Accepted,
+    src: &str,
+    macro_lines: &[bool],
+) -> Shape {
     if tag != b'a' {
         let mut pos = 0;
-        return Shape { line, targets: String::new(), value: shape_at(payload, &mut pos, calls, accepted) };
+        return Shape { line, targets: String::new(), value: shape_at(payload, &mut pos, calls, accepted, src, macro_lines) };
     }
     let targets_end = element_end(payload.as_bytes(), 0);
     let targets = payload[..targets_end].to_string();
@@ -2131,7 +2232,7 @@ fn shape_event(tag: u8, line: u32, payload: &str, calls: &[crate::facts::Call], 
     if payload.as_bytes().get(pos) == Some(&b',') {
         pos += 1;
     }
-    let value = shape_at(payload, &mut pos, calls, accepted);
+    let value = shape_at(payload, &mut pos, calls, accepted, src, macro_lines);
     Shape { line, targets, value }
 }
 
@@ -2141,7 +2242,14 @@ fn shape_event(tag: u8, line: u32, payload: &str, calls: &[crate::facts::Call], 
 /// the application has no name for the CST to read, so it is not a fact either
 /// path can be asked to agree on.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn shape_at(text: &str, pos: &mut usize, calls: &[crate::facts::Call], accepted: &mut Accepted) -> String {
+fn shape_at(
+    text: &str,
+    pos: &mut usize,
+    calls: &[crate::facts::Call],
+    accepted: &mut Accepted,
+    src: &str,
+    macro_lines: &[bool],
+) -> String {
     let bytes = text.as_bytes();
     if *pos >= bytes.len() {
         return "0".to_string();
@@ -2171,7 +2279,7 @@ fn shape_at(text: &str, pos: &mut usize, calls: &[crate::facts::Call], accepted:
             let comma = inner[at..].find(',').map(|value| value + at).unwrap_or(inner.len());
             let id: usize = inner[at..comma].parse().unwrap_or(usize::MAX);
             at = comma + 1;
-            let receiver = shape_at(inner, &mut at, calls, accepted);
+            let receiver = shape_at(inner, &mut at, calls, accepted, src, macro_lines);
             if inner_bytes.get(at) == Some(&b',') {
                 at += 1;
             }
@@ -2182,15 +2290,25 @@ fn shape_at(text: &str, pos: &mut usize, calls: &[crate::facts::Call], accepted:
                 let mut item = 0;
                 while item < list.len() {
                     if list.as_bytes()[item] == b'[' || list.as_bytes()[item] == b'0' {
-                        arguments.push(shape_at(list, &mut item, calls, accepted));
+                        let arg = shape_at(list, &mut item, calls, accepted, src, macro_lines);
+                        if !arg.is_empty() {
+                            arguments.push(arg);
+                        }
                     } else {
                         item += 1;
                     }
                 }
             }
-            let path = calls.get(id).map(|call| call.path.as_str()).unwrap_or("");
+            let call = calls.get(id);
+            let path = call.map(|call| call.path.as_str()).unwrap_or("");
             if phantom_call(path) == Some(Phantom::Anonymous) {
                 return receiver;
+            }
+            if let Some(call) = call {
+                let name = call.path.rsplit('.').next().unwrap_or(&call.path);
+                if !src.is_empty() && is_positional_call(src, macro_lines, name, call.line) {
+                    return String::new();
+                }
             }
             format!("c({receiver};[{}])", arguments.join(","))
         }
@@ -2205,7 +2323,10 @@ fn shape_at(text: &str, pos: &mut usize, calls: &[crate::facts::Call], accepted:
                 let stop = inner_bytes.len().saturating_sub(1);
                 while at < stop {
                     if inner_bytes[at] == b'[' || inner_bytes[at] == b'0' {
-                        items.push(shape_at(inner, &mut at, calls, accepted));
+                        let item = shape_at(inner, &mut at, calls, accepted, src, macro_lines);
+                        if !item.is_empty() {
+                            items.push(item);
+                        }
                     } else {
                         at += 1;
                     }
@@ -2227,7 +2348,7 @@ fn shape_at(text: &str, pos: &mut usize, calls: &[crate::facts::Call], accepted:
             if inner_bytes.get(at) == Some(&b',') {
                 at += 1;
             }
-            format!("k({name}):{}", shape_at(inner, &mut at, calls, accepted))
+            format!("k({name}):{}", shape_at(inner, &mut at, calls, accepted, src, macro_lines))
         }
         _ => body.to_string(),
     }
@@ -2307,7 +2428,11 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
             );
             return lexer;
         }
-        let why = match weight(&deep).cmp(&weight(&lexer)) {
+        let mut lexer_weight = weight(&lexer);
+        lexer_weight[0] = lexer_weight[0].saturating_sub(
+            (verdict.accepted().invented_symbols + verdict.accepted().anonymous_symbols) as u64,
+        );
+        let why = match weight(&deep).cmp(&lexer_weight) {
             std::cmp::Ordering::Greater => "",
             std::cmp::Ordering::Equal => "tie",
             std::cmp::Ordering::Less => {
