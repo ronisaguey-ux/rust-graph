@@ -3793,7 +3793,7 @@ impl<'a> Walker<'a> {
             }
             // A token tree is the macro's argument list; its names and nested
             // calls are values, its punctuation is not.
-            "token_tree" => Some(self.rust_tt_value(id)),
+            "token_tree" | "token_tree_bracket" | "token_tree_brace" => Some(self.rust_tt_value(id)),
             "if_expression" | "else_clause" | "block" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 Some(match items.as_slice() {
@@ -3982,7 +3982,7 @@ impl<'a> Walker<'a> {
             let start = at;
             let path = self.rust_tt_path(&kids, &mut at);
             if !path.is_empty() {
-                if at + 1 < kids.len() && self.kind(kids[at]) == "!" && self.kind(kids[at + 1]) == "token_tree" {
+                if at + 1 < kids.len() && self.kind(kids[at]) == "!" && matches!(self.kind(kids[at + 1]), "token_tree" | "token_tree_bracket" | "token_tree_brace") {
                     let args = self.rust_tt_value(kids[at + 1]);
                     parts.push(format!("[\"m\",[[\"n\",\"{path}\"],{args}]]"));
                     at += 2;
@@ -4012,7 +4012,10 @@ impl<'a> Walker<'a> {
         match parts.len() {
             0 => "0".to_string(),
             1 => parts.pop().unwrap_or_else(|| "0".to_string()),
-            _ => format!("[\"m\",[{}]]", parts.join(",")),
+            _ => {
+                let tag = if self.kind(id) == "token_tree_bracket" { "t" } else { "m" };
+                format!("[\"{tag}\",[{}]]", parts.join(","))
+            }
         }
     }
 
@@ -4020,7 +4023,7 @@ impl<'a> Walker<'a> {
         let mut items = Vec::new();
         for child in self.children(id) {
             match self.kind(child) {
-                "token_tree" => items.push(self.form(child)),
+                "token_tree" | "token_tree_bracket" | "token_tree_brace" => items.push(self.form(child)),
                 "identifier" | "scoped_identifier" => {
                     let path = self.path_of(child);
                     let mut text = "[\"n\",".to_string();

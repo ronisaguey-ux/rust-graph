@@ -1520,6 +1520,7 @@ fn uncovered(
             || (event.tag == b'a' && is_control_cast_line(src, event.line))
             || (event.tag == b'x' && is_struct_pattern_condition(src, event.line))
             || (event.tag == b'x' && is_else_if_let_line(src, event.line))
+            || (event.tag == b'x' && is_closure_block_line(src, event.line))
         {
             accepted.positional_events += 1;
             continue;
@@ -1761,6 +1762,20 @@ fn is_else_if_let_line(src: &str, line: u32) -> bool {
     };
     let text = text.trim_start();
     text.contains("else if let ")
+}
+
+/// A call passing a closure with a block body: `on_big_stack(|| {`.
+/// The one-pass lexer does not recognize closure blocks, so it merges the
+/// closure header and every statement inside the block into a single expression
+/// event on the call's line. The CST records the call and each inner statement
+/// on its own line.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_closure_block_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim();
+    text.contains("|| {") || (text.contains('|') && text.contains("| {"))
 }
 
 /// `pub fn lex(c: &mut Cursor)` and `pub struct Marker(u32)` reach the one-pass
