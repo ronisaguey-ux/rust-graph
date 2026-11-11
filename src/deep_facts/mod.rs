@@ -729,7 +729,14 @@ impl<'a> Walker<'a> {
                 // `except ValueError:` names a type the one-pass reader files
                 // as a value on the clause's line; the clause emits only its
                 // terminator, so that name had no counterpart at all.
+                // `except OSError as error:` binds a name, and the lexer
+                // reads the clause as an assignment of the type to it.
                 if kind == "except_clause" {
+                    if let Some((targets, value)) = self.loop_binding(id) {
+                        self.assignment_event(targets, value, self.line(id), false);
+                        self.event("[\"e\"]");
+                        return;
+                    }
                     let mut parts = Vec::new();
                     for child in self.children(id) {
                         if self.is_layout(child) || matches!(self.kind(child), "except" | ":") {

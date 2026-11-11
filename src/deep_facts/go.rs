@@ -1025,6 +1025,16 @@ impl<'a> Walker<'a> {
     /// `for a, b in xs` / `for (const a of xs)` -> targets and iterable.
     pub(crate) fn loop_binding(&mut self, id: u32) -> Option<(Vec<String>, u32)> {
         let children = self.children(id);
+        // Python writes `with open(p) as f:` and `except E as error:` with the
+        // `as` inside an `as_pattern` of its own, so the scan below never saw
+        // it and the name the statement binds had no event at all.
+        if let Some(pattern) = children.iter().copied().find(|&child| self.kind(child) == "as_pattern") {
+            let inner = self.children(pattern);
+            let at = inner.iter().position(|&child| self.kind(child) == "as")?;
+            let value = *inner[..at].iter().rev().find(|&&child| !self.is_layout(child))?;
+            let targets = inner.get(at + 1).map(|&child| self.pattern_names(child)).unwrap_or_default();
+            return Some((targets, value));
+        }
         let mut split = None;
         for (index, &child) in children.iter().enumerate() {
             if matches!(self.kind(child), "in" | "of" | "as") {
