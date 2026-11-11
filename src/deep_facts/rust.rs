@@ -349,6 +349,12 @@ impl<'a> Walker<'a> {
     /// the variant (`Ok(name)` binds `name`, not `Ok`) and a struct pattern's
     /// field names are its own, so neither is read as a binder.
     pub(crate) fn rust_pattern_names(&self, id: u32) -> Vec<String> {
+        // `let raw = …` binds `raw`, a contextual keyword the grammar accepts
+        // wherever a name goes. Without this the statement had no binder and
+        // the CST wrote no assignment event for it at all.
+        if let Some(name) = self.soft_name(id) {
+            return vec![name];
+        }
         match self.kind(id) {
             "identifier" | "shorthand_field_identifier" | "self" | "_" => vec![self.text_string(id)],
             "mut_pattern" | "ref_pattern" | "reference_pattern" => self.first_identifier(id).into_iter().collect(),
@@ -817,28 +823,12 @@ impl<'a> Walker<'a> {
             let node = kids[*at];
             let kind = self.kind(node);
             let text = self.text_string(node);
-            // The weak keywords are names wherever the grammar's `_name` and
-            // `_macro_path` rules accept one, and a token tree is exactly where
-            // nothing re-parses them: `matches!(self.raw(&t), …)` lexes `raw`
-            // as its keyword, so a path that stopped at `identifier` lost the
-            // call the macro will evaluate.
-            if matches!(
-                kind,
-                "identifier"
-                    | "scoped_identifier"
-                    | "type_identifier"
-                    | "self"
-                    | "this"
-                    | "super"
-                    | "crate"
-                    | "Self"
-                    | "union"
-                    | "default"
-                    | "raw"
-                    | "auto"
-                    | "safe"
-                    | "macro_rules"
-            ) {
+            // A token tree is where nothing re-spells a contextual keyword, so
+            // a path that stopped at `identifier` lost the call the macro will
+            // evaluate: `matches!(self.raw(&t), …)` lexes `raw` as its own.
+            if matches!(kind, "identifier" | "scoped_identifier" | "type_identifier" | "self" | "this" | "super")
+                || self.kinds.soft.contains(&kind)
+            {
                 if !path.is_empty() && !path.ends_with('.') {
                     break;
                 }

@@ -231,6 +231,12 @@ const C_DECLARATIONS: &[&str] = &[
 /// lexes both as the keyword kind, so the mapping has to read the leaf.
 const PY_SOFT: &[&str] = &["match", "case", "type", "_"];
 
+/// Rust's contextual keywords: each is a name everywhere but where it starts
+/// its own item, and the grammar's `_name` rule accepts every one of them. The
+/// lexer reads them as names, so without this the CST dropped `raw` in
+/// `match raw[0]` as punctuation and lost the value it names.
+const RS_SOFT: &[&str] = &["union", "default", "raw", "auto", "safe", "macro_rules"];
+
 fn kinds(lang: Lang) -> Kinds {
     match lang {
         Lang::Python => {
@@ -244,7 +250,7 @@ fn kinds(lang: Lang) -> Kinds {
             family: Family::Plain,
         },
         Lang::Rust => {
-            Kinds { definitions: RS_DEFS, calls: RS_CALLS, imports: RS_IMPORTS, soft: &[], family: Family::Rust }
+            Kinds { definitions: RS_DEFS, calls: RS_CALLS, imports: RS_IMPORTS, soft: RS_SOFT, family: Family::Rust }
         }
         Lang::Json => {
             Kinds { definitions: JSON_DEFS, calls: JSON_CALLS, imports: JSON_IMPORTS, soft: &[], family: Family::Plain }
