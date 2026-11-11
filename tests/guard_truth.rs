@@ -77,26 +77,25 @@ fn calls(facts: &Facts) -> Vec<String> {
     facts.symbols.iter().flat_map(|symbol| symbol.calls.iter().map(|call| call.path.clone())).collect()
 }
 
-/// Defect 1: the same event count, a different value. `f"{a}"` is one `r` event
-/// on both paths; the lexer follows the interpolation to `a`, the grammar keeps
-/// the whole string as one token and the CST writes `0`.
+/// Defect 1, now closed: `f"{a}"` used to reach the CST as the constant `0`
+/// because the field selection asked for a part with children of its own, and a
+/// leaf identifier has none. Both paths read the interpolation today, so this
+/// checks the fix rather than the loss it used to cause.
 #[test]
-fn a_value_the_cst_wrote_as_a_constant_falls_back() {
+fn an_interpolation_field_is_read_by_both_paths() {
     let source = "def f(x):\n    a, b = g(x), 1\n    return f\"{a}\"\n";
     let lexer = lexer_facts(source);
     let deep = deep_facts(source);
 
-    // The fixture is honest about both records: same events, different value.
     assert!(events(&lexer, "f").contains(r#"["r",3,["n","a"]]"#), "{}", events(&lexer, "f"));
-    assert!(events(&deep, "f").contains(r#"["r",3,0]"#), "{}", events(&deep, "f"));
+    assert!(events(&deep, "f").contains(r#"["r",3,["n","a"]]"#), "{}", events(&deep, "f"));
     // The multi-target assignment is mapped by both paths, so the *only*
     // difference here is the value the CST cannot read.
     assert!(events(&lexer, "f").contains(r#"["a",2,["a","b"]"#), "{}", events(&lexer, "f"));
     assert!(events(&deep, "f").contains(r#"["a",2,["a","b"]"#), "{}", events(&deep, "f"));
 
     let verdict = pipeline::loses(&lexer, &deep);
-    assert!(verdict.lost(), "a value the CST wrote as 0 is a loss: {verdict:?}");
-    assert_eq!(verdict.why(), Some("event"));
+    assert!(!verdict.lost(), "the field is read on both paths now: {verdict:?}");
     assert_eq!(verdict.accepted(), pipeline::Accepted::default(), "nothing here is a lexer artefact");
 }
 

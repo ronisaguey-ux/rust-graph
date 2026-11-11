@@ -1580,8 +1580,11 @@ impl<'a> Walker<'a> {
                     // from the spec, not from here. A template substitution's
                     // nested substitutions live inside a nested `template_string`
                     // node, which `form` reaches as the substitution's value.
+                    // A leaf identifier is a value: requiring the part to have
+                    // children of its own skipped `{a}` entirely and left the
+                    // field as the constant 0.
                     let value = self.children(child).into_iter().find(|&part| {
-                        !self.is_layout(part) && self.node(part).first_child != NONE && self.kind(part) != field
+                        !self.is_layout(part) && !matches!(self.kind(part), "{" | "}" | ":" | "!") && self.kind(part) != field
                     });
                     if let Some(value) = value {
                         parts.push(self.form(value));
