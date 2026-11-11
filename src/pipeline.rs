@@ -2647,6 +2647,24 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
         return deep;
     }
     if mode == PathMode::Auto {
+        // The lexer is the fast path, not the only one: if it found nothing and
+        // the CST found a record, the CST is the record. This is the fall
+        // *forward* — a one-pass reader that failed cannot be trusted to say
+        // what a file contains, and the deeper reader can.
+        if lexer.symbols.is_empty() && !deep.symbols.is_empty() {
+            deep_run::record(
+                path,
+                deep_run::Taken {
+                    deep: true,
+                    compared: false,
+                    errors: cst.errors,
+                    fallback: Some("the one-pass lexer found no symbols".to_string()),
+                    why: "lexer-empty",
+                    ..deep_run::Taken::default()
+                },
+            );
+            return deep;
+        }
         let verdict = loses_in(&lexer, &deep, &String::from_utf8_lossy(bytes));
         if verdict.lost() {
             // Name the fact, not just the fact that there was one: a reader
