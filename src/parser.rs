@@ -265,6 +265,14 @@ impl<'a> Parser<'a> {
                 return false;
             }
         }
+        // `if let Some(x) = e {`: the statement holds a `=` and the old test
+        // read that as an assignment rather than a block opener, so the whole
+        // body became one merged value.
+        if let Some(first) = self.stmt.iter().find(|token| token.kind == Kind::Ident) {
+            if matches!(self.raw(first), b"if" | b"for" | b"while" | b"match" | b"loop" | b"else") {
+                return true;
+            }
+        }
         let last_word = self.word_at(&self.stmt, self.stmt.len() - 1);
         if last_word.is_some_and(|word| VALUE_FOLLOWS.contains(&word.as_str())) {
             return false;
