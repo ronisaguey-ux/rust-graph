@@ -640,7 +640,26 @@ impl<'a> Walker<'a> {
             "throw_statement" | "decorator" => self.expression_statement(id),
             // `raise E(x) from c(y)`, `assert a(v), b(v)`, `del xs[k(v)]`:
             // every value-bearing child is read, not only the first.
-            "raise_statement" | "assert_statement" | "delete_statement" => self.statement_values(id),
+            // `raise ConfigError(f"..")`: the form fills the call table, but
+            // the statement itself emitted nothing, so the one-pass reader's
+            // event for it had no counterpart.
+            "raise_statement" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) || self.kind(child) == "raise" {
+                        continue;
+                    }
+                    let form = self.form(child);
+                    if form != "0" {
+                        parts.push(form);
+                    }
+                }
+                if !parts.is_empty() {
+                    let line = self.line(id);
+                    self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                }
+            }
+            "assert_statement" | "delete_statement" => self.statement_values(id),
             // `pass`, `break`, `continue`: the one-pass lexer reads the word as
             // an expression and files an `x` event for it, so the CST does too.
             // The module symbol is emitted only when it has events, so losing
