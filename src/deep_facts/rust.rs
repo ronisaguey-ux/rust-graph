@@ -145,9 +145,19 @@ impl<'a> Walker<'a> {
                 // this event an arm's value is invisible to the record.
                 let line = self.line(id);
                 if let Some(value) = self.rust_after_arrow(id) {
-                    let form = self.form(value);
-                    if form != "0" {
-                        self.event(&format!("[\"x\",{line},{form}]"));
+                    // `"--out" => options.out = Some(..)`: an arm that assigns is
+                    // an assignment, and the lexer files it with its target. An
+                    // arm recorded as a bare expression has no binder, so the
+                    // guard sees the target vanish.
+                    match self.kind(value) {
+                        "assignment_expression" => self.assignment(value, false),
+                        "compound_assignment_expr" => self.assignment(value, true),
+                        _ => {
+                            let form = self.form(value);
+                            if form != "0" {
+                                self.event(&format!("[\"x\",{line},{form}]"));
+                            }
+                        }
                     }
                 }
                 self.event("[\"e\"]");
