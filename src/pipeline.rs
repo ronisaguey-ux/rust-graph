@@ -2143,14 +2143,23 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
         // A path and its prefix name the same thing to a reader: the lexer
         // writes `rw` where the CST wrote `rw.Header` (or the reverse) when a
         // call sits in a receiver chain, and neither reading lost a fact.
-        let same_name = |row: &&String| {
-            row == &name
-                || (row.starts_with("n:") && name.starts_with("n:") && {
-                    let (row, name) = (&row[2..], &name[2..]);
-                    row.starts_with(&format!("{name}.")) || name.starts_with(&format!("{row}."))
-                })
+        // A path and its prefix name the same thing to a reader (`rw` against
+        // `rw.Header`), but that tolerance must not run before exactness: the
+        // name `Class` would otherwise consume `Class.Node` and leave the real
+        // `Class.Node` wants with nothing, which is how a pair of identical
+        // values was reported as a missing name.
+        let prefix_same = |row: &&String| {
+            row.starts_with("n:") && name.starts_with("n:") && {
+                let (row, name) = (&row[2..], &name[2..]);
+                !row.is_empty() && !name.is_empty()
+                    && (row.starts_with(&format!("{name}.")) || name.starts_with(&format!("{row}.")))
+            }
         };
-        match found.iter().position(|row| same_name(&row)) {
+        match found
+            .iter()
+            .position(|row| row.as_str() == name.as_str())
+            .or_else(|| found.iter().position(|row| prefix_same(&row)))
+        {
             Some(at) => {
                 found.swap_remove(at);
             }
@@ -2158,6 +2167,9 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
         }
     }
     if !missing.is_empty() {
+        if std::env::var("RG_GUARD_DEBUG").is_ok() {
+            eprintln!("MISS line {} deeplen={} lexlen={} deepnode={} lexnode={} missing={:?}", lexer.line, deep.value.len(), lexer.value.len(), deep.value.matches("Class.Node").count(), lexer.value.matches("Class.Node").count(), missing);
+        }
         let line_text = src.lines().nth(lexer.line.saturating_sub(1) as usize).unwrap_or("");
         if line_text.contains("b'") {
             missing.retain(|name| {
