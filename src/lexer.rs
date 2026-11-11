@@ -511,7 +511,24 @@ impl<'a> Lexer<'a> {
             return self.token(Kind::Str, start, line, col);
         }
         if byte == b'\'' {
-            let width = if self.peek(1) == b'\\' { 3 } else { 2 };
+            // A char literal may hold a longer escape than `\n`: `\x0c` is four
+            // characters and `\u{1F600}` more, so a fixed width of three ended
+            // the literal nowhere and the escape was read as a name.
+            let width = if self.peek(1) == b'\\' {
+                match self.peek(2) {
+                    b'x' => 5,
+                    b'u' => {
+                        let mut at = 3;
+                        while at < 12 && self.peek(at) != b'}' {
+                            at += 1;
+                        }
+                        at + 1
+                    }
+                    _ => 3,
+                }
+            } else {
+                2
+            };
             if self.peek(width) == b'\'' {
                 self.pos += width + 1;
                 return self.token(Kind::Str, start, line, col);
