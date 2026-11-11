@@ -1685,7 +1685,9 @@ fn is_variant_declaration(src: &str, line: u32) -> bool {
         && name.chars().next().is_some_and(char::is_uppercase)
         && !name.contains(|ch: char| !ch.is_alphanumeric() && ch != '_')
         && !payload.is_empty()
-        && payload.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == ' ' || ch == ',')
+        && payload
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | ' ' | ',' | '<' | '>' | ':' | '&' | '[' | ']' | '\''))
 }
 
 /// `#[cfg(feature = "deep")]`, `#![allow(dead_code)]`: the tokens inside an
