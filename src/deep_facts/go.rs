@@ -703,11 +703,6 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
-            // `Pool { … }`: the lexer stamps one event on the struct's line for
-            // its name and another on the first field's line for the fields.
-            // One merged event on the first line matched neither, and every
-            // function returning a struct literal fell back.
-            _ if self.is_rust() && self.kind(child) == "struct_expression" => self.rust_struct_events(child),
             _ => {
                 let value = self.form(child);
                 if value != "0" {
