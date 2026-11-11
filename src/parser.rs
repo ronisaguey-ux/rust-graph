@@ -2,6 +2,7 @@
 //! statement either opens a block (a definition, a branch) or becomes flow
 //! events on the function it sits in. The only state is the open-block stack.
 
+use std::collections::VecDeque;
 use crate::expr::{lexeme, Emit};
 use crate::facts::{Facts, Import, Symbol, IMPORT_MODULE, IMPORT_STAR, KIND_CLASS, KIND_FUNCTION, KIND_MODULE};
 use crate::json::push_string;
@@ -23,6 +24,12 @@ const ARMS: [&str; 11] =
 const NOT_A_NAME: [&str; 10] = ["return", "sizeof", "new", "function", "throw", "await", "yield", "assert", "print", "defined"];
 /// A `{` straight after one of these is a value or a destructuring pattern.
 const VALUE_FOLLOWS: [&str; 7] = ["return", "import", "export", "const", "let", "var", "type"];
+/// Words after which a `{` opens statements even in expression position, where
+/// the body reads exactly like a shorthand field list.
+const BLOCK_WORDS: [&[u8]; 4] = [b"unsafe", b"async", b"move", b"try"];
+/// Tokens a brace's body is read for before it is called a block. A field list
+/// is short; a body past this is not a shape worth more lookahead.
+const MAX_BRACE_SCAN: usize = 4096;
 const SQL_DDL: &[&str] = &["create", "alter", "drop"];
 const COLUMN_SKIP: [&str; 15] = [
     "module", "import", "data", "type", "newtype", "class", "instance", "where", "infixl", "infixr", "infix", "deriving",
@@ -77,6 +84,8 @@ pub struct Parser<'a> {
     /// Pascal: a header waiting for its `begin`.
     pending: Option<Head>,
     last_line: u32,
+    /// Tokens read past the cursor to decide what a `{` opens, in stream order.
+    ahead: VecDeque<Token>,
 }
 
 pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
@@ -92,6 +101,7 @@ pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
         rearmed: false,
         pending: None,
         last_line: 1,
+        ahead: VecDeque::new(),
     };
     parser.run()
 }
@@ -117,6 +127,47 @@ impl<'a> Parser<'a> {
         self.frames.last().expect("the module frame is never popped")
     }
 
+    /// The next token, from the lookahead buffer before the lexer: a `{` whose
+    /// meaning was decided by reading past it must not re-read those tokens
+    /// from the lexer, which has already moved on.
+    fn next_token(&mut self) -> Token {
+        self.ahead.pop_front().unwrap_or_else(|| self.lexer.next())
+    }
+
+    /// The n-th token past the cursor, filling the buffer from the lexer. `Eof`
+    /// repeats, so a peek past the end is the end rather than a longer buffer.
+    fn peek_token(&mut self, n: usize) -> Token {
+        while self.ahead.len() <= n {
+            if self.ahead.back().is_some_and(|token| token.kind == Kind::Eof) {
+                return Token { kind: Kind::Eof, start: 0, end: 0, line: self.last_line, col: 0, interp: None };
+            }
+            let token = self.lexer.next();
+            self.ahead.push_back(token);
+        }
+        self.ahead[n].clone()
+    }
+
+    /// The n-th token past the cursor that is not a line break. A struct
+    /// literal written over several lines puts a break between its brace and
+    /// its first field, so a field key is only visible past them.
+    fn peek_word(&mut self, n: usize) -> Token {
+        let mut seen = 0;
+        let mut at = 0;
+        loop {
+            let token = self.peek_token(at);
+            if token.kind == Kind::Eof {
+                return token;
+            }
+            if token.kind != Kind::Newline {
+                if seen == n {
+                    return token;
+                }
+                seen += 1;
+            }
+            at += 1;
+        }
+    }
+
     fn run(mut self) -> Facts {
         self.facts.symbols.push(Symbol { key: "<module>".into(), kind: KIND_MODULE, line: 1, ..Symbol::default() });
         self.frames.push(Frame {
@@ -129,7 +180,7 @@ impl<'a> Parser<'a> {
             defines: None,
         });
         loop {
-            let token = self.lexer.next();
+            let token = self.next_token();
             self.last_line = token.line;
             match token.kind {
                 Kind::Eof => break,
@@ -220,7 +271,8 @@ impl<'a> Parser<'a> {
     }
 
     fn on_open_brace(&mut self, token: Token) {
-        if self.uses_braces() && self.is_block() {
+        let opens_block = self.uses_braces() && self.is_block();
+        if opens_block {
             self.settle_branch(None);
             self.open_block();
         } else {
@@ -245,7 +297,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether a `{` here starts statements rather than a value.
-    fn is_block(&self) -> bool {
+    fn is_block(&mut self) -> bool {
         // `if let Some(x) = e {`: the statement holds a `=` and the old test
         // read that as an assignment rather than a block opener, so the whole
         // body became one merged value.
@@ -262,21 +314,26 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let Some(last) = self.stmt.last() else { return true };
+        // Cloned, not borrowed: deciding what the brace opens reads past the
+        // cursor, and that needs the parser itself.
+        let Some(last) = self.stmt.last().cloned() else { return true };
         if self.lang.tag == "TCL" && last.kind == Kind::Ident && self.has_def_word(&self.stmt) {
             return false;
         }
-        if self.is_op(last, b"=>") || (self.is_op(last, b"->") && !self.brackets.is_empty()) {
+        if self.is_op(&last, b"=>") || (self.is_op(&last, b"->") && !self.brackets.is_empty()) {
             return true;
         }
         if !self.brackets.is_empty() {
-            return self.is_op(last, b")") && self.function_word_in_tail();
+            return self.is_op(&last, b")") && self.function_word_in_tail();
         }
         if self.has_def_word(&self.stmt) {
             return true;
         }
+        if last.kind == Kind::Ident && !BLOCK_WORDS.contains(&self.raw(&last)) && self.field_key_ahead() {
+            return false;
+        }
         if last.kind == Kind::Op {
-            let raw = self.raw(last);
+            let raw = self.raw(&last);
             if raw != b")" && raw != b">" && raw != b"]" && raw != b"}" {
                 return false;
             }
@@ -285,7 +342,53 @@ impl<'a> Parser<'a> {
         if last_word.is_some_and(|word| VALUE_FOLLOWS.contains(&word.as_str())) {
             return false;
         }
-        !(self.top_level_assign(&self.stmt).is_some() && !self.is_op(last, b")"))
+        !(self.top_level_assign(&self.stmt).is_some() && !self.is_op(&last, b")"))
+    }
+
+    /// Whether the brace just read opens a struct literal's field list rather
+    /// than a block. Read as a block, `Kinds { definitions: A }` binds
+    /// `definitions` as a statement of its own and the value the literal
+    /// carries is lost.
+    ///
+    /// The shape is a key behind the brace (`definitions:`) or a shorthand
+    /// field, which is a bare name (`Reader { bytes, pos: 0 }`). A path is the
+    /// only thing that can name a struct, so the caller checks that first, and
+    /// the definition keywords and the arm and control openers are decided
+    /// above; what is left to rule out is a block in expression position, whose
+    /// body can read as a shorthand list but carries a statement separator.
+    fn field_key_ahead(&mut self) -> bool {
+        if self.peek_word(0).kind != Kind::Ident {
+            return false;
+        }
+        let after = self.peek_word(1);
+        let field = self.is_op(&after, b":") || self.is_op(&after, b",") || self.is_op(&after, b"}");
+        field && !self.statements_ahead()
+    }
+
+    /// Whether the brace just read holds statements before it closes. A field
+    /// list is one expression, so a separator or a binding at the brace's own
+    /// depth is the mark of a block the shapes above could not tell apart.
+    fn statements_ahead(&mut self) -> bool {
+        let mut depth = 0i32;
+        for at in 0..MAX_BRACE_SCAN {
+            let token = self.peek_token(at);
+            match token.kind {
+                Kind::Eof => return false,
+                Kind::Op => match self.raw(&token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" => depth -= 1,
+                    b"}" if depth == 0 => return false,
+                    b"}" => depth -= 1,
+                    b";" if depth == 0 => return true,
+                    _ => {}
+                },
+                Kind::Ident if depth == 0 && matches!(self.raw(&token), b"let") => return true,
+                _ => {}
+            }
+        }
+        // A body longer than the scan is a block: a field list that long is not
+        // a shape this reader has to win.
+        true
     }
 
     fn function_word_in_tail(&self) -> bool {
