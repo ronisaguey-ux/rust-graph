@@ -14,10 +14,10 @@ use crate::langs::Language;
 use crate::lexer::{Kind, Lexer, Token};
 
 /// Words that say something about a value without being one.
-const NOISE: [&str; 37] = [
+const NOISE: [&str; 38] = [
     "await", "yield", "new", "not", "typeof", "delete", "void", "throw", "raise", "async", "lambda", "in", "is", "and",
     "or", "if", "else", "for", "of", "as", "then", "do", "instanceof", "sizeof", "return", "my", "local", "let", "var",
-    "const", "final", "mut", "ref", "unsafe", "defer", "go", "our",
+    "const", "final", "mut", "ref", "unsafe", "defer", "go", "our", "pub",
 ];
 const NAMED_ARGS_WITH_COLON: [&str; 5] = ["RB", "CR", "SWIFT", "DART", "EX"];
 
