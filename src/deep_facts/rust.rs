@@ -22,10 +22,13 @@ impl<'a> Walker<'a> {
         let name = children
             .iter()
             .copied()
-            .find(|&child| matches!(self.kind(child), "identifier" | "default"))
+            .find(|&child| matches!(self.kind(child), "identifier" | "default" | "_" | "placeholder"))
             .map(|child| self.text_string(child))
             .unwrap_or_default();
-        if name.is_empty() || name == "_" {
+        // `const _: () = assert!(...)`: the name is the placeholder, and the
+        // lexer writes it as the event's target. Skipping it dropped the whole
+        // statement, including every call inside the assertion.
+        if name.is_empty() {
             return;
         }
         let Some(equal) = children.iter().position(|&child| self.kind(child) == "=") else {
