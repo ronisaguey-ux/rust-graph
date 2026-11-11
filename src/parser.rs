@@ -246,6 +246,16 @@ impl<'a> Parser<'a> {
 
     /// Whether a `{` here starts statements rather than a value.
     fn is_block(&self) -> bool {
+        // `if let Some(x) = e {`: the statement holds a `=` and the old test
+        // read that as an assignment rather than a block opener, so the whole
+        // body became one merged value.
+        if self.lang.tag == "RS" {
+            if let Some(first) = self.stmt.iter().find(|token| token.kind == Kind::Ident) {
+                if matches!(self.raw(first), b"if" | b"for" | b"while" | b"match" | b"loop" | b"else") {
+                    return true;
+                }
+            }
+        }
         let Some(last) = self.stmt.last() else { return true };
         if self.lang.tag == "TCL" && last.kind == Kind::Ident && self.has_def_word(&self.stmt) {
             return false;
@@ -263,14 +273,6 @@ impl<'a> Parser<'a> {
             let raw = self.raw(last);
             if raw != b")" && raw != b">" && raw != b"]" && raw != b"}" {
                 return false;
-            }
-        }
-        // `if let Some(x) = e {`: the statement holds a `=` and the old test
-        // read that as an assignment rather than a block opener, so the whole
-        // body became one merged value.
-        if let Some(first) = self.stmt.iter().find(|token| token.kind == Kind::Ident) {
-            if matches!(self.raw(first), b"if" | b"for" | b"while" | b"match" | b"loop" | b"else") {
-                return true;
             }
         }
         let last_word = self.word_at(&self.stmt, self.stmt.len() - 1);
