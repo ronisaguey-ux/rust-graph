@@ -833,6 +833,28 @@ impl<'a> Walker<'a> {
         while at < kids.len() {
             let start = at;
             let path = self.rust_tt_path(&kids, &mut at);
+            // `size_of::<Node>()`: the turbofish sits between the path and the
+            // argument list, so without stepping over it the walker never
+            // reached the parentheses and the call was recorded as a name.
+            if !path.is_empty() && at + 1 < kids.len()
+                && self.text_string(kids[at]) == "::"
+                && self.text_string(kids[at + 1]) == "<"
+            {
+                let mut depth = 0i32;
+                while at < kids.len() {
+                    let text = self.text_string(kids[at]);
+                    if text == "<" {
+                        depth += 1;
+                    } else if text == ">" {
+                        depth -= 1;
+                        if depth == 0 {
+                            at += 1;
+                            break;
+                        }
+                    }
+                    at += 1;
+                }
+            }
             if !path.is_empty() {
                 if at + 1 < kids.len() && self.kind(kids[at]) == "!" && matches!(self.kind(kids[at + 1]), "token_tree" | "token_tree_bracket" | "token_tree_brace") {
                     let args = self.rust_tt_value(kids[at + 1]);
