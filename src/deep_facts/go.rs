@@ -1470,11 +1470,24 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
-            // `lambda x: f(x)`: the body is the expression the lambda yields.
-            "lambda" => match self.children(id).into_iter().rev().find(|&child| !self.is_layout(child)) {
-                Some(body) => self.form(body),
-                None => "0".to_string(),
-            },
+            // `lambda x: f(x)`: the parameters and body form the lambda value.
+            "lambda" | "lambda_parameter" | "lambda_star_parameter" | "lambda_parameters" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) || matches!(self.kind(child), "lambda" | ":" | "," | "=" | "*" | "**" | "/") {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        parts.push(value);
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern" | "array_pattern" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 if items.is_empty() {
@@ -1580,12 +1593,6 @@ impl<'a> Walker<'a> {
                 let children = self.children(id);
                 children.last().filter(|&&last| last != children[0]).map(|&last| self.form(last)).unwrap_or_else(|| "0".to_string())
             }
-            // `lambda x: f(x)`: the body is an expression of its own and it is
-            // where the calls are; the parameters are names, not values.
-            "lambda" => match self.children(id).into_iter().rev().find(|&child| !self.is_layout(child)) {
-                Some(body) => self.form(body),
-                None => "0".to_string(),
-            },
             // `f"{a(x)} b{c(y)}"` and `` `a${h(x)}b${g(y)}` ``: the text is not
             // a value, but each field's expression is, and the one-pass lexer's
             // string reader forms the same merge of them. So a call written in
@@ -1827,7 +1834,8 @@ impl<'a> Walker<'a> {
                     // `a or b` there, and dropping it lost every name the
                     // receiver held.
                     let value = self.form(object);
-                    if self.path_of(object).is_empty() {
+                    let object_path = self.path_of(object);
+                    if object_path.is_empty() || object_path.starts_with('.') {
                         receiver_call = Some(value);
                     }
                 }
@@ -1836,7 +1844,10 @@ impl<'a> Walker<'a> {
             // `(_SockFilter * len(filters))(*filters)`, `handlers[k](x)` and
             // `f()()`: a callee that is not a plain name is an expression, and
             // the calls inside it are facts. A name has none, so it is skipped.
-            self.form(callee);
+            let value = self.form(callee);
+            if self.path_of(callee).is_empty() {
+                receiver_call = Some(value);
+            }
         }
         let (path, receiver) = self.call_target(callee, receiver_call);
         let line = self.call_line(callee, id);
@@ -1871,7 +1882,7 @@ impl<'a> Walker<'a> {
                 } else {
                     format!("{receiver_path}.{name}")
                 };
-                let receiver = if !receiver_path.is_empty() {
+                let receiver = if !receiver_path.is_empty() && !receiver_path.starts_with('.') {
                     let mut out = "[\"n\",".to_string();
                     push_string(&mut out, &receiver_path);
                     out.push(']');
@@ -1901,7 +1912,12 @@ impl<'a> Walker<'a> {
             }
             _ => {
                 let path = self.path_of(callee);
-                (path, "0".to_string())
+                let receiver = if path.is_empty() {
+                    receiver_call.unwrap_or_else(|| "0".to_string())
+                } else {
+                    "0".to_string()
+                };
+                (path, receiver)
             }
         }
     }

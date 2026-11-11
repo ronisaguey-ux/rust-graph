@@ -543,7 +543,20 @@ impl<'a> Walker<'a> {
         // built a statement out of it, and a statement is a node, not a leaf.
         // `true` and `false` are literals, not punctuation: the lexer reads
         // them as names (Rust) or constants, but never as nothing.
-        if matches!(self.kind(id), "true" | "false" | "self" | "this" | "super" | "_") {
+        if matches!(
+            self.kind(id),
+            "identifier"
+                | "type_identifier"
+                | "property_identifier"
+                | "field_identifier"
+                | "shorthand_property_identifier"
+                | "true"
+                | "false"
+                | "self"
+                | "this"
+                | "super"
+                | "_"
+        ) {
             return false;
         }
         if self.kind(id).as_bytes() == text {
@@ -891,10 +904,12 @@ impl<'a> Walker<'a> {
         // definition the grammar writes as one node: nothing else in the walk
         // reads that lambda, so its body is read here, as this symbol's return.
         if let Some(lambda) = self.child_of_kind(id, "lambda") {
-            let at = self.line(lambda);
-            let value = self.form(lambda);
-            if value != "0" {
-                self.event(&format!("[\"r\",{at},{value}]"));
+            if let Some(body) = self.children(lambda).into_iter().rev().find(|&child| !self.is_layout(child)) {
+                let at = self.line(lambda);
+                let value = self.form(body);
+                if value != "0" {
+                    self.event(&format!("[\"r\",{at},{value}]"));
+                }
             }
         }
     }
