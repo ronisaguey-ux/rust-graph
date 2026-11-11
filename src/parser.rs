@@ -1231,6 +1231,11 @@ impl<'a> Parser<'a> {
         let mut start = 0;
         while self.word_at(stmt, start).as_deref().is_some_and(|word| MODIFIERS.contains(&word)) {
             start += 1;
+            if stmt.get(start).is_some_and(|t| self.is_op(t, b"(")) {
+                if let Some((_, close)) = self.group_at(stmt, start) {
+                    start = close + 1;
+                }
+            }
         }
         let local_require = self.top_level_assign(stmt).filter(|equal| {
             self.word_at(stmt, equal + 1).is_some_and(|word| self.lang.import_words.contains(&word.as_str()))
@@ -1267,7 +1272,6 @@ impl<'a> Parser<'a> {
         }
         let mut module = String::new();
         let mut alias = String::new();
-        let mut names: Vec<(String, String)> = Vec::new();
         let mut index = 0;
         while let Some(token) = rest.get(index) {
             match token.kind {
@@ -1277,15 +1281,10 @@ impl<'a> Parser<'a> {
                 }
                 Kind::Ident => module.push_str(&self.text(token)),
                 Kind::Op if self.is_op(token, b"{") => {
-                    let close = rest.iter().position(|t| self.is_op(t, b"}")).unwrap_or(rest.len());
-                    for part in rest[index + 1..close].split(|t| self.is_op(t, b",")) {
-                        if let Some(first) = part.iter().find(|t| t.kind == Kind::Ident) {
-                            let name = self.text(first);
-                            let renamed = part.last().filter(|_| part.len() >= 3).map_or(name.clone(), |t| self.text(t));
-                            names.push((name, renamed));
-                        }
-                    }
-                    break;
+                    let prefix = module.trim_end_matches('.').to_string();
+                    let before = self.facts.imports.len();
+                    self.path_use_list(&rest[index + 1..], &prefix, line);
+                    return self.facts.imports.len() > before || !prefix.is_empty();
                 }
                 Kind::Op if matches!(self.raw(token), b"." | b"::" | b"\\" | b"/" | b":") => module.push('.'),
                 Kind::Op if self.is_op(token, b"*") => {
@@ -1305,14 +1304,112 @@ impl<'a> Parser<'a> {
         if module.is_empty() {
             return false;
         }
-        for (name, renamed) in names.iter() {
-            self.facts.imports.push(Import { line, module: module.clone(), name: name.clone(), alias: renamed.clone(), kind: IMPORT_MODULE });
-        }
-        if names.is_empty() {
-            let alias = if alias.is_empty() { module.rsplit('.').next().unwrap_or("").to_string() } else { alias };
-            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
-        }
+        let alias = if alias.is_empty() { module.rsplit('.').next().unwrap_or("").to_string() } else { alias };
+        self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
         true
+    }
+
+    fn path_use_list(&mut self, toks: &[Token], base_module: &str, line: u32) {
+        let mut depth = 0usize;
+        let mut close = toks.len();
+        for (i, token) in toks.iter().enumerate() {
+            if self.is_op(token, b"{") {
+                depth += 1;
+            } else if self.is_op(token, b"}") {
+                if depth == 0 {
+                    close = i;
+                    break;
+                }
+                depth -= 1;
+            }
+        }
+        let mut start = 0usize;
+        let mut nest = 0usize;
+        for i in 0..=close {
+            let at_end = i == close;
+            let is_top_comma = !at_end && {
+                let token = &toks[i];
+                if self.is_op(token, b"{") {
+                    nest += 1;
+                    false
+                } else if self.is_op(token, b"}") {
+                    nest = nest.saturating_sub(1);
+                    false
+                } else {
+                    nest == 0 && self.is_op(token, b",")
+                }
+            };
+            if at_end || is_top_comma {
+                let part = &toks[start..i];
+                start = i + 1;
+                self.path_use_item(part, base_module, line);
+            }
+        }
+    }
+
+    fn path_use_item(&mut self, part: &[Token], base_module: &str, line: u32) {
+        if let Some(brace_at) = part.iter().position(|t| self.is_op(t, b"{")) {
+            let sub: Vec<String> = part[..brace_at]
+                .iter()
+                .filter(|t| t.kind == Kind::Ident)
+                .map(|t| self.text(t))
+                .collect();
+            let sub_str = sub.join(".");
+            let next_module = match (base_module.is_empty(), sub_str.is_empty()) {
+                (true, _) => sub_str,
+                (_, true) => base_module.to_string(),
+                _ => format!("{base_module}.{sub_str}"),
+            };
+            self.path_use_list(&part[brace_at + 1..], &next_module, line);
+            return;
+        }
+        if let Some(star_at) = part.iter().position(|t| self.is_op(t, b"*")) {
+            let sub: Vec<String> = part[..star_at]
+                .iter()
+                .filter(|t| t.kind == Kind::Ident)
+                .map(|t| self.text(t))
+                .collect();
+            let sub_str = sub.join(".");
+            let star_module = match (base_module.is_empty(), sub_str.is_empty()) {
+                (true, _) => sub_str,
+                (_, true) => base_module.to_string(),
+                _ => format!("{base_module}.{sub_str}"),
+            };
+            self.facts.imports.push(Import {
+                line,
+                module: star_module,
+                kind: IMPORT_STAR,
+                ..Import::default()
+            });
+            return;
+        }
+        let rename_at = part
+            .iter()
+            .position(|t| (t.kind == Kind::Ident && self.raw(t) == b"as") || self.is_op(t, b"=>"));
+        let path_slice = rename_at.map_or(part, |at| &part[..at]);
+        let mut segs: Vec<String> = path_slice
+            .iter()
+            .filter(|t| t.kind == Kind::Ident)
+            .map(|t| self.text(t))
+            .collect();
+        let Some(name) = segs.pop() else { return };
+        let sub_str = segs.join(".");
+        let item_module = match (base_module.is_empty(), sub_str.is_empty()) {
+            (true, _) => sub_str,
+            (_, true) => base_module.to_string(),
+            _ => format!("{base_module}.{sub_str}"),
+        };
+        let alias = rename_at
+            .and_then(|at| part.get(at + 1))
+            .filter(|t| t.kind == Kind::Ident)
+            .map_or_else(|| name.clone(), |t| self.text(t));
+        self.facts.imports.push(Import {
+            line,
+            module: item_module,
+            name,
+            alias,
+            kind: IMPORT_MODULE,
+        });
     }
 
     fn top_level_assign(&self, toks: &[Token]) -> Option<usize> {

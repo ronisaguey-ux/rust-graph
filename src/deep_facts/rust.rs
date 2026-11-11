@@ -168,6 +168,14 @@ impl<'a> Walker<'a> {
                 self.rust_import(id);
                 true
             }
+            "macro_definition" | "decl_macro" => {
+                for child in self.children(id) {
+                    if matches!(self.kind(child), "token_tree" | "token_tree_brace" | "token_tree_bracket") {
+                        self.rust_tt_value(child);
+                    }
+                }
+                true
+            }
             "let_declaration" => {
                 self.rust_let(id);
                 true
@@ -452,7 +460,7 @@ impl<'a> Walker<'a> {
         let line = self.line(id);
         for child in self.children(id) {
             match self.kind(child) {
-                "use" | ";" => {}
+                "use" | ";" | "visibility_modifier" => {}
                 "use_as_clause" => {
                     let inner = self.children(child);
                     let Some(&path) = inner.first() else { continue };
@@ -498,24 +506,60 @@ impl<'a> Walker<'a> {
     pub(crate) fn rust_use_list(&mut self, id: u32, module: &str, line: u32) {
         for child in self.children(id) {
             match self.kind(child) {
+                "scoped_use_list" => {
+                    let inner = self.children(child);
+                    let Some(&path) = inner.first() else { continue };
+                    let sub = if self.kind(path) == "use_list" { String::new() } else { self.rust_module_text(path) };
+                    let Some(&list) = inner.iter().find(|&&node| self.kind(node) == "use_list") else { continue };
+                    let next_module = match (module.is_empty(), sub.is_empty()) {
+                        (true, _) => sub,
+                        (_, true) => module.to_string(),
+                        _ => format!("{module}.{sub}"),
+                    };
+                    self.rust_use_list(list, &next_module, line);
+                }
+                "use_list" => self.rust_use_list(child, module, line),
+                "use_wildcard" | "*" => {
+                    let sub = self.rust_module_text(child);
+                    let star_module = match (module.is_empty(), sub.is_empty() || sub == "*") {
+                        (true, true) => String::new(),
+                        (true, false) => sub,
+                        (false, true) => module.to_string(),
+                        (false, false) => format!("{module}.{sub}"),
+                    };
+                    self.facts.imports.push(Import {
+                        line,
+                        module: star_module,
+                        kind: IMPORT_STAR,
+                        ..Import::default()
+                    });
+                }
                 "use_as_clause" => {
                     let inner = self.children(child);
                     let Some(&path) = inner.first() else { continue };
-                    let name = self.rust_module_text(path);
+                    let full = self.rust_module_text(path);
+                    let (module_name, name) = match full.rsplit_once('.') {
+                        Some((sub, member)) if module.is_empty() => (sub.to_string(), member.to_string()),
+                        Some((sub, member)) => (format!("{module}.{sub}"), member.to_string()),
+                        None => (module.to_string(), full),
+                    };
                     let alias = inner.last().filter(|&&last| last != path).map(|&last| self.text_string(last));
                     self.facts.imports.push(Import {
                         line,
-                        module: module.into(),
-                        name,
-                        alias: alias.unwrap_or_default(),
+                        module: module_name,
+                        name: name.clone(),
+                        alias: alias.unwrap_or(name),
                         kind: IMPORT_MODULE,
                     });
                 }
-                "identifier" | "scoped_identifier" | "type_identifier" | "self" => {
-                    let name = self.rust_module_text(child);
-                    let (module_name, member) = match module.rsplit_once('.') {
-                        _ if module.is_empty() => (String::new(), name.clone()),
-                        _ => (module.to_string(), name.clone()),
+                kind if matches!(kind, "identifier" | "scoped_identifier" | "type_identifier" | "self" | "super" | "crate")
+                    || self.kinds.soft.contains(&kind) =>
+                {
+                    let path = self.rust_module_text(child);
+                    let (module_name, member) = match path.rsplit_once('.') {
+                        Some((sub, member)) if module.is_empty() => (sub.to_string(), member.to_string()),
+                        Some((sub, member)) => (format!("{module}.{sub}"), member.to_string()),
+                        None => (module.to_string(), path),
                     };
                     self.facts.imports.push(Import {
                         line,
@@ -910,6 +954,22 @@ impl<'a> Walker<'a> {
         let mut at = 0;
         while at < kids.len() {
             let start = at;
+            if self.kind(kids[start]) == "use" {
+                let mut next = start + 1;
+                let module = self.rust_tt_path(&kids, &mut next);
+                if !module.is_empty() && next < kids.len() && self.text_string(kids[next]) == ";" {
+                    let alias = module.rsplit('.').next().unwrap_or("").to_string();
+                    self.facts.imports.push(Import {
+                        line: self.line(kids[start]),
+                        module,
+                        alias,
+                        kind: IMPORT_MODULE,
+                        ..Import::default()
+                    });
+                    at = next + 1;
+                    continue;
+                }
+            }
             let path = self.rust_tt_path(&kids, &mut at);
             // `size_of::<Node>()`: the turbofish sits between the path and the
             // argument list, so without stepping over it the walker never
