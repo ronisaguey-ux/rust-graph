@@ -371,6 +371,27 @@ impl Emit<'_> {
     fn chain(&mut self, out: &mut String, mut value: String, mut path: String, line: u32) {
         let mut constructed = None;
         loop {
+            // `.collect::<Vec<_>>()`: a turbofish names a type, not a value.
+            // Reading its words as names put `Vec` and `_` in the record where
+            // the CST has a call and nothing else.
+            if self.is_op(0, b"::") && self.is_op(1, b"<") {
+                self.pos += 2;
+                let mut depth = 1;
+                while let Some(token) = self.tok(0) {
+                    let text = &self.src[token.start as usize..token.end as usize];
+                    if text == b"<" {
+                        depth += 1;
+                    } else if text == b">" {
+                        depth -= 1;
+                        if depth == 0 {
+                            self.pos += 1;
+                            break;
+                        }
+                    }
+                    self.pos += 1;
+                }
+                continue;
+            }
             let separator = self.is_op(0, b".")
                 || self.is_op(0, b"->")
                 || self.is_op(0, b"::")
