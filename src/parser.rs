@@ -1194,7 +1194,12 @@ impl<'a> Parser<'a> {
             match self.raw(token) {
                 b"(" | b"[" | b"{" => depth += 1,
                 b")" | b"]" | b"}" => depth -= 1,
-                b"=" | b":=" | b"+=" | b"-=" | b".=" | b"|=" | b"||=" | b"&&=" | b"??=" | b"<-" if depth == 0 => return Some(index),
+                b"=" | b":=" | b"+=" | b"-=" | b".=" | b"|=" | b"||=" | b"&&=" | b"??=" | b"<-" | b"*=" | b"/=" | b"%="
+                | b"&=" | b"^=" | b"<<=" | b">>="
+                    if depth == 0 =>
+                {
+                    return Some(index)
+                }
                 _ => {}
             }
         }
