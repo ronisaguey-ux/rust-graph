@@ -343,7 +343,14 @@ impl<'a> Lexer<'a> {
             Interp::Hash | Interp::Dollar | Interp::Swift if quote == b'"' => self.lang.interp,
             _ => Interp::None,
         };
-        let multi_line = triple || quote == b'`' || self.lang.sigils || self.lang.interp == Interp::Hash;
+        // A Rust string literal may carry a raw newline, and the CST reads one
+        // token where a line-bounded scanner reads a dangling word followed by
+        // whatever the next line starts with.
+        let multi_line = triple
+            || quote == b'`'
+            || self.lang.sigils
+            || self.lang.interp == Interp::Hash
+            || self.lang.tag == "RS";
         let parts = self.scan_interpolated(close, interp, multi_line);
         let mut token = self.token(Kind::Str, start, line, col);
         if !parts.is_empty() {
