@@ -817,7 +817,28 @@ impl<'a> Walker<'a> {
             let node = kids[*at];
             let kind = self.kind(node);
             let text = self.text_string(node);
-            if matches!(kind, "identifier" | "scoped_identifier" | "type_identifier" | "self" | "this" | "super") {
+            // The weak keywords are names wherever the grammar's `_name` and
+            // `_macro_path` rules accept one, and a token tree is exactly where
+            // nothing re-parses them: `matches!(self.raw(&t), …)` lexes `raw`
+            // as its keyword, so a path that stopped at `identifier` lost the
+            // call the macro will evaluate.
+            if matches!(
+                kind,
+                "identifier"
+                    | "scoped_identifier"
+                    | "type_identifier"
+                    | "self"
+                    | "this"
+                    | "super"
+                    | "crate"
+                    | "Self"
+                    | "union"
+                    | "default"
+                    | "raw"
+                    | "auto"
+                    | "safe"
+                    | "macro_rules"
+            ) {
                 if !path.is_empty() && !path.ends_with('.') {
                     break;
                 }
