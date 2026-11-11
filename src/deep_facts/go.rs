@@ -857,6 +857,19 @@ impl<'a> Walker<'a> {
             // annotation, not the annotation. Reading it keeps the event an
             // assignment (`["a",...]`) instead of a bare expression (`["x",...]`).
             "annotated" => self.children(id).first().and_then(|&first| self.value_path(first)).into_iter().collect(),
+            // `*slot = slot.wrapping_add(value)`: the target is the value the
+            // pointer refers to, so the name is the operand. Read as a bare
+            // unary expression the assignment has no target at all and the
+            // event cannot be paired with the lexer's.
+            "unary_expression" | "unary" | "pointer_expression" => self
+                .children(id)
+                .into_iter()
+                .filter(|&child| !self.is_layout(child) && self.kind(child) != "*")
+                .find_map(|child| {
+                    let targets = self.assignment_targets(child);
+                    (!targets.is_empty()).then_some(targets)
+                })
+                .unwrap_or_default(),
             // `meter.exhausted = …`: a field path is a target like any other
             // path, and `value_path` does not read one.
             _ => match self.value_path(id) {
