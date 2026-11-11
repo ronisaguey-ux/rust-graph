@@ -658,6 +658,15 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn expression_statement(&mut self, id: u32) {
         let Some(child) = self.expression_child(id) else { return };
+        if let Some((lhs, module)) = self.require_assignment(child) {
+            let line = self.line(id);
+            if matches!(self.kind(lhs), "object_pattern" | "object") {
+                self.js_require_destructured(lhs, &module, line);
+            } else if let Some(alias) = self.last_name(lhs) {
+                self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+            }
+            return;
+        }
         if let Some(module) = self.require_module(child) {
             let line = self.line(id);
             self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
@@ -728,7 +737,12 @@ impl<'a> Walker<'a> {
     pub(crate) fn return_statement(&mut self, id: u32) {
         let line = self.line(id);
         let value = match self.expression_child(id) {
-            Some(child) => self.form(child),
+            Some(child) => {
+                if let Some(module) = self.require_module(child) {
+                    self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
+                }
+                self.form(child)
+            }
             None => "0".to_string(),
         };
         self.event(&format!("[\"r\",{line},{value}]"));
@@ -738,21 +752,123 @@ impl<'a> Walker<'a> {
     /// has it; with one it is an assignment.
     /// `require('x')` is an import, not a call: the lexer path agrees, and a
     /// resolver treats the module string, not a callee named `require`.
-    pub(crate) fn require_module(&self, call: u32) -> Option<String> {
-        if !matches!(self.kind(call), "call_expression" | "call") {
-            return None;
+    pub(crate) fn require_module(&self, root: u32) -> Option<String> {
+        let mut stack = vec![(root, false)];
+        while let Some((node, in_args)) = stack.pop() {
+            let kind = self.kind(node);
+            if matches!(kind, "call_expression" | "call" | "import_require_clause") {
+                let children = self.children(node);
+                if let Some(&callee) = children.first() {
+                    if self.kind(callee) == "identifier" && self.text_string(callee) == "require" {
+                        if let Some(&args) = children.iter().find(|&&c| self.kind(c) == "arguments") {
+                            let inner: Vec<u32> = self.children(args).into_iter().filter(|&c| !self.is_layout(c)).collect();
+                            if inner.len() == 1 && self.kind(inner[0]) == "string" {
+                                return Some(self.string_value(inner[0]));
+                            }
+                        }
+                    }
+                }
+            }
+            let next_in_args = in_args || kind == "arguments";
+            for child in self.children(node).into_iter().rev() {
+                let ck = self.kind(child);
+                if !next_in_args
+                    && (matches!(ck, "statement_block" | "block" | "class_body")
+                        || self.kinds.definitions.iter().any(|def| def.kind == ck))
+                {
+                    continue;
+                }
+                stack.push((child, next_in_args));
+            }
         }
-        let children = self.children(call);
-        let callee = children.first()?;
-        if self.kind(*callee) != "identifier" || self.text_string(*callee) != "require" {
-            return None;
+        None
+    }
+
+    pub(crate) fn require_assignment(&self, root: u32) -> Option<(u32, String)> {
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            let kind = self.kind(node);
+            if matches!(kind, "assignment" | "assignment_expression") {
+                let children = self.children(node);
+                if let (Some(&lhs), Some(&rhs)) = (children.first(), children.last()) {
+                    if lhs != rhs && !self.kinds.definitions.iter().any(|def| def.kind == self.kind(rhs)) {
+                        if let Some(module) = self.require_module(rhs) {
+                            return Some((lhs, module));
+                        }
+                    }
+                }
+            }
+            for child in self.children(node).into_iter().rev() {
+                let ck = self.kind(child);
+                if matches!(ck, "statement_block" | "block" | "class_body" | "arguments")
+                    || self.kinds.definitions.iter().any(|def| def.kind == ck)
+                {
+                    continue;
+                }
+                stack.push(child);
+            }
         }
-        let args = children.iter().find(|&&child| self.kind(child) == "arguments")?;
-        let inner: Vec<u32> = self.children(*args).into_iter().filter(|&child| !self.is_layout(child)).collect();
-        if inner.len() != 1 {
-            return None;
+        None
+    }
+
+    pub(crate) fn js_require_destructured(&mut self, pat: u32, module: &str, line: u32) {
+        for child in self.children(pat) {
+            match self.kind(child) {
+                "shorthand_property_identifier_pattern" | "shorthand_property_identifier" | "identifier" => {
+                    let name = self.text_string(child);
+                    self.facts.imports.push(Import {
+                        line,
+                        module: module.into(),
+                        name: name.clone(),
+                        alias: name,
+                        kind: IMPORT_MODULE,
+                    });
+                }
+                "object_assignment_pattern" | "assignment_pattern" => {
+                    if let Some(&first) = self.children(child).first() {
+                        let name = self.text_string(first);
+                        self.facts.imports.push(Import {
+                            line,
+                            module: module.into(),
+                            name: name.clone(),
+                            alias: name,
+                            kind: IMPORT_MODULE,
+                        });
+                    }
+                }
+                "pair_pattern" | "pair" => {
+                    let kids = self.children(child);
+                    let Some(&first) = kids.first() else { continue };
+                    let name = self.text_string(first);
+                    let Some(&last) = kids.last().filter(|&&l| l != first) else { continue };
+                    if matches!(self.kind(last), "object_pattern" | "object") {
+                        self.facts.imports.push(Import {
+                            line,
+                            module: module.into(),
+                            name,
+                            alias: "{".into(),
+                            kind: IMPORT_MODULE,
+                        });
+                        self.js_require_destructured(last, module, line);
+                    } else {
+                        let alias_node = if matches!(self.kind(last), "assignment_pattern" | "object_assignment_pattern") {
+                            self.children(last).first().copied().unwrap_or(last)
+                        } else {
+                            last
+                        };
+                        let alias = self.text_string(alias_node);
+                        self.facts.imports.push(Import {
+                            line,
+                            module: module.into(),
+                            name,
+                            alias,
+                            kind: IMPORT_MODULE,
+                        });
+                    }
+                }
+                _ => {}
+            }
         }
-        (self.kind(inner[0]) == "string").then(|| self.string_value(inner[0]))
     }
 
     pub(crate) fn declarator(&mut self, id: u32) {
@@ -771,26 +887,30 @@ impl<'a> Walker<'a> {
             return;
         };
         let Some(&value) = children.get(equal + 1) else { return };
-        if let Some(module) = self.require_module(value) {
-            // `const { a, b } = require('m')` takes named members; `const x =
-            // require('m')` binds the module itself, so it has no member name.
-            let destructured = matches!(self.kind(name_node), "object_pattern" | "array_pattern");
-            let names = self.pattern_names(name_node);
-            let line = self.line(id);
-            for name in names {
-                let (member, alias) = if destructured { (name.clone(), name) } else { (String::new(), name) };
-                self.facts
-                    .imports
-                    .push(Import { line, module: module.clone(), name: member, alias, kind: IMPORT_MODULE });
-            }
-            return;
-        }
         // `const f = () => {}`: the binding is a definition, not a value, and
         // the walk opens the symbol when it reaches the function node.
         if self.kinds.definitions.iter().any(|def| def.kind == self.kind(value)) {
             let names = self.pattern_names(name_node);
             if let Some(name) = names.into_iter().next() {
                 self.bound.push((value, name));
+            }
+            return;
+        }
+        if let Some(module) = self.require_module(value) {
+            // `const { a, b } = require('m')` takes named members; `const x =
+            // require('m')` binds the module itself, so it has no member name.
+            let line = self.line(id);
+            if matches!(self.kind(name_node), "object_pattern" | "object") {
+                self.js_require_destructured(name_node, &module, line);
+                return;
+            }
+            let destructured = self.kind(name_node) == "array_pattern";
+            let names = self.pattern_names(name_node);
+            for name in names {
+                let (member, alias) = if destructured { (name.clone(), name) } else { (String::new(), name) };
+                self.facts
+                    .imports
+                    .push(Import { line, module: module.clone(), name: member, alias, kind: IMPORT_MODULE });
             }
             return;
         }
@@ -1242,12 +1362,37 @@ impl<'a> Walker<'a> {
             .map(|&child| self.string_value(child))
             .unwrap_or_default();
         if module.is_empty() {
+            if let Some(&alias_node) = children.iter().find(|&&c| self.kind(c) == "import_alias") {
+                let inner = self.children(alias_node);
+                if let Some(&name_node) = inner.first() {
+                    if let Some(req_mod) = self.require_module(alias_node) {
+                        let alias = self.text_string(name_node);
+                        self.facts.imports.push(Import {
+                            line,
+                            module: req_mod,
+                            alias,
+                            kind: IMPORT_MODULE,
+                            ..Import::default()
+                        });
+                    }
+                }
+            }
+            return;
+        }
+        if let Some(star_at) = children.iter().position(|&child| self.kind(child) == "*") {
+            let alias = if children.get(star_at + 1).is_some_and(|&child| self.kind(child) == "as") {
+                children.get(star_at + 2).map(|&child| self.text_string(child)).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let kind = if alias.is_empty() { IMPORT_STAR } else { IMPORT_MODULE };
+            self.facts.imports.push(Import { line, module, alias, kind, ..Import::default() });
             return;
         }
         for child in children {
             match self.kind(child) {
                 "import_clause" | "export_clause" => self.js_bindings(child, &module, line),
-                "import_specifier" => self.js_specifier(child, &module, line),
+                "import_specifier" | "export_specifier" => self.js_specifier(child, &module, line),
                 "string" | "import" | "export" | "from" | ";" => {}
                 _ => self.js_bindings(child, &module, line),
             }
@@ -1265,13 +1410,13 @@ impl<'a> Walker<'a> {
                 }
                 "named_imports" | "named_exports" => {
                     for specifier in self.children(child) {
-                        if self.kind(specifier) == "import_specifier" {
+                        if matches!(self.kind(specifier), "import_specifier" | "export_specifier") {
                             self.js_specifier(specifier, module, line);
                         }
                     }
                 }
-                "import_specifier" => self.js_specifier(child, module, line),
-                "namespace_import" => {
+                "import_specifier" | "export_specifier" => self.js_specifier(child, module, line),
+                "namespace_import" | "namespace_export" => {
                     let alias = self.children(child).into_iter().rev().find_map(|node| {
                         (self.kind(node) == "identifier").then(|| self.text_string(node))
                     });

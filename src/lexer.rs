@@ -87,7 +87,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn is_ident(&self, byte: u8) -> bool {
-        byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80 || self.lang.ident_extra.contains(&byte)
+        byte.is_ascii_alphanumeric()
+            || byte == b'_'
+            || byte >= 0x80
+            || self.lang.ident_extra.contains(&byte)
+            || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS"))
     }
 
     fn skip_to_newline(&mut self) {
@@ -468,7 +472,7 @@ impl<'a> Lexer<'a> {
                 return self.token(Kind::Ident, name, line, col);
             }
         }
-        if is_ident_start(byte) {
+        if is_ident_start(byte) || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS")) {
             while self.is_ident(self.peek(0)) {
                 self.pos += 1;
             }
