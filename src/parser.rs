@@ -1588,16 +1588,9 @@ impl<'a> Parser<'a> {
             index += 1;
         }
         if let Some(head) = self.assigned_head(toks) {
-            if std::env::var("RG_PARSER_DEBUG").is_ok() {
-                eprintln!("head by assign: {}", head.name);
-            }
             return Some(head);
         }
-        let head = (at_block && self.uses_braces()).then(|| self.c_style_head(toks)).flatten();
-        if std::env::var("RG_PARSER_DEBUG").is_ok() {
-            eprintln!("head by c_style: {:?}", head.as_ref().map(|h| h.name.clone()));
-        }
-        head
+        (at_block && self.uses_braces()).then(|| self.c_style_head(toks)).flatten()
     }
 
     fn simple_statement(&mut self, stmt: &[Token]) {
