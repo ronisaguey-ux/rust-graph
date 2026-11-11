@@ -1527,7 +1527,7 @@ impl<'a> Parser<'a> {
             return Some(Head { name, params, ..Head::default() });
         }
         let mut depth = 0;
-        let mut group = None;
+        let mut groups: Vec<usize> = Vec::new();
         for (index, token) in toks.iter().enumerate() {
             if token.kind != Kind::Op {
                 continue;
@@ -1535,19 +1535,25 @@ impl<'a> Parser<'a> {
             match self.raw(token) {
                 b"(" => {
                     if depth == 0 {
-                        group = Some(index);
+                        groups.push(index);
                     }
                     depth += 1;
                 }
                 b")" => depth -= 1,
-                b":" if depth == 0 && group.is_some() => break,
+                b":" if depth == 0 && !groups.is_empty() => break,
                 _ => {}
             }
         }
-        let open = group?;
-        if open == 0 {
-            return None;
-        }
+        // `pub(super) fn parse_with(..)`: the visibility group is also a group
+        // at depth zero, and taking it as the parameter list named the function
+        // `pub` — or, once `pub` was refused, nothing at all. The head's group
+        // is the first one that has a usable name in front of it.
+        let open = *groups.iter().find(|&&open| {
+            open > 0
+                && self
+                    .word_at(toks, open - 1)
+                    .is_some_and(|name| !CONTROL.contains(&name.as_str()) && !NOT_A_NAME.contains(&name.as_str()))
+        })?;
         let name_at = open - 1;
         let name = self.word_at(toks, name_at)?;
         if CONTROL.contains(&name.as_str()) || NOT_A_NAME.contains(&name.as_str()) {
@@ -1582,9 +1588,16 @@ impl<'a> Parser<'a> {
             index += 1;
         }
         if let Some(head) = self.assigned_head(toks) {
+            if std::env::var("RG_PARSER_DEBUG").is_ok() {
+                eprintln!("head by assign: {}", head.name);
+            }
             return Some(head);
         }
-        (at_block && self.uses_braces()).then(|| self.c_style_head(toks)).flatten()
+        let head = (at_block && self.uses_braces()).then(|| self.c_style_head(toks)).flatten();
+        if std::env::var("RG_PARSER_DEBUG").is_ok() {
+            eprintln!("head by c_style: {:?}", head.as_ref().map(|h| h.name.clone()));
+        }
+        head
     }
 
     fn simple_statement(&mut self, stmt: &[Token]) {
