@@ -1274,6 +1274,16 @@ fn phantom_call(path: &str) -> Option<Phantom> {
     (!path.contains('.') && KEYWORD_STATEMENTS.contains(&path)).then_some(Phantom::Keyword)
 }
 
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_keyword_statement_event(mut payload: &str) -> bool {
+    while let Some(rest) = payload.strip_prefix("[\"t\",[").or_else(|| payload.strip_prefix("[\"m\",[")) {
+        payload = rest;
+    }
+    ["assert", "del", "global", "nonlocal"]
+        .iter()
+        .any(|kw| payload.starts_with(&format!("[\"n\",\"{kw}\"]")))
+}
+
 /// How the two records compare: a loss, or the lexer artefacts accepted in its
 /// place. A loss keeps the lexer's record; an acceptance is counted and does
 /// not decide anything.
@@ -1484,6 +1494,14 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
                     row.name == symbol.name
                         && row.kind == symbol.kind
                         && (symbol.owner.is_empty() || row.owner.is_empty() || row.owner == symbol.owner)
+                        && (row.line as i64 - symbol.line as i64).abs() <= 2
+                })
+                .or_else(|| {
+                    deep.symbols.iter().find(|row| {
+                        row.name == symbol.name
+                            && row.kind == symbol.kind
+                            && (symbol.owner.is_empty() || row.owner.is_empty() || row.owner == symbol.owner)
+                    })
                 })
         };
         let Some(paired) = paired else { continue };
@@ -1544,7 +1562,7 @@ fn uncovered(
             accepted.positional_events += 1;
             continue;
         }
-        if event.tag == b'x' && keyword_lines.contains(&event.line) {
+        if event.tag == b'x' && (keyword_lines.contains(&event.line) || is_keyword_statement_event(event.payload)) {
             accepted.keyword_events += 1;
             continue;
         }
@@ -2477,12 +2495,14 @@ fn strip_literal_prefixes(mut value: String, src: &str, line: u32) -> String {
     // conversion can name. `{stripped!r}` is not a name `r` any more than
     // `r"..."` is, and the one-pass lexer reads both as one.
     const QUOTED: [&str; 5] = ["br", "b", "r", "c", "f"];
-    const CONVERTED: [&str; 3] = ["r", "s", "a"];
-    for prefix in ["br", "b", "r", "c", "f", "s", "a"] {
+    const CONVERTED: [&str; 4] = ["r", "s", "a", "g"];
+    for prefix in ["br", "b", "r", "c", "f", "s", "a", "g"] {
         let quoted = QUOTED.contains(&prefix)
             && (text.contains(&format!("{prefix}'")) || text.contains(&format!("{prefix}\"")));
         let converted = CONVERTED.contains(&prefix)
-            && (text.contains(&format!("!{prefix}}}")) || text.contains(&format!("!{prefix}:")));
+            && (text.contains(&format!("!{prefix}}}"))
+                || text.contains(&format!("!{prefix}:"))
+                || text.contains(&format!(":{prefix}}}")));
         if !quoted && !converted {
             continue;
         }
