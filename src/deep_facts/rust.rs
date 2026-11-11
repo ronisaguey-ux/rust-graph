@@ -361,10 +361,20 @@ impl<'a> Walker<'a> {
             "tuple_struct_pattern" => {
                 self.children(id).into_iter().skip(1).flat_map(|child| self.rust_pattern_names(child)).collect()
             }
-            "struct_pattern" => self
+            // `Event::Start { forward_parent: next, .. }`: the field patterns
+            // sit in a `field_pattern_list` of their own, so a scan of the
+            // pattern's own children found none and the name it binds was
+            // lost. The path before the brace names the variant, not a binder,
+            // which is why only the field kinds are followed.
+            "struct_pattern" | "field_pattern_list" => self
                 .children(id)
                 .into_iter()
-                .filter(|&child| matches!(self.kind(child), "field_pattern" | "shorthand_field_identifier" | "remaining_field_pattern"))
+                .filter(|&child| {
+                    matches!(
+                        self.kind(child),
+                        "field_pattern" | "shorthand_field_identifier" | "remaining_field_pattern" | "field_pattern_list"
+                    )
+                })
                 .flat_map(|child| self.rust_pattern_names(child))
                 .collect(),
             // `Struct { field: binder }` binds `binder`; `Struct { field }`

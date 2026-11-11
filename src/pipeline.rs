@@ -1531,7 +1531,10 @@ fn uncovered(
             // and the lexer reads the bare ones as a tuple value of its own.
             || is_variant_declaration(src, event.line)
             || is_pattern_line(src, event.line)
-            || (event.tag == b'x' && is_let_else_line(src, event.line))
+            // The lexer files the merged header as a bare statement, or as an
+            // assignment when it reads the pattern's binder, and the CST
+            // records the binding and the block's statements apart.
+            || (matches!(event.tag, b'x' | b'a') && is_let_else_line(src, event.line))
             || (event.tag == b'a' && is_control_cast_line(src, event.line))
             || (event.tag == b'x' && is_struct_pattern_condition(src, event.line))
             || (event.tag == b'x' && is_else_if_let_line(src, event.line))
