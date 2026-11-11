@@ -250,6 +250,12 @@ impl<'a> Parser<'a> {
         // read that as an assignment rather than a block opener, so the whole
         // body became one merged value.
         if self.lang.tag == "RS" {
+            // `let digits = |c: &mut Cursor| {`: the closure's parameter list
+            // ends on a bar, and a bar is not one of the openers the test above
+            // accepts, so the body was folded into the binding's value.
+            if self.stmt.last().is_some_and(|token| self.raw(token) == b"|") {
+                return true;
+            }
             if let Some(first) = self.stmt.iter().find(|token| token.kind == Kind::Ident) {
                 if matches!(self.raw(first), b"if" | b"for" | b"while" | b"match" | b"loop" | b"else") {
                     return true;
