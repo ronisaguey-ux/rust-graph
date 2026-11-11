@@ -140,9 +140,15 @@ impl<'a> Walker<'a> {
             }
             "match_arm" => {
                 // `pat => expr,`: the arm's value is an expression of its own,
-                // and where the calls written after `=>` live.
+                // and where the calls written after `=>` live. The value is a
+                // statement of the match, so it is recorded as one: without
+                // this event an arm's value is invisible to the record.
+                let line = self.line(id);
                 if let Some(value) = self.rust_after_arrow(id) {
-                    self.form(value);
+                    let form = self.form(value);
+                    if form != "0" {
+                        self.event(&format!("[\"x\",{line},{form}]"));
+                    }
                 }
                 self.event("[\"e\"]");
                 false
