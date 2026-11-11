@@ -619,7 +619,19 @@ impl<'a> Walker<'a> {
                     let inner = self.form(object);
                     return (format!(".{name}"), inner);
                 }
-                let receiver = self.path_of(object);
+                // `w[i - 15].rotate_right(7)`: the receiver is an index into a
+                // named value, and the lexer names the call by that value. Read
+                // as a bare index the call has no name at all and the two
+                // readers could not agree on it.
+                let mut receiver = self.path_of(object);
+                if receiver.is_empty() && self.kind(object) == "index_expression" {
+                    receiver = self
+                        .children(object)
+                        .into_iter()
+                        .find(|&child| !self.is_layout(child))
+                        .map(|child| self.path_of(child))
+                        .unwrap_or_default();
+                }
                 // `(value ^ u64::from(b)).wrapping_mul(k)`: the receiver is an
                 // expression, and the lexer writes its value there. Reading the
                 // call for its facts and then writing 0 as the receiver lost
