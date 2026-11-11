@@ -294,7 +294,11 @@ impl Emit<'_> {
             return;
         }
         let go_word = matches!(word.as_str(), "go" | "defer") && self.lang.tag != "GO";
-        if NOISE.contains(&word.as_str()) && !go_word {
+        // `new` is a keyword in the JavaScript family and an ordinary name in
+        // Rust: reading it as noise left `new.is_none()` calling nothing, and
+        // the record differed by a constant that was never there.
+        let noise = NOISE.contains(&word.as_str()) && !(self.lang.tag == "RS" && word == "new");
+        if noise && !go_word {
             self.pos += 1;
             return;
         }
