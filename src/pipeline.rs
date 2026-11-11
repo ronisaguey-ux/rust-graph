@@ -2375,10 +2375,15 @@ fn strip_literal_prefixes(mut value: String, src: &str, line: u32) -> String {
     if !value.contains("n:") {
         return value;
     }
-    let text = match src.lines().nth(line.saturating_sub(1) as usize) {
-        Some(text) => text,
-        None => return value,
-    };
+    // A statement can span several lines: `self.after_value = match kind {`
+    // opens on one and the `b')'` that proves the prefix is a literal sits two
+    // lines later. Look at the statement's neighbourhood, not its first line.
+    let text: String = src
+        .lines()
+        .skip(line.saturating_sub(3) as usize)
+        .take(5)
+        .collect::<Vec<_>>()
+        .join("\n");
     for prefix in ["br", "b", "r", "c", "f"] {
         if !text.contains(&format!("{prefix}'")) && !text.contains(&format!("{prefix}\"")) {
             continue;
