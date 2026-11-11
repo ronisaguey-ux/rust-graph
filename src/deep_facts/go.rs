@@ -1499,9 +1499,31 @@ impl<'a> Walker<'a> {
                     self.tuple_form(&items)
                 }
             }
-            "for_in_clause" | "if_clause" | "comprehension_clause" => {
-                // `for x in xs` / `if p(x)`: the value is the last child; the
-                // target is a binding, not a value.
+            "for_in_clause" => {
+                // `for x in xs`: both the target and the iterable are written
+                // in the source and the one-pass lexer reads both. Reading
+                // only the iterable dropped the name the clause binds, and
+                // every comprehension over a name it also uses fell back.
+                let children = self.children(id);
+                match children.iter().position(|&child| self.kind(child) == "in") {
+                    Some(at) => {
+                        let mut items: Vec<u32> =
+                            children[..at].iter().copied().filter(|&child| !self.is_layout(child)).collect();
+                        items.extend(children[at + 1..].iter().copied().filter(|&child| !self.is_layout(child)));
+                        if items.is_empty() {
+                            "0".to_string()
+                        } else {
+                            self.merge_form(&items)
+                        }
+                    }
+                    None => match children.into_iter().rev().find(|&child| !self.is_layout(child)) {
+                        Some(child) => self.form(child),
+                        None => "0".to_string(),
+                    },
+                }
+            }
+            "if_clause" | "comprehension_clause" => {
+                // `if p(x)`: the value is the last child.
                 match self.children(id).into_iter().rev().find(|&child| !self.is_layout(child)) {
                     Some(child) => self.form(child),
                     None => "0".to_string(),
