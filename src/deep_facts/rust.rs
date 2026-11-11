@@ -932,46 +932,6 @@ impl<'a> Walker<'a> {
     }
 
 
-    /// The two events the lexer writes for a struct literal.
-    pub(crate) fn rust_struct_events(&mut self, id: u32) {
-        let children = self.children(id);
-        let line = self.line(id);
-        if let Some(&name) = children.first() {
-            let path = self.path_of(name);
-            if !path.is_empty() {
-                let mut text = "[\"n\",".to_string();
-                push_string(&mut text, &path);
-                text.push(']');
-                self.event(&format!("[\"x\",{line},{text}]"));
-            }
-        }
-        for child in children.iter().skip(1) {
-            if self.kind(*child) != "field_initializer_list" {
-                continue;
-            }
-            let mut parts = Vec::new();
-            for field in self.children(*child) {
-                if self.is_layout(field) {
-                    continue;
-                }
-                let value = self.form(field);
-                if value != "0" {
-                    parts.push(value);
-                }
-            }
-            if parts.is_empty() {
-                continue;
-            }
-            let field_line = self
-                .children(*child)
-                .into_iter()
-                .find(|&field| !self.is_layout(field))
-                .map(|field| self.line(field))
-                .unwrap_or(line);
-            self.event(&format!("[\"x\",{field_line},[\"t\",[{}]]]", parts.join(",")));
-        }
-    }
-
     pub(crate) fn rust_struct_expression(&mut self, id: u32) -> String {
         let mut items = Vec::new();
         let children = self.children(id);
