@@ -530,6 +530,18 @@ impl<'a> Parser<'a> {
             self.brackets.clear();
             return;
         }
+        // `pub(super) fn parse_with(..) -> (Workspace, Outcome)` is a
+        // declaration header, not a statement: the block it opens is the same
+        // symbol, and the header carries no value the CST records.
+        if self.lang.tag == "RS"
+            && self.stmt.iter().any(|token| token.kind == Kind::Ident && self.raw(token) == b"fn")
+            && !self.stmt.iter().any(|token| self.raw(token) == b"=")
+            && !self.stmt.iter().any(|token| self.raw(token) == b"||")
+        {
+            self.brackets.clear();
+            self.stmt.clear();
+            return;
+        }
         let stmt = std::mem::take(&mut self.stmt);
         self.brackets.clear();
         match self.lang.blocks {
