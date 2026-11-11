@@ -2372,7 +2372,7 @@ fn shape_event(
 /// that line names nothing, so neither path is asked to agree on it.
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn strip_literal_prefixes(mut value: String, src: &str, line: u32) -> String {
-    if !value.contains("[\"n\",\"") {
+    if !value.contains("n:") {
         return value;
     }
     let text = match src.lines().nth(line.saturating_sub(1) as usize) {
@@ -2380,26 +2380,38 @@ fn strip_literal_prefixes(mut value: String, src: &str, line: u32) -> String {
         None => return value,
     };
     for prefix in ["br", "b", "r", "c", "f"] {
-        if !text.contains(&format!("{prefix}'")) && !text.contains(&format!("{prefix}\"") ) {
+        if !text.contains(&format!("{prefix}'")) && !text.contains(&format!("{prefix}\"")) {
             continue;
         }
-        let atom = format!("[\"n\",\"{prefix}\"]");
-        while let Some(at) = value.find(&atom) {
-            let end = at + atom.len();
-            let before_comma = at > 0 && value.as_bytes()[at - 1] == b',';
-            let after_comma = value.as_bytes().get(end) == Some(&b',');
-            if before_comma {
+        // The shaped form writes a name as `n:name`, and a name is an element
+        // of a list: it stands between a `[` or `,` and a `,` or `]`.
+        let atom = format!("n:{prefix}");
+        loop {
+            let mut found = None;
+            let mut from = 0;
+            while let Some(at) = value[from..].find(&atom) {
+                let at = from + at;
+                let end = at + atom.len();
+                let before = if at == 0 { b'[' } else { value.as_bytes()[at - 1] };
+                let after = value.as_bytes().get(end).copied().unwrap_or(b']');
+                let opens = before == b'[' || before == b',' || before == b':';
+                let closes = after == b',' || after == b']';
+                if opens && closes {
+                    found = Some((at, end, before, after));
+                    break;
+                }
+                from = end;
+            }
+            let Some((at, end, before, after)) = found else { break };
+            if before == b',' {
                 value.replace_range(at - 1..end, "");
-            } else if after_comma {
+            } else if after == b',' {
                 value.replace_range(at..end + 1, "");
             } else {
                 value.replace_range(at..end, "");
             }
             while value.contains("[[]]") {
                 value = value.replace("[[]]", "[]");
-            }
-            if value.trim_matches(|c| c == '[' || c == ']').is_empty() {
-                return value;
             }
         }
     }
