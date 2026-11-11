@@ -200,6 +200,13 @@ impl<'a> Parser<'a> {
             b'{' => self.on_open_brace(token),
             b'}' => self.on_close_brace(token),
             b';' if self.brackets.is_empty() => self.end_statement(),
+            // A match arm ends at its comma, not at the closing brace: without
+            // this the whole match is one statement and every arm's value is
+            // folded into one merge.
+            b',' if self.brackets.is_empty() && self.stmt.iter().any(|token| self.is_op(token, b"=>")) => {
+                self.stmt.push(token);
+                self.end_statement();
+            }
             b'.' if self.lang.period_ends && self.brackets.is_empty() && self.at_sentence_end(&token) => {
                 self.stmt.push(token);
                 self.end_statement();

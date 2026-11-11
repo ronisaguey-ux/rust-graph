@@ -57,6 +57,12 @@ impl Emit<'_> {
         })
     }
 
+    fn is_arrow(&self, offset: usize) -> bool {
+        self.tok(offset).is_some_and(|token| {
+            token.kind == Kind::Op && &self.src[token.start as usize..token.end as usize] == b"=>"
+        })
+    }
+
     fn op_byte(&self, offset: usize) -> u8 {
         match self.tok(offset) {
             Some(token) if token.kind == Kind::Op && token.end - token.start == 1 => self.src[token.start as usize],
@@ -133,6 +139,13 @@ impl Emit<'_> {
         let mut count = 0;
         while let Some(token) = self.tok(0) {
             let kind = token.kind;
+            if self.is_arrow(0) {
+                // `pat => value`: the pattern is not part of the value.
+                out.truncate(start);
+                count = 0;
+                self.pos += 1;
+                continue;
+            }
             let at = out.len();
             if count > 0 {
                 out.push(',');
