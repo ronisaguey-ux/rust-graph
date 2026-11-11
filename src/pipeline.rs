@@ -1870,6 +1870,11 @@ fn is_closure_block_line(src: &str, line: u32) -> bool {
 /// called, and the line says so — the declaration keyword is right before it.
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn is_declaration_call(src: &str, name: &str, line: u32) -> bool {
+    // An empty needle matches at every position without advancing, so the scan
+    // below would never end. A call with no name is no name to look for.
+    if name.is_empty() {
+        return false;
+    }
     const INTRODUCERS: [&str; 12] = [
         "fn", "func", "def", "struct", "enum", "trait", "type", "union", "class", "interface", "record", "module",
     ];
@@ -1936,6 +1941,9 @@ fn macro_body_lines(src: &str) -> Vec<bool> {
 
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn is_pattern_call(src: &str, name: &str, line: u32) -> bool {
+    if name.is_empty() {
+        return false;
+    }
     let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
         return false;
     };
