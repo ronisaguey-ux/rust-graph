@@ -139,6 +139,13 @@ impl Emit<'_> {
         let mut count = 0;
         while let Some(token) = self.tok(0) {
             let kind = token.kind;
+            // `"abc" "def"`: Python and friends concatenate adjacent string
+            // literals into one value. Counting two constants against the CST's
+            // one node is a difference in how the text is spelled, not a fact.
+            if kind == Kind::Str && self.pos > 0 && self.toks[self.pos - 1].kind == Kind::Str {
+                self.pos += 1;
+                continue;
+            }
             if self.is_arrow(0) {
                 // `pat => value`: the pattern is not part of the value.
                 out.truncate(start);
