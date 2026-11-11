@@ -32,7 +32,83 @@ impl<'a> Walker<'a> {
             return;
         };
         let Some(&value) = children.get(equal + 1) else { return };
-        let value = self.form(value);
+        // `const T: [KindInfo; N] = { let x = ..; .. }`: the initialiser is a
+        // block, and a block's form is the block, not the names inside it. The
+        // one-pass reader sees one flat value over the whole block, so the names
+        // a block carries are read here too — the const's own event is the only
+        // one on that line, and those names have no other place to be recorded.
+        let value = if matches!(self.kind(value), "block_expression" | "block" | "compound_statement") {
+            let mut parts = Vec::new();
+            for child in self.children(value) {
+                if self.is_layout(child) || matches!(self.kind(child), "{" | "}") {
+                    continue;
+                }
+                if self.kind(child) == "let_declaration" {
+                    let kids: Vec<u32> = self
+                        .children(child)
+                        .into_iter()
+                        .filter(|&piece| !self.is_layout(piece) && self.text_string(piece) != "let")
+                        .collect();
+                    if let Some(&pattern) = kids.first() {
+                        let pattern = if matches!(self.kind(pattern), "mutable_specifier" | "mut_pattern" | "ref_pattern") {
+                            self.children(pattern).into_iter().find(|&inner| !self.is_layout(inner)).unwrap_or(pattern)
+                        } else {
+                            pattern
+                        };
+                        for name in self.assignment_targets(pattern) {
+                            let mut atom = String::from("[\"n\",");
+                            push_string(&mut atom, &name);
+                            atom.push(']');
+                            parts.push(atom);
+                        }
+                    }
+                    if let Some(&init) = kids.last() {
+                        if init != kids.first().copied().unwrap_or(0) {
+                            let form = self.form(init);
+                            if form != "0" {
+                                parts.push(form);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // `table[i] = KindInfo { .. }` inside the block: a statement
+                // again, so its target and its initialiser are what carry names.
+                if self.kind(child) == "expression_statement" {
+                    if let Some(inner) = self.expression_child(child) {
+                        if self.kind(inner) == "assignment_expression" {
+                            let kids = self.children(inner);
+                            if let Some(&target) = kids.first() {
+                                for name in self.assignment_targets(target) {
+                                    let mut atom = String::from("[\"n\",");
+                                    push_string(&mut atom, &name);
+                                    atom.push(']');
+                                    parts.push(atom);
+                                }
+                            }
+                            if let Some(&value_node) = kids.last() {
+                                let form = self.form(value_node);
+                                if form != "0" {
+                                    parts.push(form);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+                let form = self.form(child);
+                if form != "0" {
+                    parts.push(form);
+                }
+            }
+            if parts.is_empty() {
+                "0".to_string()
+            } else {
+                format!("[\"m\",[{}]]", parts.join(","))
+            }
+        } else {
+            self.form(value)
+        };
         let line = self.line(id);
         // The target list is a plain array of names, as the lexer writes it.
         let mut targets = "[\"".to_string();
