@@ -273,17 +273,14 @@ fn the_improvements_the_bridge_documents_are_visible_in_the_output() {
 
 #[test]
 fn auto_falls_back_when_the_cst_record_loses_what_the_lexer_found() {
-    // A shape the deep tables do not cover yet: an attribute call on a call
-    // receiver, `Path(a).resolve()`, which the CST names `.resolve` and the
-    // guard treats as an anonymous application. Under `auto` the lexer's record
-    // is kept and the loss is on the row; `--deep` obeys the user and takes the
-    // CST anyway, which is how the gap stays visible instead of becoming the
-    // default's behaviour. The f-string that used to carry this test is now
-    // recorded on both paths, which is why the fixture moved.
+    // A shape the Python grammar genuinely cannot build an assignment node for
+    // (`?` is not a Python token, while the token-stream reader still records
+    // the binding and its call). Under `auto` the lexer's record is kept and
+    // the loss is on the row; `--deep` obeys the user and takes the CST anyway.
     let tree = Tree::new("guard", &[
         (
             "app/lossy.py",
-            "from app.helpers import *\n\n\ndef f(x):\n    a, b = g(x), 1\n    return Path(a).resolve()\n",
+            "from app.helpers import *\n\n\ndef f(x):\n    a = 1 ? g(x) : 2\n    return a\n",
         ),
         ("app/helpers.py", "def helper():\n    return 1\n"),
         ("app/clean.py", "def clean(value):\n    return value.strip()\n"),

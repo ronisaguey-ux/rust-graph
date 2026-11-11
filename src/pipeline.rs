@@ -2586,7 +2586,11 @@ fn shape_at(
             }
             let call = calls.get(id);
             let path = call.map(|call| call.path.as_str()).unwrap_or("");
-            if phantom_call(path) == Some(Phantom::Anonymous) {
+            // `Path(x).resolve()`: the lexer spells a call on a constructor
+            // `Path().resolve` and the CST `.resolve`, which the check above
+            // already paired in the call table. Folding only the leading-dot
+            // spelling left the outer call in the lexer's shape alone.
+            if phantom_call(path) == Some(Phantom::Anonymous) || path.contains("().") {
                 return receiver;
             }
             if phantom_call(path) == Some(Phantom::Keyword) {
