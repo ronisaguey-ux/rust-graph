@@ -273,15 +273,17 @@ fn the_improvements_the_bridge_documents_are_visible_in_the_output() {
 
 #[test]
 fn auto_falls_back_when_the_cst_record_loses_what_the_lexer_found() {
-    // Three shapes the deep tables do not cover yet: a star import, a tuple
-    // assignment, and an f-string interpolation. Under `auto` the lexer's
-    // record is kept and the loss is on the row; `--deep` obeys the user and
-    // takes the CST anyway, which is how the gap stays visible instead of
-    // becoming the default's behaviour.
+    // A shape the deep tables do not cover yet: an attribute call on a call
+    // receiver, `Path(a).resolve()`, which the CST names `.resolve` and the
+    // guard treats as an anonymous application. Under `auto` the lexer's record
+    // is kept and the loss is on the row; `--deep` obeys the user and takes the
+    // CST anyway, which is how the gap stays visible instead of becoming the
+    // default's behaviour. The f-string that used to carry this test is now
+    // recorded on both paths, which is why the fixture moved.
     let tree = Tree::new("guard", &[
         (
             "app/lossy.py",
-            "from app.helpers import *\n\n\ndef f(x):\n    a, b = g(x), 1\n    return f\"{a}\"\n",
+            "from app.helpers import *\n\n\ndef f(x):\n    a, b = g(x), 1\n    return Path(a).resolve()\n",
         ),
         ("app/helpers.py", "def helper():\n    return 1\n"),
         ("app/clean.py", "def clean(value):\n    return value.strip()\n"),
