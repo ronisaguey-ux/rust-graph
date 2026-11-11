@@ -481,7 +481,7 @@ impl<'a> Lexer<'a> {
                 let formatted = word.iter().any(|b| matches!(b, b'f' | b'F'));
                 return self.string(start, line, col, formatted);
             }
-            if self.lang.tag == "RS" && word == b"r" && next == b'#' {
+            if self.lang.tag == "RS" && matches!(word, b"r" | b"br" | b"cr") && next == b'#' {
                 let mut hashes = 0;
                 while self.peek(hashes) == b'#' {
                     hashes += 1;

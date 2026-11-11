@@ -248,7 +248,12 @@ impl Emit<'_> {
         if let Some(ranges) = &token.interp {
             for &(start, end) in ranges.iter() {
                 let slice = &self.src[start as usize..end as usize];
-                let mut lexer = Lexer::nested(slice, self.lang, line);
+                let interp_line = line
+                    + self.src[token.start as usize..start as usize]
+                        .iter()
+                        .filter(|&&b| b == b'\n')
+                        .count() as u32;
+                let mut lexer = Lexer::nested(slice, self.lang, interp_line);
                 let mut tokens = Vec::new();
                 loop {
                     let inner = lexer.next();
@@ -304,7 +309,9 @@ impl Emit<'_> {
         // `new` is a keyword in the JavaScript family and an ordinary name in
         // Rust: reading it as noise left `new.is_none()` calling nothing, and
         // the record differed by a constant that was never there.
-        let noise = NOISE.contains(&word.as_str()) && !(self.lang.tag == "RS" && word == "new");
+        let noise = NOISE.contains(&word.as_str())
+            && !(self.lang.tag == "RS" && word == "new")
+            && !(self.lang.tag == "PY" && word == "local");
         if noise && !go_word {
             self.pos += 1;
             return;
@@ -409,6 +416,10 @@ impl Emit<'_> {
                     self.pos += 2;
                     path.push('.');
                     path.push_str(&name);
+                    continue;
+                }
+                if path.is_empty() && self.is_op(0, b".") && self.tok(1).is_some_and(|t| t.kind == Kind::Num) {
+                    self.pos += 2;
                     continue;
                 }
             }
