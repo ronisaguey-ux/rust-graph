@@ -253,7 +253,10 @@ impl<'a> Parser<'a> {
             b';' if self.brackets.is_empty() => self.end_statement(),
             // A match arm ends at its comma, not at the closing brace: without
             // this the whole match is one statement and every arm's value is
-            // folded into one merge.
+            // folded into one merge. An arm whose body was a block already
+            // ended at `}`, so its trailing comma is not the start of the next
+            // arm.
+            b',' if self.brackets.is_empty() && self.stmt.is_empty() => {}
             b',' if self.brackets.is_empty() && self.stmt.iter().any(|token| self.is_op(token, b"=>")) => {
                 self.stmt.push(token);
                 self.end_statement();
@@ -302,10 +305,14 @@ impl<'a> Parser<'a> {
         // read that as an assignment rather than a block opener, so the whole
         // body became one merged value.
         if self.lang.tag == "RS" {
-            // `let digits = |c: &mut Cursor| {`: the closure's parameter list
-            // ends on a bar, and a bar is not one of the openers the test above
-            // accepts, so the body was folded into the binding's value.
-            if self.stmt.last().is_some_and(|token| self.raw(token) == b"|") {
+            // `let digits = |c: &mut Cursor| {` and
+            // `let render = |out: &mut dyn Write| -> io::Result<()> {`: a
+            // closure's block is statements of its own, whether the header
+            // ends on the closing bar or on a return type after `->`.
+            let closure_header = self.stmt.last().is_some_and(|token| matches!(self.raw(token), b"|" | b"||"))
+                || (self.stmt.iter().any(|token| matches!(self.raw(token), b"|" | b"||"))
+                    && self.stmt.iter().any(|token| self.is_op(token, b"->")));
+            if closure_header {
                 return true;
             }
             if let Some(first) = self.stmt.iter().find(|token| token.kind == Kind::Ident) {

@@ -582,10 +582,51 @@ impl<'a> Walker<'a> {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !matches!(self.kind(child), "as")).collect();
                 Some(if items.is_empty() { "0".to_string() } else { self.merge_form(&items) })
             }
-            // `&x`, `*x`, `x?`, `x.await`: the operator is not a value, the
-            // operand is, and it is where the calls are.
-            "reference_expression" | "try_expression" | "await_expression" => {
+            // `&x`, `*x`, `x?`, `x.await`, `return x`: the operator is not a
+            // value, the operand is, and it is where the calls are.
+            "reference_expression" | "try_expression" | "await_expression" | "return_expression" | "trait_bound" => {
                 self.expression_child(id).map(|child| self.form(child))
+            }
+            "dynamic_type" => {
+                let mut parts = vec!["[\"n\",\"dyn\"]".to_string()];
+                for child in self.children(id) {
+                    if !self.is_layout(child) {
+                        let value = self.form(child);
+                        if value != "0" {
+                            parts.push(value);
+                        }
+                    }
+                }
+                Some(format!("[\"m\",[{}]]", parts.join(",")))
+            }
+            "let_declaration" => {
+                let mut parts = Vec::new();
+                let children = self.children(id);
+                if let Some(&pattern) = children.iter().find(|&&child| !matches!(self.kind(child), "let" | ";" | ":")) {
+                    for name in self.rust_pattern_names(pattern) {
+                        let mut atom = String::from("[\"n\",");
+                        push_string(&mut atom, &name);
+                        atom.push(']');
+                        parts.push(atom);
+                    }
+                }
+                if let Some(equal) = children.iter().position(|&child| self.kind(child) == "=") {
+                    if let Some(&init) = children.get(equal + 1) {
+                        let form = self.form(init);
+                        if form != "0" {
+                            parts.push(form);
+                        }
+                    }
+                }
+                Some(match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                })
+            }
+            "assignment_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child) && self.kind(child) != "=").collect();
+                Some(if items.is_empty() { "0".to_string() } else { self.merge_form(&items) })
             }
             "range_expression" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
