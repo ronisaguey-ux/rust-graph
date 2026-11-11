@@ -1955,8 +1955,12 @@ fn is_pattern_call(src: &str, name: &str, line: u32) -> bool {
                 return true;
             }
             // `if let Some(x) = expr` / `while let`: the pattern sits between
-            // `let` and the `=` that starts the value.
-            if tail.starts_with('=') && !tail.starts_with("==") && text[..start].contains("let") {
+            // `let` and the `=` that starts the value. A tuple or slice pattern
+            // puts the bindings beside it and its own closing bracket in
+            // between — `if let (Some(a), Some(b)) = pair` — so the structure
+            // the pattern is nested in is stepped over before the `=` is read.
+            let nested = tail.trim_start_matches(|ch: char| matches!(ch, ')' | ']' | ',') || ch.is_whitespace());
+            if nested.starts_with('=') && !nested.starts_with("==") && text[..start].contains("let") {
                 return true;
             }
         }
