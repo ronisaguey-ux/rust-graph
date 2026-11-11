@@ -701,6 +701,28 @@ impl<'a> Walker<'a> {
             }
             "try_statement" | "switch_statement" | "match_statement" => self.event("[\"b\"]"),
             "catch_clause" | "finally_clause" | "except_clause" | "switch_case" | "case_clause" => {
+                // `except ValueError:` names a type the one-pass reader files
+                // as a value on the clause's line; the clause emits only its
+                // terminator, so that name had no counterpart at all.
+                if kind == "except_clause" {
+                    let mut parts = Vec::new();
+                    for child in self.children(id) {
+                        if self.is_layout(child) || matches!(self.kind(child), "except" | ":") {
+                            continue;
+                        }
+                        if matches!(self.kind(child), "block" | "statement_block") {
+                            break;
+                        }
+                        let form = self.form(child);
+                        if form != "0" {
+                            parts.push(form);
+                        }
+                    }
+                    if !parts.is_empty() {
+                        let line = self.line(id);
+                        self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                    }
+                }
                 self.event("[\"e\"]")
             }
             _ => {}
