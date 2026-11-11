@@ -711,7 +711,15 @@ impl<'a> Walker<'a> {
                     {
                         continue;
                     }
-                    self.form(child);
+                    // `with self._lock:` binds nothing, and the lexer still
+                    // reads the context manager as a statement of its own.
+                    // Reading the form for its calls alone left the names in
+                    // it with no event to sit on.
+                    let value = self.form(child);
+                    if value != "0" {
+                        let line = self.line(child);
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
                 }
             }
             "for_statement" | "for_in_statement" => {
