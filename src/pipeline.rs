@@ -2219,6 +2219,12 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
             eprintln!("MISS line {} deep=[{}] lex=[{}] missing={:?}", lexer.line, deep.value, lexer.value, missing);
         }
         let line_text = src.lines().nth(lexer.line.saturating_sub(1) as usize).unwrap_or("");
+        // `raise ConfigError(...) from error`: `from` is a keyword where that
+        // line writes it, and no reader of the record wants a value called
+        // `from`. The one-pass lexer has no keyword table and reads it as one.
+        if line_text.contains(" from ") {
+            missing.retain(|name| name.as_str() != "n:from");
+        }
         if line_text.contains("b'") {
             missing.retain(|name| {
                 let bare = name.strip_prefix("n:").unwrap_or(name);
@@ -2464,8 +2470,17 @@ fn strip_literal_prefixes(mut value: String, src: &str, line: u32) -> String {
         .take(5)
         .collect::<Vec<_>>()
         .join("\n");
-    for prefix in ["br", "b", "r", "c", "f"] {
-        if !text.contains(&format!("{prefix}'")) && !text.contains(&format!("{prefix}\"")) {
+    // The letters that can prefix a literal, and the three an f-string
+    // conversion can name. `{stripped!r}` is not a name `r` any more than
+    // `r"..."` is, and the one-pass lexer reads both as one.
+    const QUOTED: [&str; 5] = ["br", "b", "r", "c", "f"];
+    const CONVERTED: [&str; 3] = ["r", "s", "a"];
+    for prefix in ["br", "b", "r", "c", "f", "s", "a"] {
+        let quoted = QUOTED.contains(&prefix)
+            && (text.contains(&format!("{prefix}'")) || text.contains(&format!("{prefix}\"")));
+        let converted = CONVERTED.contains(&prefix)
+            && (text.contains(&format!("!{prefix}}}")) || text.contains(&format!("!{prefix}:")));
+        if !quoted && !converted {
             continue;
         }
         // The shaped form writes a name as `n:name`, and a name is an element
