@@ -2174,7 +2174,9 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
     }
     if !missing.is_empty() {
         if std::env::var("RG_GUARD_DEBUG").is_ok() {
-            eprintln!("MISS line {} deeplen={} lexlen={} deepnode={} lexnode={} missing={:?}", lexer.line, deep.value.len(), lexer.value.len(), deep.value.matches("Class.Node").count(), lexer.value.matches("Class.Node").count(), missing);
+            // RG_GUARD_DEBUG=1 prints the pair, not a summary: reading a length
+            // and guessing cost more than reading the values.
+            eprintln!("MISS line {} deep=[{}] lex=[{}] missing={:?}", lexer.line, deep.value, lexer.value, missing);
         }
         let line_text = src.lines().nth(lexer.line.saturating_sub(1) as usize).unwrap_or("");
         if line_text.contains("b'") {
@@ -2225,7 +2227,24 @@ fn atoms(shape: &str, out: &mut Vec<String>) {
     if let Some(rest) = shape.strip_prefix("c(") {
         out.push("call".to_string());
         let inner = rest.strip_suffix(')').unwrap_or(rest);
-        if let Some((receiver, arguments)) = inner.split_once(';') {
+        // The receiver may itself be a call — `f(Path(__file__))` writes
+        // `c(c(0;[n:__file__]);[])` — so the arguments start at the first
+        // semicolon at depth zero, not at the first one in the string.
+        let mut depth = 0i32;
+        let mut cut = None;
+        for (at, ch) in inner.char_indices() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ';' if depth == 0 => {
+                    cut = Some(at);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if let Some(split) = cut {
+            let (receiver, arguments) = (&inner[..split], &inner[split + 1..]);
             atoms(receiver, out);
             let arguments = arguments.strip_prefix('[').unwrap_or(arguments);
             let arguments = arguments.strip_suffix(']').unwrap_or(arguments);
