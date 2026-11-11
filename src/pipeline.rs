@@ -2257,7 +2257,6 @@ fn value_form(value: &str) -> &str {
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn atoms(shape: &str, out: &mut Vec<String>) {
     if let Some(rest) = shape.strip_prefix("c(") {
-        out.push("call".to_string());
         let inner = rest.strip_suffix(')').unwrap_or(rest);
         // The receiver may itself be a call — `f(Path(__file__))` writes
         // `c(c(0;[n:__file__]);[])` — so the arguments start at the first
@@ -2275,20 +2274,30 @@ fn atoms(shape: &str, out: &mut Vec<String>) {
                 _ => {}
             }
         }
-        if let Some(split) = cut {
-            let (receiver, arguments) = (&inner[..split], &inner[split + 1..]);
-            // An empty receiver slot is the absence of a name, not a constant:
-            // the one-pass lexer writes `c(0;…)` for a call it could not name a
-            // receiver for, and counting that as a constant the CST must also
-            // carry made a record that *names* the receiver read as a loss.
-            if receiver != "0" {
-                atoms(receiver, out);
-            }
-            let arguments = arguments.strip_prefix('[').unwrap_or(arguments);
-            let arguments = arguments.strip_suffix(']').unwrap_or(arguments);
-            for item in split_items(arguments) {
-                atoms(item, out);
-            }
+        let Some(split) = cut else {
+            out.push("call".to_string());
+            return;
+        };
+        let (receiver, arguments) = (&inner[..split], &inner[split + 1..]);
+        let arguments = arguments.strip_prefix('[').unwrap_or(arguments);
+        let arguments = arguments.strip_suffix(']').unwrap_or(arguments);
+        let items = split_items(arguments);
+        // A call with neither a receiver nor an argument names nothing: the
+        // one-pass lexer writes one for a chain's own parentheses, and there is
+        // no fact in it the CST can be asked to carry.
+        if receiver == "0" && items.is_empty() {
+            return;
+        }
+        out.push("call".to_string());
+        // An empty receiver slot is the absence of a name, not a constant: the
+        // lexer writes `c(0;…)` for a call it could not name a receiver for,
+        // and counting that as a constant the CST must also carry made a
+        // record that *names* the receiver read as a loss.
+        if receiver != "0" {
+            atoms(receiver, out);
+        }
+        for item in items {
+            atoms(item, out);
         }
         return;
     }
