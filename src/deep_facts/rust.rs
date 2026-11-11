@@ -545,6 +545,19 @@ impl<'a> Walker<'a> {
                     _ => Some("0".to_string()),
                 }
             }
+            // `Language { a: 1, ..BASE }`: the spread names a value the lexer
+            // records, and without a form here the struct literal lost it.
+            "base_field_initializer" => {
+                let kids: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != "..")
+                    .collect();
+                kids.into_iter().find_map(|child| {
+                    let form = self.form(child);
+                    (form != "0").then_some(form)
+                })
+            }
             "shorthand_field_initializer" => {
                 let name = self.children(id).into_iter().next().map(|child| self.form(child)).unwrap_or_else(|| "0".to_string());
                 Some(name)
