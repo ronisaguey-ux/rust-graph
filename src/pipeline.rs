@@ -1695,8 +1695,12 @@ fn is_attribute_call(src: &str, line: u32) -> bool {
     src.lines()
         .nth(line.saturating_sub(1) as usize)
         .map(|text| {
+            // An attribute may sit mid-line: `pub field: u64, #[cfg(..)] pub
+            // other: Mode,` is one line with an attribute in the middle, and
+            // the lexer reads `cfg(` as a call on it.
             let text = text.trim_start();
-            (text.starts_with("#[") || text.starts_with("#![")) && text.contains(']')
+            let attribute = text.starts_with("#[") || text.starts_with("#![") || text.contains(" #[");
+            attribute && text.contains(']')
         })
         .unwrap_or(false)
 }
