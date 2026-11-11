@@ -1533,6 +1533,7 @@ fn uncovered(
             || (event.tag == b'x' && is_struct_pattern_condition(src, event.line))
             || (event.tag == b'x' && is_else_if_let_line(src, event.line))
             || (event.tag == b'x' && is_closure_block_line(src, event.line))
+            || (event.tag == b'a' && is_control_header_line(src, event.line))
         {
             accepted.positional_events += 1;
             continue;
@@ -1688,6 +1689,19 @@ fn is_variant_declaration(src: &str, line: u32) -> bool {
         && payload
             .chars()
             .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | ' ' | ',' | '<' | '>' | ':' | '&' | '[' | ']' | '\''))
+}
+
+/// `if char in ("'", '"'):` and `while x in seen:`: a membership test in a
+/// control header reads to the one-pass lexer as a statement bound to the name
+/// on the left, and the CST records the condition as an expression. The line is
+/// a control header, so there is no binder to lose.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_control_header_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    ["if ", "elif ", "while ", "for "].iter().any(|head| text.starts_with(head)) && text.contains(" in ")
 }
 
 /// `#[cfg(feature = "deep")]`, `#![allow(dead_code)]`: the tokens inside an
