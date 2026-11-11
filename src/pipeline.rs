@@ -1527,6 +1527,9 @@ fn uncovered(
         if macro_lines.get(event.line.saturating_sub(1) as usize).copied().unwrap_or(false)
             || is_attribute_call(src, event.line)
             || is_declaration_line(src, event.line)
+            // `Bound(Bound),` in an enum body: the variants are declarations,
+            // and the lexer reads the bare ones as a tuple value of its own.
+            || is_variant_declaration(src, event.line)
             || is_pattern_line(src, event.line)
             || (event.tag == b'x' && is_let_else_line(src, event.line))
             || (event.tag == b'a' && is_control_cast_line(src, event.line))
@@ -1739,6 +1742,17 @@ fn is_declaration_line(src: &str, line: u32) -> bool {
         return false;
     };
     let text = text.trim_start();
+    // `pub(super) struct Rng(u64);`: the visibility's own parentheses come
+    // before the introducer, so splitting at the first `(` hid the word that
+    // says the line is a declaration at all.
+    let text = match text.strip_prefix("pub") {
+        Some(rest) => rest
+            .strip_prefix('(')
+            .and_then(|rest| rest.split_once(')'))
+            .map(|(_, tail)| tail)
+            .unwrap_or(rest),
+        None => text,
+    };
     let header = text.split(['(', '{', '=']).next().unwrap_or(text);
     header.split_whitespace().any(|word| INTRODUCERS.contains(&word))
 }
@@ -2263,7 +2277,13 @@ fn atoms(shape: &str, out: &mut Vec<String>) {
         }
         if let Some(split) = cut {
             let (receiver, arguments) = (&inner[..split], &inner[split + 1..]);
-            atoms(receiver, out);
+            // An empty receiver slot is the absence of a name, not a constant:
+            // the one-pass lexer writes `c(0;…)` for a call it could not name a
+            // receiver for, and counting that as a constant the CST must also
+            // carry made a record that *names* the receiver read as a loss.
+            if receiver != "0" {
+                atoms(receiver, out);
+            }
             let arguments = arguments.strip_prefix('[').unwrap_or(arguments);
             let arguments = arguments.strip_suffix(']').unwrap_or(arguments);
             for item in split_items(arguments) {
