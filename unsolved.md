@@ -112,3 +112,29 @@ Options, none of them cheap:
 
 Do not attempt (1) or (2) without a full-corpus measurement plan: both touch the guard's
 semantics, and every earlier "small" guard change moved hundreds of files.
+
+---
+
+## 6. The `{ get: all[name], enumerable: true }` object key — values now agree, the guard still says the event is missing
+
+Measure: `/tmp/rq8/a.js` — `var __export = (target, all) => { for (var name in all) __defProp(target, name, { get: all[name], enumerable: true }); };`
+46 JS corpus files fail this way (`a name the lexer read is not in the CST's value`).
+
+What was tried (both reverted, unproven):
+1. `property_identifier` added to the name arm of `form` — no change: the key `get` is an
+   anonymous `get` token in this grammar, not a `property_identifier`.
+2. The `pair` arm rewritten to take the FIRST child as the key and fall back to its raw
+   text when `form` yields `0` — this works: the CST value becomes
+   `m:[m:[n:get,n:all],m:[n:enumerable,n:true]]`, byte-identical to the lexer's.
+
+Despite identical values the hybrid build still reports
+`event x line 4 … (no event on a line both readers can mean): … CST no event of that marker
+within one line`. Both records hold one `__export` symbol at line 2, the deep `--deep` run
+writes the `x` event at line 4, and the symbols pair. So the loss is NOT in the value and
+NOT in the pairing — the guard's `found` list is not seeing the event at all.
+
+Next step before touching the value again: instrument `uncovered` for one file
+(`eprintln!` the `found` rows and the paired symbol's raw events), because everything
+above is inference and the values already match.
+
+Reverted both edits so the tree stays at a measured state (82f054f, js 851).
