@@ -1609,6 +1609,18 @@ impl<'a> Walker<'a> {
                     out
                 }
             }
+            // `(0, _createSvgIcon.default)(...)`: the comma idiom every
+            // transpiler emits is a sequence expression, and it was forming as
+            // the constant 0, so every CommonJS `exports.default = ...` in the
+            // corpus lost its value.
+            "sequence_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.tuple_form(&items),
+                }
+            }
             "argument_list" | "arguments" | "parenthesized_expression" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 match items.len() {
@@ -1821,6 +1833,17 @@ impl<'a> Walker<'a> {
                 if chained {
                     let binder = self.form(children[0]);
                     return format!("[\"m\",[{binder},{value}]]");
+                }
+                // `var _default = exports.default = (0, f)(x)`: the declaration's
+                // value is an assignment of its own, and the one-pass lexer
+                // reads that binder into the value. Transpiled CommonJS does
+                // this on nearly every module, and the CST wrote the inner
+                // value alone.
+                if self.is_js() {
+                    let binder = self.form(children[0]);
+                    if binder != "0" {
+                        return format!("[\"m\",[{binder},{value}]]");
+                    }
                 }
                 value
             }
