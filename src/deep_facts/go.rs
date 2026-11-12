@@ -756,7 +756,10 @@ impl<'a> Walker<'a> {
         let mut stack = vec![(root, false)];
         while let Some((node, in_args)) = stack.pop() {
             let kind = self.kind(node);
-            if matches!(kind, "call_expression" | "call" | "import_require_clause") {
+            // A `require` inside an argument list is the argument of some other
+            // call, not the value of this binding: `func = convert('x', require('./y'))`
+            // imports nothing into `func`. Only the top-level expression counts.
+            if !in_args && matches!(kind, "call_expression" | "call" | "import_require_clause") {
                 let children = self.children(node);
                 if let Some(&callee) = children.first() {
                     if self.kind(callee) == "identifier" && self.text_string(callee) == "require" {
@@ -1111,6 +1114,22 @@ impl<'a> Walker<'a> {
     pub(crate) fn assignment_parts(&mut self, targets: Vec<String>, value: u32, line: u32, augmented: bool) {
         if !augmented && targets.len() == 1 && self.bound_lambda(&targets[0].clone(), value, line) {
             return;
+        }
+        // `module.exports = function (v) { … }`: the value is a definition the
+        // walk opens on its own, so its name comes from the assignment's target,
+        // exactly as a declarator's does. The one-pass lexer names the same
+        // symbol from the same target, so without this the two records disagree
+        // on the name of a function they both see.
+        if !augmented && self.is_js() && targets.len() == 1 {
+            // The name is the assignment's target path as written — `module.exports`
+            // stays `module.exports`, not `exports`. Taking the last segment made
+            // two different bindings share one symbol id (`exports`, then another
+            // `exports`) and merged their flows; the corpus went 863 -> 1144.
+            let target = targets[0].clone();
+            if self.kinds.definitions.iter().any(|def| def.kind == self.kind(value)) {
+                self.bound.push((value, target));
+                return;
+            }
         }
         let weak = augmented || targets.is_empty();
         let expr = self.form(value);

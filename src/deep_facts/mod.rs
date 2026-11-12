@@ -991,10 +991,18 @@ impl<'a> Walker<'a> {
             if matches!(kind, "identifier" | "property_identifier" | "type_identifier") {
                 last = Some(self.text_string(node));
             }
+            // Depth-first in source order, so the last name assigned is the
+            // rightmost one: `func.placeholder` is `placeholder`. Pushing the
+            // children left to right popped them right to left and left the
+            // caller with `func`.
+            let mut kids = Vec::new();
             let mut child = self.node(node).first_child;
             while child != NONE {
-                walk.push(child);
+                kids.push(child);
                 child = self.node(child).next_sibling;
+            }
+            for &child in kids.iter().rev() {
+                walk.push(child);
             }
         }
         last
