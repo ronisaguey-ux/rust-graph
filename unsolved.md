@@ -160,3 +160,27 @@ The pair-key edit itself (`pair` takes its first child as the key, falling back 
 makes the CST value byte-identical to the lexer's, but it turned `{ get: … }` keys into names
 everywhere: js 851 -> 872 and python 148 -> 201. Not landed; it needs a rule that names a
 property key only where the CST lost it.
+
+---
+
+## 7. An arrow function's symbol: the corpus and the fixture disagree about its name
+
+Measure (four corpora, js/ts/python/rust): the `=>` block gets its own symbol, but *which* name
+depends on how the arrow is bound, and the two oracles disagree.
+
+| variant | js | ts | rust | fixture `deep_facts_every_disagreement_is_explained` |
+|---|---|---|---|---|
+| no separate symbol (before) | 753 | 447 | 345 | pass |
+| always anonymous (`<anonymous>@N`) | **677** | **417** | 345 | **fail**: lexer-only `<anonymous>@21`, `@28` for `const variance = (values) => {` |
+| anonymous only for a member target (`module.exports = (a) => {`) | 746 | 426 | 345 | pass |
+| always named by the whole target path (`module.exports`) | 754 | 448 | — | pass |
+
+The corpus prefers the variant the fixture rejects, by ~69 files, and the fixture's complaint is
+exactly the case the corpus likes: `const variance = (values) => {` read as `<anonymous>@21` when
+the CST names it `variance`. So either the fixture's expectation is narrower than the CST's real
+behaviour, or the guard's symbol pairing is looser than its name comparison suggests — pairing by
+name would have flagged those files too. Whichever it is, that is the next thing to measure: take
+one of the 69 (`000096_fish.js` line 96) and print the paired symbols' names on both sides.
+
+Landed: the member-target variant (js 753→746, ts 447→426, python 146, rust 345), because it is the
+best state that keeps the suite green.

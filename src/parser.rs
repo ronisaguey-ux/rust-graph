@@ -421,7 +421,25 @@ impl<'a> Parser<'a> {
         let in_expression = !self.brackets.is_empty();
         let rearmed = std::mem::take(&mut self.rearmed);
         let start_col = stmt.first().map_or(0, |token| token.col);
-        if in_expression {
+        // An arrow written at the start of a statement has no open bracket to
+        // mark it as an expression (`return (rng, ...) => {`), but it is still
+        // a function of its own: the CST makes it a symbol and files its body
+        // there, and keeping the body in the enclosing symbol made every line
+        // inside look lost.
+        // Only where `=>` is an arrow. In Rust it is a match arm and in Elixir
+        // it is a case clause: both are statements of the enclosing block, and
+        // reading them as functions moved every following line into a symbol
+        // the CST never made (rust 345 -> 417).
+        let arrow = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && stmt.last().is_some_and(|token| self.is_op(token, b"=>"))
+            // `const variance = (values) => {` is named by the assignment, and
+            // taking it here made an `<anonymous>` twin the CST never has. A
+            // member target (`module.exports = (a) => {`) is the case the
+            // assignment cannot name, so that one stays anonymous.
+            && self.top_level_assign(&stmt).map_or(true, |equal| {
+                stmt[..equal].iter().any(|token| self.is_op(token, b".") || self.is_op(token, b"["))
+            });
+        if in_expression || arrow {
             let head = self.lambda_head(&stmt);
             let brackets = std::mem::take(&mut self.brackets);
             self.push_function(head, start_col, Some((stmt, brackets)));
