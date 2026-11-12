@@ -1753,11 +1753,15 @@ fn is_attribute_call(src: &str, line: u32) -> bool {
 fn is_declaration_line(src: &str, line: u32) -> bool {
     // The header is what is written before the name's parenthesis or the body's
     // brace: `pub const fn new`, `pub(crate) struct Cache`, `def parse`.
-    const INTRODUCERS: [&str; 13] = [
+    const INTRODUCERS: [&str; 16] = [
         "fn", "func", "def", "struct", "enum", "trait", "union", "type", "impl", "class", "interface", "module",
         // `pub mod budget;` is a declaration too, and the lexer reads the two
         // words as an expression.
         "mod",
+        // `function atob(data: string): string;` in a .d.ts and
+        // `constructor(code: string)` in a class body are declarations: the
+        // lexer reads the header as a call on the declared name.
+        "function", "declare", "constructor",
     ];
     let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
         return false;
@@ -1896,8 +1900,9 @@ fn is_declaration_call(src: &str, name: &str, line: u32) -> bool {
     if name.is_empty() {
         return false;
     }
-    const INTRODUCERS: [&str; 12] = [
+    const INTRODUCERS: [&str; 15] = [
         "fn", "func", "def", "struct", "enum", "trait", "type", "union", "class", "interface", "record", "module",
+        "function", "declare", "constructor",
     ];
     let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
         return false;
