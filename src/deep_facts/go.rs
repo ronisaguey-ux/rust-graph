@@ -1815,7 +1815,9 @@ impl<'a> Walker<'a> {
                     _ => "0".to_string(),
                 }
             }
-            "spread_element" | "rest_pattern" | "list_splat" | "list_splat_pattern" => match self.expression_child(id) {
+            // `f(*args, **kwargs)`: Python spells the double splat its own way,
+            // and the one-pass lexer reads the name under it.
+            "spread_element" | "rest_pattern" | "list_splat" | "list_splat_pattern" | "dictionary_splat" => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
             },
