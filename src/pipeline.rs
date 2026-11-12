@@ -1828,6 +1828,9 @@ fn is_type_property_line(src: &str, line: u32) -> bool {
             head = rest.trim();
         }
     }
+    // `private _isDirty;` has no colon at all, so the semicolon is the end of
+    // the head rather than the type.
+    head = head.trim_end_matches(';').trim();
     !head.is_empty() && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
 }
 
