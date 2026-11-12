@@ -1829,6 +1829,22 @@ impl<'a> Parser<'a> {
 
     fn statement(&mut self, stmt: &[Token]) {
         let Some(first) = stmt.first() else { return };
+        // `export { a }` and `export * from …` name what leaves the module and
+        // carry no value: the lexer read `export` as a name and the braces as a
+        // merge. `export default X` is the value of X, not a merge with the
+        // keyword in front of it.
+        if self.lang.imports == crate::langs::Imports::Js
+            && self.word_at(stmt, 0).as_deref() == Some("export")
+        {
+            match stmt.get(1) {
+                Some(token) if self.is_op(token, b"{") || self.is_op(token, b"*") => return,
+                _ if self.word_at(stmt, 1).as_deref() == Some("default") => {
+                    self.expression_event("x", &stmt[2..]);
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.import_of(stmt) {
             return;
         }
