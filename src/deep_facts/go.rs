@@ -1813,8 +1813,10 @@ impl<'a> Walker<'a> {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
-            // Rust's lexer has no keyword table for these: `true` is a name.
-            "true" | "false" if self.is_rust() => {
+            // Rust's and JavaScript's lexers have no keyword table for these:
+            // `true` is a name, and an object literal `{ value: true }` records
+            // one where the CST was writing a constant.
+            "true" | "false" if self.is_rust() || self.is_js() => {
                 let text = self.text_string(id);
                 let mut out = "[\"n\",".to_string();
                 push_string(&mut out, &text);
