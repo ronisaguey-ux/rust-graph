@@ -1442,6 +1442,14 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
                 .flat_map(|row| row.calls.iter())
                 .any(|row| name_of(&row.path) == name && near(row.line));
             if !same {
+                // A declaration header is not a call: `constructor(code:
+                // string, options?: string);` in a .d.ts and
+                // `function atob(data: string): string;` are read by the
+                // lexer as calls on the declared name. The line carries the
+                // introducer, so nothing was lost.
+                if !src.is_empty() && is_declaration_line(src, call.line) {
+                    continue;
+                }
                 // `match self.tok(i) { Some(t) => ... }`: the lexer reads the
                 // arm's pattern as a call, and a pattern is not a call. The
                 // source line says so — the name, its argument list, then `=>`.
