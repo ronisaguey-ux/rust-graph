@@ -184,3 +184,22 @@ one of the 69 (`000096_fish.js` line 96) and print the paired symbols' names on 
 
 Landed: the member-target variant (js 753→746, ts 447→426, python 146, rust 345), because it is the
 best state that keeps the suite green.
+
+**Answered 2026-11-12 (c5e5996).** The question was the wrong question: no arrow's *name* was ever the
+problem. Printing both sides on `000096_fish.js` showed the failure eight lines past the arrow, at
+`if (conditionArg) parts.push(conditionArg);` — one line that both readers write **two** events for
+(the condition and the call). The guard's same-line pass let `covers()` pair the call with the
+condition's row, so the call's own row was left over and the file was blamed for an event that was in
+the record all along. So the fixture's expectation was right and the *pairing* was loose.
+
+Fix tried, measured, reverted: an exact-value claim before `covers()` in the same-line pass. python
+146→**114**, js 725→721, ts 409 held, **rust 345→445** — a hundred rust files broke. Those files were
+passing by the cross-line (|Δline| ≤ 1) mispair the change removes, so the change is more correct and
+the corpus rewards the sloppiness. Rust's token-merge idiom (`m:[0]` against the CST's
+`m:[c(…),n:LPAREN]`) has no exact partner, so the row it used to borrow is gone. A per-language gate
+on the exact pass would buy python's 32 and keep rust's 345, but it hides the real defect: the lexer
+writes `0` where the CST writes a merge. That is a lexer fix, not a pairing fix — next item.
+
+Kept: the arrow itself is now **one constant** (`map(s => s.name)`), and Rust keeps the match-arm
+path (`=>` drops the pattern, the arm expression stands). Measured js 746→**725**, ts 426→**409**,
+python 146, rust 345 held, cargo 1463 / pytest 1169 green.
