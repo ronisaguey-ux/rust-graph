@@ -1556,6 +1556,7 @@ fn uncovered(
             || is_method_declaration_line(src, event.line)
             || is_type_property_line(src, event.line)
             || is_export_statement_line(src, event.line)
+            || is_type_continuation_line(src, event.line)
             // `Bound(Bound),` in an enum body: the variants are declarations,
             // and the lexer reads the bare ones as a tuple value of its own.
             || is_variant_declaration(src, event.line)
@@ -1764,8 +1765,11 @@ fn is_attribute_call(src: &str, line: u32) -> bool {
 fn is_declaration_line(src: &str, line: u32) -> bool {
     // The header is what is written before the name's parenthesis or the body's
     // brace: `pub const fn new`, `pub(crate) struct Cache`, `def parse`.
-    const INTRODUCERS: [&str; 16] = [
+    const INTRODUCERS: [&str; 18] = [
         "fn", "func", "def", "struct", "enum", "trait", "union", "type", "impl", "class", "interface", "module",
+        // `namespace NodeJS {` and `declare global {`: both declare a scope, and
+        // the one-pass lexer reads the header as an expression.
+        "namespace", "global",
         // `pub mod budget;` is a declaration too, and the lexer reads the two
         // words as an expression.
         "mod",
@@ -1808,16 +1812,35 @@ fn is_type_property_line(src: &str, line: u32) -> bool {
     if !(text.ends_with(';') || text.ends_with(':') || text.ends_with('{')) || text.contains('=') {
         return false;
     }
-    let Some(colon) = text.find(':') else {
+    let Some(colon) = text.find(':').or_else(|| Some(text.len())) else {
         return false;
     };
     let mut head = text[..colon].trim_end_matches('?').trim();
+    // `private _isDirty;` has a modifier and a name and no type at all.
+    let modified = ["private ", "protected ", "public ", "static ", "readonly ", "declare ", "abstract "]
+        .iter()
+        .any(|keyword| text.starts_with(keyword));
+    if colon == text.len() && !modified {
+        return false;
+    }
     for keyword in ["declare ", "var ", "let ", "const ", "readonly ", "static ", "public ", "private ", "protected "] {
         if let Some(rest) = head.strip_prefix(keyword) {
             head = rest.trim();
         }
     }
     !head.is_empty() && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
+}
+
+/// A line that continues a type across lines: `| DynamicModuleLoader<Script>`.
+/// The union is one declaration, and the one-pass lexer reads each branch as an
+/// expression of its own.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_type_continuation_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    text.starts_with("| ") || text.starts_with("& ")
 }
 
 /// `export = escape;` and `export {};`: the lexer writes an assignment or an
