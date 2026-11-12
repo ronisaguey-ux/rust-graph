@@ -938,8 +938,65 @@ impl<'a> Walker<'a> {
             return;
         }
         let line = self.line(id);
+        if std::env::var("RG_ASSIGN_DEBUG").is_ok() {
+            let dump: Vec<String> = children.iter().map(|&c| format!("{}:{:?}", self.kind(c), self.text_string(c).chars().take(8).collect::<String>())).collect();
+            eprintln!("assign: {:?}", dump);
+        }
         let targets = self.assignment_targets(first);
         let weak = augmented || matches!(self.kind(first), "subscript" | "subscript_expression" | "index_expression");
+        // `a = b = value` arrives flat: two `=` and the middle binder is an
+        // ordinary child. The one-pass lexer reads the line left to right, so its
+        // value names that binder as well; reading only the last child dropped
+        // it and every chained assignment in the corpus fell back.
+        let equals: Vec<usize> = children
+            .iter()
+            .enumerate()
+            .filter(|(_, &child)| self.kind(child) == "=")
+            .map(|(at, _)| at)
+            .collect();
+        // The chain arrives nested: `a = (b = value)` is two assignment nodes,
+        // and the inner binder is the first child of the inner one.
+        let nested = matches!(self.kind(last), "assignment" | "assignment_expression");
+        let mut mids = Vec::new();
+        if nested {
+            if let Some(inner) = self.children(last).first().copied() {
+                if let Some(name) = self.value_path(inner) {
+                    mids.push(name);
+                }
+            }
+        }
+        if equals.len() > 1 {
+            for pair in equals.windows(2) {
+                for &child in &children[pair[0] + 1..pair[1]] {
+                    if let Some(name) = self.value_path(child) {
+                        mids.push(name);
+                    }
+                }
+            }
+        }
+        if !mids.is_empty() {
+            {
+                let expr = self.form(last);
+                let mut merged = String::from("[\"m\",[");
+                for name in &mids {
+                    merged.push_str("[\"n\",");
+                    push_string(&mut merged, name);
+                    merged.push_str("],");
+                }
+                merged.push_str(&expr);
+                merged.push_str("]]");
+                let mut list = String::from("[");
+                for (index, name) in targets.iter().enumerate() {
+                    if index > 0 {
+                        list.push(0x2c as char);
+                    }
+                    push_string(&mut list, name);
+                }
+                list.push(']');
+                self.event(&format!("[\"a\",{line},{list},{merged}]"));
+                return;
+            }
+        }
         self.assignment_parts(targets, last, line, weak);
     }
 
@@ -1736,7 +1793,20 @@ impl<'a> Walker<'a> {
             },
             "assignment" | "assignment_expression" | "augmented_assignment_expression" => {
                 let children = self.children(id);
-                children.last().filter(|&&last| last != children[0]).map(|&last| self.form(last)).unwrap_or_else(|| "0".to_string())
+                let value = children.last().filter(|&&last| last != children[0]).map(|&last| self.form(last)).unwrap_or_else(|| "0".to_string());
+                // `cache['SHA1'] = cache['sha1'] = _sha1.sha1` nests: the right
+                // side is another assignment, and the one-pass lexer reads the
+                // line left to right, so its value names the inner binder too.
+                // Reading only the innermost value dropped `cache`.
+                let chained = children
+                    .last()
+                    .filter(|&&last| last != children[0])
+                    .is_some_and(|&last| matches!(self.kind(last), "assignment" | "assignment_expression"));
+                if chained {
+                    let binder = self.form(children[0]);
+                    return format!("[\"m\",[{binder},{value}]]");
+                }
+                value
             }
             // `f"{a(x)} b{c(y)}"` and `` `a${h(x)}b${g(y)}` ``: the text is not
             // a value, but each field's expression is, and the one-pass lexer's
