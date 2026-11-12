@@ -756,10 +756,10 @@ impl<'a> Walker<'a> {
         let mut stack = vec![(root, false)];
         while let Some((node, in_args)) = stack.pop() {
             let kind = self.kind(node);
-            // A `require` inside an argument list is the argument of some other
-            // call, not the value of this binding: `func = convert('x', require('./y'))`
-            // imports nothing into `func`. Only the top-level expression counts.
-            if !in_args && matches!(kind, "call_expression" | "call" | "import_require_clause") {
+            // A `require` nested in an argument list still counts: the one-pass
+            // lexer records `_interopRequireWildcard(require("react"))` as an
+            // import of `react`, so refusing the nested form cost 276 JS files.
+            if matches!(kind, "call_expression" | "call" | "import_require_clause") {
                 let children = self.children(node);
                 if let Some(&callee) = children.first() {
                     if self.kind(callee) == "identifier" && self.text_string(callee) == "require" {
