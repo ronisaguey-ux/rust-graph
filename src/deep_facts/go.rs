@@ -1818,8 +1818,34 @@ impl<'a> Walker<'a> {
             "pair" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 match items.len() {
+                    // `{ type: "boolean" }`: a key spelled like a keyword (`type`,
+                    // `class`, `default`) has that keyword as its kind, so
+                    // is_layout() drops it and the pair is left holding its value
+                    // alone. The lexer reads the key as a name, so the CST must:
+                    // the key is the first child whose text is a word.
+                    1 => {
+                        let key = self
+                            .children(id)
+                            .into_iter()
+                            .find(|&child| {
+                                let text = self.text_string(child);
+                                !text.is_empty()
+                                    && text != ":"
+                                    && (text.as_bytes()[0].is_ascii_alphabetic() || text.as_bytes()[0] == b'_')
+                            });
+                        match key {
+                            Some(key) => {
+                                let mut out = "[\"m\",[[\"n\",".to_string();
+                                push_string(&mut out, &self.text_string(key));
+                                out.push_str("],");
+                                out.push_str(&self.form(items[0]));
+                                out.push_str("]]");
+                                out
+                            }
+                            None => self.form(items[0]),
+                        }
+                    }
                     0 => "0".to_string(),
-                    1 => self.form(items[0]),
                     _ => {
                         let key = self.form(items[0]);
                         let value = self.form(items[items.len() - 1]);
