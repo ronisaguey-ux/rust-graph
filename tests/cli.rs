@@ -182,7 +182,9 @@ fn a_bare_name_in_a_class_is_a_member_only_where_the_language_says_so() {
 fn an_assigned_function_is_named_for_the_word_beside_the_equals() {
     let tree = Tree::new("assigned", &[("a.ts", "export const one = (x: string) => x;\nconst two: Fn = (y: string) => y;\nexports.three = (z) => z;\n")]);
     let json = tree.json();
-    for name in ["a.ts:one", "a.ts:two", "a.ts:three"] {
+    // `exports.three` keeps the target's path: naming it `three` collided with
+    // any other `x.three` binding in the same file and merged their flows.
+    for name in ["a.ts:one", "a.ts:two", "a.ts:exports.three"] {
         assert!(json.contains(&format!("\"id\":\"{name}\"")), "{name}: {json}");
     }
 }
