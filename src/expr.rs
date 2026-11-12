@@ -305,8 +305,44 @@ impl Emit<'_> {
             }
             return;
         }
-        let go_word = matches!(word.as_str(), "go" | "defer") && self.lang.tag != "GO";
-        // `new` is a keyword in the JavaScript family and an ordinary name in
+        // `f(function (st) { ... })`: a function expression is a value, and the
+        // CST records it as one constant. Read as a name, `function` became a
+        // call whose arguments were its parameter list, and the statement was
+        // blamed for a call the source never made.
+        if word == "function" && self.lang.defs.contains(&word.as_str()) {
+            self.pos += 1;
+            if self.word(0).is_some() {
+                self.pos += 1;
+            }
+            if self.op_byte(0) == b'(' {
+                self.pos += 1;
+                let mut params = String::new();
+                self.list(&mut params, b')', false);
+            }
+            if self.op_byte(0) == b'{' {
+                let mut depth = 0usize;
+                loop {
+                    let Some(token) = self.tok(0) else { break };
+                    let (kind, start, end) = (token.kind, token.start as usize, token.end as usize);
+                    self.pos += 1;
+                    if kind == Kind::Op {
+                        match &self.src[start..end] {
+                            b"{" => depth += 1,
+                            b"}" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            out.push('0');
+            return;
+        }
+        let go_word = matches!(word.as_str(), "go" | "defer") && self.lang.tag != "GO";        // `new` is a keyword in the JavaScript family and an ordinary name in
         // Rust: reading it as noise left `new.is_none()` calling nothing, and
         // the record differed by a constant that was never there.
         let noise = NOISE.contains(&word.as_str())
@@ -499,6 +535,18 @@ mod tests {
         let mut out = String::new();
         emit.mix(&mut out, 0);
         (out, calls.into_iter().map(|call| call.path).collect())
+    }
+
+    #[test]
+    fn a_function_expression_is_a_constant() {
+        // `f(function (st) { st; })`: the CST records the function expression
+        // as one value, and reading `function` as a name made it a call whose
+        // arguments were the parameter list.
+        let (value, calls) = form("js", "f(function (st) { st; })");
+        assert_eq!(value, r#"["c",0,0,[0]]"#);
+        assert_eq!(calls, ["f"]);
+        let (value, _) = form("js", "f(function st(x) { g(x); })");
+        assert_eq!(value, r#"["c",0,0,[0]]"#);
     }
 
     #[test]
