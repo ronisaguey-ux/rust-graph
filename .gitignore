@@ -1,2 +1,5 @@
 target/
 .rust-graph/
+
+# 10k-file reference corpora are cloned, never committed
+/corpus45/
