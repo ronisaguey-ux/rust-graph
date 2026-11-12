@@ -1909,6 +1909,15 @@ impl<'a> Walker<'a> {
                 out.push(']');
                 out
             }
+            // JavaScript reads `null` and `undefined` as names too: there is no
+            // keyword table on the lexer's side, so `obj.__proto__ = null`
+            // records `n:null` while the CST wrote the constant 0.
+            "null" | "undefined" if self.is_js() => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment" => "0".to_string(),
             // A region the grammar could not name. The tokens are still there —
