@@ -117,6 +117,71 @@ impl Emit<'_> {
         count
     }
 
+    /// `set(v) { … }` starting at `at`: the index just past the body when the
+    /// tokens spell a method definition, and nothing otherwise. One extra word
+    /// is allowed in front (`get name() {…}`, `async run() {…}`), because the
+    /// accessor word is part of the same definition.
+    fn method_end(&self, at: usize) -> Option<usize> {
+        let op_at = |index: usize, op: &[u8]| {
+            self.toks.get(index).is_some_and(|token| {
+                token.kind == Kind::Op && &self.src[token.start as usize..token.end as usize] == op
+            })
+        };
+        // A method is an object entry, so it follows the opening brace or a
+        // comma. Without this, `if num_truthy(h) {` in a Rust block read as a
+        // method and the block's statements vanished from the value.
+        let previous = at.checked_sub(1)?;
+        if !op_at(previous, b"{") && !op_at(previous, b",") {
+            return None;
+        }
+        let mut open = at + 1;
+        if self.toks.get(open).is_some_and(|token| token.kind == Kind::Ident) {
+            open += 1;
+        }
+        if !op_at(open, b"(") {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut index = open;
+        loop {
+            let token = self.toks.get(index)?;
+            if token.kind == Kind::Op {
+                match &self.src[token.start as usize..token.end as usize] {
+                    b"(" => depth += 1,
+                    b")" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            index += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            index += 1;
+        }
+        if !op_at(index, b"{") {
+            return None;
+        }
+        let mut depth = 0usize;
+        loop {
+            let token = self.toks.get(index)?;
+            if token.kind == Kind::Op {
+                match &self.src[token.start as usize..token.end as usize] {
+                    b"{" => depth += 1,
+                    b"}" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(index + 1);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            index += 1;
+        }
+    }
+
     fn argument(&mut self, out: &mut String, close: u8) {
         if let Some(name) = self.word(0) {
             let colon = self.op_byte(1) == b':' && NAMED_ARGS_WITH_COLON.contains(&self.lang.tag);
@@ -159,7 +224,22 @@ impl Emit<'_> {
             }
             let body = out.len();
             match kind {
-                Kind::Ident => self.ident(out, close),
+                Kind::Ident => {
+                    // `{ set(v) { … } }`: a method definition is one value to
+                    // the CST, and the lexer read its body as part of the
+                    // object. The key is dropped with it, exactly as the CST
+                    // drops it, so the merge lists the same items.
+                    if close == b'}' {
+                        if let Some(end) = self.method_end(self.pos) {
+                            self.pos = end;
+                            out.push('0');
+                        } else {
+                            self.ident(out, close);
+                        }
+                    } else {
+                        self.ident(out, close);
+                    }
+                }
                 Kind::Str => self.string(out),
                 Kind::Op => {
                     let byte = self.op_byte(0);
@@ -535,6 +615,14 @@ mod tests {
         let mut out = String::new();
         emit.mix(&mut out, 0);
         (out, calls.into_iter().map(|call| call.path).collect())
+    }
+
+    #[test]
+    fn an_object_method_is_a_constant() {
+        // `{ set(v) { … } }`: the CST writes the method as one value, and the
+        // lexer read the body into the object's merge.
+        assert_eq!(form("js", "{ set(v) { v; } }").0, r#"["m",[0]]"#);
+        assert_eq!(form("js", "{ get name() { return a; } }").0, r#"["m",[0]]"#);
     }
 
     #[test]
