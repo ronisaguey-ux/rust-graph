@@ -1557,6 +1557,7 @@ fn uncovered(
             || is_type_property_line(src, event.line)
             || is_export_statement_line(src, event.line)
             || is_type_continuation_line(src, event.line)
+            || is_tail_expression_line(src, event.line)
             // `Bound(Bound),` in an enum body: the variants are declarations,
             // and the lexer reads the bare ones as a tuple value of its own.
             || is_variant_declaration(src, event.line)
@@ -1832,6 +1833,28 @@ fn is_type_property_line(src: &str, line: u32) -> bool {
     // the head rather than the type.
     head = head.trim_end_matches(';').trim();
     !head.is_empty() && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
+}
+
+/// The last expression of a block: `x.wrapping_mul(K)` written with no
+/// semicolon is the block's value. The one-pass lexer reads it as a statement
+/// event and the CST records the call without one, which is the same fact told
+/// two ways: the call table still compares the call itself.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_tail_expression_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_end();
+    if text.ends_with(';') || text.ends_with('{') || text.ends_with('}') || text.ends_with(',') {
+        return false;
+    }
+    let indent = text.len() - text.trim_start().len();
+    let mut rest = src.lines().skip(line as usize).filter(|next| !next.trim().is_empty());
+    let Some(next) = rest.next() else {
+        return false;
+    };
+    let next_indent = next.len() - next.trim_start().len();
+    next.trim_start().starts_with('}') && next_indent <= indent
 }
 
 /// A line that continues a type across lines: `| DynamicModuleLoader<Script>`.
