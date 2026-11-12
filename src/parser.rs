@@ -1655,8 +1655,15 @@ impl<'a> Parser<'a> {
                 head.body = head.body.map(|body| body + equal + 1);
                 head
             };
-            head.name = name;
-            head.owner = owner;
+            // `module.exports = function callBindBasic(args) {`: the function
+            // names itself, and the CST keeps that name, so overriding it with
+            // the assignment target made the two records disagree about a
+            // symbol both of them saw. The target's name is only a fallback for
+            // a function expression that has none.
+            if head.name.is_empty() {
+                head.name = name;
+                head.owner = owner;
+            }
             return Some(head);
         }
         let arrow = rhs.iter().position(|token| self.is_op(token, b"=>"))?;
