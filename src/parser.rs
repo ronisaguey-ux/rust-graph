@@ -1883,6 +1883,35 @@ impl<'a> Parser<'a> {
         }
         let mut start = at;
         while start > 0 {
+            if self.is_op(&toks[start - 1], b")") {
+                // `(object).__proto__ = v`: the receiver is parenthesised, so the
+                // path continues inside the group. Stopping at the `)` named the
+                // target `.__proto__` and the assignment lost its receiver.
+                let mut depth = 0usize;
+                let mut open = None;
+                let mut index = start - 1;
+                loop {
+                    let token = &toks[index];
+                    if self.is_op(token, b")") {
+                        depth += 1;
+                    } else if self.is_op(token, b"(") {
+                        depth -= 1;
+                        if depth == 0 {
+                            open = Some(index);
+                            break;
+                        }
+                    }
+                    if index == 0 {
+                        break;
+                    }
+                    index -= 1;
+                }
+                match open {
+                    Some(index) => start = index,
+                    None => break,
+                }
+                continue;
+            }
             let token = &toks[start - 1];
             let joins = token.kind == Kind::Op && matches!(self.raw(token), b"." | b"->" | b"::");
             if token.kind == Kind::Ident && (start == at || self.raw(&toks[start]) != b".") && start != at {
@@ -1905,6 +1934,8 @@ impl<'a> Parser<'a> {
                 } else {
                     path.push_str(&word);
                 }
+            } else if token.kind == Kind::Op && matches!(self.raw(token), b"(" | b")") {
+                // A parenthesised receiver contributes its contents, not a dot.
             } else {
                 path.push('.');
             }
