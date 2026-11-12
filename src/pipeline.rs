@@ -1802,16 +1802,22 @@ fn is_type_property_line(src: &str, line: u32) -> bool {
         return false;
     };
     let text = text.trim_start();
-    if !text.ends_with(';') || text.contains('=') || text.contains('(') {
+    // The declaration may stop at the colon or at the opening of an object
+    // type: `importModuleDynamically?:` and `attributes?: {` continue on the
+    // next lines, and the one-pass lexer reads the words after them anyway.
+    if !(text.ends_with(';') || text.ends_with(':') || text.ends_with('{')) || text.contains('=') {
         return false;
     }
     let Some(colon) = text.find(':') else {
         return false;
     };
-    let head = text[..colon].trim_end_matches('?').trim();
-    !head.is_empty()
-        && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
-        && !text[colon..text.len() - 1].contains(';')
+    let mut head = text[..colon].trim_end_matches('?').trim();
+    for keyword in ["declare ", "var ", "let ", "const ", "readonly ", "static ", "public ", "private ", "protected "] {
+        if let Some(rest) = head.strip_prefix(keyword) {
+            head = rest.trim();
+        }
+    }
+    !head.is_empty() && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
 }
 
 /// `export = escape;` and `export {};`: the lexer writes an assignment or an
