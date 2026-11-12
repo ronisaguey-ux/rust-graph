@@ -12,6 +12,9 @@ members = [
 [features]
 deep = ["dep:deep-rt", "dep:deep-lex", "dep:deep-grammars"]
 parser = ["dep:rust-graph-deep"]
+# One row per top-level expression instead of one per statement. Off by default:
+# the default build keeps the statement rows the corpus was measured against.
+event-split = []
 # The bridge in src/deep_integration.rs, and nothing in the default build.
 
 [[bin]]
