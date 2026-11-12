@@ -1603,23 +1603,56 @@ fn uncovered(
     // re-read as an artefact. Pairing greedily one want at a time let a
     // resembling event on the next line consume the row a later want needed,
     // and the file was blamed for an event that was in the record all along.
+    if std::env::var("RG_GUARD_DEBUG").is_ok() {
+        eprintln!("[rgdebug] built found rows={} wanted={}", found.len(), wanted.len());
+        for row in &found {
+            eprintln!("[rgdebug]   found {} line {} targets {} value {}", row.0 as char, row.1.line, row.1.targets, row.1.value);
+        }
+        for want in &wanted {
+            eprintln!("[rgdebug]   want {} line {} targets {} value {}", want.0 as char, want.1.line, want.1.targets, want.1.value);
+        }
+    }
+    // A line that both readers wrote is matched first, for every statement,
+    // before any statement is allowed to take a row from another line. Pairing
+    // in one loop let an event with the right marker and a covering value on a
+    // later line be consumed by an earlier want, and the statement that owned
+    // that line was then reported as lost while it sat in the record all along.
+    let mut wants: Vec<(u8, Shape)> = wanted;
     let mut leftover: Vec<(u8, Shape)> = Vec::new();
-    for want in wanted {
-        let exact = found
-            .iter()
-            .position(|row| row.0 == want.0 && row.1.line == want.1.line && covers(&row.1, &want.1, src).is_ok())
-            .or_else(|| found.iter().position(|row| row.0 == want.0 && covers(&row.1, &want.1, src).is_ok()))
+    let mut twice: Vec<(u8, Shape)> = Vec::new();
+    for want in wants.drain(..) {
+        match found.iter().position(|row| {
+            row.0 == want.0 && row.1.line == want.1.line && covers(&row.1, &want.1, src).is_ok()
+        }) {
+            Some(at) => {
+                found.swap_remove(at);
+            }
+            None => twice.push(want),
+        }
+    }
+    for want in twice {
+        // A statement the lexer read as a bare expression is the CST's
+        // assignment on the same line (`for (var name in all)` against the
+        // CST's `a … name = all`), so that row is the right partner and is
+        // tried before a same-marker row from a neighbouring line: that row
+        // belongs to the statement on its own line.
+        let exact = (want.0 == b'x' && want.1.targets.is_empty())
+            .then(|| {
+                found.iter().position(|row| {
+                    row.0 == b'a'
+                        && (row.1.line as i64 - want.1.line as i64).abs() <= 1
+                        && a_row_covers(&row.1, &want.1, src)
+                })
+            })
+            .flatten()
             .or_else(|| {
-                if want.0 == b'x' && want.1.targets.is_empty() {
-                    found.iter().position(|row| {
-                        row.0 == b'a'
-                            && (row.1.line as i64 - want.1.line as i64).abs() <= 1
-                            && covers_value(&row.1, &want.1, src).is_ok()
-                    })
-                } else {
-                    None
-                }
-            });
+                found.iter().position(|row| {
+                    row.0 == want.0
+                        && (row.1.line as i64 - want.1.line as i64).abs() <= 1
+                        && covers(&row.1, &want.1, src).is_ok()
+                })
+            })
+            .or_else(|| found.iter().position(|row| row.0 == want.0 && covers(&row.1, &want.1, src).is_ok()));
         match exact {
             Some(at) => {
                 found.swap_remove(at);
@@ -1667,7 +1700,19 @@ fn uncovered(
                 };
                 (format!("line {} targets {} value {}", row.1.line, row.1.targets, row.1.value), why)
             }
-            None => ("no event of that marker within one line".to_string(), "no event on a line both readers can mean"),
+            None => {
+                if std::env::var("RG_GUARD_DEBUG").is_ok() {
+                    eprintln!(
+                        "[rgdebug] no near row for {} line {} marker {} in symbol {} (paired {}/{} line {})",
+                        symbol.name, want.1.line, want.0 as char, symbol.key, paired.name, paired.key, paired.line
+                    );
+                    eprintln!("[rgdebug]   paired raw events: {}", paired.events);
+                    for row in &found {
+                        eprintln!("[rgdebug]   found {} line {} targets {} value {}", row.0 as char, row.1.line, row.1.targets, row.1.value);
+                    }
+                }
+                ("no event of that marker within one line".to_string(), "no event on a line both readers can mean")
+            }
         };
         return Some(format!(
             "event {} line {} targets {} in {} ({why}): lexer {}; CST {}",
@@ -2443,6 +2488,39 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
         }
     }
     Ok(())
+}
+
+/// The CST writes a `for` header's binder in the statement's target list and the
+/// iterable in its value, while the lexer writes both as one merge; the row
+/// still carries every name the lexer read, only in two fields.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn a_row_covers(row: &Shape, want: &Shape, src: &str) -> bool {
+    if covers_value(row, want, src).is_ok() {
+        return true;
+    }
+    let mut pool = Vec::new();
+    atoms(&row.value, &mut pool);
+    for name in row.targets.split('"').skip(1).step_by(2) {
+        pool.push(format!("n:{name}"));
+    }
+    let mut wanted = Vec::new();
+    atoms(&want.value, &mut wanted);
+    let mut left = 0usize;
+    for name in wanted {
+        if name == "call" || name == "0" {
+            left += 1;
+            continue;
+        }
+        match pool.iter().position(|atom| *atom == name) {
+            Some(at) => {
+                pool.swap_remove(at);
+            }
+            None => return false,
+        }
+    }
+    let mut row_atoms = Vec::new();
+    atoms(&row.value, &mut row_atoms);
+    row_atoms.iter().filter(|atom| *atom == "call" || *atom == "0").count() >= left
 }
 
 /// The top-level form of a value: `n` (a name), `c` (a call), `t`/`m` (a list or
