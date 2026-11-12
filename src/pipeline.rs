@@ -1554,6 +1554,8 @@ fn uncovered(
             || is_attribute_call(src, event.line)
             || is_declaration_line(src, event.line)
             || is_method_declaration_line(src, event.line)
+            || is_type_property_line(src, event.line)
+            || is_export_statement_line(src, event.line)
             // `Bound(Bound),` in an enum body: the variants are declarations,
             // and the lexer reads the bare ones as a tuple value of its own.
             || is_variant_declaration(src, event.line)
@@ -1789,6 +1791,38 @@ fn is_declaration_line(src: &str, line: u32) -> bool {
     };
     let header = text.split(['(', '{', '=']).next().unwrap_or(text);
     header.split_whitespace().any(|word| INTRODUCERS.contains(&word))
+}
+
+/// A type property: `filename?: string | undefined;` and `id: string;` in a
+/// `.d.ts` declare a field. The one-pass lexer reads the words as an expression
+/// and writes an event the CST has nothing to match.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_type_property_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    if !text.ends_with(';') || text.contains('=') || text.contains('(') {
+        return false;
+    }
+    let Some(colon) = text.find(':') else {
+        return false;
+    };
+    let head = text[..colon].trim_end_matches('?').trim();
+    !head.is_empty()
+        && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
+        && !text[colon..text.len() - 1].contains(';')
+}
+
+/// `export = escape;` and `export {};`: the lexer writes an assignment or an
+/// expression for the line, and an export statement is neither.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_export_statement_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    text.starts_with("export ") || text == "export"
 }
 
 /// A method header with no introducer: `create(id: string): APIPromise<T>;` in
