@@ -1558,6 +1558,7 @@ fn uncovered(
             || is_export_statement_line(src, event.line)
             || is_type_continuation_line(src, event.line)
             || is_tail_expression_line(src, event.line)
+            || is_yield_line(src, event.line)
             // `Bound(Bound),` in an enum body: the variants are declarations,
             // and the lexer reads the bare ones as a tuple value of its own.
             || is_variant_declaration(src, event.line)
@@ -1833,6 +1834,17 @@ fn is_type_property_line(src: &str, line: u32) -> bool {
     // the head rather than the type.
     head = head.trim_end_matches(';').trim();
     !head.is_empty() && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
+}
+
+/// `yield None`, `yield name`: the one-pass lexer files the yielded name as an
+/// expression event, and the CST records the yield without it. The call inside a
+/// yielded value is still compared through the call table.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_yield_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    text.trim_start().starts_with("yield ")
 }
 
 /// The last expression of a block: `x.wrapping_mul(K)` written with no
