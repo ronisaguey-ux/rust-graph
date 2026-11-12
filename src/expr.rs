@@ -212,11 +212,38 @@ impl Emit<'_> {
                 continue;
             }
             if self.is_arrow(0) {
-                // `pat => value`: the pattern is not part of the value.
+                // In Rust `=>` opens a match arm: the pattern is not part of the
+                // value, so it is dropped and the arm's expression stands (the
+                // constant form below cost rust 100 files there).
+                if !matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") {
+                    out.truncate(start);
+                    count = 0;
+                    self.pos += 1;
+                    continue;
+                }
+                // `map(s => s.name)`: the CST writes one constant for the whole
+                // arrow. Dropping only the pattern left the parameter and the
+                // body standing as the argument.
                 out.truncate(start);
-                count = 0;
+                count = 1;
                 self.pos += 1;
-                continue;
+                let mut depth = 0usize;
+                while let Some(token) = self.tok(0) {
+                    let byte = self.op_byte(0);
+                    if token.kind == Kind::Op {
+                        match byte {
+                            b'(' | b'[' | b'{' => depth += 1,
+                            b')' | b']' | b'}' if depth > 0 => depth -= 1,
+                            _ => {}
+                        }
+                        if depth == 0 && (byte == b',' || (close != 0 && byte == close)) {
+                            break;
+                        }
+                    }
+                    self.pos += 1;
+                }
+                out.push('0');
+                break;
             }
             let at = out.len();
             if count > 0 {
