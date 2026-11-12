@@ -712,6 +712,18 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            // `pos++;` as a statement is the operand's name, which is what the
+            // one-pass lexer writes. Read only here, not in `form`: an update
+            // inside a larger expression is not a statement of its own.
+            "update_expression" | "postfix_expression" => {
+                if let Some(operand) = self.expression_child(child) {
+                    let value = self.form(operand);
+                    if value != "0" {
+                        let line = self.line(child);
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
+                }
+            }
             _ => {
                 let value = self.form(child);
                 if value != "0" {

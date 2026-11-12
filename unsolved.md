@@ -62,3 +62,24 @@ other 33, value written as 0 22.
 
 Not yet reduced to one repro. Next step: take the most common exact message in
 `/tmp/opencode/sweep-python.json`, reduce it to a 5-line file, and fix that shape only.
+
+---
+
+## 4. `pos++;` as a statement is a fact the CST never wrote — SOLVED (2026-11-12)
+
+Measure: `/tmp/rq6/a.js` — `function f(code, plus, minus, pos) { if (code === plus || code === minus) { pos++; } return pos; }`
+The lexer writes `["x",3,["n","pos"]]` for the `pos++` line; the CST wrote no event at all.
+
+Cause: `update_expression` has no arm in `form`, so it formed the constant `0`, and
+`expression_statement` only emits an event when the value is not `0`.
+
+Fix: emit the operand's name in `expression_statement` only — an update inside a larger
+expression (`a[i++]`) is not a statement and the lexer does not write one.
+Measured: js 863 -> 862, ts/python/rust re-measured, cargo and pytest green.
+
+Correction for the record: two earlier measurements (js 1135 and 1137) blamed this arm,
+but the real cause of those numbers was a different change made in the same window —
+`require_module` refusing a `require` nested in an argument list, which cost 276 JS files
+(`_interopRequireWildcard(require("react"))`). That change was reverted in `b7f25c9`; with
+it gone the arm is a one-file improvement. Lesson: one change at a time, or the numbers
+lie about which change did what.
