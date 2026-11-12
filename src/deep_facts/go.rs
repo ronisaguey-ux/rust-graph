@@ -971,6 +971,10 @@ impl<'a> Walker<'a> {
             if binder == tail {
                 break;
             }
+            // The binder itself is an expression: `a[i] = b[f(x)] = v` calls
+            // `f` in the middle of the chain, and naming the binder alone left
+            // that call unrecorded.
+            let _ = self.form(binder);
             if let Some(name) = self.value_path(binder) {
                 mids.push(name);
             }
