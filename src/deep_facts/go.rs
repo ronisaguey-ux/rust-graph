@@ -956,15 +956,31 @@ impl<'a> Walker<'a> {
             .collect();
         // The chain arrives nested: `a = (b = value)` is two assignment nodes,
         // and the inner binder is the first child of the inner one.
-        let nested = matches!(self.kind(last), "assignment" | "assignment_expression");
+        // `a = b = c = value` nests one assignment per binder, and the one-pass
+        // lexer reads the line left to right into one flat merge. Walking the
+        // chain to its end and naming every binder keeps the two forms equal
+        // instead of nesting a merge inside a merge.
         let mut mids = Vec::new();
-        if nested {
-            if let Some(inner) = self.children(last).first().copied() {
-                if let Some(name) = self.value_path(inner) {
-                    mids.push(name);
-                }
+        let mut tail = last;
+        loop {
+            if !matches!(self.kind(tail), "assignment" | "assignment_expression") {
+                break;
             }
+            let inner = self.children(tail);
+            let Some(&binder) = inner.first() else { break };
+            if binder == tail {
+                break;
+            }
+            if let Some(name) = self.value_path(binder) {
+                mids.push(name);
+            }
+            let Some(&next) = inner.last().filter(|&&child| child != binder) else { break };
+            if next == tail {
+                break;
+            }
+            tail = next;
         }
+        let nested = tail != last;
         if equals.len() > 1 {
             for pair in equals.windows(2) {
                 for &child in &children[pair[0] + 1..pair[1]] {
@@ -976,7 +992,7 @@ impl<'a> Walker<'a> {
         }
         if !mids.is_empty() {
             {
-                let expr = self.form(last);
+                let expr = self.form(if nested { tail } else { last });
                 let mut merged = String::from("[\"m\",[");
                 for name in &mids {
                     merged.push_str("[\"n\",");
@@ -2206,7 +2222,13 @@ impl<'a> Walker<'a> {
         let mut out = "[".to_string();
         let mut first = true;
         for child in self.children(list) {
-            if self.is_layout(child) {
+            let kind = self.kind(child);
+            // Python's `...` is an anonymous token, so it reads as layout, but
+            // the one-pass lexer reads it as one argument of value 0: `type(...)`
+            // is `c(0;0;[0])` there and `c(0;0;[])` here. Every EllipsisType and
+            // every stub default of `...` fell back on the difference.
+            let ellipsis = matches!(kind, "ellipsis" | "Ellipsis" | "...");
+            if self.is_layout(child) && !ellipsis {
                 continue;
             }
             if !first {
@@ -2215,9 +2237,13 @@ impl<'a> Walker<'a> {
             first = false;
             // Go and Java do not use `form`: an argument that is itself a call
             // (`path.Join(os.Getenv(..))`) would come back as `0`.
-            let value = match self.kinds.family {
-                Family::Go | Family::Java => self.decl_value(child),
-                _ => self.form(child),
+            let value = if ellipsis {
+                "0".to_string()
+            } else {
+                match self.kinds.family {
+                    Family::Go | Family::Java => self.decl_value(child),
+                    _ => self.form(child),
+                }
             };
             out.push_str(&value);
         }
