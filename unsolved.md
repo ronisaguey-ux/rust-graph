@@ -83,3 +83,32 @@ but the real cause of those numbers was a different change made in the same wind
 (`_interopRequireWildcard(require("react"))`). That change was reverted in `b7f25c9`; with
 it gone the arm is a one-file improvement. Lesson: one change at a time, or the numbers
 lie about which change did what.
+
+---
+
+## 5. A multi-line expression is one CST event and several lexer events
+
+Measure: `/tmp/rq7/a.js` —
+`const humanErr = (detail, status) => (A && B.humanErrorText) ? B.humanErrorText(detail, status) : \`x${status ? \`y${status}\` : ''}\`;`
+spanning four lines. The lexer writes `x line 3` (the call) and `x line 4` (the template
+fields) on the module symbol; the CST folds the whole body into the arrow's single
+`r line 1` event, so lines 3 and 4 carry nothing and the file falls back with
+"no event on a line both readers can mean".
+
+Which reader is right: the CST. One expression is one fact, and the lexer's per-line
+events are an artefact of reading line by line. But the guard treats the lexer's record as
+the truth to be covered, so the difference is counted as a loss.
+
+49 files in the JS corpus fail exactly this way (`no event on a line both readers can mean`
+with empty targets), and the same shape appears in TS and Rust.
+
+Options, none of them cheap:
+1. Teach the guard that a lexer event is covered when every name it carries appears in a
+   CST event that spans its line — requires line ranges per event, which the fact format
+   does not carry today.
+2. Make the lexer emit one event per statement, not per line — a change to the one-pass
+   reader's core model, and the largest single change on this project.
+3. Leave it and keep the fallback honest.
+
+Do not attempt (1) or (2) without a full-corpus measurement plan: both touch the guard's
+semantics, and every earlier "small" guard change moved hundreds of files.
