@@ -1447,7 +1447,7 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
                 // `function atob(data: string): string;` are read by the
                 // lexer as calls on the declared name. The line carries the
                 // introducer, so nothing was lost.
-                if !src.is_empty() && is_declaration_line(src, call.line) {
+                if !src.is_empty() && (is_declaration_line(src, call.line) || is_method_declaration_line(src, call.line)) {
                     continue;
                 }
                 // `match self.tok(i) { Some(t) => ... }`: the lexer reads the
@@ -1553,6 +1553,7 @@ fn uncovered(
         if macro_lines.get(event.line.saturating_sub(1) as usize).copied().unwrap_or(false)
             || is_attribute_call(src, event.line)
             || is_declaration_line(src, event.line)
+            || is_method_declaration_line(src, event.line)
             // `Bound(Bound),` in an enum body: the variants are declarations,
             // and the lexer reads the bare ones as a tuple value of its own.
             || is_variant_declaration(src, event.line)
@@ -1788,6 +1789,38 @@ fn is_declaration_line(src: &str, line: u32) -> bool {
     };
     let header = text.split(['(', '{', '=']).next().unwrap_or(text);
     header.split_whitespace().any(|word| INTRODUCERS.contains(&word))
+}
+
+/// A method header with no introducer: `create(id: string): APIPromise<T>;` in
+/// a `.d.ts` declares a method, and the one-pass lexer reads the name and its
+/// parameter list as a call. The shape is what tells it apart from a call
+/// statement: the line ends `;`, the text after the closing parenthesis is a
+/// return type starting with `:`, and neither side of it holds `=` — which is
+/// what keeps `const f = (a: string): string => a;` an expression.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_method_declaration_line(src: &str, line: u32) -> bool {
+    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+        return false;
+    };
+    let text = text.trim_start();
+    let Some(body) = text.strip_suffix(';') else {
+        return false;
+    };
+    let Some(close) = body.rfind(')') else {
+        return false;
+    };
+    let rest = body[close + 1..].trim();
+    if !rest.starts_with(':') || rest.contains('=') {
+        return false;
+    }
+    let Some(open) = body[..close].find('(') else {
+        return false;
+    };
+    let head = body[..open].trim();
+    if head.is_empty() || head.contains('=') {
+        return false;
+    }
+    head.chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
 /// A match arm header: `pat => {`, `pat => {}`, or `pat =>` opening a block.
