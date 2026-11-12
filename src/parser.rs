@@ -1883,7 +1883,7 @@ impl<'a> Parser<'a> {
         }
         let mut start = at;
         while start > 0 {
-            if self.is_op(&toks[start - 1], b")") {
+            if self.is_op(&toks[start - 1], b")") && start < toks.len() && self.is_op(&toks[start], b".") {
                 // `(object).__proto__ = v`: the receiver is parenthesised, so the
                 // path continues inside the group. Stopping at the `)` named the
                 // target `.__proto__` and the assignment lost its receiver.
@@ -1907,7 +1907,20 @@ impl<'a> Parser<'a> {
                     index -= 1;
                 }
                 match open {
-                    Some(index) => start = index,
+                    Some(index) => {
+                        // Only a parenthesised primary is a receiver. When the
+                        // group follows an identifier or another group it is a
+                        // call's argument list, and stepping into it merged the
+                        // argument into the path.
+                        let is_call = index > 0
+                            && (toks[index - 1].kind == Kind::Ident
+                                || self.is_op(&toks[index - 1], b")")
+                                || self.is_op(&toks[index - 1], b"]"));
+                        if is_call {
+                            break;
+                        }
+                        start = index;
+                    }
                     None => break,
                 }
                 continue;
