@@ -137,4 +137,26 @@ Next step before touching the value again: instrument `uncovered` for one file
 (`eprintln!` the `found` rows and the paired symbol's raw events), because everything
 above is inference and the values already match.
 
-Reverted both edits so the tree stays at a measured state (82f054f, js 851).
+**Resolved (70863d2).** The instrumentation showed the object key was never the loss. `found`
+held `x line 4` with the exact value the lexer wrote, but pairing ran in one loop: the first
+want (`x line 3`, the `for (var name in all)` header) took the later line's row through the
+"same marker, any line" fallback, and the statement that owned line 4 was then reported as
+lost. Pairing is now two passes — every statement claims a row on its own line first, then the
+leftovers fall back (a `for` header's row first, since the CST files the binder under `targets`
+and the iterable under the value; `a_row_covers` checks both fields) — which also fixed the
+same theft in Python and Rust.
+
+Measured with the pair-key edit REVERTED (it is still a real value gap but it costs more than it
+wins — see below):
+
+| corpus | before | after |
+|---|---|---|
+| js | 851 | 838 |
+| ts | 448 | 448 |
+| python | 148 | 146 |
+| rust | 360 | 345 |
+
+The pair-key edit itself (`pair` takes its first child as the key, falling back to raw text)
+makes the CST value byte-identical to the lexer's, but it turned `{ get: … }` keys into names
+everywhere: js 851 -> 872 and python 148 -> 201. Not landed; it needs a rule that names a
+property key only where the CST lost it.
