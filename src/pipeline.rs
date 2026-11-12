@@ -1799,28 +1799,49 @@ fn is_declaration_line(src: &str, line: u32) -> bool {
 /// what keeps `const f = (a: string): string => a;` an expression.
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn is_method_declaration_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+    let lines: Vec<&str> = src.lines().skip(line.saturating_sub(1) as usize).take(16).collect();
+    let Some(first) = lines.first() else {
         return false;
     };
-    let text = text.trim_start();
-    let Some(body) = text.strip_suffix(';') else {
+    let text = first.trim_start();
+    // The name in front of the parameter list: `create(`, `runInNewContext(`.
+    let Some(open) = text.find('(') else {
         return false;
     };
-    let Some(close) = body.rfind(')') else {
-        return false;
-    };
-    let rest = body[close + 1..].trim();
-    if !rest.starts_with(':') || rest.contains('=') {
+    let head = text[..open].trim();
+    if head.is_empty() || head.contains('=') || !head.chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_') {
         return false;
     }
-    let Some(open) = body[..close].find('(') else {
+    // A signature may wrap: `runInNewContext(` opens the paren on one line and
+    // `): any;` closes it several lines down. Walk the scanned lines counting
+    // parentheses only, then read what stands between the close and the `;`.
+    let joined: String = lines.iter().map(|l| l.trim_start()).collect::<Vec<_>>().join("\n");
+    let mut depth = 0i32;
+    let mut close = None;
+    for (index, ch) in joined.char_indices().skip(open) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            ';' if depth == 0 => break,
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
         return false;
     };
-    let head = body[..open].trim();
-    if head.is_empty() || head.contains('=') {
-        return false;
-    }
-    head.chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+    let rest: String = joined[close + 1..].trim_start().chars().take_while(|&ch| ch != ';' && ch != '\n').collect();
+    let rest = rest.trim();
+    // `code(cxt: KeywordCxt) {` and `get children() {` are method definitions:
+    // a name, its parameters, then a body. A statement keyword never reaches
+    // this test — the keyword-callee check runs first — so `if (x) {` and
+    // `while (x) {` are decided before here.
+    rest.starts_with(':') && !rest.contains('=') || rest.starts_with('{')
 }
 
 /// A match arm header: `pat => {`, `pat => {}`, or `pat =>` opening a block.
