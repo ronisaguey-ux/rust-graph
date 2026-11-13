@@ -1,0 +1,433 @@
+{
+ "deep": {
+  "000001_virtual-network-toolbox.d.ts": {
+   "events": 4,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000002_vm.d.ts": {
+   "events": 2,
+   "imports": 4,
+   "symbols": 45
+  },
+  "000003_blob.d.ts": {
+   "events": 2,
+   "imports": 1,
+   "symbols": 11
+  },
+  "000004_auth-utils.d.ts": {
+   "symbols": 2
+  },
+  "000005_AirlineSeatReclineExtraRounded.d.ts": {
+   "imports": 1
+  },
+  "000006_files.d.ts": {
+   "imports": 9,
+   "symbols": 23
+  },
+  "000007_escape.d.ts": {
+   "events": 1,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000008_id.d.ts": {
+   "events": 2,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000009_MovieCreationRounded.d.ts": {
+   "imports": 1
+  },
+  "000010_WatchOffRounded.d.ts": {
+   "imports": 1
+  },
+  "000011_TripOriginRounded.d.ts": {
+   "imports": 1
+  },
+  "000012_notmodified.d.ts": {
+   "symbols": 2
+  },
+  "000013_map.test.ts": {
+   "events": 66,
+   "imports": 5,
+   "symbols": 10
+  },
+  "000014_errors.d.ts": {
+   "events": 2,
+   "imports": 6,
+   "symbols": 44
+  },
+  "000015_FeedArticle.ts": {
+   "events": 9,
+   "imports": 13,
+   "symbols": 6
+  },
+  "000016_timers.d.ts": {
+   "imports": 3,
+   "symbols": 4
+  },
+  "000017_materialDefines.d.ts": {
+   "symbols": 18
+  },
+  "000018_auxiliaryAuthenticationHeaderPolicy.d.ts": {
+   "events": 1,
+   "imports": 3,
+   "symbols": 3
+  },
+  "000019_sse.d.ts": {
+   "imports": 6,
+   "symbols": 9
+  },
+  "000020_appBarClasses.d.ts": {
+   "events": 2,
+   "symbols": 4
+  },
+  "000021_types.d.ts": {
+   "imports": 3,
+   "symbols": 33
+  },
+  "000022_glob.d.ts": {
+   "imports": 7,
+   "symbols": 19
+  },
+  "000023_url.d.ts": {
+   "symbols": 2
+  },
+  "000024_ZREVRANK.d.ts": {
+   "events": 2,
+   "imports": 4,
+   "symbols": 1
+  },
+  "000025_DirectionsBusOutlined.d.ts": {
+   "imports": 1
+  },
+  "000026_Query.d.ts": {
+   "imports": 6,
+   "symbols": 13
+  },
+  "000027_metrics.d.ts": {
+   "events": 1,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000028_Transcribe.d.ts": {
+   "imports": 1
+  },
+  "000029_storage.d.ts": {
+   "events": 3,
+   "symbols": 4
+  },
+  "000030_index.d.ts": {
+   "imports": 51
+  },
+  "000031_protocol.d.ts": {
+   "events": 27,
+   "imports": 2,
+   "symbols": 1
+  },
+  "000032_index.d.ts": {
+   "events": 2,
+   "symbols": 7
+  },
+  "000033_receipt.d.ts": {
+   "events": 14,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000034_engine.readTexture.d.ts": {
+   "imports": 3,
+   "symbols": 1
+  },
+  "000035_Exception.d.ts": {
+   "symbols": 4
+  },
+  "000036_ElectricBike.d.ts": {
+   "imports": 1
+  },
+  "000037_constants.d.ts": {
+   "events": 21,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000038_parseJson.ts": {
+   "edges": 11,
+   "events": 182,
+   "symbols": 7
+  },
+  "000039_date-utils.d.ts": {
+   "events": 4,
+   "symbols": 2
+  },
+  "000040_view-desktop-mobile.d.ts": {
+   "events": 6,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000041_EditNoteSharp.d.ts": {
+   "imports": 1
+  },
+  "000042_index-browser.ts": {
+   "events": 11,
+   "imports": 6,
+   "symbols": 12
+  },
+  "000043_border-outside.d.ts": {
+   "events": 6,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000044_TableView.d.ts": {
+   "imports": 1
+  },
+  "000045_instanceof.test.ts": {
+   "edges": 6,
+   "events": 75,
+   "imports": 4,
+   "symbols": 22
+  },
+  "000046_AirlineStopsTwoTone.d.ts": {
+   "imports": 1
+  },
+  "000047_not.ts": {
+   "events": 13,
+   "imports": 5,
+   "symbols": 5
+  },
+  "000048_url.test.ts": {
+   "events": 5,
+   "imports": 4,
+   "symbols": 3
+  },
+  "000049_table-sparkle.d.ts": {
+   "events": 6,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000050_JSHandle.d.ts": {
+   "imports": 4,
+   "symbols": 12
+  }
+ },
+ "lexer": {
+  "000001_virtual-network-toolbox.d.ts": {
+   "events": 4,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000002_vm.d.ts": {
+   "events": 90,
+   "imports": 4,
+   "symbols": 19
+  },
+  "000003_blob.d.ts": {
+   "events": 15,
+   "imports": 1,
+   "symbols": 5
+  },
+  "000004_auth-utils.d.ts": {
+   "events": 2,
+   "symbols": 1
+  },
+  "000005_AirlineSeatReclineExtraRounded.d.ts": {
+   "imports": 1
+  },
+  "000006_files.d.ts": {
+   "events": 41,
+   "imports": 9,
+   "symbols": 12
+  },
+  "000007_escape.d.ts": {
+   "events": 1,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000008_id.d.ts": {
+   "events": 2,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000009_MovieCreationRounded.d.ts": {
+   "imports": 1
+  },
+  "000010_WatchOffRounded.d.ts": {
+   "imports": 1
+  },
+  "000011_TripOriginRounded.d.ts": {
+   "imports": 1
+  },
+  "000012_notmodified.d.ts": {
+   "events": 2,
+   "symbols": 2
+  },
+  "000013_map.test.ts": {
+   "events": 66,
+   "imports": 5,
+   "symbols": 8
+  },
+  "000014_errors.d.ts": {
+   "events": 73,
+   "imports": 6,
+   "symbols": 13
+  },
+  "000015_FeedArticle.ts": {
+   "events": 6,
+   "imports": 13,
+   "symbols": 2
+  },
+  "000016_timers.d.ts": {
+   "events": 27,
+   "imports": 3,
+   "symbols": 5
+  },
+  "000017_materialDefines.d.ts": {
+   "events": 36,
+   "symbols": 2
+  },
+  "000018_auxiliaryAuthenticationHeaderPolicy.d.ts": {
+   "events": 5,
+   "imports": 3,
+   "symbols": 2
+  },
+  "000019_sse.d.ts": {
+   "events": 16,
+   "imports": 6,
+   "symbols": 3
+  },
+  "000020_appBarClasses.d.ts": {
+   "events": 19,
+   "symbols": 2
+  },
+  "000021_types.d.ts": {
+   "events": 35,
+   "imports": 3,
+   "symbols": 4
+  },
+  "000022_glob.d.ts": {
+   "events": 72,
+   "imports": 7,
+   "symbols": 3
+  },
+  "000023_url.d.ts": {
+   "events": 2,
+   "symbols": 1
+  },
+  "000024_ZREVRANK.d.ts": {
+   "events": 2,
+   "imports": 4,
+   "symbols": 1
+  },
+  "000025_DirectionsBusOutlined.d.ts": {
+   "imports": 1
+  },
+  "000026_Query.d.ts": {
+   "events": 24,
+   "imports": 6,
+   "symbols": 6
+  },
+  "000027_metrics.d.ts": {
+   "events": 1,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000028_Transcribe.d.ts": {
+   "imports": 1
+  },
+  "000029_storage.d.ts": {
+   "events": 15,
+   "symbols": 3
+  },
+  "000030_index.d.ts": {
+   "imports": 51
+  },
+  "000031_protocol.d.ts": {
+   "events": 27,
+   "imports": 2,
+   "symbols": 1
+  },
+  "000032_index.d.ts": {
+   "events": 8,
+   "symbols": 3
+  },
+  "000033_receipt.d.ts": {
+   "events": 14,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000034_engine.readTexture.d.ts": {
+   "events": 3,
+   "imports": 3,
+   "symbols": 2
+  },
+  "000035_Exception.d.ts": {
+   "events": 13,
+   "symbols": 4
+  },
+  "000036_ElectricBike.d.ts": {
+   "imports": 1
+  },
+  "000037_constants.d.ts": {
+   "events": 21,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000038_parseJson.ts": {
+   "edges": 11,
+   "events": 176,
+   "symbols": 7
+  },
+  "000039_date-utils.d.ts": {
+   "events": 1,
+   "symbols": 1
+  },
+  "000040_view-desktop-mobile.d.ts": {
+   "events": 6,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000041_EditNoteSharp.d.ts": {
+   "imports": 1
+  },
+  "000042_index-browser.ts": {
+   "events": 18,
+   "imports": 6,
+   "symbols": 11
+  },
+  "000043_border-outside.d.ts": {
+   "events": 6,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000044_TableView.d.ts": {
+   "imports": 1
+  },
+  "000045_instanceof.test.ts": {
+   "edges": 5,
+   "events": 66,
+   "imports": 4,
+   "symbols": 12
+  },
+  "000046_AirlineStopsTwoTone.d.ts": {
+   "imports": 1
+  },
+  "000047_not.ts": {
+   "events": 2,
+   "imports": 5,
+   "symbols": 1
+  },
+  "000048_url.test.ts": {
+   "events": 5,
+   "imports": 4,
+   "symbols": 3
+  },
+  "000049_table-sparkle.d.ts": {
+   "events": 6,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000050_JSHandle.d.ts": {
+   "events": 1,
+   "imports": 4,
+   "symbols": 1
+  }
+ }
+}

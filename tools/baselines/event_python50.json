@@ -1,0 +1,562 @@
+{
+ "deep": {
+  "000001_hashlib.py": {
+   "edges": 5,
+   "events": 134,
+   "imports": 11,
+   "symbols": 6
+  },
+  "000002_inspect.py": {
+   "edges": 182,
+   "events": 2666,
+   "imports": 22,
+   "symbols": 165
+  },
+  "000003_runpy.py": {
+   "edges": 20,
+   "events": 232,
+   "imports": 8,
+   "symbols": 18
+  },
+  "000004_token.py": {
+   "events": 77,
+   "symbols": 4
+  },
+  "000005_rlcompleter.py": {
+   "edges": 7,
+   "events": 180,
+   "imports": 7,
+   "symbols": 8
+  },
+  "000006__collections_abc.py": {
+   "edges": 60,
+   "events": 779,
+   "imports": 5,
+   "symbols": 143
+  },
+  "000007_dis.py": {
+   "edges": 61,
+   "events": 668,
+   "imports": 14,
+   "symbols": 40
+  },
+  "000008_ssl.py": {
+   "edges": 43,
+   "events": 962,
+   "imports": 53,
+   "symbols": 116
+  },
+  "000009_copyreg.py": {
+   "edges": 3,
+   "events": 173,
+   "imports": 2,
+   "symbols": 13
+  },
+  "000010__casefix.py": {
+   "events": 1,
+   "symbols": 1
+  },
+  "000011___init__.py": {
+   "edges": 10,
+   "events": 154,
+   "imports": 10,
+   "symbols": 20
+  },
+  "000012__compiler.py": {
+   "edges": 63,
+   "events": 888,
+   "imports": 5,
+   "symbols": 21
+  },
+  "000013__constants.py": {
+   "edges": 5,
+   "events": 58,
+   "imports": 2,
+   "symbols": 7
+  },
+  "000014__parser.py": {
+   "edges": 151,
+   "events": 1288,
+   "imports": 8,
+   "symbols": 42
+  },
+  "000015_sre_constants.py": {
+   "events": 2,
+   "imports": 2,
+   "symbols": 1
+  },
+  "000016__weakrefset.py": {
+   "edges": 19,
+   "events": 176,
+   "imports": 2,
+   "symbols": 38
+  },
+  "000017_gettext.py": {
+   "edges": 24,
+   "events": 582,
+   "imports": 10,
+   "symbols": 39
+  },
+  "000018_fileinput.py": {
+   "edges": 26,
+   "events": 343,
+   "imports": 8,
+   "symbols": 31
+  },
+  "000019__distutils_system_mod.py": {
+   "edges": 5,
+   "events": 110,
+   "imports": 9,
+   "symbols": 15
+  },
+  "000020_pprint.py": {
+   "edges": 53,
+   "events": 586,
+   "imports": 6,
+   "symbols": 44
+  },
+  "000021___future__.py": {
+   "edges": 10,
+   "events": 28,
+   "symbols": 6
+  },
+  "000022_fractions.py": {
+   "edges": 29,
+   "events": 544,
+   "imports": 8,
+   "symbols": 48
+  },
+  "000023_warnings.py": {
+   "edges": 39,
+   "events": 513,
+   "imports": 15,
+   "symbols": 34
+  },
+  "000024_aifc.py": {
+   "edges": 106,
+   "events": 820,
+   "imports": 15,
+   "symbols": 79
+  },
+  "000025_handlers.py": {
+   "edges": 43,
+   "events": 287,
+   "imports": 9,
+   "symbols": 42
+  },
+  "000026_types.py": {
+   "events": 5,
+   "imports": 7,
+   "symbols": 16
+  },
+  "000028_simple_server.py": {
+   "edges": 6,
+   "events": 113,
+   "imports": 8,
+   "symbols": 14
+  },
+  "000029_util.py": {
+   "edges": 2,
+   "events": 108,
+   "imports": 5,
+   "symbols": 11
+  },
+  "000030_validate.py": {
+   "edges": 67,
+   "events": 198,
+   "imports": 3,
+   "symbols": 40
+  },
+  "000031_headers.py": {
+   "edges": 17,
+   "events": 92,
+   "imports": 1,
+   "symbols": 20
+  },
+  "000032_os.py": {
+   "edges": 83,
+   "events": 754,
+   "imports": 28,
+   "symbols": 71
+  },
+  "000033_secrets.py": {
+   "edges": 2,
+   "events": 18,
+   "imports": 3,
+   "symbols": 5
+  },
+  "000034_tokenize.py": {
+   "edges": 53,
+   "events": 490,
+   "imports": 14,
+   "symbols": 30
+  },
+  "000035_types.py": {
+   "edges": 9,
+   "events": 228,
+   "imports": 3,
+   "symbols": 35
+  },
+  "000036_gzip.py": {
+   "edges": 38,
+   "events": 576,
+   "imports": 14,
+   "symbols": 50
+  },
+  "000038__base.py": {
+   "edges": 29,
+   "events": 410,
+   "imports": 5,
+   "symbols": 56
+  },
+  "000039___init__.py": {
+   "events": 14,
+   "imports": 13,
+   "symbols": 3
+  },
+  "000040_process.py": {
+   "edges": 41,
+   "events": 557,
+   "imports": 13,
+   "symbols": 54
+  },
+  "000041_thread.py": {
+   "edges": 4,
+   "events": 195,
+   "imports": 7,
+   "symbols": 14
+  },
+  "000042_modulefinder.py": {
+   "edges": 83,
+   "events": 742,
+   "imports": 8,
+   "symbols": 34
+  },
+  "000043_telnetlib.py": {
+   "edges": 46,
+   "events": 509,
+   "imports": 7,
+   "symbols": 31
+  },
+  "000044_tty.py": {
+   "edges": 2,
+   "events": 30,
+   "imports": 1,
+   "symbols": 5
+  },
+  "000045_site.py": {
+   "edges": 41,
+   "events": 539,
+   "imports": 13,
+   "symbols": 29
+  },
+  "000046_nturl2path.py": {
+   "events": 68,
+   "imports": 3,
+   "symbols": 2
+  },
+  "000047_copy.py": {
+   "edges": 16,
+   "events": 261,
+   "imports": 3,
+   "symbols": 12
+  },
+  "000048_sched.py": {
+   "edges": 1,
+   "events": 78,
+   "imports": 6,
+   "symbols": 9
+  },
+  "000049_dataclasses.py": {
+   "edges": 78,
+   "events": 707,
+   "imports": 12,
+   "symbols": 61
+  },
+  "000050_machinery.py": {
+   "events": 1,
+   "imports": 15,
+   "symbols": 1
+  }
+ },
+ "lexer": {
+  "000001_hashlib.py": {
+   "edges": 5,
+   "events": 136,
+   "imports": 11,
+   "symbols": 6
+  },
+  "000002_inspect.py": {
+   "edges": 180,
+   "events": 2673,
+   "imports": 22,
+   "symbols": 165
+  },
+  "000003_runpy.py": {
+   "edges": 16,
+   "events": 227,
+   "imports": 8,
+   "symbols": 18
+  },
+  "000004_token.py": {
+   "events": 77,
+   "symbols": 4
+  },
+  "000005_rlcompleter.py": {
+   "edges": 7,
+   "events": 179,
+   "imports": 7,
+   "symbols": 8
+  },
+  "000006__collections_abc.py": {
+   "edges": 58,
+   "events": 788,
+   "imports": 5,
+   "symbols": 143
+  },
+  "000007_dis.py": {
+   "edges": 61,
+   "events": 665,
+   "imports": 14,
+   "symbols": 40
+  },
+  "000008_ssl.py": {
+   "edges": 42,
+   "events": 956,
+   "imports": 53,
+   "symbols": 116
+  },
+  "000009_copyreg.py": {
+   "edges": 3,
+   "events": 176,
+   "imports": 2,
+   "symbols": 13
+  },
+  "000010__casefix.py": {
+   "events": 1,
+   "symbols": 1
+  },
+  "000011___init__.py": {
+   "edges": 11,
+   "events": 157,
+   "imports": 10,
+   "symbols": 20
+  },
+  "000012__compiler.py": {
+   "edges": 63,
+   "events": 894,
+   "imports": 5,
+   "symbols": 21
+  },
+  "000013__constants.py": {
+   "edges": 5,
+   "events": 59,
+   "imports": 2,
+   "symbols": 7
+  },
+  "000014__parser.py": {
+   "edges": 157,
+   "events": 1293,
+   "imports": 8,
+   "symbols": 42
+  },
+  "000015_sre_constants.py": {
+   "events": 2,
+   "imports": 2,
+   "symbols": 1
+  },
+  "000016__weakrefset.py": {
+   "edges": 19,
+   "events": 176,
+   "imports": 2,
+   "symbols": 38
+  },
+  "000017_gettext.py": {
+   "edges": 24,
+   "events": 583,
+   "imports": 10,
+   "symbols": 39
+  },
+  "000018_fileinput.py": {
+   "edges": 26,
+   "events": 345,
+   "imports": 8,
+   "symbols": 31
+  },
+  "000019__distutils_system_mod.py": {
+   "edges": 5,
+   "events": 110,
+   "imports": 9,
+   "symbols": 15
+  },
+  "000020_pprint.py": {
+   "edges": 53,
+   "events": 578,
+   "imports": 6,
+   "symbols": 44
+  },
+  "000021___future__.py": {
+   "edges": 10,
+   "events": 28,
+   "symbols": 6
+  },
+  "000022_fractions.py": {
+   "edges": 29,
+   "events": 544,
+   "imports": 8,
+   "symbols": 48
+  },
+  "000023_warnings.py": {
+   "edges": 39,
+   "events": 517,
+   "imports": 15,
+   "symbols": 34
+  },
+  "000024_aifc.py": {
+   "edges": 104,
+   "events": 811,
+   "imports": 15,
+   "symbols": 79
+  },
+  "000025_handlers.py": {
+   "edges": 43,
+   "events": 286,
+   "imports": 9,
+   "symbols": 42
+  },
+  "000026_types.py": {
+   "events": 5,
+   "imports": 7,
+   "symbols": 16
+  },
+  "000028_simple_server.py": {
+   "edges": 5,
+   "events": 108,
+   "imports": 8,
+   "symbols": 14
+  },
+  "000029_util.py": {
+   "edges": 2,
+   "events": 109,
+   "imports": 5,
+   "symbols": 11
+  },
+  "000030_validate.py": {
+   "edges": 67,
+   "events": 198,
+   "imports": 3,
+   "symbols": 40
+  },
+  "000031_headers.py": {
+   "edges": 17,
+   "events": 93,
+   "imports": 1,
+   "symbols": 20
+  },
+  "000032_os.py": {
+   "edges": 83,
+   "events": 764,
+   "imports": 28,
+   "symbols": 71
+  },
+  "000033_secrets.py": {
+   "edges": 2,
+   "events": 18,
+   "imports": 3,
+   "symbols": 5
+  },
+  "000034_tokenize.py": {
+   "edges": 53,
+   "events": 491,
+   "imports": 14,
+   "symbols": 30
+  },
+  "000035_types.py": {
+   "edges": 9,
+   "events": 230,
+   "imports": 3,
+   "symbols": 35
+  },
+  "000036_gzip.py": {
+   "edges": 39,
+   "events": 573,
+   "imports": 14,
+   "symbols": 50
+  },
+  "000038__base.py": {
+   "edges": 29,
+   "events": 411,
+   "imports": 5,
+   "symbols": 56
+  },
+  "000039___init__.py": {
+   "events": 15,
+   "imports": 13,
+   "symbols": 3
+  },
+  "000040_process.py": {
+   "edges": 41,
+   "events": 555,
+   "imports": 13,
+   "symbols": 54
+  },
+  "000041_thread.py": {
+   "edges": 4,
+   "events": 194,
+   "imports": 7,
+   "symbols": 14
+  },
+  "000042_modulefinder.py": {
+   "edges": 83,
+   "events": 738,
+   "imports": 8,
+   "symbols": 34
+  },
+  "000043_telnetlib.py": {
+   "edges": 42,
+   "events": 500,
+   "imports": 7,
+   "symbols": 31
+  },
+  "000044_tty.py": {
+   "edges": 2,
+   "events": 30,
+   "imports": 1,
+   "symbols": 5
+  },
+  "000045_site.py": {
+   "edges": 41,
+   "events": 536,
+   "imports": 13,
+   "symbols": 29
+  },
+  "000046_nturl2path.py": {
+   "events": 68,
+   "imports": 3,
+   "symbols": 2
+  },
+  "000047_copy.py": {
+   "edges": 16,
+   "events": 264,
+   "imports": 3,
+   "symbols": 12
+  },
+  "000048_sched.py": {
+   "edges": 1,
+   "events": 78,
+   "imports": 6,
+   "symbols": 9
+  },
+  "000049_dataclasses.py": {
+   "edges": 78,
+   "events": 711,
+   "imports": 12,
+   "symbols": 61
+  },
+  "000050_machinery.py": {
+   "events": 1,
+   "imports": 15,
+   "symbols": 1
+  }
+ }
+}
