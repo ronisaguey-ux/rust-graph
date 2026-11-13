@@ -75,6 +75,7 @@ file and `tools/strict_gate.py` count. They are:
 | `CST_MISSING_KIND:<kind>` | a whole `import`, `symbol`, `call` or `var` is missing from the CST |
 | `CST_SHAPE_MISMATCH:targets` | the statement's target list differs |
 | `PAIR_AMBIGUOUS:1` | no row on a line both readers can mean |
+| `CST_DEGRADED:recovery` | the CST needed error nodes for more than 1% of its nodes, so it is not emitted at all |
 
 A rename is a migration, not an edit: the old string keeps being emitted for one
 phase while both are counted, and `docs/PAIRING.md` records the switch and the
@@ -83,3 +84,10 @@ dashboard to zero, and a zero looks exactly like a fix.
 
 `tests/guard_truth.rs` pins the four strings the corpus actually produces and
 checks the prefix set, so a rename fails the suite instead of the graph.
+
+`CST_DEGRADED:recovery` is the one code that is not a fact loss: the guard
+passed, and the file is rejected anyway because the tree needed recovery for more
+than one node in a hundred. The guard runs first, so a file that both lost facts
+and guessed is reported as a fact loss — the precise diagnosis wins — and only a
+file that would otherwise have been emitted is degraded. 22 of 6,379 corpus
+files move, and the two rust files that move carry 175 error nodes each.
