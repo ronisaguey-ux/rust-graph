@@ -98,6 +98,15 @@ impl Tree {
     pub(crate) fn build(&mut self, events: &mut [Event], tokens: &Tokens, language: &Language, src_len: u32) {
         self.nodes.clear();
         self.stack.clear();
+        // The tree is sized once, from the token count, instead of growing as
+        // the build pushes: a node per token plus the groups that wrap them, and
+        // a little slack for the wrappers a grammar inserts. Growth is not
+        // free — every reallocation copies the whole array — and the count is
+        // known before the first push.
+        let estimate = tokens.kind.len().saturating_mul(2).saturating_add(16);
+        if self.nodes.capacity() < estimate {
+            self.nodes.reserve(estimate - self.nodes.len());
+        }
         // Stack entries from `unset` up still lack a start: no token reached them yet.
         let mut unset = 0usize;
         let mut last_end = 0u32;
