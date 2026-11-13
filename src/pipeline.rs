@@ -2913,7 +2913,18 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
             // and guessing cost more than reading the values.
             eprintln!("MISS line {} deep=[{}] lex=[{}] missing={:?}", lexer.line, deep.value, lexer.value, missing);
         }
-        let line_text = src.lines().nth(lexer.line.saturating_sub(1) as usize).unwrap_or("");
+        // The statement, not the line: `raise TypeError(\n  'bad' %\n  (x,)\n)
+        // from None` puts the keyword three lines below the event, and a
+        // one-line window calls that a lost name every time. A Python `from`
+        // can only be the raise-from or an import, and an import writes the
+        // name in both readings, so the wider window cannot excuse a real loss.
+        let window: String = src
+            .lines()
+            .skip(lexer.line.saturating_sub(1) as usize)
+            .take(4)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let line_text = window.as_str();
         // `raise ConfigError(...) from error`: `from` is a keyword where that
         // line writes it, and no reader of the record wants a value called
         // `from`. The one-pass lexer has no keyword table and reads it as one.
