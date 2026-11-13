@@ -1018,6 +1018,48 @@ mod tests {
     }
 
     #[test]
+    fn a_call_is_one_row_and_never_a_merge_of_its_own_callee() {
+        // The failure this catches: the callee written twice, once as the call
+        // and once as a name beside it, so one source call reads as a merge of
+        // a call and a path. Counting the call rows against the call table is
+        // the invariant — every shape below is one call per source call, nested
+        // through the receiver, never emitted a second time as an operand.
+        let shapes = [
+            ("js", "a.b(c)"),
+            ("js", "f()(g)"),
+            ("js", "new Foo(x)"),
+            ("js", "a.b().c(d)"),
+            ("js", "console.log(a)(b)"),
+            ("js", "f(a, g(b))"),
+            ("js", "x.y.z(1)"),
+            ("js", "a.b(c)(d)(e)"),
+            ("py", "f(x).g(y)"),
+            ("js", "f(...a)"),
+            ("js", "f(function(){})"),
+            ("rb", "system \"ls\""),
+        ];
+        for (suffix, body) in shapes {
+            let (value, calls) = form(suffix, body);
+            let rows = value.matches("[\"c\",").count();
+            assert_eq!(
+                rows,
+                calls.len(),
+                "{suffix} {body}: {rows} call rows for {} calls: {value}",
+                calls.len()
+            );
+            for path in &calls {
+                // A bare callee (no receiver) has no business also standing as
+                // a value; a method's path stays in the call table.
+                let as_name = format!("[\"n\",\"{path}\"]");
+                assert!(
+                    !path.contains('.') || !value.contains(&as_name),
+                    "{suffix} {body}: callee {path} also rendered as a name: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn an_object_method_is_a_constant() {
         // `{ set(v) { … } }`: the CST writes the method as one value, and the
         // lexer read the body into the object's merge.
