@@ -110,3 +110,29 @@ would be a worse graph in exchange for nothing but a tidier story about the guar
 The flag stays, default off, because it is the instrument that produced the table
 above and it is the cheapest way to answer the same question again after the tiers
 change. It is not a mode anybody should run the product in.
+
+## Match arms: one expression, and the fold that is load-bearing
+
+A Rust `match` is an expression, and this is the one shape where the two readers
+disagree about where it ends. The CST records each arm's value as a statement of
+its own (so an arm's calls are visible), and it also folds the arm block into the
+`match_expression` value. The one-pass lexer sees the head: for
+`let v = match check() { .. };` it writes `match` and the scrutinee call and
+nothing else.
+
+Tried 2026-11-13: drop the `match_block` from the head's value, so the head is
+only `match` plus the scrutinee and the arms stay their own statements. It fixes
+exactly the case above — that fixture goes clean under strict pairing — and costs
+the corpus seven files: rust subset 4 → 11 fallbacks. The fold is load-bearing
+because the lexer *does* read the arms when the match is a block's tail
+expression: there it is one statement to the lexer too, and the folded head is
+what covers it. Reverted.
+
+So the disagreement is not in the CST's reading, it is in the lexer's line
+handling, and a fix has to distinguish a match that is an assignment's value from
+a match that ends a block. That distinction is not available where the value is
+built, and guessing it would trade one language's number for another's.
+
+Consequence for strict pairing on Rust: it stays off. The 42-file cost on the
+rust subset is dominated by these head-versus-arms values and by constant-`0`
+array literals (`[0; MODE_CAP]`), not by pairing tolerance that could be tightened.
