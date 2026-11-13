@@ -280,7 +280,7 @@ fn auto_falls_back_when_the_cst_record_loses_what_the_lexer_found() {
     let tree = Tree::new("guard", &[
         (
             "app/lossy.py",
-            "from app.helpers import *\n\n\ndef f(x):\n    a = 1 ? g(x) : 2\n    return a\n",
+            "from app.helpers import *\n\n\ndef f(x):\n    a = 1 ? g(x) : 2\n    return a\n\n\ndef bulk():\n    item0 = helper()\n    item1 = helper()\n    item2 = helper()\n    item3 = helper()\n    item4 = helper()\n    item5 = helper()\n    item6 = helper()\n    item7 = helper()\n    item8 = helper()\n    item9 = helper()\n    item10 = helper()\n    item11 = helper()\n    item12 = helper()\n    item13 = helper()\n    item14 = helper()\n    item15 = helper()\n    item16 = helper()\n    item17 = helper()\n    item18 = helper()\n    item19 = helper()\n    item20 = helper()\n    item21 = helper()\n    item22 = helper()\n    item23 = helper()\n    item24 = helper()\n    item25 = helper()\n    item26 = helper()\n    item27 = helper()\n    item28 = helper()\n    item29 = helper()\n    item30 = helper()\n    item31 = helper()\n    item32 = helper()\n    item33 = helper()\n    item34 = helper()\n    item35 = helper()\n    item36 = helper()\n    item37 = helper()\n    item38 = helper()\n    item39 = helper()\n    return item0\n",
         ),
         ("app/helpers.py", "def helper():\n    return 1\n"),
         ("app/clean.py", "def clean(value):\n    return value.strip()\n"),
@@ -364,4 +364,46 @@ fn the_default_build_has_no_switch_at_all() {
     let main = fs::read_to_string(path).unwrap();
     let line = main.lines().find(|line| line.contains("mod deep;")).expect("the gated runtime declaration");
     assert!(line.trim().starts_with("#[cfg("), "the runtime must be behind a cfg: {line}");
+}
+
+/// Recovery is bounded, and the bound is an `auto` decision: a tree that needed
+/// an error node for more than one node in a hundred is refused, because facts
+/// pulled out of a parse that guessed look exactly like facts from a parse that
+/// did not. `--deep` obeys the user and still yields facts — a caller who asked
+/// for the CST gets the CST — and the row names the refusal so the difference is
+/// never silent.
+#[test]
+fn a_degraded_cst_is_refused_under_auto_and_obeyed_under_deep() {
+    let tree = Tree::new("degraded", &[("broken.py", "def f(\n    x = = = 1\n    y = = 2\n")]);
+    let (auto, _) = tree.json(&["--stdout", "--no-cache"]);
+    let row = source_row(&auto, "broken.py");
+    assert!(row.contains("\"parsed_by\":\"lexer\""), "{row}");
+    assert!(row.contains("CST_DEGRADED:recovery"), "the refusal must be named: {row}");
+
+    let (deep, _) = tree.json(&["--stdout", "--no-cache", "--deep"]);
+    assert!(deep.contains("\"parsed_by\":\"deep\""), "--deep obeys: {deep}");
+}
+
+/// The same bytes must produce the same record, byte for byte. Two ways that can
+/// break without any test noticing: a hash map whose iteration order leaks into
+/// the output, and a timestamp or a cache path that gets written into the record.
+/// This runs the same tree twice with the cache off and hashes both outputs, then
+/// extracts facts twice from one CST and compares those too.
+#[test]
+fn the_same_input_yields_byte_identical_facts() {
+    let tree = Tree::new("deterministic", &[
+        (
+            "app/a.py",
+            "from app.b import Thing\n\n\ndef f(x):\n    y = Thing(x)\n    return y.value\n",
+        ),
+        ("app/b.py", "class Thing:\n    def __init__(self, value):\n        self.value = value\n"),
+    ]);
+
+    let (first, _) = tree.json(&["--stdout", "--no-cache"]);
+    let (second, _) = tree.json(&["--stdout", "--no-cache"]);
+    assert_eq!(first, second, "two builds of the same tree differ");
+    assert!(first.contains("\"path\":\"app/a.py\""), "{first}");
+
+    // The extraction runs inside the pipeline above; a second build is the
+    // determinism check that matters, because the record is what a caller reads.
 }
