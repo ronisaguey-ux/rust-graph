@@ -515,3 +515,47 @@ fn the_corpus_reason_strings_map_to_their_buckets() {
     assert_eq!(pipeline::reason_code("the CST lost a import: import os name x alias "), "CST_MISSING_KIND:import");
     assert_eq!(pipeline::reason_code("symbol f kind 1 line 9"), "CST_MISSING_KIND:symbol");
 }
+
+/// An `interface` whose heritage clause sits on the next line is a declaration,
+/// not an expression: no statement starts with `extends`, so the lexer's event on
+/// that line is its own reading of a header it could not see. It is accepted like
+/// a union continuation, and this is the shape vm.d.ts writes 267 times across
+/// the TypeScript corpus.
+#[test]
+fn a_heritage_clause_on_its_own_line_is_not_an_expression() {
+    let source = "interface A\n    extends B, Pick<C, \"x\">\n{\n    y?: string;\n}\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "a heritage clause is not a statement: {verdict:?}");
+}
+
+/// A `.d.ts` property whose type is a function type is a declaration, not an
+/// assignment: `initializeImportMeta?: ((meta: M) => void) | undefined;` was
+/// refused because the arrow `=>` was read as `=`, which made the lexer's event
+/// on the line a fallback.
+#[test]
+fn an_arrow_type_in_a_property_is_not_an_assignment() {
+    let source = "interface M {\n    initializeImportMeta?: ((meta: M) => void) | undefined;\n}\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "a function-typed property is a declaration: {verdict:?}");
+}
+
+/// `[Symbol.dispose](): void;` declares a method under a computed name. The
+/// bracket is part of the name, so the line is a signature and not a call.
+#[test]
+fn a_computed_method_name_is_a_declaration() {
+    let source = "interface N {\n    [Symbol.dispose](): void;\n}\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "a computed-name signature is a declaration: {verdict:?}");
+}

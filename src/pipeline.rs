@@ -2166,7 +2166,7 @@ fn is_type_property_line(src: &Lines<'_>, line: u32) -> bool {
     // The declaration may stop at the colon or at the opening of an object
     // type: `importModuleDynamically?:` and `attributes?: {` continue on the
     // next lines, and the one-pass lexer reads the words after them anyway.
-    if !(text.ends_with(';') || text.ends_with(':') || text.ends_with('{')) || text.contains('=') {
+    if !(text.ends_with(';') || text.ends_with(':') || text.ends_with('{')) || assigns(text) {
         return false;
     }
     let Some(colon) = text.find(':').or_else(|| Some(text.len())) else {
@@ -2189,6 +2189,28 @@ fn is_type_property_line(src: &Lines<'_>, line: u32) -> bool {
     // the head rather than the type.
     head = head.trim_end_matches(';').trim();
     !head.is_empty() && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
+}
+
+/// A `=` that assigns, as opposed to the arrow `=>` a function type is written
+/// with or the `<=`/`>=`/`==` a comparison uses. `initializeImportMeta?: ((meta:
+/// ImportMeta) => void) | undefined;` in a `.d.ts` is a property whose type is a
+/// function — the guard read the arrow as an assignment and refused the line, so
+/// the lexer's event on it became a fallback.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn assigns(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    for (at, byte) in bytes.iter().enumerate() {
+        if *byte != b'=' {
+            continue;
+        }
+        let before = at.checked_sub(1).map(|index| bytes[index]);
+        let after = bytes.get(at + 1).copied();
+        if after == Some(b'>') || after == Some(b'=') || before == Some(b'=') || before == Some(b'<') || before == Some(b'>') {
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 /// `yield None`, `yield name`: the one-pass lexer files the yielded name as an
@@ -2233,7 +2255,15 @@ fn is_type_continuation_line(src: &Lines<'_>, line: u32) -> bool {
         return false;
     };
     let text = text.trim_start();
-    text.starts_with("| ") || text.starts_with("& ")
+    // `interface A` on one line and `extends B, Pick<C, "x">` on the next: the
+    // heritage clause is not a statement, and no statement starts with
+    // `extends` or `implements`, so the lexer's event on that line is its own
+    // reading of a declaration it could not see the header of. Type unions and
+    // intersections continue the same way.
+    text.starts_with("| ")
+        || text.starts_with("& ")
+        || text.starts_with("extends ")
+        || text.starts_with("implements ")
 }
 
 /// `export = escape;` and `export {};`: the lexer writes an assignment or an
@@ -2265,7 +2295,13 @@ fn is_method_declaration_line(src: &Lines<'_>, line: u32) -> bool {
         return false;
     };
     let head = text[..open].trim();
-    if head.is_empty() || head.contains('=') || !head.chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_') {
+    // `[Symbol.dispose](): void;` declares a method under a computed name; the
+    // bracket is part of the name, so it is not a call either.
+    let computed = head.starts_with('[') && head.ends_with(']');
+    if head.is_empty()
+        || head.contains('=')
+        || !(computed || head.chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_'))
+    {
         return false;
     }
     // A signature may wrap: `runInNewContext(` opens the paren on one line and
