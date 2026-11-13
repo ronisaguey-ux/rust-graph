@@ -136,3 +136,34 @@ built, and guessing it would trade one language's number for another's.
 Consequence for strict pairing on Rust: it stays off. The 42-file cost on the
 rust subset is dominated by these head-versus-arms values and by constant-`0`
 array literals (`[0; MODE_CAP]`), not by pairing tolerance that could be tightened.
+
+## Every pairing change carries its numbers
+
+A pairing change is only as good as the sweep beside it, and the queue file is
+not where a reader looks two commits later. So the rule for this repository:
+
+- **A change to the guard lands with a before/after pair in the commit body.**
+  `tools/sweep_pair.sh before` on the parent commit, `tools/sweep_pair.sh after`
+  on the change, both pasted verbatim. One line per corpus, four lines.
+- **A corpus the change does not name must not rise.** If it does, the change is
+  reverted in the same turn and the reason is written down — a fix that moves one
+  file and breaks two is a regression with a flattering headline.
+- **A rejected change still carries its measurement.** The match-arm fold and
+  strict-pairing-by-default both failed this way, and both left their numbers in
+  `docs/MEASURE.md` and `docs/PAIRING.md`. A measurement that is not attached is
+  a claim.
+- **The pair is the release build.** The debug binary takes minutes per corpus
+  and measures a different program; the numbers in a commit body have to be the
+  ones a user would see.
+
+The `.d.ts` shapes landed as dec6d74 with this pair, measured with
+`tools/sweep_pair.sh` on the release build:
+
+```
+before js 622/1995  ts 395/2000  python 145/568  rust 345/1816
+after  js 621/1995  ts 376/2000  python 145/568  rust 343/1816
+```
+
+The commit body for that change quoted ts 393 because it was written against a
+build that predated the last of the three fixes; the number that belongs in the
+record is this one, taken from the tool the rule above requires.
