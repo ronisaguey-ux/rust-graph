@@ -1254,13 +1254,16 @@ impl<'a> Walker<'a> {
             }
             "attribute" | "member_expression" => {
                 let object = self.children(id).first().copied()?;
-                match self.root_callee(object) {
-                    Some(root) => Some(root),
-                    None => {
-                        let path = self.path_of(id);
-                        (!path.is_empty()).then_some(path)
-                    }
+                let path = self.path_of(id);
+                // `Config.Array(...).pipe` starts with a call: unwrap to that
+                // call so the class is the one the lexer's first tokens name.
+                // Otherwise the whole path is the answer: `Context.Reference`
+                // constructs Reference, not Context, and returning the object
+                // root reported every namespaced constructor as a lost var.
+                if path.contains("()") || matches!(self.kind(object), "call" | "call_expression" | "new_expression") {
+                    return self.root_callee(object);
                 }
+                (!path.is_empty()).then_some(path)
             }
             _ => {
                 let path = self.path_of(id);
