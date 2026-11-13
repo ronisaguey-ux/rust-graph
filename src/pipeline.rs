@@ -709,6 +709,33 @@ pub(crate) mod gate {
 #[path = "deep_facts/mod.rs"]
 mod deep_facts;
 
+/// Nanoseconds spent in the guard's comparison, for the performance budget in
+/// docs/MEASURE.md. Process-wide and read once at the end: the comparison runs
+/// on the same thread as the walk, so an atomic is enough and costs nothing that
+/// would change what it measures.
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[cfg(all(feature = "deep", feature = "parser"))]
+pub(crate) static PHASE: [std::sync::atomic::AtomicU64; 6] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[cfg(all(feature = "deep", feature = "parser"))]
+pub(crate) static CMP: [std::sync::atomic::AtomicU64; 4] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+pub(crate) static PAIR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The parser this run is using, and the per-file record of what each file
 /// took.
 ///
@@ -1106,14 +1133,34 @@ mod deep_run {
         }
 
         pub(super) fn stderr_line(&self) -> String {
-            format!(
+            let base = format!(
                 "rust-graph: parser {}, {} deep, {} lexer, {} fallbacks, {} cached",
                 get().description(),
                 self.deep,
                 self.lexer,
                 self.fallbacks,
                 self.reused
-            )
+            );
+            if std::env::var_os("RG_PHASE").is_some() {
+                let names = ["imports", "symbol-names", "calls", "vars+events-setup", "compare", "tail"];
+                let mut line = String::from("compare:"); 
+                for (index, name) in ["wanted", "found", "pair", "leftover"].iter().enumerate() {
+                    let secs = super::CMP[index].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9;
+                    line.push_str(&format!(" {name} {secs:.3}s"));
+                }
+                eprintln!("{line}");
+                let mut line = String::from("phases:");
+                for (index, name) in names.iter().enumerate() {
+                    let secs = super::PHASE[index].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9;
+                    line.push_str(&format!(" {name} {secs:.3}s"));
+                }
+                eprintln!("{line}");
+            }
+            if std::env::var_os("RG_TIMING").is_some() {
+                let secs = super::PAIR_NANOS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9;
+                return format!("{base}\nguard: {secs:.3}s of pairing comparison");
+            }
+            base
         }
     }
 
@@ -1397,8 +1444,56 @@ pub(crate) fn loses(lexer: &Facts, deep: &Facts) -> Verdict {
 #[cfg(all(feature = "deep", feature = "parser"))]
 pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
     let mut accepted = Accepted::default();
+    let lines = Lines::new(src);
     let macro_lines = macro_body_lines(src);
+    // Indexes over the CST's record, built once. The comparisons below used to
+    // rescan every deep call for every lexer call — O(calls²) with an allocation
+    // per row — and that scan was 72% of build time on the JS corpus, all of it
+    // in the guard the budget is about.
+    fn leaf(path: &str) -> &str {
+        path.rsplit('.').next().unwrap_or(path)
+    }
+    let mut deep_calls: std::collections::HashSet<(&str, u32)> = std::collections::HashSet::new();
+    let mut deep_names: std::collections::HashSet<(u8, &str)> = std::collections::HashSet::new();
+    let mut deep_leaves: std::collections::HashSet<(u8, &str)> = std::collections::HashSet::new();
+    for row in &deep.symbols {
+        deep_names.insert((row.kind, row.name.as_str()));
+        deep_leaves.insert((row.kind, leaf(&row.name)));
+        for call in &row.calls {
+            deep_calls.insert((leaf(&call.path), call.line));
+        }
+    }
     let verdict = |loss: Option<&'static str>, detail: String, accepted: Accepted| Verdict { loss, detail, accepted };
+    // Phase accounting for the performance budget. It charges the time to the
+    // phase that was running when the function returned, so a file that falls
+    // back early is counted in the phase that failed rather than vanishing.
+    struct PhaseTimer {
+        at: std::time::Instant,
+        index: usize,
+        on: bool,
+    }
+    impl PhaseTimer {
+        fn switch(&mut self, index: usize) {
+            if self.on {
+                PHASE[self.index].fetch_add(self.at.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.index = index;
+            self.at = std::time::Instant::now();
+        }
+    }
+    impl Drop for PhaseTimer {
+        fn drop(&mut self) {
+            if self.on {
+                PHASE[self.index].fetch_add(self.at.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    let mut timer = PhaseTimer { at: std::time::Instant::now(), index: 0, on: std::env::var_os("RG_PHASE").is_some() };
+    macro_rules! phase {
+        ($index:expr) => {
+            timer.switch($index)
+        };
+    }
     for import in &lexer.imports {
         let same = deep.imports.iter().any(|row| {
             row.module == import.module && row.name == import.name && row.alias == import.alias && row.kind == import.kind
@@ -1408,6 +1503,7 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
             return verdict(Some("import"), detail, accepted);
         }
     }
+    phase!(0);
     for symbol in lexer.symbols.iter().filter(|symbol| symbol.kind != KIND_MODULE) {
         // A symbol with no name is not a fact: the one-pass lexer opens one for
         // `go func() {`, for a function literal, for an `if` header it misreads
@@ -1430,22 +1526,30 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         // The lexer's line says `for … := range []string{…}`; a definition of
         // `string` is not there. A fact the source does not support is not a
         // loss when the CST does not repeat it.
-        if !src.is_empty() && !claims_the_line(src, &lexer.tag, symbol.line, &symbol.name) {
+        if !lines.is_empty() && !claims_the_line(&lines, &lexer.tag, symbol.line, &symbol.name) {
             accepted.invented_symbols += 1;
             continue;
         }
         // `mod tests { fn f() }`: the CST spells the symbol `tests.f` because the
         // module is its owner; the one-pass lexer files it under `f`. Same
         // definition, two spellings, so a dotted suffix counts.
-        let same = deep.symbols.iter().any(|row| {
-            row.kind == symbol.kind
-                && (row.name == symbol.name || row.name.ends_with(&format!(".{}", symbol.name)))
-        });
+        // Same definition, two spellings: the bare name, or the name as the
+        // last segment of an owner-qualified one. A dotted symbol name is rare
+        // enough to fall back to the scan rather than index.
+        let same = if symbol.name.contains('.') {
+            deep.symbols.iter().any(|row| {
+                row.kind == symbol.kind && (row.name == symbol.name || row.name.ends_with(&format!(".{}", symbol.name)))
+            })
+        } else {
+            deep_names.contains(&(symbol.kind, symbol.name.as_str()))
+                || deep_leaves.contains(&(symbol.kind, symbol.name.as_str()))
+        };
         if !same {
             let detail = format!("symbol {} kind {} line {}", symbol.name, symbol.kind, symbol.line);
             return verdict(Some("symbol"), detail, accepted);
         }
     }
+    phase!(1);
     let name_of = |path: &str| path.rsplit('.').next().unwrap_or(path).to_string();
     for symbol in &lexer.symbols {
         for call in &symbol.calls {
@@ -1468,25 +1572,21 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
                 None => {}
             }
             let name = name_of(&call.path);
-            let near = |line: u32| (line as i64 - call.line as i64).abs() <= 1;
-            let same = deep
-                .symbols
-                .iter()
-                .flat_map(|row| row.calls.iter())
-                .any(|row| name_of(&row.path) == name && near(row.line));
+            let same = (call.line.saturating_sub(1)..=call.line.saturating_add(1))
+                .any(|line| deep_calls.contains(&(leaf(&call.path), line)));
             if !same {
                 // A declaration header is not a call: `constructor(code:
                 // string, options?: string);` in a .d.ts and
                 // `function atob(data: string): string;` are read by the
                 // lexer as calls on the declared name. The line carries the
                 // introducer, so nothing was lost.
-                if !src.is_empty() && (is_declaration_line(src, call.line) || is_method_declaration_line(src, call.line)) {
+                if !lines.is_empty() && (is_declaration_line(&lines, call.line) || is_method_declaration_line(&lines, call.line)) {
                     continue;
                 }
                 // `match self.tok(i) { Some(t) => ... }`: the lexer reads the
                 // arm's pattern as a call, and a pattern is not a call. The
                 // source line says so — the name, its argument list, then `=>`.
-                if !src.is_empty() && is_positional_call(src, &macro_lines, &name, call.line) {
+                if !lines.is_empty() && is_positional_call(&lines, &macro_lines, &name, call.line) {
                     accepted.positional_calls += 1;
                     continue;
                 }
@@ -1495,17 +1595,34 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
             }
         }
     }
+    phase!(2);
     // `repo = Repo()` is what ties `repo.find()` to `Repo.find`: the resolver's
     // typed-variable edges come from this table, so a binding the CST misses is
     // a lost fact even though no event names it.
+    let mut deep_var_counts: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
+    for (name, class) in &deep.vars {
+        *deep_var_counts.entry((name.as_str(), class.as_str())).or_default() += 1;
+    }
+    let mut seen_vars: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
     for pair in &lexer.vars {
-        let wanted = lexer.vars.iter().filter(|row| *row == pair).count();
-        let found = deep.vars.iter().filter(|row| *row == pair).count();
+        let key = (pair.0.as_str(), pair.1.as_str());
+        let wanted = {
+            let count = seen_vars.entry(key).or_default();
+            *count += 1;
+            *count
+        };
+        let found = deep_var_counts.get(&key).copied().unwrap_or(0);
         if found < wanted {
             let detail = format!("var {} = {}", pair.0, pair.1);
             return verdict(Some("var"), detail, accepted);
         }
     }
+    phase!(3);
+    // The CST's event shapes are derived once per symbol. A module symbol's
+    // comparison pool is every other symbol's events, so without this the same
+    // value string was parsed once per enclosing comparison and the derivation
+    // was 60% of the guard's time.
+    let mut shapes: std::collections::HashMap<String, Vec<(u8, Shape)>> = std::collections::HashMap::new();
     for symbol in &lexer.symbols {
         if symbol.kind != KIND_MODULE {
             if macro_lines
@@ -1518,7 +1635,7 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
             if symbol.name.is_empty() || symbol.name.starts_with("<anonymous>@") {
                 continue;
             }
-            if !src.is_empty() && !claims_the_line(src, &lexer.tag, symbol.line, &symbol.name) {
+            if !lines.is_empty() && !claims_the_line(&lines, &lexer.tag, symbol.line, &symbol.name) {
                 continue;
             }
         }
@@ -1551,10 +1668,12 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         // under the method. For the module, every symbol's events are the
         // module's: the fact is in the file either way.
         let extra: &[crate::facts::Symbol] = if symbol.kind == KIND_MODULE { &deep.symbols } else { &[] };
-        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted, src, &macro_lines, extra) {
+        phase!(4);
+        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted, &lines, &macro_lines, extra, &mut shapes) {
             return verdict(Some("event"), detail, accepted);
         }
     }
+    phase!(5);
     verdict(None, String::new(), accepted)
 }
 
@@ -1568,10 +1687,21 @@ fn uncovered(
     symbol: &crate::facts::Symbol,
     paired: &crate::facts::Symbol,
     accepted: &mut Accepted,
-    src: &str,
+    lines: &Lines<'_>,
     macro_lines: &[bool],
     extra: &[crate::facts::Symbol],
+    shapes: &mut std::collections::HashMap<String, Vec<(u8, Shape)>>,
 ) -> Option<String> {
+    let mut at = std::time::Instant::now();
+    let on = std::env::var_os("RG_PHASE").is_some();
+    macro_rules! cmp {
+        ($index:expr) => {{
+            if on {
+                CMP[$index].fetch_add(at.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            at = std::time::Instant::now();
+        }};
+    }
     let keyword_lines: Vec<u32> = symbol
         .calls
         .iter()
@@ -1584,27 +1714,27 @@ fn uncovered(
             continue;
         }
         if macro_lines.get(event.line.saturating_sub(1) as usize).copied().unwrap_or(false)
-            || is_attribute_call(src, event.line)
-            || is_declaration_line(src, event.line)
-            || is_method_declaration_line(src, event.line)
-            || is_type_property_line(src, event.line)
-            || is_export_statement_line(src, event.line)
-            || is_type_continuation_line(src, event.line)
-            || is_tail_expression_line(src, event.line)
-            || is_yield_line(src, event.line)
+            || is_attribute_call(lines, event.line)
+            || is_declaration_line(lines, event.line)
+            || is_method_declaration_line(lines, event.line)
+            || is_type_property_line(lines, event.line)
+            || is_export_statement_line(lines, event.line)
+            || is_type_continuation_line(lines, event.line)
+            || is_tail_expression_line(lines, event.line)
+            || is_yield_line(lines, event.line)
             // `Bound(Bound),` in an enum body: the variants are declarations,
             // and the lexer reads the bare ones as a tuple value of its own.
-            || is_variant_declaration(src, event.line)
-            || is_pattern_line(src, event.line)
+            || is_variant_declaration(lines, event.line)
+            || is_pattern_line(lines, event.line)
             // The lexer files the merged header as a bare statement, or as an
             // assignment when it reads the pattern's binder, and the CST
             // records the binding and the block's statements apart.
-            || (matches!(event.tag, b'x' | b'a') && is_let_else_line(src, event.line))
-            || (event.tag == b'a' && is_control_cast_line(src, event.line))
-            || (event.tag == b'x' && is_struct_pattern_condition(src, event.line))
-            || (event.tag == b'x' && is_else_if_let_line(src, event.line))
-            || (event.tag == b'x' && is_closure_block_line(src, event.line))
-            || (event.tag == b'a' && is_control_header_line(src, event.line))
+            || (matches!(event.tag, b'x' | b'a') && is_let_else_line(lines, event.line))
+            || (event.tag == b'a' && is_control_cast_line(lines, event.line))
+            || (event.tag == b'x' && is_struct_pattern_condition(lines, event.line))
+            || (event.tag == b'x' && is_else_if_let_line(lines, event.line))
+            || (event.tag == b'x' && is_closure_block_line(lines, event.line))
+            || (event.tag == b'a' && is_control_header_line(lines, event.line))
         {
             accepted.positional_events += 1;
             continue;
@@ -1613,24 +1743,26 @@ fn uncovered(
             accepted.keyword_events += 1;
             continue;
         }
-        wanted.push((event.tag, shape_event(event.tag, event.line, event.payload, &symbol.calls, &mut *accepted, src, macro_lines)));
+        wanted.push((event.tag, shape_event(event.tag, event.line, event.payload, &symbol.calls, &mut *accepted, lines, macro_lines)));
     }
-    let mut found: Vec<(u8, Shape)> = raw_events(&paired.events)
-        .into_iter()
-        .filter(|event| matches!(event.tag, b'a' | b'r' | b'x'))
-        .map(|event| {
-            let mut none = Accepted::default();
-            (event.tag, shape_event(event.tag, event.line, event.payload, &paired.calls, &mut none, src, macro_lines))
+    cmp!(0);
+    let rows_of = |symbol: &crate::facts::Symbol, shapes: &mut std::collections::HashMap<String, Vec<(u8, Shape)>>| {
+        shapes.get(&symbol.key).cloned().unwrap_or_else(|| {
+            let rows: Vec<(u8, Shape)> = raw_events(&symbol.events)
+                .into_iter()
+                .filter(|event| matches!(event.tag, b'a' | b'r' | b'x'))
+                .map(|event| {
+                    let mut none = Accepted::default();
+                    (event.tag, shape_event(event.tag, event.line, event.payload, &symbol.calls, &mut none, lines, macro_lines))
+                })
+                .collect();
+            shapes.insert(symbol.key.clone(), rows.clone());
+            rows
         })
-        .collect();
+    };
+    let mut found: Vec<(u8, Shape)> = rows_of(paired, shapes);
     for other in extra.iter().filter(|row| row.name != paired.name || row.owner != paired.owner) {
-        for event in raw_events(&other.events) {
-            if !matches!(event.tag, b'a' | b'r' | b'x') {
-                continue;
-            }
-            let mut none = Accepted::default();
-            found.push((event.tag, shape_event(event.tag, event.line, event.payload, &other.calls, &mut none, src, macro_lines)));
-        }
+        found.extend(rows_of(other, shapes));
     }
     // The exact matches are taken first, all of them, before any statement is
     // re-read as an artefact. Pairing greedily one want at a time let a
@@ -1645,6 +1777,7 @@ fn uncovered(
             eprintln!("[rgdebug]   want {} line {} targets {} value {}", want.0 as char, want.1.line, want.1.targets, want.1.value);
         }
     }
+    cmp!(1);
     // A line that both readers wrote is matched first, for every statement,
     // before any statement is allowed to take a row from another line. Pairing
     // in one loop let an event with the right marker and a covering value on a
@@ -1653,6 +1786,39 @@ fn uncovered(
     let mut wants: Vec<(u8, Shape)> = wanted;
     let mut leftover: Vec<(u8, Shape)> = Vec::new();
     let mut twice: Vec<(u8, Shape)> = Vec::new();
+    // The pool is indexed by marker and line once instead of rescanned per
+    // statement. A module symbol carries every symbol's events, so the scan was
+    // O(events²) and the guard was 68% of build time on the JS corpus; the
+    // index makes each lookup the rows on one line.
+    let mut used = vec![false; found.len()];
+    let mut by_line: std::collections::HashMap<(u8, u32), Vec<usize>> = std::collections::HashMap::new();
+    let mut by_tag: std::collections::HashMap<u8, Vec<usize>> = std::collections::HashMap::new();
+    for (at, row) in found.iter().enumerate() {
+        by_line.entry((row.0, row.1.line)).or_default().push(at);
+        by_tag.entry(row.0).or_default().push(at);
+    }
+    let lines_near = |line: u32| [line.saturating_sub(1), line, line + 1];
+    /// The lowest-index unused row among the candidates that `accept` takes.
+    /// Index order is the order the pool was built in, which is the order the
+    /// old scan found, so the choice of partner is unchanged.
+    fn pick<'a>(
+        found: &[(u8, Shape)],
+        used: &[bool],
+        candidates: impl Iterator<Item = &'a usize>,
+        accept: impl Fn(&(u8, Shape)) -> bool,
+    ) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for &at in candidates {
+            if used[at] || !accept(&found[at]) {
+                continue;
+            }
+            best = match best {
+                Some(previous) if previous < at => Some(previous),
+                _ => Some(at),
+            };
+        }
+        best
+    }
     for want in wants.drain(..) {
         // Two events on one line is normal (`if (x) y();` is a condition and a
         // call), and a row that covers a want is not always its partner: the
@@ -1660,13 +1826,14 @@ fn uncovered(
         // the first covering row pair the condition with the call and left the
         // call with nothing — a file blamed for an event that was in the record.
         // The identical row is the partner; a covering row is the fallback.
-        let identical_matches: Vec<usize> = found
+        let bucket = by_line.get(&(want.0, want.1.line)).map(|rows| rows.as_slice()).unwrap_or(&[]);
+        let identical_matches: Vec<usize> = bucket
             .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                row.0 == want.0 && row.1.line == want.1.line && row.1.targets == want.1.targets && row.1.value == want.1.value
+            .copied()
+            .filter(|&at| {
+                let row = &found[at];
+                !used[at] && row.1.targets == want.1.targets && row.1.value == want.1.value
             })
-            .map(|(at, _)| at)
             .collect();
         if identical_matches.len() > 1 {
             // Two rows the record cannot tell apart. One is paired — the choice
@@ -1683,13 +1850,11 @@ fn uncovered(
             if cfg!(feature = "strict-pair") {
                 return None;
             }
-            found
-                .iter()
-                .position(|row| row.0 == want.0 && row.1.line == want.1.line && covers(&row.1, &want.1, src).is_ok())
+            pick(found.as_slice(), &used, bucket.iter(), |row| covers(&row.1, &want.1, lines).is_ok())
         });
         match paired_at {
             Some(at) => {
-                found.swap_remove(at);
+                used[at] = true;
             }
             None => twice.push(want),
         }
@@ -1705,43 +1870,52 @@ fn uncovered(
         // CST's `a … name = all`), so that row is the right partner and is
         // tried before a same-marker row from a neighbouring line: that row
         // belongs to the statement on its own line.
+        let near: Vec<usize> = lines_near(want.1.line)
+            .iter()
+            .flat_map(|line| by_line.get(&(want.0, *line)).map(|rows| rows.as_slice()).unwrap_or(&[]))
+            .copied()
+            .collect();
         let exact = (want.0 == b'x' && want.1.targets.is_empty())
             .then(|| {
-                found.iter().position(|row| {
-                    row.0 == b'a'
-                        && (row.1.line as i64 - want.1.line as i64).abs() <= 1
-                        && a_row_covers(&row.1, &want.1, src)
-                })
+                let targets: Vec<usize> = lines_near(want.1.line)
+                    .iter()
+                    .flat_map(|line| by_line.get(&(b'a', *line)).map(|rows| rows.as_slice()).unwrap_or(&[]))
+                    .copied()
+                    .collect();
+                pick(found.as_slice(), &used, targets.iter(), |row| a_row_covers(&row.1, &want.1, lines))
             })
             .flatten()
+            .or_else(|| pick(found.as_slice(), &used, near.iter(), |row| covers(&row.1, &want.1, lines).is_ok()))
             .or_else(|| {
-                found.iter().position(|row| {
-                    row.0 == want.0
-                        && (row.1.line as i64 - want.1.line as i64).abs() <= 1
-                        && covers(&row.1, &want.1, src).is_ok()
-                })
-            })
-            .or_else(|| found.iter().position(|row| row.0 == want.0 && covers(&row.1, &want.1, src).is_ok()));
+                let same_tag = by_tag.get(&want.0).map(|rows| rows.as_slice()).unwrap_or(&[]);
+                pick(found.as_slice(), &used, same_tag.iter(), |row| covers(&row.1, &want.1, lines).is_ok())
+            });
         match exact {
-            Some(at) => {
-                found.swap_remove(at);
-            }
+            Some(at) => used[at] = true,
             None => leftover.push(want),
         }
     }
+    // The pool the later checks see is the rows nothing claimed.
+    let mut found: Vec<(u8, Shape)> = found
+        .into_iter()
+        .enumerate()
+        .filter(|(at, _)| !used[*at])
+        .map(|(_, row)| row)
+        .collect();
+    cmp!(2);
     for want in leftover {
         // A target list that names an imported type instead of a binder is the
         // lexer reading `x: Dict[...] = ...` as an assignment to `Dict`. Its
         // statement is still in the CST's record, with the real name and the
         // same value, so the fact is there and only the invented binder is set
         // aside.
-        if annotation_targets(lexer, &want, &found, src) || type_as_target(src, &want, &found) {
+        if annotation_targets(lexer, &want, &found, lines) || type_as_target(lines, &want, &found) {
             accepted.annotation_targets += 1;
             // Both checks require a covering row before they say yes, so the
             // statement is in the record either way; the row is retired when it
             // is still there so a second invented binder cannot claim it.
             if let Some(at) = found.iter().position(|row| {
-                row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 && covers_value(&row.1, &want.1, src).is_ok()
+                row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 && covers_value(&row.1, &want.1, lines).is_ok()
             }) {
                 found.swap_remove(at);
             }
@@ -1756,7 +1930,7 @@ fn uncovered(
             .or_else(|| found.iter().find(|row| row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1));
         let (other, why) = match near {
             Some(row) => {
-                let miss = match covers(&row.1, &want.1, src) {
+                let miss = match covers(&row.1, &want.1, lines) {
                     Ok(()) => Miss::Line,
                     Err(miss) => miss,
                 };
@@ -1805,11 +1979,51 @@ fn uncovered(
 }
 
 
+/// The source split into lines once. Every line-shaped check used to call
+/// `src.lines().nth(n)`, which scans the file from the start for each event —
+/// quadratic in file size and the reason the guard was over its budget. The
+/// struct derefs to `str`, so a check that also looks at the whole source keeps
+/// working unchanged.
+#[cfg(all(feature = "deep", feature = "parser"))]
+struct Lines<'a> {
+    rows: Vec<&'a str>,
+    text: &'a str,
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+impl<'a> Lines<'a> {
+    fn new(text: &'a str) -> Self {
+        Lines { rows: text.lines().collect(), text }
+    }
+
+    fn get(&self, line: u32) -> Option<&'a str> {
+        self.rows.get(line.saturating_sub(1) as usize).copied()
+    }
+
+    /// The statement's neighbourhood as one string, for checks that look a line
+    /// or two either side. Constant time in the file's size, unlike the
+    /// `src.lines().skip(..)` it replaces.
+    fn around(&self, line: u32, before: u32, after: u32) -> String {
+        let start = line.saturating_sub(before).saturating_sub(1) as usize;
+        let end = (line as usize + after as usize).min(self.rows.len());
+        self.rows[start.min(self.rows.len())..end.max(start.min(self.rows.len()))].join("\n")
+    }
+}
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+impl std::ops::Deref for Lines<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.text
+    }
+}
+
 /// Whether the call the lexer reports on this line is written as a pattern:
 /// `<name>(… )` followed by `=>`. A match arm's pattern binds, it does not call,
 /// and the CST records no call for it.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_positional_call(src: &str, macro_lines: &[bool], name: &str, line: u32) -> bool {
+fn is_positional_call(src: &Lines<'_>, macro_lines: &[bool], name: &str, line: u32) -> bool {
     is_attribute_call(src, line)
         || is_declaration_call(src, name, line)
         || is_visibility_call(src, line, name)
@@ -1822,7 +2036,7 @@ fn is_positional_call(src: &str, macro_lines: &[bool], name: &str, line: u32) ->
 /// reads `pub(` as a call and the CST records none, which is a difference in
 /// spelling rather than a lost fact.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_visibility_call(src: &str, line: u32, name: &str) -> bool {
+fn is_visibility_call(src: &Lines<'_>, line: u32, name: &str) -> bool {
     name == "pub"
         && src
             .lines()
@@ -1834,8 +2048,8 @@ fn is_visibility_call(src: &str, line: u32, name: &str) -> bool {
 /// line is a declaration, and the parenthesis holds a type name, not arguments.
 /// The trailing comma is what separates it from a tail expression `Some(x)`.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_variant_declaration(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_variant_declaration(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim();
@@ -1861,8 +2075,8 @@ fn is_variant_declaration(src: &str, line: u32) -> bool {
 /// on the left, and the CST records the condition as an expression. The line is
 /// a control header, so there is no binder to lose.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_control_header_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_control_header_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -1872,7 +2086,7 @@ fn is_control_header_line(src: &str, line: u32) -> bool {
 /// `#[cfg(feature = "deep")]`, `#![allow(dead_code)]`: the tokens inside an
 /// attribute are not a call, and the lexer reads `cfg` and `allow` as ones.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_attribute_call(src: &str, line: u32) -> bool {
+fn is_attribute_call(src: &Lines<'_>, line: u32) -> bool {
     src.lines()
         .nth(line.saturating_sub(1) as usize)
         .map(|text| {
@@ -1891,7 +2105,7 @@ fn is_attribute_call(src: &str, line: u32) -> bool {
 /// as an expression — `pub fn` becomes a merge of two names — and the CST is
 /// right to record no expression at all.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_declaration_line(src: &str, line: u32) -> bool {
+fn is_declaration_line(src: &Lines<'_>, line: u32) -> bool {
     // The header is what is written before the name's parenthesis or the body's
     // brace: `pub const fn new`, `pub(crate) struct Cache`, `def parse`.
     const INTRODUCERS: [&str; 18] = [
@@ -1907,7 +2121,7 @@ fn is_declaration_line(src: &str, line: u32) -> bool {
         // lexer reads the header as a call on the declared name.
         "function", "declare", "constructor",
     ];
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -1930,8 +2144,8 @@ fn is_declaration_line(src: &str, line: u32) -> bool {
 /// `.d.ts` declare a field. The one-pass lexer reads the words as an expression
 /// and writes an event the CST has nothing to match.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_type_property_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_type_property_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -1967,8 +2181,8 @@ fn is_type_property_line(src: &str, line: u32) -> bool {
 /// expression event, and the CST records the yield without it. The call inside a
 /// yielded value is still compared through the call table.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_yield_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_yield_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     text.trim_start().starts_with("yield ")
@@ -1979,8 +2193,8 @@ fn is_yield_line(src: &str, line: u32) -> bool {
 /// event and the CST records the call without one, which is the same fact told
 /// two ways: the call table still compares the call itself.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_tail_expression_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_tail_expression_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_end();
@@ -2000,8 +2214,8 @@ fn is_tail_expression_line(src: &str, line: u32) -> bool {
 /// The union is one declaration, and the one-pass lexer reads each branch as an
 /// expression of its own.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_type_continuation_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_type_continuation_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -2011,8 +2225,8 @@ fn is_type_continuation_line(src: &str, line: u32) -> bool {
 /// `export = escape;` and `export {};`: the lexer writes an assignment or an
 /// expression for the line, and an export statement is neither.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_export_statement_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_export_statement_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -2026,7 +2240,7 @@ fn is_export_statement_line(src: &str, line: u32) -> bool {
 /// return type starting with `:`, and neither side of it holds `=` — which is
 /// what keeps `const f = (a: string): string => a;` an expression.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_method_declaration_line(src: &str, line: u32) -> bool {
+fn is_method_declaration_line(src: &Lines<'_>, line: u32) -> bool {
     let lines: Vec<&str> = src.lines().skip(line.saturating_sub(1) as usize).take(16).collect();
     let Some(first) = lines.first() else {
         return false;
@@ -2076,8 +2290,8 @@ fn is_method_declaration_line(src: &str, line: u32) -> bool {
 /// The pattern is not an expression statement, and the CST is right to record
 /// no statement event for it.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_pattern_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_pattern_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -2105,8 +2319,8 @@ fn is_pattern_line(src: &str, line: u32) -> bool {
 /// statement that merges the value and the `else` block, while the CST records
 /// the binding and visits the block's statements.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_let_else_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_let_else_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -2122,8 +2336,8 @@ fn is_let_else_line(src: &str, line: u32) -> bool {
 /// and files an assignment event to the comparison operand. The CST correctly
 /// records the condition as an expression statement.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_control_cast_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_control_cast_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -2138,8 +2352,8 @@ fn is_control_cast_line(src: &str, line: u32) -> bool {
 /// emits the pattern fields as expression statements inside a fake block,
 /// and closes it at `}`, before reading the remainder of the line.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_struct_pattern_condition(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_struct_pattern_condition(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -2158,8 +2372,8 @@ fn is_struct_pattern_condition(src: &str, line: u32) -> bool {
 /// into a single expression event on the header's line. The CST records the condition
 /// and each inner/outer statement on its own line.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_else_if_let_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_else_if_let_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
@@ -2172,8 +2386,8 @@ fn is_else_if_let_line(src: &str, line: u32) -> bool {
 /// event on the call's line. The CST records the call and each inner statement
 /// on its own line.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_closure_block_line(src: &str, line: u32) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn is_closure_block_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim();
@@ -2184,7 +2398,7 @@ fn is_closure_block_line(src: &str, line: u32) -> bool {
 /// lexer as calls: a name, then a parenthesis. The name is being declared, not
 /// called, and the line says so — the declaration keyword is right before it.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_declaration_call(src: &str, name: &str, line: u32) -> bool {
+fn is_declaration_call(src: &Lines<'_>, name: &str, line: u32) -> bool {
     // An empty needle matches at every position without advancing, so the scan
     // below would never end. A call with no name is no name to look for.
     if name.is_empty() {
@@ -2194,7 +2408,7 @@ fn is_declaration_call(src: &str, name: &str, line: u32) -> bool {
         "fn", "func", "def", "struct", "enum", "trait", "type", "union", "class", "interface", "record", "module",
         "function", "declare", "constructor",
     ];
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let mut from = 0;
@@ -2256,11 +2470,11 @@ fn macro_body_lines(src: &str) -> Vec<bool> {
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_pattern_call(src: &str, name: &str, line: u32) -> bool {
+fn is_pattern_call(src: &Lines<'_>, name: &str, line: u32) -> bool {
     if name.is_empty() {
         return false;
     }
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+    let Some(text) = src.get(line) else {
         return false;
     };
     let mut from = 0;
@@ -2317,11 +2531,11 @@ fn is_pattern_call(src: &str, name: &str, line: u32) -> bool {
 /// invented, and it is set aside here rather than forcing a fallback on every
 /// Go file that declares a typed variable.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn type_as_target(src: &str, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool {
+fn type_as_target(src: &Lines<'_>, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool {
     if want.0 != b'a' || src.is_empty() {
         return false;
     }
-    let Some(line) = src.lines().nth(want.1.line.saturating_sub(1) as usize) else {
+    let Some(line) = src.get(want.1.line) else {
         return false;
     };
     let lexer_names = name_list(&want.1.targets);
@@ -2402,6 +2616,7 @@ fn quoted_names(text: &str) -> Vec<&str> {
 /// on: the assignment targets (empty for `r`/`x`) and the value's form with the
 /// call table's numbering erased.
 #[cfg(all(feature = "deep", feature = "parser"))]
+#[derive(Clone)]
 struct Shape {
     line: u32,
     targets: String,
@@ -2783,7 +2998,7 @@ fn shape_event(
     payload: &str,
     calls: &[crate::facts::Call],
     accepted: &mut Accepted,
-    src: &str,
+    src: &Lines<'_>,
     macro_lines: &[bool],
 ) -> Shape {
     if tag != b'a' {
@@ -2806,19 +3021,18 @@ fn shape_event(
 /// token. A name that is exactly a prefix and sits in front of its quote on
 /// that line names nothing, so neither path is asked to agree on it.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn strip_literal_prefixes(mut value: String, src: &str, line: u32) -> String {
+fn strip_literal_prefixes(mut value: String, src: &Lines<'_>, line: u32) -> String {
+    // The prefixes are single letters, so the cheap test is one of those
+    // letters after `n:`: a value with plain names and no prefix can never
+    // match an atom, and building the statement's neighbourhood for it was the
+    // most frequent allocation in the guard.
     if !value.contains("n:") {
         return value;
     }
     // A statement can span several lines: `self.after_value = match kind {`
     // opens on one and the `b')'` that proves the prefix is a literal sits two
     // lines later. Look at the statement's neighbourhood, not its first line.
-    let text: String = src
-        .lines()
-        .skip(line.saturating_sub(3) as usize)
-        .take(5)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = src.around(line, 2, 2);
     // The letters that can prefix a literal, and the three an f-string
     // conversion can name. `{stripped!r}` is not a name `r` any more than
     // `r"..."` is, and the one-pass lexer reads both as one.
@@ -2880,7 +3094,7 @@ fn shape_at(
     pos: &mut usize,
     calls: &[crate::facts::Call],
     accepted: &mut Accepted,
-    src: &str,
+    src: &Lines<'_>,
     macro_lines: &[bool],
 ) -> String {
     let bytes = text.as_bytes();
@@ -3076,7 +3290,12 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
             );
             return deep;
         }
+        // The guard is the only work the auto path does that the CST path does
+        // not, so its cost is the number the performance budget is about. It is
+        // accumulated here and reported by `stderr_line` under `RG_TIMING`.
+        let pairing_started = std::time::Instant::now();
         let verdict = loses_in(&lexer, &deep, &String::from_utf8_lossy(bytes));
+        PAIR_NANOS.fetch_add(pairing_started.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         if verdict.lost() {
             // Name the fact, not just the fact that there was one: a reader
             // looking at a fallback must be able to see what the CST missed
@@ -3144,8 +3363,8 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn claims_the_line(src: &str, tag: &str, line: u32, name: &str) -> bool {
-    let Some(text) = src.lines().nth(line.saturating_sub(1) as usize) else {
+fn claims_the_line(src: &Lines<'_>, tag: &str, line: u32, name: &str) -> bool {
+    let Some(text) = src.get(line) else {
         return false;
     };
     if !text.contains(name) {
