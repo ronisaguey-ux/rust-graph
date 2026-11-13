@@ -234,6 +234,12 @@ const C_DECLARATIONS: &[&str] = &[
 /// lexes both as the keyword kind, so the mapping has to read the leaf.
 const PY_SOFT: &[&str] = &["match", "case", "type", "_"];
 
+/// JavaScript's contextual keywords. Each is an ordinary identifier in the
+/// grammar unless a statement claims it, so a leaf whose kind is `from` is a
+/// name (`g(from)`, `let from = 1`) and not punctuation. Reading them as layout
+/// dropped every argument or binding spelled that way.
+const JS_SOFT: &[&str] = &["from", "of", "get", "set"];
+
 /// Rust's contextual keywords: each is a name everywhere but where it starts
 /// its own item, and the grammar's `_name` rule accepts every one of them. The
 /// lexer reads them as names, so without this the CST dropped `raw` in
@@ -259,7 +265,7 @@ fn kinds(lang: Lang) -> Kinds {
             Kinds { definitions: JSON_DEFS, calls: JSON_CALLS, imports: JSON_IMPORTS, soft: &[], family: Family::Plain }
         }
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
-            Kinds { definitions: JS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: &[], family: Family::Js }
+            Kinds { definitions: JS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: JS_SOFT, family: Family::Js }
         }
         // Go and Java write their statements and their calls themselves: the
         // lexer's statement model is mirrored by `decl_value` rather than by

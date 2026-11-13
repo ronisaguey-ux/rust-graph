@@ -112,7 +112,16 @@ const COVERAGE: &[(&str, &str)] = &[
         "regex and numeric literals",
         "const re = /a+b/g;\nconst n = 0x10 + 1_000 + 1e3;\nconst ok = re.test('aab');\n",
     ),
+    (
+        "optional call",
+        "function f(a) {\n  const c = a?.();\n  return c;\n}\n",
+    ),
+    (
+        "computed object key",
+        "const key = 'k';\nconst o = { [key]: 1 };\n",
+    ),
 ];
+
 /// Constructs the reader does not cover yet, with the exact disagreement.
 ///
 /// This list is asserted, not skipped: a test that fails here means a gap was
@@ -128,16 +137,6 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
         "c-style for with an inline body",
         "function f(xs) {\n  for (var i = 0; i < 2; i++) console.log(i);\n}\n",
         "same pairing order as the for-of row: the header mentions the binding three times and the dedupe that fixed it measured the same regression",
-    ),
-    (
-        "optional chaining call",
-        "function f(a) {\n  const c = a?.();\n  return c;\n}\n",
-        "the CST writes an anonymous call `c(0;[])` where the lexer writes the name `a`",
-    ),
-    (
-        "computed object key",
-        "const key = 'k';\nconst o = { [key]: 1 };\n",
-        "the CST writes the key as `m:[0,0]`; the lexer writes the name `t:[n:key]`",
     ),
     (
         "labelled statement",
