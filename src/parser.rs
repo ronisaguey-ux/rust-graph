@@ -2110,6 +2110,16 @@ impl<'a> Parser<'a> {
         if self.frames.iter().any(|frame| frame.type_only) {
             return;
         }
+        // `class A { error; }` is a field declaration with no value, not an
+        // expression: the CST writes no event for it, and the lexer's bare
+        // `x n:error` had no counterpart in every SDK error class.
+        if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
+            && self.top().kind == FrameKind::Class
+            && stmt.len() == 1
+            && stmt[0].kind == Kind::Ident
+        {
+            return;
+        }
         // A class member declares its type after a colon, and the type is
         // erased at runtime: `readonly id: number = 1` binds `id`,
         // `name!: string` binds nothing, and `abstract area(): number` is a
