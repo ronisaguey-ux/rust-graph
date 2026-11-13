@@ -2308,10 +2308,18 @@ fn is_type_continuation_line(src: &Lines<'_>, line: u32) -> bool {
     // `extends` or `implements`, so the lexer's event on that line is its own
     // reading of a declaration it could not see the header of. Type unions and
     // intersections continue the same way.
-    text.starts_with("| ")
-        || text.starts_with("& ")
-        || text.starts_with("extends ")
-        || text.starts_with("implements ")
+    if text.starts_with("| ") || text.starts_with("& ") || text.starts_with("extends ") || text.starts_with("implements ") {
+        return true;
+    }
+    // A type wrapped over several lines continues with punctuation no statement
+    // starts with: the arrow of a function-typed property (`) => Effect<…>`), the
+    // close of a type argument list (`>`), a conditional's branch (`? infer _ :
+    // never`). The lexer reads those fragments as expressions and the CST is
+    // right to record nothing, so the line is set aside here rather than counted
+    // as a loss.
+    let head: String = text.chars().take_while(|ch| !ch.is_alphanumeric() && !matches!(ch, '_' | '$' | '"' | '\'' | '(')).collect();
+    let head = head.trim();
+    matches!(head, ")" | "=>" | ">" | "]" | "?" | ":" | ") =>" | "):")
 }
 
 /// `import clearImmediate = globalThis.clearImmediate;`: a TypeScript import

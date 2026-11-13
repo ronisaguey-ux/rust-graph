@@ -686,3 +686,20 @@ fn interface_member_signatures_are_not_calls() {
     let verdict = pipeline::loses_in(&lexer, &deep, source);
     assert!(!verdict.lost(), "a member signature is a declaration: {verdict:?}");
 }
+
+/// A type wrapped over several lines continues with punctuation no statement
+/// starts with: the arrow of a function-typed property (`) => Effect<…>`), the
+/// close of a type argument list (`>`), a conditional's branch (`| infer _ ? … :
+/// never`). The lexer reads those fragments as expressions and the CST rightly
+/// records nothing, so each one used to be a fallback in every `.d.ts` that
+/// wraps a signature — 35 losses in one file alone.
+#[test]
+fn wrapped_type_continuation_lines_are_not_statements() {
+    let source = "interface Sink<out A> extends Sink.Variance<A>, Pipeable {\n  readonly transform: (\n    upstream: Pull.Pull<A>,\n    scope: Scope.Scope\n  ) => Effect.Effect<End<A>, never, never>\n  [Unify.typeSymbol]?: unknown\n}\n\ntype Pick_<A> = A extends infer T ? Sink<A, T>\n  | infer _ ? Sink<A, never>\n  : never\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "a wrapped type is not a statement: {verdict:?}");
+}
