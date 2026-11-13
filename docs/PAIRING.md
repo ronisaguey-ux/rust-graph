@@ -167,3 +167,29 @@ after  js 621/1995  ts 376/2000  python 145/568  rust 343/1816
 The commit body for that change quoted ts 393 because it was written against a
 build that predated the last of the three fixes; the number that belongs in the
 record is this one, taken from the tool the rule above requires.
+
+## Phase 2 exit gate: measured, one condition failed
+
+The gate has three conditions. Two hold and the first does not, so the phase is
+recorded as blocked on its own premise rather than waved through.
+
+1. **Strict pairing lifts at least two of the four corpora.** It lifts none. The
+   same session, the same corpus, base build against the `strict-pair` build:
+   ts 376 → 403 (27 files move clean to fallback). js, python and rust were
+   measured on the fifty-file subsets in P2-05 and moved 16 → 32, 18 → 46 and
+   4 → 46. Strict pairing is a stricter oracle, and stricter means more files
+   fall back — which is the honest direction for a guard but the opposite of what
+   this condition asked for. Either the condition means "lifts the guard's
+   precision" (it does, by construction) or the phase has no exit through it.
+2. **No file moves clean to fallback without a named reason.** Holds at corpus
+   scale: `tools/strict_gate.py` on ts reports 27 clean-to-fail moves, every one
+   naming its row and its bucket, exit 0.
+3. **The oracle is green.** Holds: `cargo test --workspace --features "deep
+   parser"` exit 0, `cargo test` (default build) exit 0, `guard_truth` 140 tests
+   green.
+
+The honest reading is that condition 1 was written before anyone had measured
+what strict pairing costs. The guard it describes is a different design — one
+where the forgiving tiers are unnecessary because the records agree — and the
+corpora say they are not there yet. Recorded so the next phase does not spend a
+week trying to satisfy a number that was never achievable.
