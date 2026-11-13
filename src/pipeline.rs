@@ -1621,9 +1621,21 @@ fn uncovered(
     let mut leftover: Vec<(u8, Shape)> = Vec::new();
     let mut twice: Vec<(u8, Shape)> = Vec::new();
     for want in wants.drain(..) {
-        match found.iter().position(|row| {
-            row.0 == want.0 && row.1.line == want.1.line && covers(&row.1, &want.1, src).is_ok()
-        }) {
+        // Two events on one line is normal (`if (x) y();` is a condition and a
+        // call), and a row that covers a want is not always its partner: the
+        // condition's value is a name the call's value also contains, so taking
+        // the first covering row pair the condition with the call and left the
+        // call with nothing — a file blamed for an event that was in the record.
+        // The identical row is the partner; a covering row is the fallback.
+        let identical = found.iter().position(|row| {
+            row.0 == want.0 && row.1.line == want.1.line && row.1.targets == want.1.targets && row.1.value == want.1.value
+        });
+        let paired_at = identical.or_else(|| {
+            found
+                .iter()
+                .position(|row| row.0 == want.0 && row.1.line == want.1.line && covers(&row.1, &want.1, src).is_ok())
+        });
+        match paired_at {
             Some(at) => {
                 found.swap_remove(at);
             }

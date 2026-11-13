@@ -352,3 +352,19 @@ fn the_multi_target_mapping_is_enabled_and_carries_both_names() {
     let first = cst.nodes[assignment.first_child as usize];
     assert_eq!(language.name(first.kind), "pattern_list", "the target node is the arm that is mapped");
 }
+
+/// Two events on one line is normal: `if (x) g(x);` is a condition and a call.
+/// The condition's value is a name the call's value also carries, so a pairing
+/// that takes the first *covering* row handed the condition the call's row and
+/// left the call with nothing — the file was reported as losing a call the CST
+/// had written all along. The identical row must win over a covering one.
+#[test]
+fn two_events_on_one_line_are_paired_with_their_own_rows() {
+    let source = "function f(descriptor) {\n  const parts = [];\n  if (descriptor) parts.push(descriptor);\n}\n";
+    let language = langs::by_content("js", source.as_bytes()).expect("a JavaScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::JavaScript);
+    let verdict = pipeline::loses(&lexer, &deep);
+    assert!(!verdict.lost(), "{verdict:?}");
+}
