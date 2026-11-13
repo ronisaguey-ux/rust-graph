@@ -90,6 +90,14 @@ const COVERAGE: &[(&str, &str)] = &[
         "const cfg = { a: 1 } satisfies Record<string, number>;\nconst n = (cfg as unknown as { a: number }).a;\n",
     ),
     (
+        "type aliases: unions, intersections, function and tuple types",
+        "type Id = string | number;\ntype Pair = { a: number } & { b: number };\ntype Fn = (x: number) => void;\ntype Tup = [number, string];\n",
+    ),
+    (
+        "type operators: keyof, typeof, indexed access and non-null",
+        "type K = keyof { a: number };\ntype T = typeof globalThis;\ntype V = { a: number }['a'];\nfunction f(x?: string) {\n  return x!.length;\n}\n",
+    ),
+    (
         "JS node set: statements, arrows, destructuring and templates",
         "function f({ a, b }: { a: number; b: number }, [c]: number[]) {\n  const double = (x: number) => x * 2;\n  const s = tag`v ${a} ${b} ${c}`;\n  return double(a) + s.length;\n}\n",
     ),
@@ -104,17 +112,7 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
     (
         "decorators on a class, a method and a property",
         "function dec(...args: unknown[]) {\n  return args;\n}\n@dec\nclass A {\n  @dec\n  field: number = 1;\n  @dec\n  method() {\n    return this.field;\n  }\n}\n",
-        "an `@dec` line is skipped, but the class member it decorates is still read at the decorator's line (event `a dec` line 6 against the CST's `field` line 7)",
-    ),
-    (
-        "type aliases: unions, intersections, function and tuple types",
-        "type Id = string | number;\ntype Pair = { a: number } & { b: number };\ntype Fn = (x: number) => void;\ntype Tup = [number, string];\n",
-        "the alias statement is skipped, but the `=>` in a function type opens a function symbol at token time, before the statement is skipped, so `Fn` exists with a return event",
-    ),
-    (
-        "type operators: keyof, typeof, indexed access and non-null",
-        "type K = keyof { a: number };\ntype T = typeof globalThis;\ntype V = { a: number }['a'];\nfunction f(x?: string) {\n  return x!.length;\n}\n",
-        "the alias statements are skipped, but the object type inside `keyof { a: number }` is read as a value of its own",
+        "the CST is the wrong reader here: for `@dec class A {}` it writes both `x n:dec` and an assignment `a dec` at the decorator line, which a decorator is not - `@dec` is a call of dec on the class. The lexer writes only `x n:dec`. Closing this means fixing the CST's decorator handling, not the lexer's",
     ),
 ];
 
