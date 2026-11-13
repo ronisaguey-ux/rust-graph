@@ -2896,15 +2896,14 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
                     && (row.starts_with(&format!("{name}.")) || name.starts_with(&format!("{row}.")))
             }
         };
-        match found
-            .iter()
-            .position(|row| row.as_str() == name.as_str())
-            .or_else(|| found.iter().position(|row| prefix_same(&row)))
-        {
-            Some(at) => {
-                found.swap_remove(at);
-            }
-            None => missing.push(name),
+        // A name is a fact, not a count. `{[States.A]: [States.B], [States.B]:
+        // [States.A]}` repeats States.B three times in the lexer's nested pairs
+        // while the CST flattens the object literal and lists each distinct name
+        // once, so consuming found atoms one by one reported every repeat after
+        // the first as lost (35 js files). Membership is what both readers
+        // promise; a duplicate carries no second fact.
+        if !found.iter().any(|row| row.as_str() == name.as_str() || prefix_same(&row)) {
+            missing.push(name);
         }
     }
     if !missing.is_empty() {
