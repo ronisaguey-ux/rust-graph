@@ -469,7 +469,12 @@ impl<'a> Parser<'a> {
         // it is a case clause: both are statements of the enclosing block, and
         // reading them as functions moved every following line into a symbol
         // the CST never made (rust 345 -> 417).
+        // `type Fn = (x: number) => void` has an arrow and is still a type: the
+        // statement is skipped as a declaration, and opening a function here
+        // left `Fn` with a return event the CST never writes.
+        let type_declaration = matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(&stmt);
         let arrow = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && !type_declaration
             && stmt.last().is_some_and(|token| self.is_op(token, b"=>"))
             // `const variance = (values) => {` is named by the assignment, and
             // taking it here made an `<anonymous>` twin the CST never has. A
@@ -1690,6 +1695,11 @@ impl<'a> Parser<'a> {
 
     /// `name = function (a) {`, `name = (a) => ...`, `name <- function(a)`.
     fn assigned_head(&self, toks: &[Token]) -> Option<Head> {
+        // `type Fn = (x: number) => void` is an assignment shape with a type on
+        // the right, not a function: the CST writes no symbol for it.
+        if matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(toks) {
+            return None;
+        }
         let equal = self.top_level_assign(toks)?;
         // Only the chain touching the `=`: `export const f`, `const f: T` name `f`.
         let mut start = equal.checked_sub(1).filter(|at| toks[*at].kind == Kind::Ident)?;
@@ -2015,8 +2025,11 @@ impl<'a> Parser<'a> {
                 continue;
             }
             match self.raw(token) {
-                b"(" | b"[" | b"{" => depth += 1,
-                b")" | b"]" | b"}" => depth -= 1,
+                // `<` counts: `connect<TOpaque = null>(options: T): U` has an
+                // `=` and a `:` inside its generic parameter list, and a member
+                // signature is not an assignment of `TOpaque`.
+                b"(" | b"[" | b"{" | b"<" => depth += 1,
+                b")" | b"]" | b"}" | b">" => depth -= 1,
                 b"=" | b"=>" if depth == 0 => return None,
                 b":" if depth == 0 => return (index > 0).then_some(index),
                 _ => {}

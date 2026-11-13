@@ -573,6 +573,12 @@ impl Emit<'_> {
                 }
                 continue;
             }
+            // `x!.length`: the non-null assertion is a type marker between the
+            // value and its member, and the CST keeps the chain whole.
+            if matches!(self.lang.tag, "TS" | "TSX") && self.is_op(0, b"!") {
+                self.pos += 1;
+                continue;
+            }
             let separator = self.is_op(0, b".")
                 || self.is_op(0, b"->")
                 || self.is_op(0, b"::")
