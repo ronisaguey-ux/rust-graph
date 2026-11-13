@@ -57,6 +57,9 @@ struct Frame {
     saved: Option<(Vec<Token>, Vec<u8>)>,
     /// The symbol this frame defines, whose end line it sets on closing.
     defines: Option<usize>,
+    /// The body of a type declaration: `interface { ... }`, `enum { ... }`.
+    /// Its statements are type members and write no fact.
+    type_only: bool,
 }
 
 #[derive(Default)]
@@ -178,6 +181,7 @@ impl<'a> Parser<'a> {
             col: 0,
             saved: None,
             defines: None,
+        type_only: false,
         });
         loop {
             let token = self.next_token();
@@ -304,7 +308,15 @@ impl<'a> Parser<'a> {
         let opens_block = self.uses_braces() && self.is_block();
         if opens_block {
             self.settle_branch(None);
+            // `interface User extends Base {` opens a body of type members:
+            // `greet(who: string): string` is a signature, not a call, and the
+            // CST writes nothing for any of it.
+            let type_body = matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(&self.stmt);
+            let before = self.frames.len();
             self.open_block();
+            if type_body && self.frames.len() > before {
+                self.frames[before].type_only = true;
+            }
         } else {
             self.brackets.push(b'{');
             self.stmt.push(token);
@@ -490,7 +502,7 @@ impl<'a> Parser<'a> {
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
-            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None });
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
         }
         stmt.clear();
         self.stmt = stmt;
@@ -503,7 +515,7 @@ impl<'a> Parser<'a> {
         let symbol = self.top().symbol;
         let class = self.top().class.clone();
         let receiver = self.top().receiver.clone();
-        self.frames.push(Frame { kind: FrameKind::Control, symbol, class, receiver, col, saved: None, defines: None });
+        self.frames.push(Frame { kind: FrameKind::Control, symbol, class, receiver, col, saved: None, defines: None, type_only: false });
     }
 
     /// `["f"]`: this arm has no condition, so the arms together cover every case.
@@ -574,6 +586,7 @@ impl<'a> Parser<'a> {
             col,
             saved: None,
             defines: Some(index),
+        type_only: false,
         });
     }
 
@@ -588,6 +601,7 @@ impl<'a> Parser<'a> {
             col,
             saved,
             defines: Some(index),
+        type_only: false,
         });
     }
 
@@ -933,7 +947,7 @@ impl<'a> Parser<'a> {
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
-            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col, saved: None, defines: None });
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col, saved: None, defines: None, type_only: false });
             return;
         }
         self.simple_statement(stmt);
@@ -979,6 +993,7 @@ impl<'a> Parser<'a> {
                             col: 0,
                             saved: None,
                             defines: None,
+                        type_only: false,
                         });
                     }
                 }
@@ -1901,9 +1916,32 @@ impl<'a> Parser<'a> {
         if matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(stmt) {
             return;
         }
-        // A decorator names the member it decorates, not a value of its own.
-        if matches!(self.lang.tag, "TS" | "TSX") && self.is_op(first, b"@") {
+        // A type body writes no facts: its statements are members, not values.
+        if self.frames.iter().any(|frame| frame.type_only) {
             return;
+        }
+        // A class member declares its type after a colon, and the type is
+        // erased at runtime: `readonly id: number = 1` binds `id`,
+        // `name!: string` binds nothing, and `abstract area(): number` is a
+        // signature. Read as one value, the annotation ended up in the merge
+        // and the CST never wrote it.
+        if matches!(self.lang.tag, "TS" | "TSX") && self.top().kind == FrameKind::Class {
+            if let Some(cut) = self.member_type_cut(stmt) {
+                let head: Vec<Token> = stmt[..cut].to_vec();
+                if head.last().is_some_and(|token| self.is_op(token, b")")) {
+                    return;
+                }
+                let skip = head
+                    .iter()
+                    .take_while(|token| token.kind == Kind::Ident && MODIFIERS.contains(&self.text(token).as_str()))
+                    .count();
+                let Some(equal) = self.top_level_assign(stmt) else { return };
+                let mut combined: Vec<Token> = head[skip..].to_vec();
+                combined.extend_from_slice(&stmt[equal..]);
+                let _ = cut;
+                self.statement(&combined);
+                return;
+            }
         }
         let word = self.word_at(stmt, 0);
         if matches!(word.as_deref(), Some("return")) {
@@ -1962,6 +2000,25 @@ impl<'a> Parser<'a> {
             self.word_at(stmt, at).as_deref(),
             Some("type") | Some("interface") | Some("namespace") | Some("module") | Some("enum")
         ) && self.word_at(stmt, at + 1).is_some()
+    }
+
+    /// Where a class member's type annotation starts, if it has one: the first
+    /// colon outside brackets and before any `=`.
+    fn member_type_cut(&self, stmt: &[Token]) -> Option<usize> {
+        let mut depth = 0i32;
+        for (index, token) in stmt.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" | b"{" => depth += 1,
+                b")" | b"]" | b"}" => depth -= 1,
+                b"=" | b"=>" if depth == 0 => return None,
+                b":" if depth == 0 => return (index > 0).then_some(index),
+                _ => {}
+            }
+        }
+        None
     }
 
     fn target_path(&self, toks: &[Token]) -> Option<String> {

@@ -58,12 +58,32 @@ const COVERAGE: &[(&str, &str)] = &[
         "function f(a: number, b: string): boolean {\n  const c: number = a + 1;\n  return b.length > c;\n}\n",
     ),
     (
+        "interface: properties, optional members, methods and extends",
+        "interface Base {\n  id: number;\n}\ninterface User extends Base {\n  name: string;\n  nick?: string;\n  greet(who: string): string;\n}\n",
+    ),
+    (
+        "generics on functions, classes and interfaces with a constraint",
+        "interface Box<T> {\n  value: T;\n}\nfunction id<T extends object>(x: T): T {\n  return x;\n}\nclass Holder<T> {\n  constructor(private item: T) {}\n}\n",
+    ),
+    (
+        "enums: numeric, string and computed",
+        "enum Direction {\n  Up,\n  Down = 4,\n}\nenum Named {\n  A = 'a',\n  B = 'b',\n}\n",
+    ),
+    (
         "namespaces with exported members",
         "namespace NS {\n  export const x = 1;\n  export function f() {\n    return x;\n  }\n}\n",
     ),
     (
         "import type and export type",
         "import type { Foo } from './foo';\nexport type Bar = Foo | null;\nexport function f(x: Bar) {\n  return x;\n}\n",
+    ),
+    (
+        "abstract classes with implements and access modifiers",
+        "abstract class Shape {\n  protected name: string;\n  private size = 0;\n  abstract area(): number;\n  describe(): string {\n    return this.name;\n  }\n}\nclass Square extends Shape implements Shape {\n  area(): number {\n    return 1;\n  }\n}\n",
+    ),
+    (
+        "readonly, definite assignment, getters and setters",
+        "class A {\n  readonly id: number = 1;\n  name!: string;\n  get label(): string {\n    return this.name;\n  }\n  set label(v: string) {\n    this.name = v;\n  }\n}\n",
     ),
     (
         "JS node set: statements, arrows, destructuring and templates",
@@ -77,21 +97,6 @@ const COVERAGE: &[(&str, &str)] = &[
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[
-    (
-        "interface: properties, optional members, methods and extends",
-        "interface Base {\n  id: number;\n}\ninterface User extends Base {\n  name: string;\n  nick?: string;\n  greet(who: string): string;\n}\n",
-        "the body is a list of members, not statements: `greet(who: string)` is read as a call and `name: string` as a merge. Suppressing a type body by frame works in isolation and was reverted with the `as` change that corrupted the sweep JSON; the frame flag itself is still the plan",
-    ),
-    (
-        "generics on functions, classes and interfaces with a constraint",
-        "interface Box<T> {\n  value: T;\n}\nfunction id<T extends object>(x: T): T {\n  return x;\n}\nclass Holder<T> {\n  constructor(private item: T) {}\n}\n",
-        "the interface body member `value: T` again; the function and class halves read cleanly",
-    ),
-    (
-        "enums: numeric, string and computed",
-        "enum Direction {\n  Up,\n  Down = 4,\n}\nenum Named {\n  A = 'a',\n  B = 'b',\n}\n",
-        "the header is now skipped as a type declaration, but the members are statements of the enclosing scope: `Up,` and `Down = 4` still write events the CST never has",
-    ),
     (
         "decorators on a class, a method and a property",
         "function dec(...args: unknown[]) {\n  return args;\n}\n@dec\nclass A {\n  @dec\n  field: number = 1;\n  @dec\n  method() {\n    return this.field;\n  }\n}\n",
@@ -108,19 +113,9 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
         "the alias statement is skipped, but the `=>` in a function type opens a function symbol at token time, before the statement is skipped, so `Fn` exists with a return event",
     ),
     (
-        "abstract classes with implements and access modifiers",
-        "abstract class Shape {\n  protected name: string;\n  private size = 0;\n  abstract area(): number;\n  describe(): string {\n    return this.name;\n  }\n}\nclass Square extends Shape implements Shape {\n  area(): number {\n    return 1;\n  }\n}\n",
-        "`abstract area(): number;` is a signature and `protected name: string` is a field declaration: both are read as values because the member's type annotation is not cut off",
-    ),
-    (
         "type operators: keyof, typeof, indexed access and non-null",
         "type K = keyof { a: number };\ntype T = typeof globalThis;\ntype V = { a: number }['a'];\nfunction f(x?: string) {\n  return x!.length;\n}\n",
         "the alias statements are skipped, but the object type inside `keyof { a: number }` is read as a value of its own",
-    ),
-    (
-        "readonly, definite assignment, getters and setters",
-        "class A {\n  readonly id: number = 1;\n  name!: string;\n  get label(): string {\n    return this.name;\n  }\n  set label(v: string) {\n    this.name = v;\n  }\n}\n",
-        "`name!: string` and `readonly id: number = 1` put the annotation into the value; the member's type has to be cut at the colon before the value is read",
     ),
 ];
 
