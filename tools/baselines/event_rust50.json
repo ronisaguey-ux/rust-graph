@@ -1,0 +1,586 @@
+{
+ "deep": {
+  "000001_measure.rs": {
+   "edges": 15,
+   "events": 119,
+   "imports": 10,
+   "symbols": 15
+  },
+  "000002_layout.rs": {
+   "events": 193,
+   "imports": 10,
+   "symbols": 5
+  },
+  "000003_scan.rs": {
+   "edges": 12,
+   "events": 294,
+   "imports": 12,
+   "symbols": 6
+  },
+  "000004_scanner.rs": {
+   "edges": 2,
+   "events": 123,
+   "imports": 5,
+   "symbols": 21
+  },
+  "000005_mode.rs": {
+   "edges": 3,
+   "events": 70,
+   "symbols": 31
+  },
+  "000006_profiles.rs": {
+   "edges": 3,
+   "events": 53,
+   "imports": 6,
+   "symbols": 10
+  },
+  "000007_run.rs": {
+   "events": 70,
+   "imports": 7,
+   "symbols": 3
+  },
+  "000008_kind.rs": {
+   "edges": 1,
+   "events": 101,
+   "imports": 2,
+   "symbols": 25
+  },
+  "000009_recovery.rs": {
+   "edges": 2,
+   "events": 17,
+   "imports": 1,
+   "symbols": 7
+  },
+  "000010_brackets.rs": {
+   "edges": 14,
+   "events": 97,
+   "imports": 1,
+   "symbols": 22
+  },
+  "000011_python.rs": {
+   "edges": 1,
+   "events": 50,
+   "imports": 2,
+   "symbols": 7
+  },
+  "000012_lib.rs": {
+   "events": 103,
+   "imports": 29,
+   "symbols": 41
+  },
+  "000013_cursor.rs": {
+   "edges": 6,
+   "events": 81,
+   "symbols": 32
+  },
+  "000014_runtime.rs": {
+   "edges": 6,
+   "events": 50,
+   "imports": 8,
+   "symbols": 7
+  },
+  "000015_modes.rs": {
+   "edges": 3,
+   "events": 89,
+   "imports": 10,
+   "symbols": 10
+  },
+  "000016_scanner.rs": {
+   "edges": 2,
+   "events": 76,
+   "imports": 12,
+   "symbols": 13
+  },
+  "000017_profiles.rs": {
+   "edges": 6,
+   "events": 110,
+   "imports": 11,
+   "symbols": 10
+  },
+  "000018_fixtures.rs": {
+   "edges": 16,
+   "events": 36,
+   "imports": 3,
+   "symbols": 10
+  },
+  "000019_operators.rs": {
+   "edges": 3,
+   "events": 31,
+   "imports": 3,
+   "symbols": 5
+  },
+  "000020_brackets.rs": {
+   "events": 85,
+   "imports": 4,
+   "symbols": 7
+  },
+  "000021_old_lexer_golden.rs": {
+   "edges": 2,
+   "events": 59,
+   "imports": 12,
+   "symbols": 7
+  },
+  "000022_mod.rs": {
+   "edges": 19,
+   "events": 282,
+   "imports": 7,
+   "symbols": 18
+  },
+  "000023_differential.rs": {
+   "events": 37,
+   "imports": 3,
+   "symbols": 4
+  },
+  "000024_alloc.rs": {
+   "edges": 10,
+   "events": 59,
+   "imports": 8,
+   "symbols": 9
+  },
+  "000025_robustness.rs": {
+   "edges": 8,
+   "events": 67,
+   "imports": 6,
+   "symbols": 9
+  },
+  "000026_tests.rs": {
+   "edges": 9,
+   "events": 97,
+   "imports": 4,
+   "symbols": 13
+  },
+  "000027_lower.rs": {
+   "edges": 43,
+   "events": 192,
+   "imports": 6,
+   "symbols": 10
+  },
+  "000028_mod.rs": {
+   "edges": 8,
+   "events": 80,
+   "imports": 7,
+   "symbols": 14
+  },
+  "000029_emit.rs": {
+   "edges": 6,
+   "events": 87,
+   "imports": 7,
+   "symbols": 3
+  },
+  "000030_decide.rs": {
+   "edges": 42,
+   "events": 238,
+   "imports": 9,
+   "symbols": 17
+  },
+  "000031_check.rs": {
+   "edges": 135,
+   "events": 951,
+   "imports": 12,
+   "symbols": 64
+  },
+  "000032_read.rs": {
+   "edges": 65,
+   "events": 687,
+   "imports": 7,
+   "symbols": 51
+  },
+  "000033_lib.rs": {
+   "edges": 8,
+   "events": 185,
+   "imports": 12,
+   "symbols": 22
+  },
+  "000034_emit.rs": {
+   "edges": 185,
+   "events": 612,
+   "imports": 19,
+   "symbols": 47
+  },
+  "000035_line_boundary.rs": {
+   "edges": 20,
+   "events": 183,
+   "imports": 18,
+   "symbols": 20
+  },
+  "000036_lexer_modes.rs": {
+   "edges": 18,
+   "events": 69,
+   "imports": 15,
+   "symbols": 17
+  },
+  "000037_corpus.rs": {
+   "edges": 7,
+   "events": 41,
+   "imports": 5,
+   "symbols": 7
+  },
+  "000038_harness.rs": {
+   "edges": 11,
+   "events": 145,
+   "imports": 16,
+   "symbols": 38
+  },
+  "000039_treecheck.rs": {
+   "edges": 9,
+   "events": 129,
+   "imports": 4,
+   "symbols": 16
+  },
+  "000040_mutate.rs": {
+   "edges": 46,
+   "events": 258,
+   "imports": 1,
+   "symbols": 27
+  },
+  "000041_registry.rs": {
+   "edges": 6,
+   "events": 85,
+   "imports": 34,
+   "symbols": 10
+  },
+  "000042_main.rs": {
+   "edges": 11,
+   "events": 334,
+   "imports": 20,
+   "symbols": 11
+  },
+  "000043_lib.rs": {
+   "imports": 19,
+   "symbols": 6
+  },
+  "000044_shrink.rs": {
+   "edges": 6,
+   "events": 150,
+   "imports": 9,
+   "symbols": 18
+  },
+  "000045_corpus.rs": {
+   "events": 33,
+   "imports": 7,
+   "symbols": 4
+  },
+  "000046_summary.rs": {
+   "edges": 13,
+   "events": 173,
+   "imports": 6,
+   "symbols": 16
+  },
+  "000047_scan.rs": {
+   "edges": 10,
+   "events": 169,
+   "imports": 10,
+   "symbols": 5
+  },
+  "000048_report.rs": {
+   "edges": 4,
+   "events": 127,
+   "imports": 7,
+   "symbols": 19
+  },
+  "000049_json.rs": {
+   "edges": 34,
+   "events": 334,
+   "imports": 2,
+   "symbols": 28
+  },
+  "000050_gates.rs": {
+   "edges": 9,
+   "events": 165,
+   "imports": 14,
+   "symbols": 6
+  }
+ },
+ "lexer": {
+  "000001_measure.rs": {
+   "edges": 15,
+   "events": 117,
+   "imports": 10,
+   "symbols": 14
+  },
+  "000002_layout.rs": {
+   "edges": 9,
+   "events": 143,
+   "imports": 10,
+   "symbols": 16
+  },
+  "000003_scan.rs": {
+   "edges": 21,
+   "events": 207,
+   "imports": 12,
+   "symbols": 16
+  },
+  "000004_scanner.rs": {
+   "edges": 17,
+   "events": 100,
+   "imports": 5,
+   "symbols": 22
+  },
+  "000005_mode.rs": {
+   "edges": 3,
+   "events": 59,
+   "symbols": 29
+  },
+  "000006_profiles.rs": {
+   "events": 30,
+   "imports": 6,
+   "symbols": 9
+  },
+  "000007_run.rs": {
+   "events": 60,
+   "imports": 7,
+   "symbols": 3
+  },
+  "000008_kind.rs": {
+   "events": 36,
+   "imports": 2,
+   "symbols": 23
+  },
+  "000009_recovery.rs": {
+   "edges": 2,
+   "events": 15,
+   "imports": 1,
+   "symbols": 6
+  },
+  "000010_brackets.rs": {
+   "edges": 12,
+   "events": 84,
+   "imports": 1,
+   "symbols": 21
+  },
+  "000011_python.rs": {
+   "edges": 1,
+   "events": 39,
+   "imports": 2,
+   "symbols": 7
+  },
+  "000012_lib.rs": {
+   "events": 36,
+   "imports": 29,
+   "symbols": 8
+  },
+  "000013_cursor.rs": {
+   "edges": 5,
+   "events": 59,
+   "symbols": 31
+  },
+  "000014_runtime.rs": {
+   "edges": 6,
+   "events": 50,
+   "imports": 8,
+   "symbols": 7
+  },
+  "000015_modes.rs": {
+   "edges": 3,
+   "events": 89,
+   "imports": 10,
+   "symbols": 10
+  },
+  "000016_scanner.rs": {
+   "edges": 5,
+   "events": 69,
+   "imports": 12,
+   "symbols": 16
+  },
+  "000017_profiles.rs": {
+   "edges": 6,
+   "events": 110,
+   "imports": 11,
+   "symbols": 10
+  },
+  "000018_fixtures.rs": {
+   "edges": 16,
+   "events": 38,
+   "imports": 3,
+   "symbols": 12
+  },
+  "000019_operators.rs": {
+   "edges": 3,
+   "events": 31,
+   "imports": 3,
+   "symbols": 6
+  },
+  "000020_brackets.rs": {
+   "events": 85,
+   "imports": 4,
+   "symbols": 7
+  },
+  "000021_old_lexer_golden.rs": {
+   "edges": 1,
+   "events": 44,
+   "imports": 12,
+   "symbols": 5
+  },
+  "000022_mod.rs": {
+   "edges": 18,
+   "events": 204,
+   "imports": 7,
+   "symbols": 19
+  },
+  "000023_differential.rs": {
+   "events": 38,
+   "imports": 3,
+   "symbols": 4
+  },
+  "000024_alloc.rs": {
+   "edges": 10,
+   "events": 60,
+   "imports": 8,
+   "symbols": 8
+  },
+  "000025_robustness.rs": {
+   "edges": 9,
+   "events": 68,
+   "imports": 6,
+   "symbols": 8
+  },
+  "000026_tests.rs": {
+   "edges": 9,
+   "events": 95,
+   "imports": 4,
+   "symbols": 14
+  },
+  "000027_lower.rs": {
+   "edges": 7,
+   "events": 138,
+   "imports": 6,
+   "symbols": 23
+  },
+  "000028_mod.rs": {
+   "edges": 8,
+   "events": 71,
+   "imports": 7,
+   "symbols": 11
+  },
+  "000029_emit.rs": {
+   "edges": 8,
+   "events": 66,
+   "imports": 7,
+   "symbols": 4
+  },
+  "000030_decide.rs": {
+   "edges": 18,
+   "events": 150,
+   "imports": 9,
+   "symbols": 29
+  },
+  "000031_check.rs": {
+   "edges": 139,
+   "events": 728,
+   "imports": 12,
+   "symbols": 87
+  },
+  "000032_read.rs": {
+   "edges": 110,
+   "events": 408,
+   "imports": 7,
+   "symbols": 67
+  },
+  "000033_lib.rs": {
+   "edges": 6,
+   "events": 130,
+   "imports": 12,
+   "symbols": 17
+  },
+  "000034_emit.rs": {
+   "edges": 87,
+   "events": 408,
+   "imports": 19,
+   "symbols": 62
+  },
+  "000035_line_boundary.rs": {
+   "edges": 20,
+   "events": 131,
+   "imports": 18,
+   "symbols": 15
+  },
+  "000036_lexer_modes.rs": {
+   "edges": 18,
+   "events": 65,
+   "imports": 15,
+   "symbols": 12
+  },
+  "000037_corpus.rs": {
+   "edges": 7,
+   "events": 37,
+   "imports": 5,
+   "symbols": 7
+  },
+  "000038_harness.rs": {
+   "edges": 16,
+   "events": 123,
+   "imports": 16,
+   "symbols": 37
+  },
+  "000039_treecheck.rs": {
+   "edges": 29,
+   "events": 97,
+   "imports": 4,
+   "symbols": 15
+  },
+  "000040_mutate.rs": {
+   "edges": 36,
+   "events": 216,
+   "imports": 1,
+   "symbols": 26
+  },
+  "000041_registry.rs": {
+   "edges": 6,
+   "events": 82,
+   "imports": 34,
+   "symbols": 10
+  },
+  "000042_main.rs": {
+   "edges": 10,
+   "events": 240,
+   "imports": 20,
+   "symbols": 18
+  },
+  "000043_lib.rs": {
+   "events": 6,
+   "imports": 19,
+   "symbols": 1
+  },
+  "000044_shrink.rs": {
+   "edges": 6,
+   "events": 143,
+   "imports": 9,
+   "symbols": 17
+  },
+  "000045_corpus.rs": {
+   "events": 33,
+   "imports": 7,
+   "symbols": 4
+  },
+  "000046_summary.rs": {
+   "edges": 31,
+   "events": 143,
+   "imports": 6,
+   "symbols": 17
+  },
+  "000047_scan.rs": {
+   "edges": 9,
+   "events": 104,
+   "imports": 10,
+   "symbols": 14
+  },
+  "000048_report.rs": {
+   "edges": 6,
+   "events": 99,
+   "imports": 7,
+   "symbols": 17
+  },
+  "000049_json.rs": {
+   "edges": 57,
+   "events": 257,
+   "imports": 2,
+   "symbols": 30
+  },
+  "000050_gates.rs": {
+   "edges": 5,
+   "events": 109,
+   "imports": 14,
+   "symbols": 6
+  }
+ }
+}
