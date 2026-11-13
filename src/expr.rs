@@ -1076,6 +1076,47 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "event-split")]
+    #[test]
+    fn the_split_emits_rows_in_source_order_and_never_reorders_them() {
+        let lang = crate::langs::by_content("js", b"").unwrap();
+        let body = "a = f(1); b = g(2); c = h(3)";
+        let mut lexer = Lexer::new(body.as_bytes(), lang);
+        let mut tokens = Vec::new();
+        loop {
+            let token = lexer.next();
+            match token.kind {
+                Kind::Eof => break,
+                Kind::Newline => {}
+                _ => tokens.push(token),
+            }
+        }
+        let mut calls = Vec::new();
+        let segments = split_events(body.as_bytes(), lang, &tokens, "", &mut calls);
+        assert_eq!(segments.len(), 3, "three statements, three rows: {segments:?}");
+        // The statement order is the source order, one row per `;` segment.
+        assert_eq!(segments.iter().map(|s| s.target.join("")).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!(calls.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["f", "g", "h"]);
+        // No row's line is behind the row before it, in a statement that
+        // spans lines: an `if` header, its body, then the statement after it.
+        let body = "if (ready) {\n  go(x);\n}\nafter(y);";
+        let mut lexer = Lexer::new(body.as_bytes(), lang);
+        let mut tokens = Vec::new();
+        loop {
+            let token = lexer.next();
+            match token.kind {
+                Kind::Eof => break,
+                Kind::Newline => {}
+                _ => tokens.push(token),
+            }
+        }
+        let mut calls = Vec::new();
+        let segments = split_events(body.as_bytes(), lang, &tokens, "", &mut calls);
+        let lines: Vec<u32> = segments.iter().map(|s| s.line).collect();
+        assert!(lines.windows(2).all(|pair| pair[0] <= pair[1]), "rows out of order: {lines:?}");
+        assert_eq!(lines.first(), Some(&1));
+    }
+
     #[test]
     fn an_object_method_is_a_constant() {
         // `{ set(v) { … } }`: the CST writes the method as one value, and the
