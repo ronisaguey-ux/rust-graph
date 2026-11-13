@@ -695,6 +695,10 @@ impl<'a> Parser<'a> {
         };
         match count {
             0 => "0".to_string(),
+            // A count with no text behind it means the reader stopped before it
+            // wrote anything: an empty value is not a value, and left in the
+            // event it produces `[,0]`, which is not JSON.
+            1 if items.is_empty() => "0".to_string(),
             1 => items,
             _ => format!("[\"t\",[{items}]]"),
         }

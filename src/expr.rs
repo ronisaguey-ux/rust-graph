@@ -262,6 +262,20 @@ impl Emit<'_> {
             let body = out.len();
             match kind {
                 Kind::Ident => {
+                    // `x as T` and `x satisfies T`: everything after the keyword
+                    // is a type, erased at runtime, so the value ends there.
+                    // Left as a name it became a merge item beside the value and
+                    // the CST never wrote it.
+                    if matches!(self.lang.tag, "TS" | "TSX")
+                        && count > 0
+                        && matches!(self.word(0).as_deref(), Some("as") | Some("satisfies"))
+                    {
+                        // The separator for this item is already written; drop it
+                        // with the item, or the value ends in a stray comma and
+                        // the event JSON stops parsing.
+                        out.truncate(at);
+                        break;
+                    }
                     // `{ set(v) { … } }`: a method definition is one value to
                     // the CST, and the lexer read its body as part of the
                     // object. The key is dropped with it, exactly as the CST
