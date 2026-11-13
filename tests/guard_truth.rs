@@ -586,3 +586,32 @@ fn the_taxonomy_prefixes_are_frozen() {
         assert!(!code.contains(":the"), "{code} buckets a sentence word");
     }
 }
+
+/// `private _sseResponse?;` is a class field with a modifier, no type, and the
+/// optional marker between the name and the semicolon. Trimming only the
+/// semicolon left a head that ended in `?`, so the line named nothing and the
+/// lexer's value became a fallback.
+#[test]
+fn an_untyped_optional_field_is_a_declaration() {
+    let source = "declare class T {\n    private _sseResponse?;\n}\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "an untyped optional field is a declaration: {verdict:?}");
+}
+
+/// `import clearImmediate = globalThis.clearImmediate;` is an import alias. The
+/// lexer reads it as an assignment, and the CST records the import; the
+/// assignment is the lexer's invention, compared through the import table.
+#[test]
+fn an_import_alias_is_not_an_assignment() {
+    let source = "import clearImmediate = globalThis.clearImmediate;\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "an import alias is an import: {verdict:?}");
+}

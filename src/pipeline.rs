@@ -1733,6 +1733,7 @@ fn uncovered(
             || is_method_declaration_line(lines, event.line)
             || is_type_property_line(lines, event.line)
             || is_export_statement_line(lines, event.line)
+            || is_import_alias_line(lines, event.line)
             || is_type_continuation_line(lines, event.line)
             || is_tail_expression_line(lines, event.line)
             || is_yield_line(lines, event.line)
@@ -2186,8 +2187,11 @@ fn is_type_property_line(src: &Lines<'_>, line: u32) -> bool {
         }
     }
     // `private _isDirty;` has no colon at all, so the semicolon is the end of
-    // the head rather than the type.
-    head = head.trim_end_matches(';').trim();
+    // the head rather than the type. The optional marker can sit on either side
+    // of it — `private _sseResponse?;` writes `?` then `;`, and trimming only
+    // the semicolon left a head ending in `?`, which named nothing and made the
+    // line a fallback.
+    head = head.trim_end_matches(|ch| ch == ';' || ch == '?').trim();
     !head.is_empty() && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
 }
 
@@ -2264,6 +2268,19 @@ fn is_type_continuation_line(src: &Lines<'_>, line: u32) -> bool {
         || text.starts_with("& ")
         || text.starts_with("extends ")
         || text.starts_with("implements ")
+}
+
+/// `import clearImmediate = globalThis.clearImmediate;`: a TypeScript import
+/// alias. The lexer reads it as an assignment to `clearImmediate` and the CST
+/// records an import, so the assignment is the lexer's invention and the import
+/// itself is compared through the import table.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_import_alias_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
+        return false;
+    };
+    let text = text.trim_start();
+    text.starts_with("import ") && text.contains(" = ") && text.trim_end().ends_with(';')
 }
 
 /// `export = escape;` and `export {};`: the lexer writes an assignment or an
