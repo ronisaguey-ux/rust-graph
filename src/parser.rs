@@ -2069,6 +2069,17 @@ impl<'a> Parser<'a> {
         // signature. Read as one value, the annotation ended up in the merge
         // and the CST never wrote it.
         if matches!(self.lang.tag, "TS" | "TSX") && self.top().kind == FrameKind::Class {
+            // `set x(v: T);` and `abstract area(): number` are member signatures
+            // in a declaration: they bind nothing at runtime. Read as a value
+            // the setter became a call of the property name, which the CST never
+            // writes (21 losses in the .d.ts files). The colon cases already end
+            // at the ), this catches the ones whose only colon is inside the
+            // parameter list.
+            if stmt.last().is_some_and(|token| self.is_op(token, b")"))
+                && self.top_level_assign(stmt).is_none()
+            {
+                return;
+            }
             if let Some(cut) = self.member_type_cut(stmt) {
                 let head: Vec<Token> = stmt[..cut].to_vec();
                 if head.last().is_some_and(|token| self.is_op(token, b")")) {
