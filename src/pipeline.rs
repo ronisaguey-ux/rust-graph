@@ -897,6 +897,8 @@ mod deep_run {
         accepted_anonymous_symbols: u64,
         /// Named symbols the lexer built out of an ordinary expression.
         accepted_invented_symbols: u64,
+        /// Pairings that had two identical CST candidates and had to pick one.
+        accepted_ambiguous_pairs: u64,
         /// Lexer calls that are a pattern in the source (`Some(x) =>`).
         accepted_positional_calls: u64,
         /// Lexer events on a line inside a macro body.
@@ -927,7 +929,7 @@ mod deep_run {
         /// header carries the format number, so a file from an older writer is
         /// void rather than half-read.
         pub(super) fn save(&self, dir: &Path) -> io::Result<()> {
-            let mut text = format!("rust-graph facts.meta 7 {}\n", bits());
+            let mut text = format!("rust-graph facts.meta 8 {}\n", bits());
             let mut rows: Vec<(&String, &Taken)> = self.records.iter().collect();
             rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
             for (path, taken) in rows {
@@ -937,7 +939,7 @@ mod deep_run {
                     (false, false) => "lexer",
                 };
                 text.push_str(&format!(
-                    "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
                     escape(path),
                     parser,
                     taken.errors,
@@ -952,7 +954,8 @@ mod deep_run {
                     taken.accepted.invented_symbols,
                     taken.accepted.positional_calls,
                     taken.accepted.positional_events,
-                    taken.accepted.positional_symbols
+                    taken.accepted.positional_symbols,
+                    taken.accepted.ambiguous_pairs
                 ));
             }
             let temporary = dir.join("facts.meta.tmp");
@@ -1008,6 +1011,7 @@ mod deep_run {
                 self.accepted_keyword_calls += u64::from(taken.accepted.keyword_calls);
                 self.accepted_keyword_events += u64::from(taken.accepted.keyword_events);
                 self.accepted_annotation_targets += u64::from(taken.accepted.annotation_targets);
+                self.accepted_ambiguous_pairs += u64::from(taken.accepted.ambiguous_pairs);
                 if taken.errors > 0 {
                     row.push_str(&format!(",\"deep_errors\":{}", taken.errors));
                 }
@@ -1063,7 +1067,7 @@ mod deep_run {
             // agreement.
             write!(
                 out,
-                ",\"accepted\":{{\"anonymous_call\":{},\"keyword_call\":{},\"keyword_event\":{},\"annotation_target\":{},\"anonymous_symbol\":{},\"invented_symbol\":{},\"positional_call\":{},\"positional_event\":{},\"positional_symbol\":{}}}",
+                ",\"accepted\":{{\"anonymous_call\":{},\"keyword_call\":{},\"keyword_event\":{},\"annotation_target\":{},\"anonymous_symbol\":{},\"invented_symbol\":{},\"positional_call\":{},\"positional_event\":{},\"positional_symbol\":{},\"ambiguous_pair\":{}}}",
                 self.accepted_anonymous_calls,
                 self.accepted_keyword_calls,
                 self.accepted_keyword_events,
@@ -1072,13 +1076,14 @@ mod deep_run {
                 self.accepted_invented_symbols,
                 self.accepted_positional_calls,
                 self.accepted_positional_events,
-                self.accepted_positional_symbols
+                self.accepted_positional_symbols,
+                self.accepted_ambiguous_pairs
             )
         }
 
         pub(super) fn report_line(&self, text: &str) -> String {
             format!(
-                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\nAccepted differences: {} lexer-only calls ({} anonymous, {} statement keywords), {} lexer-only value events for a statement keyword, {} lexer assignment targets naming an imported type instead of a binder, {} lexer symbols with no name in the source, {} lexer symbols whose line declares nothing, {} lexer calls the source writes as a pattern, an attribute or a macro body, {} lexer events and {} lexer symbols on a line inside one.\n",
+                "{text}\nParsed by: {} files through the CST, {} through the lexer, {} requested CST parses fell back.\nPaths: {{\"deep\": {}, \"lexer\": {}, \"chosen_deep\": {}, \"chosen_lexer\": {}}} (files with a CST record, files the lexer alone could take; which record was emitted per file).\nAccepted differences: {} lexer-only calls ({} anonymous, {} statement keywords), {} lexer-only value events for a statement keyword, {} lexer assignment targets naming an imported type instead of a binder, {} lexer symbols with no name in the source, {} lexer symbols whose line declares nothing, {} lexer calls the source writes as a pattern, an attribute or a macro body, {} lexer events and {} lexer symbols on a line inside one, {} pairings with two identical candidates.\n",
                 self.deep,
                 self.lexer,
                 self.fallbacks,
@@ -1095,7 +1100,8 @@ mod deep_run {
                 self.accepted_invented_symbols,
                 self.accepted_positional_calls,
                 self.accepted_positional_events,
-                self.accepted_positional_symbols
+                self.accepted_positional_symbols,
+                self.accepted_ambiguous_pairs
             )
         }
 
@@ -1117,7 +1123,7 @@ mod deep_run {
     pub(super) fn load(dir: &Path) -> Option<HashMap<String, Taken>> {
         let text = std::fs::read_to_string(dir.join("facts.meta")).ok()?;
         let mut lines = text.lines();
-        if lines.next()? != format!("rust-graph facts.meta 7 {}", bits()) {
+        if lines.next()? != format!("rust-graph facts.meta 8 {}", bits()) {
             return None;
         }
         let mut out = HashMap::new();
@@ -1143,6 +1149,7 @@ mod deep_run {
                 positional_calls: fields.next()?.parse().ok()?,
                 positional_events: fields.next()?.parse().ok()?,
                 positional_symbols: fields.next()?.parse().ok()?,
+                ambiguous_pairs: fields.next()?.parse().ok()?,
             };
             out.insert(
                 path,
@@ -1247,6 +1254,12 @@ pub(crate) struct Accepted {
     pub(crate) positional_events: u32,
     /// A lexer symbol whose line is inside a macro body.
     pub(crate) positional_symbols: u32,
+    /// A lexer event for which two CST rows matched identically on marker,
+    /// line, targets and value. One of them is paired — the comparison cannot
+    /// do better — but the ambiguity is counted: a pairing that had to choose
+    /// between identical rows is a fact about the record, and a silent choice
+    /// would hide it.
+    pub(crate) ambiguous_pairs: u32,
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
@@ -1262,6 +1275,7 @@ impl Accepted {
             + self.positional_calls
             + self.positional_events
             + self.positional_symbols
+            + self.ambiguous_pairs
     }
 }
 
@@ -1646,9 +1660,22 @@ fn uncovered(
         // the first covering row pair the condition with the call and left the
         // call with nothing — a file blamed for an event that was in the record.
         // The identical row is the partner; a covering row is the fallback.
-        let identical = found.iter().position(|row| {
-            row.0 == want.0 && row.1.line == want.1.line && row.1.targets == want.1.targets && row.1.value == want.1.value
-        });
+        let identical_matches: Vec<usize> = found
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.0 == want.0 && row.1.line == want.1.line && row.1.targets == want.1.targets && row.1.value == want.1.value
+            })
+            .map(|(at, _)| at)
+            .collect();
+        if identical_matches.len() > 1 {
+            // Two rows the record cannot tell apart. One is paired — the choice
+            // is arbitrary and deterministic — and the rest are counted, so the
+            // tie shows up in the report instead of disappearing into a
+            // position() call.
+            accepted.ambiguous_pairs += (identical_matches.len() - 1) as u32;
+        }
+        let identical = identical_matches.first().copied();
         // `strict-pair` keeps only the identical row: the covering and the
         // one-line tiers are what make a comparison forgiving, and a
         // measurement has to say what they buy before trusting them.

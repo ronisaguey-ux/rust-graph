@@ -409,3 +409,25 @@ fn a_miss_names_the_row_and_two_rows_are_never_fused() {
     assert!(detail.contains("targets ["), "the reason names the wanted targets: {detail}");
     assert_eq!(detail.matches("found line").count(), 1, "exactly one found row, never two fused: {detail}");
 }
+
+/// Two CST rows that the record cannot tell apart are a counted tie, not a
+/// silent choice. `a.set(x); a.set(x);` on one line is the cheapest real shape:
+/// both readers write two events with the same marker, line, targets and value,
+/// so the first want matches two identical rows. The pairing still succeeds, and
+/// the tie is reported in `accepted.ambiguous_pairs` so a reader knows the choice
+/// was arbitrary rather than forced.
+#[test]
+fn an_ambiguous_pair_is_counted_not_silently_resolved() {
+    let source = "function f(a, x) {\n  a.set(x); a.set(x);\n}\n";
+    let language = langs::by_content("js", source.as_bytes()).expect("a JavaScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::JavaScript);
+    let verdict = pipeline::loses(&lexer, &deep);
+    assert!(!verdict.lost(), "{verdict:?}");
+    assert!(
+        verdict.accepted().ambiguous_pairs >= 1,
+        "the tie is counted: {:?}",
+        verdict.accepted()
+    );
+}
