@@ -27,6 +27,27 @@ ts sit at a third of it. The maxima are single files — the 9 MB `typescript.js
 bundle, a 15 ms rust file — and the budget is deliberately about the percentile,
 not the outlier: a 9 MB file is not a parse the editor waits on.
 
+## Memory
+
+Budget: **a 2,000-file corpus run stays under 300 MB peak RSS**. Measured with
+the bench harness, one parse per file, the caller holding every source at once:
+
+```bash
+$B bench /tmp/js2000.list --reps 1     # prints rss_kb at the end
+```
+
+| corpus | files | bytes | nodes | peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| js | 2000 | 47.3 MB | 10,979,991 | **129 MB** |
+| ts | 2000 | 12.0 MB | 1,830,042 | **17.9 MB** |
+| python | 568 | 10.6 MB | 1,860,245 | **14.4 MB** |
+| rust | 1816 | 33.7 MB | 8,108,679 | **45.2 MB** |
+
+Measured 2026-11-13. The arena is reused across files, so peak memory tracks the
+largest single tree plus the sources the harness holds — not the corpus size.
+js is the largest because its corpus is 47 MB of source and the biggest file is a
+9 MB bundle; a 2,000-file ts run allocates a seventh of the budget.
+
 ## What is not in this number
 
 - Reading the file and building the record. `conformance` measures
