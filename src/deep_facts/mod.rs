@@ -689,7 +689,17 @@ impl<'a> Walker<'a> {
             // the event for a module-level `pass` dropped the whole symbol.
             "pass_statement" | "break_statement" | "continue_statement" => {
                 let line = self.line(id);
-                let word = self.text_string(id);
+                // The node's text carries the statement terminator: a JS
+                // `break;` was written as the name `break;` while the lexer
+                // wrote `break`, and a name the lexer read but the CST did not
+                // is a fallback with nothing wrong underneath it. The word is
+                // the first run of text before the `;` or the newline.
+                let raw = self.text_string(id);
+                let word = raw
+                    .split(|ch: char| ch == ';' || ch == '\n' || ch.is_whitespace())
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 let mut text = format!("[\"x\",{line},[\"n\",");
                 push_string(&mut text, &word);
                 text.push_str("]]");
