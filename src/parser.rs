@@ -1893,6 +1893,18 @@ impl<'a> Parser<'a> {
         if self.import_of(stmt) {
             return;
         }
+        // TypeScript declares types, and a type declaration writes no runtime
+        // fact: `type Id = string | number` is not an assignment of `Id`, an
+        // `enum` header is not a value, and `namespace NS` names no variable.
+        // The CST writes nothing for any of them, so reading them as statements
+        // only invented facts the other reader never had.
+        if matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(stmt) {
+            return;
+        }
+        // A decorator names the member it decorates, not a value of its own.
+        if matches!(self.lang.tag, "TS" | "TSX") && self.is_op(first, b"@") {
+            return;
+        }
         let word = self.word_at(stmt, 0);
         if matches!(word.as_deref(), Some("return")) {
             self.expression_event("r", &stmt[1..]);
@@ -1926,6 +1938,30 @@ impl<'a> Parser<'a> {
                 self.facts.vars.push((target, name));
             }
         }
+    }
+
+    /// `type Id = ...`, `interface User { ... }`, `namespace NS { ... }`,
+    /// `enum E { ... }` and their `export` / `declare` / `abstract` / `const`
+    /// prefixed spellings: a declaration of a type, not a binding.
+    fn type_declaration(&self, stmt: &[Token]) -> bool {
+        let mut at = 0;
+        while let Some(word) = self.word_at(stmt, at) {
+            match word.as_str() {
+                "export" | "declare" | "default" | "abstract" => at += 1,
+                "const" => {
+                    // `const enum E {}` is a type; `const x = 1` is not.
+                    if self.word_at(stmt, at + 1).as_deref() != Some("enum") {
+                        break;
+                    }
+                    at += 1;
+                }
+                _ => break,
+            }
+        }
+        matches!(
+            self.word_at(stmt, at).as_deref(),
+            Some("type") | Some("interface") | Some("namespace") | Some("module") | Some("enum")
+        ) && self.word_at(stmt, at + 1).is_some()
     }
 
     fn target_path(&self, toks: &[Token]) -> Option<String> {
