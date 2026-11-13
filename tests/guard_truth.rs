@@ -460,3 +460,22 @@ fn duplicate_function_names_are_paired_by_their_line() {
     let verdict = pipeline::loses(&lexer, &deep);
     assert!(!verdict.lost(), "near-line pairing pairs each body with its own: {verdict:?}");
 }
+
+/// The oracle is only worth something if it is independent. The comparison core
+/// — `loses_in` through `uncovered` — reads two row lists and a taxonomy of
+/// accepted artefacts; it must never reach into the CST's grammar, its node
+/// kinds, or the extractor. The moment it does, a CST bug can be mirrored by the
+/// check that is supposed to catch it, and the guard starts agreeing with itself.
+#[test]
+fn the_comparison_core_never_consults_the_cst() {
+    let source = include_str!("../src/pipeline.rs");
+    let start = source.find("pub(crate) fn loses_in(").expect("the comparison entry point");
+    let end = source.find("fn is_positional_call(").expect("the end of the comparison core");
+    let core = &source[start..end];
+    for forbidden in ["deep_integration", "grammar", "deep_facts::", "node(", "kind("] {
+        assert!(
+            !core.contains(forbidden),
+            "the guard consulted {forbidden}; it must see only row lists and the taxonomy"
+        );
+    }
+}
