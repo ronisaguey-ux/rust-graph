@@ -3384,6 +3384,24 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
         }
         return lexer;
     };
+    // `--deep` obeys the user, so the refusal is an `auto` decision: only there
+    // can the pipeline pick the honest reader. `--compare` reports both.
+    if mode == PathMode::Auto && cst.degraded() {
+        deep_run::record(
+            path,
+            deep_run::Taken {
+                compared: true,
+                errors: cst.errors,
+                fallback: Some(format!(
+                    "the CST needed {} error nodes in {}: more than 1% is recovery noise",
+                    cst.errors,
+                    cst.nodes.len()
+                )),
+                ..deep_run::Taken::default()
+            },
+        );
+        return lexer;
+    }
     let deep = deep_facts::extract(bytes, &cst, lang);
     if mode == PathMode::Compare {
         // No choice: both records are weighed and the audit decides nothing.
@@ -3440,7 +3458,7 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
         // a tree the grammar did not understand — and emitting it would make the
         // record look authoritative while the parse was guessing. The lexer's
         // one-pass record is the honest answer there, and the reason says so.
-        if cst.errors > 0 && (cst.errors as f64) / (cst.nodes.len().max(1) as f64) > 0.01 {
+        if cst.degraded() {
             deep_run::record(
                 path,
                 deep_run::Taken {

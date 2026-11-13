@@ -54,6 +54,16 @@ pub struct Node {
 }
 
 /// A finished parse: the arena, the root and how many nodes are `ERROR`.
+impl Cst {
+    /// Recovery has a budget: a tree that needed an error node for more than one
+    /// node in a hundred is a tree the grammar did not understand, not a tree
+    /// with a mistake in it. Extraction refuses it and the pipeline emits the
+    /// lexer's record instead, so a guess is never published as a fact.
+    pub fn degraded(&self) -> bool {
+        self.errors > 0 && (self.errors as f64) / (self.nodes.len().max(1) as f64) > 0.01
+    }
+}
+
 pub struct Cst {
     pub nodes: Vec<Node>,
     pub root: NodeId,
