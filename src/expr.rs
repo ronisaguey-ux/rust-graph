@@ -209,6 +209,16 @@ impl Emit<'_> {
             // one node is a difference in how the text is spelled, not a fact.
             if kind == Kind::Str && self.pos > 0 && self.toks[self.pos - 1].kind == Kind::Str {
                 self.pos += 1;
+                // `'a, ' 'b {}'.format(x)`: the two literals are one value and
+                // the dot binds to it, so the call is the value, not a second
+                // item beside the literal. Only this shape reaches here — a
+                // general dot continuation also swallowed JS index chains and
+                // wrote a call with an empty receiver.
+                if count == 1 && self.op_byte(0) == b'.' && self.word(1).is_some() {
+                    let value = out.split_off(start);
+                    let line = self.toks[self.pos].line;
+                    self.chain(out, value, String::new(), line);
+                }
                 continue;
             }
             if self.is_arrow(0) {
