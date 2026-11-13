@@ -484,6 +484,15 @@ impl Emit<'_> {
             return;
         }
         self.pos += 1;
+        // `await import('./x.js')`: a dynamic import is a module load, not a
+        // call. The CST records no call for it, and the lexer's `import` call
+        // lost 12 js files; the value it produces is its argument group.
+        if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") && word == "import" && self.op_byte(0) == b'(' {
+            let mut value = String::new();
+            self.group(&mut value);
+            out.push_str(&value);
+            return;
+        }
         if self.lang.arg_words.contains(&word.as_str()) {
             out.push_str("[\"n\",\"_\"]");
             return;
