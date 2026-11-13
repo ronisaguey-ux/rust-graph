@@ -108,6 +108,27 @@ per-file difference without choosing. The record holds `symbols`, `edges`,
 `imports`, `unresolved` and `flows`; `deep.mode` and `paths` say which reader
 produced it.
 
+## 5b. Conformance: coverage, recovery and time per file
+
+The deep reader has its own harness, and it reports what the sweep cannot see:
+
+```bash
+D=/home/roni/Roni_workspace/rg-kbuilds/verify/x86_64-unknown-linux-musl/debug/rust-graph-deep-scan
+$D conformance /tmp/opencode/sweep-local/ts          # one line per file, then per language
+```
+
+Each file line carries `nodes`, `kinds=seen/declared`, `errors` (the CST's own
+recovery count, not a fallback) and the best of `--reps` parse times. The summary
+line adds totals, the union of kinds across the corpus and how many files parsed
+clean; the `language` lines give the same per grammar. Kinds seen against kinds
+declared is the number that says whether a corpus exercises a grammar at all — a
+grammar with 286 kinds and 252 seen is being read, one with 40 seen is not.
+
+Baseline on the four corpora (2026-11-13): js 223/286 kinds and 1,978/2,000 clean
+files, ts 252/286 and 1,960/2,000, python 176/178 and 500/568, rust 225/231 and
+1,795/1,816. Python's 68 unclean files are the largest recovery share of any
+corpus and the place to look after the fallback work in `PAIRING.md`.
+
 ## 6. Cost, batching and the cooling-off rule
 
 A full sweep on a rented 80-core Vast box costs about **4 cents**: rent, run,

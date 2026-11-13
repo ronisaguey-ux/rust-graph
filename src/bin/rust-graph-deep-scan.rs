@@ -7,6 +7,7 @@
 //! rust-graph-deep-scan probe FILE [--reps N] [--max-depth D] [--stack-kb K]
 //! rust-graph-deep-scan bench LIST [--reps N]  files named one per line in LIST
 //! rust-graph-deep-scan compare LIST [--reps N]  JSON: the grammar! parser against the hand one
+//! rust-graph-deep-scan conformance DIR [--reps N]  per-file coverage, recovery and parse time
 //! ```
 //! `bench` mirrors the Tree-sitter driver used in Phase 1: every file is read
 //! first, then each is parsed `--reps` times and the best time counts.
@@ -47,6 +48,20 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let (path, options) = rest.split_first().ok_or_else(usage)?;
+    if command == "conformance" {
+        let root = path.clone();
+        let reps = match options {
+            [flag, value] if flag == "--reps" => value.parse().map_err(|_| "--reps needs a number".to_string())?,
+            [] => 1,
+            _ => return Err(usage()),
+        };
+        return std::thread::Builder::new()
+            .stack_size(PARSE_STACK)
+            .spawn(move || conformance(&root, reps))
+            .map_err(|error| format!("cannot start the parse thread: {error}"))?
+            .join()
+            .map_err(|_| "the parse thread panicked".to_string())?;
+    }
     if command == "bench" || command == "compare" {
         let is_bench = command == "bench";
         let reps = match options {
@@ -153,6 +168,94 @@ fn execute(command: &str, path: &str, src: &[u8], language: &'static Language, b
             );
         }
         other => return Err(format!("unknown command {other}\n{}", usage())),
+    }
+    Ok(())
+}
+
+fn conformance(root: &str, reps: usize) -> Result<(), String> {
+    let mut files = Vec::new();
+    collect(root, &mut files)?;
+    files.sort();
+    let budget = Budget::default();
+    let mut workspace = Workspace::default();
+    let (mut total_files, mut total_bytes, mut total_nodes, mut total_errors, mut total_ms, mut clean) = (0usize, 0u64, 0usize, 0usize, 0.0, 0usize);
+    let mut covered: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
+    let mut languages: std::collections::BTreeMap<&'static str, (usize, usize, usize, usize, usize)> = std::collections::BTreeMap::new();
+    for path in &files {
+        let Some(language) = deep::language_for(path) else { continue };
+        let src = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
+        let mut best = f64::INFINITY;
+        let mut outcome = None;
+        for _ in 0..reps.max(1) {
+            let start = Instant::now();
+            outcome = Some(workspace.parse(&src, language, &budget).map_err(|_| format!("{path}: over 4 GiB"))?);
+            best = best.min(start.elapsed().as_secs_f64() * 1e3);
+        }
+        let outcome = outcome.expect("reps is at least 1");
+        let tree = &workspace.tree;
+        let errors = tree.nodes.iter().filter(|node| node.kind == deep::syntax::ERROR).count();
+        let kinds: std::collections::BTreeSet<u16> = tree.nodes.iter().map(|node| node.kind).collect();
+        covered.extend(kinds.iter().copied());
+        let entry = languages.entry(language.name).or_default();
+        entry.0 += 1;
+        entry.1 += tree.len();
+        entry.2 += errors;
+        entry.3 = language.kinds.len();
+        if tree.root().flags & HAS_ERROR == 0 {
+            entry.4 += 1;
+        }
+        total_files += 1;
+        total_bytes += src.len() as u64;
+        total_nodes += tree.len();
+        total_errors += errors;
+        total_ms += best;
+        if tree.root().flags & HAS_ERROR == 0 {
+            clean += 1;
+        }
+        println!(
+            "file\t{}\tlang={}\tbytes={}\tnodes={}\tkinds={}/{}\terrors={}\tms={:.3}\tcomplete={}",
+            path,
+            language.name,
+            src.len(),
+            tree.len(),
+            kinds.len(),
+            language.kinds.len(),
+            errors,
+            best,
+            outcome.complete(),
+        );
+    }
+    let declared: usize = languages.values().map(|entry| entry.3).max().unwrap_or(0);
+    println!(
+        "summary\tfiles={} bytes={} nodes={} kinds={}/{} errors={} clean={}/{} total_ms={:.1} mean_ms={:.3}",
+        total_files,
+        total_bytes,
+        total_nodes,
+        covered.len(),
+        declared,
+        total_errors,
+        clean,
+        total_files,
+        total_ms,
+        total_ms / total_files.max(1) as f64,
+    );
+    for (name, (files, nodes, errors, declared, clean)) in languages {
+        println!("language\t{name}\tfiles={files}\tnodes={nodes}\terrors={errors}\tdeclared_kinds={declared}\tclean={clean}/{files}");
+    }
+    Ok(())
+}
+
+/// Every regular file under `root`, in directory order (the caller sorts).
+fn collect(root: &str, out: &mut Vec<String>) -> Result<(), String> {
+    let directory = std::fs::read_dir(root).map_err(|error| format!("{root}: {error}"))?;
+    for entry in directory {
+        let entry = entry.map_err(|error| format!("{root}: {error}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect(&path.to_string_lossy(), out)?;
+        } else if path.is_file() {
+            out.push(path.to_string_lossy().into_owned());
+        }
     }
     Ok(())
 }
@@ -281,5 +384,5 @@ fn peak_rss_kb() -> u64 {
 }
 
 fn usage() -> String {
-    "usage: rust-graph-deep-scan --version | tree FILE | sexp FILE [--all] | probe FILE [--reps N] [--max-depth D] [--stack-kb K] | bench LIST [--reps N] | compare LIST [--reps N]".into()
+    "usage: rust-graph-deep-scan --version | tree FILE | sexp FILE [--all] | probe FILE [--reps N] [--max-depth D] [--stack-kb K] | bench LIST [--reps N] | compare LIST [--reps N] | conformance DIR [--reps N]".into()
 }
