@@ -669,3 +669,20 @@ fn the_guard_decides_from_two_records_and_no_grammar() {
     let verdict = pipeline::loses_in(&lexer, &short, "def f():\n    pass\n");
     assert!(verdict.lost(), "a record with no symbols lost one");
 }
+
+/// Two declaration shapes the lexer reads as code and the CST rightly does not:
+/// a generic method signature (`g<T extends B>(type: T): other is T;`) and a
+/// method whose return type is a function with a type predicate
+/// (`f(x: unknown): (y: unknown) => y is string;`). Both are members of an
+/// interface, both were fallbacks, and both are the same mistake — a signature
+/// is not a call, and an arrow in a return type is not an assignment.
+#[test]
+fn interface_member_signatures_are_not_calls() {
+    let source = "interface A {\n    g<T extends B>(type: T, other?: T | null): other is T;\n    f(x: unknown): (y: unknown) => y is string;\n}\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "a member signature is a declaration: {verdict:?}");
+}

@@ -1705,6 +1705,14 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         phase!(4);
         let details = uncovered(lexer, symbol, paired, &mut accepted, &lines, &macro_lines, extra, &mut shapes);
         if let Some(first) = details.first() {
+            // `RG_LOSSES=1` prints every loss of the symbol, not just the one the
+            // fallback names, so a corpus sweep can be grouped by construct
+            // instead of guessed at from the first line of each file.
+            if std::env::var_os("RG_LOSSES").is_some() {
+                for detail in &details {
+                    eprintln!("loss\t{}", detail);
+                }
+            }
             let mut found = verdict(Some("event"), first.clone(), accepted);
             found.losses = details.len() as u32;
             return found;
@@ -2351,9 +2359,13 @@ fn is_method_declaration_line(src: &Lines<'_>, line: u32) -> bool {
     // `[Symbol.dispose](): void;` declares a method under a computed name; the
     // bracket is part of the name, so it is not a call either.
     let computed = head.starts_with('[') && head.ends_with(']');
+    // A generic method writes its parameters after the type list: `g<T extends
+    // B>(type: T): other is T;` ends with `>`, so the name test cannot see a
+    // name at all. The type arguments are part of the name here.
+    let generic = head.ends_with('>') && head.contains('<');
     if head.is_empty()
         || head.contains('=')
-        || !(computed || head.chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_'))
+        || !(computed || generic || head.chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_'))
     {
         return false;
     }
@@ -2386,7 +2398,11 @@ fn is_method_declaration_line(src: &Lines<'_>, line: u32) -> bool {
     // a name, its parameters, then a body. A statement keyword never reaches
     // this test — the keyword-callee check runs first — so `if (x) {` and
     // `while (x) {` are decided before here.
-    rest.starts_with(':') && !rest.contains('=') || rest.starts_with('{')
+    // A function-typed return is still a signature: `f(x: unknown): (y:
+    // unknown) => y is string;` contains `=>`, and the arrow is not an
+    // assignment, so it must not disqualify the line.
+    let without_arrows = rest.replace("=>", ">");
+    rest.starts_with(':') && !without_arrows.contains('=') || rest.starts_with('{')
 }
 
 /// A match arm header: `pat => {`, `pat => {}`, or `pat =>` opening a block.
