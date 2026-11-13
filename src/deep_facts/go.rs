@@ -634,7 +634,13 @@ impl<'a> Walker<'a> {
                 "shorthand_property_identifier_pattern" | "shorthand_property_identifier" => {
                     out.push(self.text_string(node))
                 }
-                "pair" | "object_assignment_pattern" => {
+                // `{ a, b: c } = obj` binds `a` and `c`. The key `b` is how the
+                // source names the property, and both the one-pass reader and
+                // the resolver want the binders only.
+                // `{ a, b: c } = obj` binds `a` and `c`. The key `b` is how the
+                // source names the property; the one-pass reader and the
+                // resolver both want the binders only.
+                "pair" | "pair_pattern" | "object_assignment_pattern" => {
                     if let Some(last) = self.children(node).into_iter().last() {
                         walk.push(last);
                     }
@@ -955,7 +961,9 @@ impl<'a> Walker<'a> {
     /// way the lexer treats a statement in a class body.
     pub(crate) fn field(&mut self, id: u32) {
         let children = self.children(id);
-        let Some(&name_node) = children.first() else { return };
+        // `static count = 0` has the modifier first: the name is the first child
+        // that is not layout, not the first child outright.
+        let Some(&name_node) = children.iter().find(|&&child| !self.is_layout(child)) else { return };
         let Some(equal) = children.iter().position(|&child| self.kind(child) == "=") else { return };
         let Some(&value) = children.get(equal + 1) else { return };
         let targets = self.pattern_names(name_node);

@@ -551,6 +551,7 @@ impl<'a> Walker<'a> {
             "identifier"
                 | "type_identifier"
                 | "property_identifier"
+                | "private_property_identifier"
                 | "field_identifier"
                 | "shorthand_property_identifier"
                 | "true"
@@ -759,13 +760,37 @@ impl<'a> Walker<'a> {
                 self.condition_before(id);
                 self.event("[\"b\"]");
             }
-            "try_statement" | "switch_statement" | "match_statement" => self.event("[\"b\"]"),
+            "try_statement" | "match_statement" => self.event("[\"b\"]"),
+            // `switch (x)` carries a condition the one-pass reader writes as an
+            // expression on the header line; the clause events below are the
+            // body. Reading the body alone dropped the scrutinee, which is a
+            // fact the resolver keeps (a call in the test is a call).
+            "switch_statement" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
             "catch_clause" | "finally_clause" | "except_clause" | "switch_case" | "case_clause" => {
                 // `except ValueError:` names a type the one-pass reader files
                 // as a value on the clause's line; the clause emits only its
                 // terminator, so that name had no counterpart at all.
                 // `except OSError as error:` binds a name, and the lexer
                 // reads the clause as an assignment of the type to it.
+                if kind == "catch_clause" {
+                    // `catch (e)`: the lexer reads the caught binding as the
+                    // clause's value. The binding sits inside a
+                    // `catch_parameter`, so the name is one level down.
+                    let mut names = Vec::new();
+                    for child in self.children(id) {
+                        names.extend(self.pattern_names(child));
+                    }
+                    if let Some(name) = names.into_iter().next() {
+                        let line = self.line(id);
+                        let mut text = format!("[\"x\",{line},[\"n\",");
+                        push_string(&mut text, &name);
+                        text.push_str("]]");
+                        self.event(&text);
+                    }
+                }
                 if kind == "except_clause" {
                     if let Some((targets, value)) = self.loop_binding(id) {
                         self.assignment_event(targets, value, self.line(id), false);
