@@ -736,6 +736,35 @@ pub(crate) static CMP: [std::sync::atomic::AtomicU64; 4] = [
 #[cfg(all(feature = "deep", feature = "parser"))]
 pub(crate) static PAIR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The machine name of a fallback reason. The prose says what happened; this
+/// says which bucket a count belongs in, so a histogram never parses English.
+/// It is tested against the strings the corpus actually produces.
+#[cfg(all(feature = "deep", feature = "parser"))]
+pub(crate) fn reason_code(reason: &str) -> String {
+    if reason.contains("no event on a line both readers can mean") {
+        "PAIR_AMBIGUOUS:1".to_string()
+    } else if reason.contains("target list differs") {
+        "CST_SHAPE_MISMATCH:targets".to_string()
+    } else if reason.contains("value as the constant 0") {
+        "CST_MISSING_KIND:constant".to_string()
+    } else if reason.contains("a name the lexer read is not in the CST's value") {
+        "LEX_OVER_EMIT:name".to_string()
+    } else if reason.contains("a call or constant the lexer read is not in the CST's value") {
+        "LEX_OVER_EMIT:call".to_string()
+    } else if let Some(rest) = reason.strip_prefix("the CST lost a ") {
+        // Every fallback is written as "the CST lost a <kind>: <detail>", so the
+        // kind is the word that follows, not the first word of the sentence.
+        // Reading the first word made a lost variable `CST_MISSING_KIND:the`,
+        // which is a bucket with no meaning.
+        let kind = rest.split([' ', ':']).next().unwrap_or("event");
+        format!("CST_MISSING_KIND:{kind}")
+    } else {
+        let kind = reason.split_whitespace().next().unwrap_or("event");
+        format!("CST_MISSING_KIND:{kind}")
+    }
+}
+
+
 /// The parser this run is using, and the per-file record of what each file
 /// took.
 ///
@@ -1047,22 +1076,7 @@ mod deep_run {
                     row.push_str(",\"deep_fallback\":");
                     super::push_string(row, reason);
                     row.push_str(",\"deep_fallback_code\":");
-                    // The prose reason is for a person, this is for a counter:
-                    // one string per bucket, so a histogram never parses English.
-                    let code = if reason.contains("no event on a line both readers can mean") {
-                        "PAIR_AMBIGUOUS:1".to_string()
-                    } else if reason.contains("target list differs") {
-                        "CST_SHAPE_MISMATCH:targets".to_string()
-                    } else if reason.contains("value as the constant 0") {
-                        "CST_MISSING_KIND:constant".to_string()
-                    } else if reason.contains("a name the lexer read is not in the CST's value") {
-                        "LEX_OVER_EMIT:name".to_string()
-                    } else if reason.contains("a call or constant the lexer read is not in the CST's value") {
-                        "LEX_OVER_EMIT:call".to_string()
-                    } else {
-                        let kind = reason.split_whitespace().next().unwrap_or("event");
-                        format!("CST_MISSING_KIND:{kind}")
-                    };
+                    let code = super::reason_code(reason);
                     super::push_string(row, &code);
                 }
             }

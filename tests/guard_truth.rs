@@ -479,3 +479,39 @@ fn the_comparison_core_never_consults_the_cst() {
         );
     }
 }
+
+/// The four reason classes and the strings the corpus really produces for them.
+/// The prose is for a reader and the code is for a histogram; this pins both ends
+/// of that mapping against real output rather than against strings invented for
+/// the test, and it fails if a reason is reworded without its bucket following.
+#[test]
+fn the_corpus_reason_strings_map_to_their_buckets() {
+    // Verbatim from a sweep of the JS corpus (000085_polygonContains.js), the
+    // rust subset (000005_mode.rs) and the rust subset (000004_scanner.rs).
+    let call = "the CST lost a event: event a line 14 targets [\"lambda\"] in _default (paired _default line 13): a call or constant the lexer read is not in the CST's value; wanted line 14 targets [\"lambda\"] value t:[c(0;[n:point])]; found line 14 targets [\"lambda\"] value c(0;[n:point])";
+    let line = "the CST lost a event: event x line 60 targets  in new (no event on a line both readers can mean): lexer m:[n:ModeStack]; CST line 60 targets  value m:[n:ModeStack,m:[0,n:MODE_CAP]]";
+    let constant = "the CST lost a event: event a line 16 targets [\"v\"] in h (value as the constant 0): lexer m:[n:match,c(0;[])]; CST line 16 targets [\"v\"] value m:[0,0]";
+
+    assert_eq!(pipeline::reason_code(call), "LEX_OVER_EMIT:call");
+    assert_eq!(pipeline::reason_code(line), "PAIR_AMBIGUOUS:1");
+    assert_eq!(pipeline::reason_code(constant), "CST_MISSING_KIND:constant");
+
+    // The two reasons the corpus has not needed yet are matched by the same
+    // phrase the guard writes, so a reworded reason moves them too.
+    assert_eq!(
+        pipeline::reason_code("the CST lost a event: event a line 3 targets [\"a\"] in f (the statement's target list differs (names or order)): …"),
+        "CST_SHAPE_MISMATCH:targets"
+    );
+    assert_eq!(
+        pipeline::reason_code("the CST lost a event: event r line 3 targets  in f (a name the lexer read is not in the CST's value): …"),
+        "LEX_OVER_EMIT:name"
+    );
+
+    // A loss that is not an event carries its kind in the sentence: every
+    // fallback is written "the CST lost a <kind>: <detail>", and reading the
+    // first word instead put a lost variable in a bucket called `the`.
+    assert_eq!(pipeline::reason_code("the CST lost a var: var repo = Repo"), "CST_MISSING_KIND:var");
+    assert_eq!(pipeline::reason_code("the CST lost a symbol: symbol f kind 1 line 9"), "CST_MISSING_KIND:symbol");
+    assert_eq!(pipeline::reason_code("the CST lost a import: import os name x alias "), "CST_MISSING_KIND:import");
+    assert_eq!(pipeline::reason_code("symbol f kind 1 line 9"), "CST_MISSING_KIND:symbol");
+}
