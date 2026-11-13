@@ -632,3 +632,40 @@ fn a_string_literal_property_name_is_a_declaration() {
     let verdict = pipeline::loses_in(&lexer, &deep, source);
     assert!(!verdict.lost(), "a quoted property name is a declaration: {verdict:?}");
 }
+
+/// The guard is a function of two `Facts` records and nothing else: it never
+/// sees a `Language`, a `Grammar`, a parse tree or a kind table, so it cannot
+/// accidentally grow a preference for one reader. This test drives it the way
+/// the type system allows — two hand-built records, no parser in sight — and
+/// takes a verdict out. If the guard ever needed the grammar to decide, this
+/// would not compile.
+#[test]
+fn the_guard_decides_from_two_records_and_no_grammar() {
+    let lexer = facts::Facts {
+        tag: "PY".to_string(),
+        lines: 2,
+        imports: Vec::new(),
+        symbols: vec![facts::Symbol {
+            key: "a.py:f".to_string(),
+            name: "f".to_string(),
+            owner: String::new(),
+            kind: facts::KIND_FUNCTION,
+            line: 1,
+            end_line: 2,
+            params: Vec::new(),
+            bases: Vec::new(),
+            events: String::new(),
+            calls: Vec::new(),
+        }],
+        vars: Vec::new(),
+    };
+    let deep = lexer.clone();
+
+    let verdict = pipeline::loses_in(&lexer, &deep, "def f():\n    pass\n");
+    assert!(!verdict.lost(), "identical records lose nothing: {verdict:?}");
+
+    let mut short = deep.clone();
+    short.symbols.clear();
+    let verdict = pipeline::loses_in(&lexer, &short, "def f():\n    pass\n");
+    assert!(verdict.lost(), "a record with no symbols lost one");
+}
