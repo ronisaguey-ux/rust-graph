@@ -156,3 +156,44 @@ learns from the reversal instead of digging for the missing code.
 
 Do not `git reset --hard` a phase commit that has been pushed: the remote keeps
 the commit and the local branch then lies about what the corpus was measured on.
+
+## The guard's cost, and the 5% budget
+
+Measured 2026-11-13 on the 1,995-file JavaScript corpus, release build, cold
+cache, `RG_TIMING=1` (the binary then prints the nanoseconds it spent inside the
+guard's comparison):
+
+| run | wall | guard | share |
+| --- | ---: | ---: | ---: |
+| before any work | 27.4 s | 19.8 s | 72% |
+| after the indexes and the line table | 14.8 s | 7.4 s | 50% |
+
+So the guard got 2.7× faster and the build 1.85× faster, and the 5% budget is
+still not met. It is worth saying plainly rather than tuning the definition: the
+comparison is not 5% of this build, it is half of it.
+
+What was fixed, in order of what it bought:
+
+- **`src.lines().nth(n)` in every line-shaped check.** Each of the twenty-odd
+  helpers scanned the file from its first byte to reach line `n`, and they run
+  per event, so the guard was quadratic in file size for no reason at all. The
+  source is now split once per file into a `Lines` table and lookups are
+  constant time. This was the largest single win.
+- **Deep calls indexed by leaf name and line.** The call check rescanned every
+  deep call for every lexer call, allocating a `String` per comparison.
+- **Event shapes cached per CST symbol.** A module symbol's pool is every other
+  symbol's events, so the same value string was parsed once per enclosing
+  comparison.
+
+What is left is the shape derivation itself — `shape_at` walking each value and
+`strip_literal_prefixes` looking at the statement's neighbourhood — which is
+linear work the comparison needs for every event on both sides. Reaching 5% from
+here means not deriving most shapes, not deriving them faster: a cheap
+pre-screen that can prove agreement without shaping, or comparing lazily until
+the first real difference. Both change the guard's design, so they belong to a
+decision about the budget rather than to a tuning pass.
+
+Instrumentation: `RG_TIMING=1` prints the guard total, `RG_PHASE=1` breaks it
+into imports, symbol names, calls, the event comparison, and inside that the
+wanted rows, the found rows, and the pairing. Both are environment-gated and
+cost one environment lookup per file when off.
