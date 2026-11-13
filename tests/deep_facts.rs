@@ -697,3 +697,28 @@ fn deep_facts_a_pair_key_spelled_like_a_keyword_is_a_name() {
         );
     }
 }
+
+/// A node kind is a `u16` index into a static table that belongs to the
+/// language, not to the arena or the guard. Adding a kind to a grammar is a
+/// table entry: `Node` stays 16 bytes, and nothing in the comparison core names
+/// a kind at all — the guard reads the record's tags (`a`, `r`, `x`), never the
+/// grammar's vocabulary. This test pins both halves of that claim.
+#[test]
+fn a_kind_is_a_table_index_and_the_arena_does_not_grow() {
+    use std::mem::size_of;
+
+    assert_eq!(size_of::<deep::syntax::Kind>(), 2, "a kind is a u16");
+    assert_eq!(size_of::<deep::tree::Node>(), 16, "the arena record stays 16 bytes");
+
+    for language in [&deep::json::JSON, &deep::python::PYTHON] {
+        assert!(!language.kinds.is_empty(), "{} has no table", language.name);
+        for (offset, info) in language.kinds.iter().enumerate() {
+            let kind = deep::syntax::FIRST_LANGUAGE_KIND + offset as deep::syntax::Kind;
+            assert_eq!(language.name(kind), info.name, "{} kind at {offset}", language.name);
+        }
+        // Names are not unique: a grammar may write two rules that produce the
+        // same node name, which is a decision the language makes, not an arena
+        // problem. What matters here is that every entry is addressable by its
+        // index and that the record size does not depend on how many there are.
+    }
+}
