@@ -148,8 +148,9 @@ fn execute(command: &str, path: &str, src: &[u8], language: &'static Language, b
                 + workspace.events.capacity() * std::mem::size_of::<Event>()
                 + tree.nodes.capacity() * std::mem::size_of::<Node>();
             println!(
-                "bytes={} root={} clean={} first_ms={:.2} parse_ms={:.2} MB_s={:.1} walk_ms={:.2} nodes={} depth={} error_nodes={} arena_bytes={} arena_per_byte={:.2} node_bytes={} event_bytes={} rss_kb={} {}",
+                "bytes={} tokens={} root={} clean={} first_ms={:.2} parse_ms={:.2} MB_s={:.1} walk_ms={:.2} nodes={} depth={} error_nodes={} arena_bytes={} arena_per_byte={:.2} node_bytes={} event_bytes={} rss_kb={} {}",
                 src.len(),
+                workspace.tokens.kind.len(),
                 language.name(tree.root().kind),
                 tree.root().flags & HAS_ERROR == 0,
                 first,
