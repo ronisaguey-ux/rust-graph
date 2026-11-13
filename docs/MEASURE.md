@@ -129,6 +129,32 @@ files, ts 252/286 and 1,960/2,000, python 176/178 and 500/568, rust 225/231 and
 1,795/1,816. Python's 68 unclean files are the largest recovery share of any
 corpus and the place to look after the fallback work in `PAIRING.md`.
 
+## 5c. Both readers in one command
+
+`auto` hides a regression in either path: the mix changes with the corpus, so a
+slower CST can look like a faster run. `tools/bench_paths.py` runs the three
+modes the binary already has over the same directory and prints time and peak
+RSS for each, plus the guard's share (`auto - lexer - deep`):
+
+```bash
+tools/bench_paths.py                 # the four local corpora
+tools/bench_paths.py /tmp/corpus     # any directory
+```
+
+Measured 2026-11-13, release build, `--no-cache`:
+
+| corpus | lexer ms | deep ms | auto ms | guard ms | peak MB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| js (1995) | 3,771 | 7,202 | 14,976 | 4,003 | 62.1 |
+| ts (2000) | 1,088 | 1,909 | 5,512 | 2,515 | 14.0 |
+| python (568) | 1,613 | 2,797 | 14,410 | 10,000 | 9.2 |
+| rust (1816) | 13,766 | 25,388 | 65,633 | 26,479 | 27.1 |
+
+The guard is the end-to-end cost that matters and it is not evenly spread: 2 ms
+per file on js and ts, 17 ms on python, 15 ms on rust — the two corpora whose
+files carry the most events per symbol. That is where the next performance work
+belongs; a faster parser would barely move `auto` on either.
+
 ## 6. Cost, batching and the cooling-off rule
 
 A full sweep on a rented 80-core Vast box costs about **4 cents**: rent, run,
