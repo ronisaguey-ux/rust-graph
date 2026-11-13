@@ -69,3 +69,24 @@ A fallback now means "the lexer wrote a fact the CST does not have, and no row
 within one line and one atom covers it". That is a statement worth acting on. The
 alternative — a single fuzzy pass — produces a number that moves when anything
 moves and cannot be argued with.
+
+## Measured: what the forgiving tiers buy
+
+`strict-pair` keeps only tier 1. Built once beside the default binary and run on
+the same fifty-file subsets in the same session:
+
+| subset | default | strict-pair |
+| --- | ---: | ---: |
+| js | 16 / 50 | 32 / 50 |
+| ts | 10 / 50 | 10 / 50 |
+| python | 18 / 50 | 46 / 50 |
+| rust | 4 / 50 | 46 / 50 |
+
+Read it per language, not in total. On python and rust nearly every pairing is a
+tier-2 or tier-3 pairing, so those corpora are the ones the tolerance is serving:
+four rust files fall back today and forty-six would without it. On TypeScript the
+flag changes nothing at all, which says its ten fallbacks are structural and no
+amount of pairing tolerance reaches them. JS sits in between.
+
+That is also the warning: a change that tightens the tiers has to be measured on
+python and rust first, because those are where the cost lands.
