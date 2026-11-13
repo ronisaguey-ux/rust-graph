@@ -1556,6 +1556,13 @@ impl<'a> Walker<'a> {
                         self.facts.imports.push(Import { line, module: module.into(), alias, kind: IMPORT_MODULE, ..Import::default() });
                     }
                 }
+                // The TypeScript grammar gives these words their own node kind,
+                // so `import get from 'lodash/get'` bound nothing on this side
+                // while the lexer recorded the alias.
+                "is" | "as" | "satisfies" | "get" | "set" | "static" | "readonly" | "declare" | "async" => {
+                    let alias = self.text_string(child);
+                    self.facts.imports.push(Import { line, module: module.into(), alias, kind: IMPORT_MODULE, ..Import::default() });
+                }
                 "named_imports" | "named_exports" => {
                     for specifier in self.children(child) {
                         if matches!(self.kind(specifier), "import_specifier" | "export_specifier") {
