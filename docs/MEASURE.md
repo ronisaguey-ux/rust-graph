@@ -83,3 +83,26 @@ $B build /tmp/one --deep  --no-cache --stdout > /tmp/deep.json
 per-file difference without choosing. The record holds `symbols`, `edges`,
 `imports`, `unresolved` and `flows`; `deep.mode` and `paths` say which reader
 produced it.
+
+## 6. Cost, batching and the cooling-off rule
+
+A full sweep on a rented 80-core Vast box costs about **4 cents**: rent, run,
+destroy. `tools/vast_sweep.sh` rents and runs the command after `--`, and
+destroys the instance from an `EXIT/INT/TERM/HUP` trap, so a sweep that dies
+mid-run (a compiler crash, a timeout, a kill) still destroys the box. The rule
+is proven rather than assumed:
+
+```bash
+tools/vast_sweep.sh --self-test
+# SELF-TEST OK: failed sweep still destroyed instance 12345
+```
+
+Spend it once per language, not once per fix. One call per language, its output
+piped through `head`/`awk`/`jq` — a raw log or a full `ps` table in the
+conversation is paid for again on every later step of that turn, which costs
+more than the sweep did.
+
+**Cooling-off rule.** A fix that flips one file and breaks two is reverted in
+the same turn, and the reversal is committed — never left half-applied while the
+next idea is tried. The measurement that shows the break is quoted in the commit
+message so the next reader does not re-run the experiment.
