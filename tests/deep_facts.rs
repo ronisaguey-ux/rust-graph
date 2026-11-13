@@ -801,3 +801,39 @@ fn every_node_range_reconstructs_its_source_slice() {
         assert_eq!((root.start, root.end), (0, bytes.len() as u32), "{lang:?} root does not span the file");
     }
 }
+
+/// A language cannot be half-declared: `Language::new` asserts at compile time
+/// that the table has kinds and that the root is a language kind. What is left to
+/// check is that every registered grammar actually parses — that its root rule
+/// accepts an empty input and reports the root it declared. A grammar whose root
+/// rule is missing would otherwise fail only on a file, at run time, as a
+/// fallback or an empty tree.
+#[test]
+fn every_registered_grammar_parses_its_own_root() {
+    use deep::syntax::{FIRST_LANGUAGE_KIND, ERROR};
+
+    let languages: [&deep::syntax::Language; 8] = [
+        &deep::json::JSON,
+        &deep::python::PYTHON,
+        &deep::rust::RUST,
+        &deep::javascript::JAVASCRIPT,
+        &deep::javascript::TYPESCRIPT,
+        &deep::javascript::TSX,
+        &deep::go::GO,
+        &deep::java::JAVA,
+    ];
+
+    for language in languages {
+        assert!(language.root >= FIRST_LANGUAGE_KIND, "{} has a runtime root", language.name);
+        assert_ne!(language.root, ERROR, "{} claims ERROR as its root", language.name);
+
+        let mut workspace = deep::Workspace::default();
+        let outcome = workspace
+            .parse(b"", language, &deep::Budget::default())
+            .unwrap_or_else(|_| panic!("{} refused an empty input", language.name));
+        let root = workspace.tree.root();
+        assert_eq!(root.kind, language.root, "{} parsed an empty input to a different root", language.name);
+        assert!(outcome.complete(), "{} could not finish an empty input", language.name);
+        assert!(!workspace.tree.nodes.is_empty(), "{} produced no root at all", language.name);
+    }
+}

@@ -105,7 +105,17 @@ pub struct Language {
 
 impl Language {
     /// A language with no layout.
+    ///
+    /// The invariants are checked in the constructor, which for a `static` means
+    /// at compile time: a grammar that declares no kinds, or a root that is a
+    /// runtime kind, is a build failure rather than a parse that quietly returns
+    /// the wrong root at run time. Rust has no "missing implementation" here —
+    /// `parse` and `lex` are function pointers the language must name — so the
+    /// only way a language can be incomplete is by declaring nothing, and that is
+    /// what these two assertions refuse.
     pub const fn new(name: &'static str, root: Kind, kinds: &'static [KindInfo], lex: fn(&mut Cursor) -> Kind, parse: fn(&mut Parser)) -> Self {
+        assert!(!kinds.is_empty(), "a language must declare at least one kind");
+        assert!(root >= FIRST_LANGUAGE_KIND, "a root must be a language kind, not a runtime one");
         Language { name, root, kinds, lex, layout: None, parse }
     }
 
