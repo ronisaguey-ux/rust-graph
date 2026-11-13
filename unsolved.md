@@ -203,3 +203,40 @@ writes `0` where the CST writes a merge. That is a lexer fix, not a pairing fix 
 Kept: the arrow itself is now **one constant** (`map(s => s.name)`), and Rust keeps the match-arm
 path (`=>` drops the pattern, the arm expression stands). Measured js 746→**725**, ts 426→**409**,
 python 146, rust 345 held, cargo 1463 / pytest 1169 green.
+
+## P1-08 — row counts for each candidate construct, recorded before the code
+
+The rule this table exists to enforce: a construct is a candidate only when the
+number to explain is visible first. Both readers were run over the same fifty JS
+files (`/tmp/js50`, the first fifty of the local js corpus) with
+`build <dir> --deep|--lexer --no-cache --stdout` and the graph rows counted.
+
+| construct (graph row) | CST rows | lexer rows | difference | why it is a candidate |
+| --- | ---: | ---: | ---: | --- |
+| symbols | 545 | 455 | **+90** | the CST resolves a definition the lexer only sees as a token |
+| edges (kind `call`) | 464 | 448 | **+16** | calls recovered after a fallback, mostly inside object literals |
+| flows | 533 | 444 | **+89** | the "event" rows: the CST writes one per statement, the lexer per expression |
+| imports | 98 | 96 | +2 | re-export shapes |
+| unresolved | 0 | 0 | 0 | nothing to explain — not a candidate |
+
+Fallback reasons over the whole js corpus (1995 files, 646 files falling back),
+counted from `/tmp/new_js.json`:
+
+| reason | files |
+| --- | ---: |
+| the CST lost a event | 501 |
+| the CST lost a symbol | 53 |
+| the CST lost a call | 45 |
+| the CST lost a var | 38 |
+| the CST lost a import | 9 |
+
+The two tables disagree on purpose. Flows differ by 89 on fifty files while only
+13 of those files fall back: the CST writes more flow rows than the lexer nearly
+everywhere and that is normal, so a flow-count difference is *not* by itself the
+bug. The candidate is the file that falls back, not the row total. Symbols are
+the opposite — the lexer is the lighter writer and the CST's extra 90 are rows
+the default path only reaches when it takes the CST.
+
+So the next code change is chosen from the 501 event rows, and the first thing
+recorded about each is the CST row count and the lexer row count for the same
+file, side by side, in this section. Not after.
