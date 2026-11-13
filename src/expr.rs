@@ -202,6 +202,15 @@ impl Emit<'_> {
     pub fn mix(&mut self, out: &mut String, close: u8) {
         let start = out.len();
         let mut count = 0;
+        // Where the first value of this item ends. An object property whose
+        // value is an arrow keeps its key: `{ identify: v => … }` is one pair,
+        // and the arrow rule below must truncate to the end of the key, not to
+        // the start of the item (55 js losses: yaml tags, config tables).
+        let mut first_end = 0usize;
+        // The word that opened the first item. `delete: (r) => …` opens with a
+        // keyword, so ident() never runs for the key and the first value came
+        // from the arrow's parameter list: that is not a key/value pair.
+        let mut first_word: Option<String> = None;
         while let Some(token) = self.tok(0) {
             let kind = token.kind;
             // `"abc" "def"`: Python and friends concatenate adjacent string
@@ -234,8 +243,23 @@ impl Emit<'_> {
                 // `map(s => s.name)`: the CST writes one constant for the whole
                 // arrow. Dropping only the pattern left the parameter and the
                 // body standing as the argument.
-                out.truncate(start);
-                count = 1;
+                // `{ key: v => … }` keeps the key and makes the value a
+                // constant: truncate to the end of the key and write the second
+                // item, so the pair wraps exactly as `key: value` does.
+                // One value already written is the key: `createNode: () => new
+                // Scalar(null)` spends its parameter list inside group() and
+                // leaves count at 1, so count >= 2 was too strict.
+                let key = first_word.as_deref().map(|w| format!("[\"n\",{w:?}]"));
+                let paired = close == b'}' && count >= 1 && first_end > start
+                    && key.is_some_and(|k| out[start..first_end] == k[..]);
+                if paired {
+                    out.truncate(first_end);
+                    out.push_str(",0");
+                } else {
+                    out.truncate(start);
+                    out.push('0');
+                }
+                count = if paired { 2 } else { 1 };
                 self.pos += 1;
                 let mut depth = 0usize;
                 while let Some(token) = self.tok(0) {
@@ -252,8 +276,10 @@ impl Emit<'_> {
                     }
                     self.pos += 1;
                 }
-                out.push('0');
                 break;
+            }
+            if count == 0 {
+                first_word = self.word(0).map(|w| w.to_string());
             }
             let at = out.len();
             if count > 0 {
@@ -317,6 +343,9 @@ impl Emit<'_> {
                 out.truncate(at);
             } else {
                 count += 1;
+                if count == 1 {
+                    first_end = out.len();
+                }
             }
         }
         match count {

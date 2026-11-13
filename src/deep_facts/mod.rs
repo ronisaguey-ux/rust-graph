@@ -566,6 +566,11 @@ impl<'a> Walker<'a> {
                 // the name `n:null`, so a return that read it as layout wrote
                 // the constant 0 and lost the value.
                 | "null"
+                // A regex literal is a value, not punctuation: the lexer
+                // writes it as the constant 0, and dropping it as layout lost
+                // one argument from every call that takes a regex
+                // (`arg.replace(/x/, 's')`, 69 js first-loss rows).
+                | "regex"
                 | "self"
                 | "this"
                 | "super"
