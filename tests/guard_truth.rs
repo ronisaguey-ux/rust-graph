@@ -385,3 +385,27 @@ fn a_member_access_that_starts_a_line_continues_the_statement() {
     let verdict = pipeline::loses(&lexer, &deep);
     assert!(!verdict.lost(), "{verdict:?}");
 }
+
+/// A miss is a miss: pairing never fuses two CST rows into one to satisfy a
+/// single lexer event. This is the shape that tempts it — the lexer reads the
+/// `var` chain's continuation lines as one statement whose value names five
+/// calls, while the CST writes each binding on its own row. Adding two rows
+/// together would let the event pass and would also hide the next real loss, so
+/// the test pins the opposite: the file falls back, and the reason names the row
+/// that could not be paired — the wanted line with its value and the one row the
+/// CST did write there — instead of just naming the file.
+#[test]
+fn a_miss_names_the_row_and_two_rows_are_never_fused() {
+    let source = "function _default(polygon, point) {\n  var lambda = longitude(point),\n    phi = point[1],\n    sinPhi = (0, _math.sin)(phi),\n    normal = [(0, _math.sin)(lambda), -(0, _math.cos)(lambda), 0],\n    angle = 0,\n    winding = 0;\n  return winding;\n}\n";
+    let language = langs::by_content("js", source.as_bytes()).expect("a JavaScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::JavaScript);
+
+    let verdict = pipeline::loses(&lexer, &deep);
+    let detail = format!("{verdict:?}");
+    assert!(verdict.lost(), "the chain is a real loss: {detail}");
+    assert!(detail.contains("wanted line"), "the reason names the wanted row: {detail}");
+    assert!(detail.contains("targets ["), "the reason names the wanted targets: {detail}");
+    assert_eq!(detail.matches("found line").count(), 1, "exactly one found row, never two fused: {detail}");
+}
