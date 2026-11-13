@@ -934,6 +934,23 @@ impl<'a> Walker<'a> {
         self.assignment_parts(targets, value, line, false);
     }
 
+    /// `a.lineStartAngle = function () { … }`: an assignment whose value is a
+    /// definition. The function node names itself from nothing — it is an
+    /// expression — so the target is the only place its name exists, exactly as
+    /// the `const f = () => {}` declarator above reads its own binding.
+    pub(crate) fn assignment_definition(&mut self, id: u32) {
+        let children = self.children(id);
+        let equal = children.iter().position(|&child| self.kind(child) == "=");
+        let Some(equal) = equal else { return };
+        let Some(&value) = children.get(equal + 1) else { return };
+        if !self.kinds.definitions.iter().any(|def| def.kind == self.kind(value)) {
+            return;
+        }
+        let Some(&target) = children.first() else { return };
+        let Some(name) = self.last_name(target) else { return };
+        self.bound.push((value, name));
+    }
+
     /// A class field: `#store = new Map()` writes on the enclosing symbol, the
     /// way the lexer treats a statement in a class body.
     pub(crate) fn field(&mut self, id: u32) {
@@ -1672,7 +1689,16 @@ impl<'a> Walker<'a> {
             // `xs[lo():hi():st()]`: a slice and a subscript list are lists of
             // values, not wrappers, so nothing may be dropped.
             | "slice" | "subscript_list" => {
-                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                // `type + 'x'`: `type` is a keyword in this grammar, so the
+                // layout filter drops it and the binary expression keeps only
+                // its right operand — the lexer reads `m:[n:type,0]` and the
+                // CST wrote `0`. A word that is not one of this arm's operators
+                // is an operand.
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.binary_operand(child))
+                    .collect();
                 if items.len() == 1 {
                     return self.form(items[0]);
                 }
@@ -2311,6 +2337,22 @@ impl<'a> Walker<'a> {
             }
             _ => self.line(callee),
         }
+    }
+
+    /// Whether a child of a binary, ternary or slice node is an operand: not
+    /// layout, or a word the layout filter took for a keyword (`type`, `class`,
+    /// `default`) that cannot be one of the operators this arm merges.
+    fn binary_operand(&self, child: u32) -> bool {
+        if !self.is_layout(child) {
+            return true;
+        }
+        let text = self.text_string(child);
+        let starts_a_word = text.as_bytes().first().is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_');
+        starts_a_word
+            && !matches!(
+                text.as_str(),
+                "in" | "instanceof" | "of" | "as" | "satisfies" | "typeof" | "void" | "delete" | "new" | "await" | "yield"
+            )
     }
 
     pub(crate) fn arguments(&mut self, list: u32) -> String {

@@ -656,6 +656,7 @@ impl<'a> Walker<'a> {
             "expression_statement" => self.expression_statement(id),
             "return_statement" => self.return_statement(id),
             "variable_declarator" if self.is_js() => self.declarator(id),
+            "assignment_expression" if self.is_js() => self.assignment_definition(id),
             "public_field_definition" | "field_definition" | "property_signature" if self.is_js() => {
                 self.field(id)
             }
@@ -931,18 +932,38 @@ impl<'a> Walker<'a> {
         if let Some(node) = def.name.iter().find_map(|kind| self.child_of_kind(id, *kind)) {
             return Some(self.text_string(node));
         }
-        // A method called `get` or `set` reads as the modifier that introduces
-        // a getter, so the grammar gives it that kind: the name is then the leaf
-        // just before the parameter list.
-        if def.kind == "method_definition" {
-            let children = self.children(id);
-            let at = children.iter().position(|&child| self.kind(child) == "formal_parameters")?;
-            let name = children.get(at.checked_sub(1)?)?;
-            if self.node(*name).first_child == NONE {
-                return Some(self.text_string(*name));
-            }
+        // A function or method called `get` or `set` reads as the modifier that
+        // introduces an accessor, so the grammar gives the name that anonymous
+        // token rather than an identifier: `function set(a) {}` and
+        // `class A { set(v) {} }` both came out unnamed while `setter` did not.
+        // The name is then the leaf just before the parameter list — but only
+        // that leaf: `const readBlob = async function* (blob) {}` puts a `*`
+        // and the `function` keyword there, and naming the definition after
+        // either one hides the assignment name that used to fill it.
+        if !matches!(
+            def.kind,
+            "method_definition" | "function_declaration" | "generator_function_declaration"
+        ) {
+            return None;
         }
-        None
+        let params = def.params?;
+        let children = self.children(id);
+        let at = children.iter().position(|&child| self.kind(child) == params)?;
+        let mut name = *children.get(at.checked_sub(1)?)?;
+        // `get` and `set` ARE the name here; the words to step over are the ones
+        // the grammar writes between a declaration and its parameters.
+        if matches!(self.text_string(name).as_str(), "*" | "function" | "async" | "static") {
+            let before = *children.get(at.checked_sub(2)?)?;
+            if matches!(self.text_string(before).as_str(), "function" | "async") {
+                return None;
+            }
+            name = before;
+        }
+        if self.node(name).first_child != NONE {
+            return None;
+        }
+        let text = self.text_string(name);
+        (!text.is_empty()).then_some(text)
     }
 
     pub(crate) fn bases(&self, id: u32) -> Vec<String> {
@@ -1085,4 +1106,29 @@ fn line_starts(src: &[u8]) -> Vec<u32> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod accessor_name_tests {
+    use super::*;
+    use crate::deep_integration::{self, Lang};
+
+    /// `get` and `set` are the words a grammar uses for accessors, so a
+    /// function that carries one as its own name arrives with that anonymous
+    /// token instead of an `identifier`, and the walk named nothing: the lexer
+    /// had `set` and the CST had `<anonymous>`, which is a fallback on every
+    /// `module.exports` helper called `set` in the wild.
+    #[test]
+    fn a_function_named_set_or_get_still_has_a_name() {
+        for (source, expected) in [
+            ("function set(a, b) { return a; }", "set"),
+            ("function get(a) { return a; }", "get"),
+            ("function setter(a) { return a; }", "setter"),
+        ] {
+            let tree = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a tree");
+            let facts = extract(source.as_bytes(), &tree, Lang::JavaScript);
+            let names: Vec<&str> = facts.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+            assert!(names.contains(&expected), "{source} named {names:?}");
+        }
+    }
 }
