@@ -228,6 +228,23 @@ impl<'a> Parser<'a> {
         matches!(self.src.get(at), Some(b'.')) || self.src.get(at..at + 2) == Some(b"?.")
     }
 
+    /// Whether the next line begins with `?` or `:` — the continuation of a
+    /// ternary, never the start of a statement.
+    fn next_starts_with_ternary(&self, end: usize) -> bool {
+        let mut at = end;
+        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r') {
+            at += 1;
+        }
+        if self.src.get(at) != Some(&b'\n') {
+            return false;
+        }
+        at += 1;
+        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r' | b'\n') {
+            at += 1;
+        }
+        matches!(self.src.get(at), Some(b'?') | Some(b':'))
+    }
+
     fn on_newline(&mut self) {
         if !self.brackets.is_empty() || self.stmt.is_empty() {
             return;
@@ -246,6 +263,15 @@ impl<'a> Parser<'a> {
         // starts, and the guard could not pair them — 160 JS files.
         if let Some(last) = self.stmt.last() {
             if self.next_is_member_access(last.end as usize) {
+                return;
+            }
+            // A ternary written over three lines puts `?` and `:` at the start
+            // of the continuation lines. A statement cannot begin with either,
+            // so the newline is inside the expression: the CST writes one value
+            // on the line the statement starts and the split lost it.
+            if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                && self.next_starts_with_ternary(last.end as usize)
+            {
                 return;
             }
         }
