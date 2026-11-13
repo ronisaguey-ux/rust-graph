@@ -1015,10 +1015,29 @@ mod deep_run {
                     self.fallbacks += 1;
                     row.push_str(",\"deep_fallback\":");
                     super::push_string(row, reason);
+                    row.push_str(",\"deep_fallback_code\":");
+                    // The prose reason is for a person, this is for a counter:
+                    // one string per bucket, so a histogram never parses English.
+                    let code = if reason.contains("no event on a line both readers can mean") {
+                        "PAIR_AMBIGUOUS:1".to_string()
+                    } else if reason.contains("target list differs") {
+                        "CST_SHAPE_MISMATCH:targets".to_string()
+                    } else if reason.contains("value as the constant 0") {
+                        "CST_MISSING_KIND:constant".to_string()
+                    } else if reason.contains("a name the lexer read is not in the CST's value") {
+                        "LEX_OVER_EMIT:name".to_string()
+                    } else if reason.contains("a call or constant the lexer read is not in the CST's value") {
+                        "LEX_OVER_EMIT:call".to_string()
+                    } else {
+                        let kind = reason.split_whitespace().next().unwrap_or("event");
+                        format!("CST_MISSING_KIND:{kind}")
+                    };
+                    super::push_string(row, &code);
                 }
             }
             row.push('}');
         }
+
 
         /// One object a reader can count without opening `sources`.
         pub(super) fn heading(&self, out: &mut dyn Write) -> io::Result<()> {
