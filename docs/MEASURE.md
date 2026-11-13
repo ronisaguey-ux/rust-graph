@@ -106,3 +106,29 @@ more than the sweep did.
 the same turn, and the reversal is committed — never left half-applied while the
 next idea is tried. The measurement that shows the break is quoted in the commit
 message so the next reader does not re-run the experiment.
+
+## 7. Rolling a phase back
+
+A phase is one commit (or a short chain). Undoing it is one command, and the
+numbers that justified it are re-derived in the same breath:
+
+```bash
+git revert --no-edit <phase-commit>          # the commit, not the tree
+git log --oneline -3                         # the revert is its own commit
+tools/repro_build.sh --print                 # the binary is a new artifact now
+# then the four sweeps and the gate, exactly as in section 2 and 3:
+python3 /tmp/shard_sweep.py /tmp/opencode/sweep-local/js  /tmp/after_js.json 6
+python3 /tmp/shard_sweep.py /tmp/opencode/sweep-local/ts  /tmp/after_ts.json 6
+python3 /tmp/shard_sweep.py /tmp/opencode/sweep-local/python /tmp/after_python.json 6
+python3 /tmp/shard_sweep.py /tmp/opencode/sweep-local/rust /tmp/after_rust.json 6
+tools/diff.py <before>.json <after>.json     # refuses an unexplained regression
+cargo test --workspace --features "deep parser"
+(cd /home/roni/Roni_workspace/bugbounty_agent && python3 -m pytest -q)
+```
+
+`git revert` never rewrites history, so a bad phase stays visible in the log as
+the thing that was tried and withdrawn — which is the point: the next reader
+learns from the reversal instead of digging for the missing code.
+
+Do not `git reset --hard` a phase commit that has been pushed: the remote keeps
+the commit and the local branch then lies about what the corpus was measured on.
