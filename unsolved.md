@@ -262,3 +262,25 @@ no effect there was nothing for it to raise either. The feature, its `Segment` a
 mentions a flag that does not exist, and the default and deep suites both run
 green without it. Phase 1 closes as measured-and-rejected: the idea was tested at
 the smallest cost that could answer it, and the answer was no.
+
+## P2-02 — exact-value-first pairing stays reverted
+
+The idea was to claim a line for an exact value before anything else could. It was
+measured and reverted on 2026-11: python 146→114 and js 725→721 against a rust
+cost of 345→445. Nothing else on the scale moved enough to pay for that, and rust
+going backwards on a hundred files is not a trade, it is a regression with a
+side-benefit.
+
+Current numbers, measured today on the same corpora:
+
+| language | files | falling back |
+| --- | ---: | ---: |
+| js | 1995 | 646 |
+| ts | 2000 | 397 |
+| python | 568 | 145 |
+| rust | 1816 | 345 |
+
+The tree carries no trace of the experiment (no `exact_value`/`exact-first`
+symbol in `src/`, `tools/` or `docs/`), so there is nothing dormant waiting to be
+revived by accident. If it is ever retried, the rust column is the gate: a variant
+that does not hold rust at 345 is rejected on the numbers, not on taste.
