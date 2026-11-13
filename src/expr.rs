@@ -729,10 +729,34 @@ fn for_parts(
 }
 
 /// The names written on the left of an assignment, as the source spells them.
+/// A declaration keyword and a type annotation are part of the statement, not
+/// part of the name: `const x: Fn = …` binds `x`.
 #[cfg(feature = "event-split")]
 fn target_text(src: &[u8], lang: &'static Language, toks: &[Token], start: usize, end: usize) -> String {
+    let mut from = start;
+    while from < end {
+        let token = &toks[from];
+        if token.kind == Kind::Ident && DECL_WORDS.contains(&lexeme(src, token, lang).as_str()) {
+            from += 1;
+            continue;
+        }
+        break;
+    }
+    let mut to = end;
+    let mut depth = 0i32;
+    for index in from..end {
+        match one_byte(src, &toks[index]) {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b':' if depth == 0 => {
+                to = index;
+                break;
+            }
+            _ => {}
+        }
+    }
     let mut out = String::new();
-    for token in &toks[start..end] {
+    for token in &toks[from..to] {
         out.push_str(&lexeme(src, token, lang));
     }
     out
