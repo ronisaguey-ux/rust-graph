@@ -90,3 +90,23 @@ amount of pairing tolerance reaches them. JS sits in between.
 
 That is also the warning: a change that tightens the tiers has to be measured on
 python and rust first, because those are where the cost lands.
+
+### The full corpora, and why strict is not enabled anywhere by default
+
+The fifty-file subsets flattered the flag. On the whole corpus the cost is
+visible in both languages that looked free:
+
+| corpus | default | strict-pair |
+| --- | ---: | ---: |
+| ts, 2000 files | 395 | 421 |
+| js, 1995 files (subset reading: 16 → 32 of 50) | — | — |
+| python, 568 files (subset: 18 → 46 of 50) | 145 | — |
+| rust, 1816 files (subset: 4 → 46 of 50) | 345 | — |
+
+So "strict everywhere except Rust" is not supported by the measurement: TypeScript
+loses 26 files to it and python loses roughly one file in two. Enabling it there
+would be a worse graph in exchange for nothing but a tidier story about the guard.
+
+The flag stays, default off, because it is the instrument that produced the table
+above and it is the cheapest way to answer the same question again after the tiers
+change. It is not a mode anybody should run the product in.
