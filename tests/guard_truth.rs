@@ -559,3 +559,30 @@ fn a_computed_method_name_is_a_declaration() {
     let verdict = pipeline::loses_in(&lexer, &deep, source);
     assert!(!verdict.lost(), "a computed-name signature is a declaration: {verdict:?}");
 }
+
+/// The machine strings are a contract: a dashboard counts them, the queue file
+/// names them, and `tools/strict_gate.py` gates on them. A rename that is not a
+/// migration resets those counts to zero, and a zero looks like a fix. So the
+/// set of prefixes is pinned here — a new bucket is a decision, not an accident.
+#[test]
+fn the_taxonomy_prefixes_are_frozen() {
+    const PREFIXES: [&str; 4] = ["LEX_OVER_EMIT:", "CST_MISSING_KIND:", "CST_SHAPE_MISMATCH:", "PAIR_AMBIGUOUS:"];
+    let reasons = [
+        "event a line 4 targets [\"x\"] in f (a name the lexer read is not in the CST's value): …",
+        "event a line 4 targets [\"x\"] in f (a call or constant the lexer read is not in the CST's value): …",
+        "event a line 4 targets [\"x\"] in f (the CST wrote the value as the constant 0): …",
+        "event a line 4 targets [\"x\"] in f (the statement's target list differs (names or order)): …",
+        "event a line 4 targets  in f (no event on a line both readers can mean): …",
+        "the CST lost a var: var repo = Repo",
+        "the CST lost a call: call x line 3 in f",
+    ];
+    for reason in reasons {
+        let code = pipeline::reason_code(reason);
+        assert!(
+            PREFIXES.iter().any(|prefix| code.starts_with(prefix)),
+            "{code} is outside the frozen taxonomy for {reason}"
+        );
+        assert!(!code.ends_with(':'), "{code} names no construct");
+        assert!(!code.contains(":the"), "{code} buckets a sentence word");
+    }
+}

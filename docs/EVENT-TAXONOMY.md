@@ -61,3 +61,25 @@ they split a statement differently. Nothing to take here yet.
 No entry: the fifty-file subset has no event-count disagreement at all, in
 either direction. That is why rust is the language a JS change is measured
 against — it holds still.
+
+## The reason strings are frozen
+
+The taxonomy above is prose; the machine strings are what dashboards, the queue
+file and `tools/strict_gate.py` count. They are:
+
+| code | written when |
+| --- | --- |
+| `LEX_OVER_EMIT:name` | the lexer wrote a name the CST's value does not have |
+| `LEX_OVER_EMIT:call` | the lexer wrote a call or constant the CST's value does not have |
+| `CST_MISSING_KIND:constant` | the CST wrote the value as `0` |
+| `CST_MISSING_KIND:<kind>` | a whole `import`, `symbol`, `call` or `var` is missing from the CST |
+| `CST_SHAPE_MISMATCH:targets` | the statement's target list differs |
+| `PAIR_AMBIGUOUS:1` | no row on a line both readers can mean |
+
+A rename is a migration, not an edit: the old string keeps being emitted for one
+phase while both are counted, and `docs/PAIRING.md` records the switch and the
+sweep that justified it. The reason is that a renamed bucket silently resets a
+dashboard to zero, and a zero looks exactly like a fix.
+
+`tests/guard_truth.rs` pins the four strings the corpus actually produces and
+checks the prefix set, so a rename fails the suite instead of the graph.
