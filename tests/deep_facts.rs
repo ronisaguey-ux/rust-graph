@@ -722,3 +722,24 @@ fn a_kind_is_a_table_index_and_the_arena_does_not_grow() {
         // index and that the record size does not depend on how many there are.
     }
 }
+
+/// A bad statement costs one error node and does not eat the next statement:
+/// `x = = 1` is closed as one `ERROR`, the parser resumes at the next line, and
+/// the two functions either side of it are both in the record. This is the
+/// recovery the parser promises — close the smallest open node, resume at the
+/// statement boundary, one error per recovery — pinned on a file where the
+/// damage is in the middle rather than at the end.
+#[test]
+fn one_bad_statement_is_one_error_and_the_rest_parses() {
+    let source = "def bad():\n    x = = 1\n    y = 2\n    return y\n\n\ndef good():\n    z = 3\n    return z\n";
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::Python).expect("a deep parse");
+    assert_eq!(cst.errors, 1, "one recovery, one error");
+
+    let error_nodes = cst.nodes.iter().filter(|node| node.kind == deep::syntax::ERROR).count();
+    assert_eq!(error_nodes, 1, "one ERROR node in the tree, not one per token");
+
+    let facts = deep_facts::extract(source.as_bytes(), &cst, Lang::Python);
+    let names: Vec<&str> = facts.symbols.iter().map(|row| row.name.as_str()).collect();
+    assert!(names.contains(&"bad"), "the function with the bad line is still there: {names:?}");
+    assert!(names.contains(&"good"), "and so is the one after it: {names:?}");
+}
