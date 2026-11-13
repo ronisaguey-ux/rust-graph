@@ -741,7 +741,9 @@ pub(crate) static PAIR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::
 /// It is tested against the strings the corpus actually produces.
 #[cfg(all(feature = "deep", feature = "parser"))]
 pub(crate) fn reason_code(reason: &str) -> String {
-    if reason.contains("no event on a line both readers can mean") {
+    if reason.contains("more than 1% is recovery noise") {
+        "CST_DEGRADED:recovery".to_string()
+    } else if reason.contains("no event on a line both readers can mean") {
         "PAIR_AMBIGUOUS:1".to_string()
     } else if reason.contains("target list differs") {
         "CST_SHAPE_MISMATCH:targets".to_string()
@@ -3412,6 +3414,28 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
                     fallback,
                     accepted: verdict.accepted(),
                     losses: verdict.losses(),
+                    ..deep_run::Taken::default()
+                },
+            );
+            return lexer;
+        }
+        // Recovery has a budget. A CST that needed an error node for more than
+        // one percent of its own nodes is not a tree with a mistake in it, it is
+        // a tree the grammar did not understand — and emitting it would make the
+        // record look authoritative while the parse was guessing. The lexer's
+        // one-pass record is the honest answer there, and the reason says so.
+        if cst.errors > 0 && (cst.errors as f64) / (cst.nodes.len().max(1) as f64) > 0.01 {
+            deep_run::record(
+                path,
+                deep_run::Taken {
+                    compared: true,
+                    errors: cst.errors,
+                    fallback: Some(format!(
+                        "the CST needed {} error nodes in {}: more than 1% is recovery noise",
+                        cst.errors,
+                        cst.nodes.len()
+                    )),
+                    accepted: deep_run::Taken::default().accepted,
                     ..deep_run::Taken::default()
                 },
             );

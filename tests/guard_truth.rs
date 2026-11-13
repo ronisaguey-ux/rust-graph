@@ -566,7 +566,7 @@ fn a_computed_method_name_is_a_declaration() {
 /// set of prefixes is pinned here — a new bucket is a decision, not an accident.
 #[test]
 fn the_taxonomy_prefixes_are_frozen() {
-    const PREFIXES: [&str; 4] = ["LEX_OVER_EMIT:", "CST_MISSING_KIND:", "CST_SHAPE_MISMATCH:", "PAIR_AMBIGUOUS:"];
+    const PREFIXES: [&str; 5] = ["LEX_OVER_EMIT:", "CST_MISSING_KIND:", "CST_SHAPE_MISMATCH:", "PAIR_AMBIGUOUS:", "CST_DEGRADED:"];
     let reasons = [
         "event a line 4 targets [\"x\"] in f (a name the lexer read is not in the CST's value): …",
         "event a line 4 targets [\"x\"] in f (a call or constant the lexer read is not in the CST's value): …",
@@ -575,6 +575,7 @@ fn the_taxonomy_prefixes_are_frozen() {
         "event a line 4 targets  in f (no event on a line both readers can mean): …",
         "the CST lost a var: var repo = Repo",
         "the CST lost a call: call x line 3 in f",
+        "the CST needed 4 error nodes in 21: more than 1% is recovery noise",
     ];
     for reason in reasons {
         let code = pipeline::reason_code(reason);
