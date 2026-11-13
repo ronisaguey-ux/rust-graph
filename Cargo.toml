@@ -10,9 +10,11 @@ members = [
     "crates/deep-abi", "crates/rust-graph-deep", "crates/deep-grammars", "crates/deep-lex", "crates/deep-tables", "crates/deep-rt", "crates/deep-bench", "crates/deep-conformance", "crates/deep-fuzz"]
 
 [features]
+# owner: gideon | removal: never (the CST path is the product, not a phase)
 deep = ["dep:deep-rt", "dep:deep-lex", "dep:deep-grammars"]
+# owner: gideon | removal: never (the bridge in src/deep_integration.rs; a build
+# without it is the lexer-only build, which stays supported)
 parser = ["dep:rust-graph-deep"]
-# The bridge in src/deep_integration.rs, and nothing in the default build.
 
 [[bin]]
 name = "rust-graph"

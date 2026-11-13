@@ -15,6 +15,7 @@ name = "deep-conformance"
 path = "src/main.rs"
 
 [features]
+# owner: gideon | removal: when the language crates replace the adapter in src/lib.rs
 # Populates the registry with the grammars that exist in this worktree today
 # (Python, JavaScript, TypeScript). The integrator's job is to replace this
 # adapter when the language crates land; nothing else in the crate changes.
