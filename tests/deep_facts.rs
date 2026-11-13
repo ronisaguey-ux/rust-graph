@@ -837,3 +837,41 @@ fn every_registered_grammar_parses_its_own_root() {
         assert!(!workspace.tree.nodes.is_empty(), "{} produced no root at all", language.name);
     }
 }
+
+/// The workspace is reused across files, and this is the counter that proves it:
+/// the first parse allocates, everything after it fits in what the first one
+/// grew. Reuse is the whole reason `Workspace` exists, and a regression that
+/// rebuilt it per file would be invisible in time on a warm cache.
+#[test]
+fn one_workspace_allocates_once_for_a_whole_corpus() {
+    let sources = [
+        ("fn f(x: u32) -> u32 {\n    let y = x + 1;\n    y\n}\n", &deep::rust::RUST),
+        ("def f(x):\n    y = x + 1\n    return y\n", &deep::python::PYTHON),
+        ("{\"a\": [1, 2, 3], \"b\": {\"c\": true}}\n", &deep::json::JSON),
+    ];
+
+    let before = deep::parser::Workspace::allocations();
+    let mut workspace = deep::parser::Workspace::default();
+    for (source, language) in sources {
+        workspace
+            .parse(source.as_bytes(), language, &deep::Budget::default())
+            .expect("a parsed file");
+    }
+    // Three parses of three languages, all smaller than the first: the only
+    // growth is the first parse's.
+    let growth = deep::parser::Workspace::allocations() - before;
+    assert!(growth <= 1, "{growth} allocations for three parses; the workspace is not being reused");
+
+    // A bigger file may grow it once more, and then it holds again.
+    let big = "fn f() {\n".to_string() + &"    let x = 1;\n".repeat(500) + "}\n";
+    let mid = deep::parser::Workspace::allocations();
+    workspace
+        .parse(big.as_bytes(), &deep::rust::RUST, &deep::Budget::default())
+        .expect("a big file");
+    assert!(deep::parser::Workspace::allocations() - mid <= 1, "a grow must be one event, not one per buffer");
+    let after_big = deep::parser::Workspace::allocations();
+    workspace
+        .parse(big.as_bytes(), &deep::rust::RUST, &deep::Budget::default())
+        .expect("the same big file again");
+    assert_eq!(deep::parser::Workspace::allocations(), after_big, "the second parse of the same size allocated again");
+}

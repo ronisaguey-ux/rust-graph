@@ -535,6 +535,10 @@ impl<'a> Parser<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TooLarge;
 
+/// How many parses had to grow the arena, process-wide. See
+/// [`Workspace::allocations`].
+pub static ALLOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Everything one parse allocates, kept between files so the steady state
 /// allocates nothing.
 #[derive(Default)]
@@ -547,7 +551,27 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// How many times a parse had to grow an arena. The workspace is reused
+    /// across files, so the steady state is zero: a corpus run that keeps growing
+    /// is a corpus whose largest file keeps getting bigger, and a run that grows
+    /// on every file is not reusing anything.
+    pub fn allocations() -> u64 {
+        ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The capacity of every buffer this workspace owns, summed: a parse that
+    /// changes it allocated.
+    fn capacity(&self) -> usize {
+        self.tokens.kind.capacity()
+            + self.tokens.end.capacity()
+            + self.pairs.pair.capacity()
+            + self.events.capacity()
+            + self.links.capacity()
+            + self.tree.nodes.capacity()
+    }
+
     pub fn parse(&mut self, src: &[u8], language: &Language, budget: &Budget) -> Result<Outcome, TooLarge> {
+        let capacity = self.capacity();
         if src.len() > MAX_INPUT {
             return Err(TooLarge);
         }
@@ -589,6 +613,9 @@ impl Workspace {
             stray: self.pairs.stray,
         };
         self.tree.build(&mut self.events, &self.tokens, language, src.len() as u32);
+        if self.capacity() != capacity {
+            ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(outcome)
     }
 }
