@@ -207,6 +207,23 @@ impl<'a> Parser<'a> {
         self.lang.blocks == Blocks::Brace
     }
 
+    /// Whether the next bytes after `end` are a member access that begins a
+    /// new line, ignoring spaces and tabs: `.name` or `?.name`.
+    fn next_is_member_access(&self, end: usize) -> bool {
+        let mut at = end;
+        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r') {
+            at += 1;
+        }
+        if at >= self.src.len() || self.src[at] != b'\n' {
+            return false;
+        }
+        at += 1;
+        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r' | b'\n') {
+            at += 1;
+        }
+        matches!(self.src.get(at), Some(b'.')) || self.src.get(at..at + 2) == Some(b"?.")
+    }
+
     fn on_newline(&mut self) {
         if !self.brackets.is_empty() || self.stmt.is_empty() {
             return;
@@ -217,6 +234,16 @@ impl<'a> Parser<'a> {
         }
         if self.lang.semicolons || self.lang.period_only {
             return;
+        }
+        // `String(name)` ends a line and `.replace(…)` begins the next: a
+        // statement cannot start with a member access, so the newline is
+        // inside the expression. Splitting there gave the continuation its own
+        // event, which the CST (rightly) writes once on the line the statement
+        // starts, and the guard could not pair them — 160 JS files.
+        if let Some(last) = self.stmt.last() {
+            if self.next_is_member_access(last.end as usize) {
+                return;
+            }
         }
         if let Some(last) = self.stmt.last() {
             let continues = self.lang.operator_continues

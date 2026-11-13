@@ -368,3 +368,20 @@ fn two_events_on_one_line_are_paired_with_their_own_rows() {
     let verdict = pipeline::loses(&lexer, &deep);
     assert!(!verdict.lost(), "{verdict:?}");
 }
+
+/// A statement that continues onto the next line with a member access is one
+/// statement: `String(name)` then a newline then `.replace(…)`. JavaScript ends
+/// a statement at a newline only where a statement can start, and one cannot
+/// start with `.`. Splitting there gave the continuation its own event, in the
+/// module, while the CST (rightly) wrote the whole expression once in the arrow
+/// — 160 JS files fell back as "no event on a line both readers can mean".
+#[test]
+fn a_member_access_that_starts_a_line_continues_the_statement() {
+    let source = "const escapeName = (name) => String(name)\n    .replace(/\\r/g, \"%0D\")\n    .replace(/\"/g, \"%22\");\nexport default escapeName;\n";
+    let language = langs::by_content("js", source.as_bytes()).expect("a JavaScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::JavaScript);
+    let verdict = pipeline::loses(&lexer, &deep);
+    assert!(!verdict.lost(), "{verdict:?}");
+}
