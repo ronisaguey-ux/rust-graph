@@ -240,3 +240,25 @@ the default path only reaches when it takes the CST.
 So the next code change is chosen from the 501 event rows, and the first thing
 recorded about each is the CST row count and the lexer row count for the same
 file, side by side, in this section. Not after.
+
+## Phase 1 exit gate — the narrowed split, measured and rejected
+
+The gate offered two doors: the narrowed split lowers js without raising ts,
+python or rust, or the feature is removed and the phase closes as
+measured-and-rejected. It is the second, and the numbers are on the record.
+
+| measurement | with `event-split` | default build |
+| --- | ---: | ---: |
+| js, fifty files, files falling back | 18 | 18 |
+| js reason histogram (event/call/var/symbol) | 13/2/2/1 | 13/2/2/1 |
+| js rows, fifty files | 5743 | 5743 |
+| ts rows, fifty files | 994 | 994 |
+| python rows, fifty files | 22533 | 22533 |
+| rust rows, fifty files | 9980 | 9980 |
+
+The split changed nothing the guard compares, so it could not lower js, and with
+no effect there was nothing for it to raise either. The feature, its `Segment` and
+`Marker` types and its tests are deleted (`1082e0f`), the measure recipe no longer
+mentions a flag that does not exist, and the default and deep suites both run
+green without it. Phase 1 closes as measured-and-rejected: the idea was tested at
+the smallest cost that could answer it, and the answer was no.
