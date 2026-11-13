@@ -558,7 +558,9 @@ impl Emit<'_> {
                 if let Some(name) = self.word(1) {
                     self.pos += 2;
                     path.push('.');
-                    path.push_str(&name);
+                    // The CST names a private member without its hash; the
+                    // hash is how the source spells the name, not part of it.
+                    path.push_str(name.trim_start_matches('#'));
                     continue;
                 }
                 if path.is_empty() && self.is_op(0, b".") && self.tok(1).is_some_and(|t| t.kind == Kind::Num) {

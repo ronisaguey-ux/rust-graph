@@ -472,6 +472,17 @@ impl<'a> Lexer<'a> {
                 return self.token(Kind::Ident, name, line, col);
             }
         }
+        // A JavaScript private name is one identifier: `this.#secret` is a
+        // member access, not a name followed by a hash and another name. Without
+        // this the lexer wrote both halves and every private field read as a
+        // merge of two names the CST writes as one path.
+        if byte == b'#' && matches!(self.lang.tag, "JS" | "TS") && is_ident_start(self.peek(1)) {
+            self.pos += 1;
+            while self.is_ident(self.peek(0)) {
+                self.pos += 1;
+            }
+            return self.token(Kind::Ident, start, line, col);
+        }
         if is_ident_start(byte) || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS")) {
             while self.is_ident(self.peek(0)) {
                 self.pos += 1;
