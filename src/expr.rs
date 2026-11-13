@@ -1060,6 +1060,23 @@ mod tests {
     }
 
     #[test]
+    fn an_arrow_argument_stays_one_constant_and_a_match_arm_keeps_its_value() {
+        // The c5e5996 rule, pinned so it cannot drift back: in the JS family an
+        // arrow is one constant for the whole argument, because dropping only
+        // the pattern left the parameter and the body standing as the argument.
+        assert_eq!(form("js", "xs.map(s => s.name)").0, r#"["c",0,["n","xs"],[0]]"#);
+        assert_eq!(form("js", "f(x => { return x; })").0, r#"["c",0,0,[0]]"#);
+        assert_eq!(form("ts", "items.filter((x: T) => x.ok)").0, r#"["c",0,["n","items"],[0]]"#);
+        // In Rust `=>` opens a match arm, not an arrow: the pattern is dropped
+        // and the arm's expression is the value. Reading it as a constant cost
+        // rust a hundred files when it was last tried.
+        assert_eq!(
+            form("rs", "match y { _ => a.b }").0,
+            r#"["m",[["n","match"],["n","y"],["m",[["n","a.b"]]]]]"#
+        );
+    }
+
+    #[test]
     fn an_object_method_is_a_constant() {
         // `{ set(v) { … } }`: the CST writes the method as one value, and the
         // lexer read the body into the object's merge.
