@@ -829,6 +829,12 @@ mod deep_run {
         /// Lexer artefacts accepted in place of a reproduction: a named call
         /// that is not in the source, or a statement read as an expression.
         pub(super) accepted: super::Accepted,
+        /// How many facts this file's comparison lost. One for an import, a
+        /// symbol, a call or a variable — those checks stop at their first miss
+        /// — and the full count for events, because the comparison already
+        /// walks every one of them. A file-level fallback count cannot show
+        /// per-event progress; this can.
+        pub(super) losses: u32,
     }
 
     thread_local! {
@@ -985,7 +991,7 @@ mod deep_run {
         /// header carries the format number, so a file from an older writer is
         /// void rather than half-read.
         pub(super) fn save(&self, dir: &Path) -> io::Result<()> {
-            let mut text = format!("rust-graph facts.meta 8 {}\n", bits());
+            let mut text = format!("rust-graph facts.meta 9 {}\n", bits());
             let mut rows: Vec<(&String, &Taken)> = self.records.iter().collect();
             rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
             for (path, taken) in rows {
@@ -995,7 +1001,7 @@ mod deep_run {
                     (false, false) => "lexer",
                 };
                 text.push_str(&format!(
-                    "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
+                    "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
                     escape(path),
                     parser,
                     taken.errors,
@@ -1011,7 +1017,8 @@ mod deep_run {
                     taken.accepted.positional_calls,
                     taken.accepted.positional_events,
                     taken.accepted.positional_symbols,
-                    taken.accepted.ambiguous_pairs
+                    taken.accepted.ambiguous_pairs,
+                    taken.losses
                 ));
             }
             let temporary = dir.join("facts.meta.tmp");
@@ -1078,6 +1085,9 @@ mod deep_run {
                     row.push_str(",\"deep_fallback_code\":");
                     let code = super::reason_code(reason);
                     super::push_string(row, &code);
+                }
+                if taken.losses > 0 {
+                    row.push_str(&format!(",\"deep_losses\":{}", taken.losses));
                 }
             }
             row.push('}');
@@ -1184,7 +1194,7 @@ mod deep_run {
     pub(super) fn load(dir: &Path) -> Option<HashMap<String, Taken>> {
         let text = std::fs::read_to_string(dir.join("facts.meta")).ok()?;
         let mut lines = text.lines();
-        if lines.next()? != format!("rust-graph facts.meta 8 {}", bits()) {
+        if lines.next()? != format!("rust-graph facts.meta 9 {}", bits()) {
             return None;
         }
         let mut out = HashMap::new();
@@ -1221,6 +1231,7 @@ mod deep_run {
                     fallback: (!reason.is_empty()).then_some(reason),
                     why,
                     accepted,
+                    losses: fields.next()?.parse().ok()?,
                 },
             );
         }
@@ -1391,6 +1402,8 @@ pub(crate) struct Verdict {
     /// CST keeps pays nothing for it.
     detail: String,
     accepted: Accepted,
+    /// See `deep_run::Taken::losses`.
+    losses: u32,
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
@@ -1411,6 +1424,11 @@ impl Verdict {
 
     pub(crate) fn accepted(&self) -> Accepted {
         self.accepted
+    }
+
+    /// How many facts the comparison lost, for the per-event metric.
+    pub(crate) fn losses(&self) -> u32 {
+        self.losses
     }
 }
 
@@ -1477,7 +1495,7 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
             deep_calls.insert((leaf(&call.path), call.line));
         }
     }
-    let verdict = |loss: Option<&'static str>, detail: String, accepted: Accepted| Verdict { loss, detail, accepted };
+    let verdict = |loss: Option<&'static str>, detail: String, accepted: Accepted| Verdict { loss, detail, accepted, losses: u32::from(loss.is_some()) };
     // Phase accounting for the performance budget. It charges the time to the
     // phase that was running when the function returned, so a file that falls
     // back early is counted in the phase that failed rather than vanishing.
@@ -1683,8 +1701,11 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         // module's: the fact is in the file either way.
         let extra: &[crate::facts::Symbol] = if symbol.kind == KIND_MODULE { &deep.symbols } else { &[] };
         phase!(4);
-        if let Some(detail) = uncovered(lexer, symbol, paired, &mut accepted, &lines, &macro_lines, extra, &mut shapes) {
-            return verdict(Some("event"), detail, accepted);
+        let details = uncovered(lexer, symbol, paired, &mut accepted, &lines, &macro_lines, extra, &mut shapes);
+        if let Some(first) = details.first() {
+            let mut found = verdict(Some("event"), first.clone(), accepted);
+            found.losses = details.len() as u32;
+            return found;
         }
     }
     phase!(5);
@@ -1705,7 +1726,7 @@ fn uncovered(
     macro_lines: &[bool],
     extra: &[crate::facts::Symbol],
     shapes: &mut std::collections::HashMap<String, Vec<(u8, Shape)>>,
-) -> Option<String> {
+) -> Vec<String> {
     let mut at = std::time::Instant::now();
     let on = std::env::var_os("RG_PHASE").is_some();
     macro_rules! cmp {
@@ -1918,6 +1939,10 @@ fn uncovered(
         .map(|(_, row)| row)
         .collect();
     cmp!(2);
+    // Every loss, not just the first: the caller reports one and counts the
+    // rest, which is the only way a per-event metric can move while the
+    // file-level count stands still.
+    let mut losses: Vec<String> = Vec::new();
     for want in leftover {
         // A target list that names an imported type instead of a binder is the
         // lexer reading `x: Dict[...] = ...` as an assignment to `Dict`. Its
@@ -1976,7 +2001,7 @@ fn uncovered(
         // symbol it was compared inside, and the closest CST event found. A
         // reader can then see the miss without a debug rebuild — the wanted row
         // and the found row are the whole diagnosis.
-        return Some(format!(
+        losses.push(format!(
             "event {} line {} targets {} in {} (paired {} line {}): {why}; wanted line {} targets {} value {}; found {}",
             want.0 as char,
             want.1.line,
@@ -1990,7 +2015,7 @@ fn uncovered(
             other
         ));
     }
-    None
+    losses
 }
 
 
@@ -3373,7 +3398,13 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
             });
             deep_run::record(
                 path,
-                deep_run::Taken { compared: true, fallback, accepted: verdict.accepted(), ..deep_run::Taken::default() },
+                deep_run::Taken {
+                    compared: true,
+                    fallback,
+                    accepted: verdict.accepted(),
+                    losses: verdict.losses(),
+                    ..deep_run::Taken::default()
+                },
             );
             return lexer;
         }
@@ -3396,7 +3427,15 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
         };
         deep_run::record(
             path,
-            deep_run::Taken { deep: true, compared: true, errors: cst.errors, fallback: None, why, accepted: verdict.accepted() },
+            deep_run::Taken {
+                deep: true,
+                compared: true,
+                errors: cst.errors,
+                fallback: None,
+                why,
+                accepted: verdict.accepted(),
+                losses: verdict.losses(),
+            },
         );
         return deep;
     }
