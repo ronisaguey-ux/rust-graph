@@ -7,15 +7,14 @@
 //! as a tree or as a clean refusal. A panic anywhere fails the test by itself,
 //! which is the point: nothing here catches one.
 
-#[cfg(all(feature = "deep", feature = "parser"))]
+#![cfg(all(feature = "deep", feature = "parser"))]
+
 #[path = "../src/deep/mod.rs"]
 mod deep;
 
-#[cfg(all(feature = "deep", feature = "parser"))]
 #[path = "../src/deep_integration.rs"]
 mod deep_integration;
 
-#[cfg(all(feature = "deep", feature = "parser"))]
 use deep_integration::Lang;
 
 const SOURCES: [(&str, Lang); 5] = [
