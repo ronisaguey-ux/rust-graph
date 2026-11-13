@@ -1869,6 +1869,30 @@ impl<'a> Parser<'a> {
         Some(head)
     }
 
+    /// `class` as the value of an assignment: the name it spells, if any,
+    /// and its bases. `= class extends B {` is anonymous — the CST gives that
+    /// class no name of its own, so neither does the lexer.
+    fn assigned_class_head(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {
+        let at = toks.iter().position(|t| t.kind == Kind::Ident && self.raw(t) == b"class")?;
+        let mut name = String::new();
+        let mut bases = Vec::new();
+        let mut next = at + 1;
+        match self.word_at(toks, next) {
+            Some(word) if word != "extends" => {
+                name = word;
+                next += 1;
+            }
+            _ => {}
+        }
+        if self.word_at(toks, next).as_deref() == Some("extends") {
+            let (base, _, _) = self.name_chain(toks, next + 1);
+            if !base.is_empty() {
+                bases.push(base);
+            }
+        }
+        Some((name, bases))
+    }
+
     /// `name = function (a) {`, `name = (a) => ...`, `name <- function(a)`.
     fn assigned_head(&self, toks: &[Token]) -> Option<Head> {
         // `type Fn = (x: number) => void` is an assignment shape with a type on
@@ -2160,6 +2184,20 @@ impl<'a> Parser<'a> {
             return;
         }
         let line = first.line;
+        // `X = class Y { … }` and `module.exports = class …`: a class
+        // expression is the definition an assigned function is — the walk
+        // opens the class body as its own symbol and the CST writes no event.
+        // Read as a value, `class`, the class name and `extends B` became
+        // three names the CST never wrote.
+        if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX") {
+            if let Some(equal) = self.top_level_assign(stmt) {
+                if let Some((name, bases)) = self.assigned_class_head(&stmt[equal + 1..]) {
+                    self.last_line = stmt[stmt.len() - 1].line;
+                    self.push_class(name, bases, first.col);
+                    return;
+                }
+            }
+        }
         if let Some(equal) = self.top_level_assign(stmt) {
             let augmented = self.raw(&stmt[equal]) != b"=" && !matches!(self.raw(&stmt[equal]), b":=" | b"<-");
             self.note_class(&stmt[..equal], &stmt[equal + 1..]);
