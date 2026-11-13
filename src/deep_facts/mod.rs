@@ -671,7 +671,19 @@ impl<'a> Walker<'a> {
             "public_field_definition" | "field_definition" | "property_signature" if self.is_js() => {
                 self.field(id)
             }
-            "throw_statement" | "decorator" => self.expression_statement(id),
+            "throw_statement" => self.expression_statement(id),
+            // `@dec` / `@Component({...})` decorates the declaration that
+            // follows; in JS/TS it is not a statement. Read as an expression
+            // statement it wrote an assignment of `dec` on the decorator line,
+            // and the lexer records only the name there, so the decorated
+            // member's event had no counterpart (the last TS construct in
+            // P4-02). Python spells a decorator with the same node kind but its
+            // reader does model the line, so only the JS family skips it.
+            "decorator" => {
+                if !self.is_js() {
+                    self.expression_statement(id);
+                }
+            }
             // `raise E(x) from c(y)`, `assert a(v), b(v)`, `del xs[k(v)]`:
             // every value-bearing child is read, not only the first.
             // `raise ConfigError(f"..")`: the form fills the call table, but

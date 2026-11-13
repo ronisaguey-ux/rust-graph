@@ -843,6 +843,28 @@ impl<'a> Parser<'a> {
             self.brackets.clear();
             return;
         }
+        // `@dec` and `@Component({...})` written on their own line decorate the
+        // declaration that follows: a decorator is not a statement, so it writes
+        // no event. A decorator sharing its line with a declaration is not
+        // caught here: that statement carries the class/function keyword and is
+        // read normally.
+        if matches!(self.lang.tag, "TS" | "TSX")
+            && self.stmt.len() > 1
+            && self.is_op(&self.stmt[0], b"@")
+            && !self.stmt.iter().any(|token| {
+                token.kind == Kind::Ident
+                    && matches!(
+                        self.raw(token),
+                        b"class" | b"function" | b"interface" | b"enum" | b"namespace"
+                            | b"module" | b"let" | b"const" | b"var" | b"export" | b"declare"
+                            | b"abstract" | b"async"
+                    )
+            })
+        {
+            self.brackets.clear();
+            self.stmt.clear();
+            return;
+        }
         // `pub(super) fn parse_with(..) -> (Workspace, Outcome)` is a
         // declaration header, not a statement: the block it opens is the same
         // symbol, and the header carries no value the CST records.
