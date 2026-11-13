@@ -1851,6 +1851,17 @@ impl<'a> Walker<'a> {
             }
             "pair" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                // `{ [key]: 1 }`: the one-pass reader writes the computed key as
+                // a list holding the name in it, and the pair there is the key,
+                // not a key/value merge.
+                if items.first().is_some_and(|&first| self.kind(first) == "computed_property_name") {
+                    let inner = self
+                        .children(items[0])
+                        .into_iter()
+                        .find(|&child| !self.is_layout(child));
+                    let value = inner.map(|child| self.form(child)).unwrap_or_else(|| "0".to_string());
+                    return format!("[\"t\",[{value}]]");
+                }
                 match items.len() {
                     // `{ type: "boolean" }`: a key spelled like a keyword (`type`,
                     // `class`, `default`) has that keyword as its kind, so

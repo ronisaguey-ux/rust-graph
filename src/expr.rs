@@ -555,6 +555,14 @@ impl Emit<'_> {
                 || self.is_op(0, b"?.")
                 || (self.is_op(0, b":") && self.op_byte(2) == b'(' && self.lang.tag == "LUA");
             if separator {
+                // `a?.()`: the optional chain is a call with no member name
+                // between the separator and the parenthesis. Leaving it to be
+                // rescanned as an operator made the lexer read the whole thing
+                // as the name `a`, so the call the CST records was lost.
+                if self.is_op(0, b"?.") && self.op_byte(1) == b'(' {
+                    self.pos += 1;
+                    continue;
+                }
                 if let Some(name) = self.word(1) {
                     self.pos += 2;
                     path.push('.');
