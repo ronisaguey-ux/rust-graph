@@ -77,6 +77,7 @@ const JAVASCRIPT_VALID: &[(&str, &str)] = &[
     ("jsx_elements.jsx", "lexical_declaration lexical_declaration lexical_declaration lexical_declaration lexical_declaration lexical_declaration lexical_declaration"),
     ("jsx_nested.jsx", "lexical_declaration lexical_declaration"),
     ("jsx_types.tsx", "type_alias_declaration function_declaration lexical_declaration"),
+    ("keyword_keys.js", "lexical_declaration lexical_declaration export_statement"),
     ("math_stats.js", "function_declaration function_declaration function_declaration lexical_declaration lexical_declaration lexical_declaration expression_statement"),
     ("node_stream.js", "lexical_declaration lexical_declaration lexical_declaration class_declaration function_declaration if_statement expression_statement"),
     ("reducers.js", "lexical_declaration export_statement export_statement export_statement"),
