@@ -2217,7 +2217,16 @@ fn is_type_property_line(src: &Lines<'_>, line: u32) -> bool {
     // the semicolon left a head ending in `?`, which named nothing and made the
     // line a fallback.
     head = head.trim_end_matches(|ch| ch == ';' || ch == '?').trim();
-    !head.is_empty() && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.')
+    // A property name may be a string literal — `"DELETE /app/{id}":
+    // Operation<…>;` is a signature in an interface, and the path in the name is
+    // not an expression. Three `.d.ts` files in the corpus write about a
+    // thousand of these each, which made them the largest loss bucket by far.
+    let quoted = (head.starts_with('"') && head.ends_with('"')) || (head.starts_with('\'') && head.ends_with('\''));
+    let computed = head.starts_with('[') && head.ends_with(']');
+    !head.is_empty()
+        && (quoted
+            || computed
+            || head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.'))
 }
 
 /// A `=` that assigns, as opposed to the arrow `=>` a function type is written

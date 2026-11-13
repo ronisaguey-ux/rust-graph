@@ -615,3 +615,19 @@ fn an_import_alias_is_not_an_assignment() {
     let verdict = pipeline::loses_in(&lexer, &deep, source);
     assert!(!verdict.lost(), "an import alias is an import: {verdict:?}");
 }
+
+/// A property name may be a string literal: `"DELETE /app/{id}": Operation<…>;`
+/// is a signature in an interface, and the path inside the name is not an
+/// expression. Three `.d.ts` files write about a thousand of these each, which
+/// made them the largest loss bucket in the corpus — 4,673 losses down to 1,036
+/// once the line is recognised.
+#[test]
+fn a_string_literal_property_name_is_a_declaration() {
+    let source = "export interface E {\n    \"DELETE /app/{id}\": Operation<\"/a\", \"delete\">;\n}\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "a quoted property name is a declaration: {verdict:?}");
+}
