@@ -843,8 +843,19 @@ mod deep_run {
         // Pass one decides and pass two renders; a `String` and a flag per
         // parsed file is the whole cost.
         static RECORDS: RefCell<Vec<(String, Taken)>> = const { RefCell::new(Vec::new()) };
+        // The file being parsed, for the `RG_LOSSES` dump: a loss line is only
+        // actionable if it names the file it came from.
+        static CURRENT: RefCell<String> = const { RefCell::new(String::new()) };
         // Only `--compare` writes here: one row per file with both weights.
         static COMPARED: RefCell<Vec<Compared>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn enter(path: &str) {
+        CURRENT.with(|cell| *cell.borrow_mut() = path.to_string());
+    }
+
+    pub(super) fn current() -> String {
+        CURRENT.with(|cell| cell.borrow().clone())
     }
 
     pub(super) fn record(path: &str, taken: Taken) {
@@ -1534,7 +1545,10 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         });
         if !same {
             let detail = format!("import {} name {} alias {}", import.module, import.name, import.alias);
-            return verdict(Some("import"), detail, accepted);
+                        if std::env::var_os("RG_LOSSES").is_some() {
+                eprintln!("loss\t{}\timport\t{}", deep_run::current(), detail);
+            }
+return verdict(Some("import"), detail, accepted);
         }
     }
     phase!(0);
@@ -1580,7 +1594,10 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         };
         if !same {
             let detail = format!("symbol {} kind {} line {}", symbol.name, symbol.kind, symbol.line);
-            return verdict(Some("symbol"), detail, accepted);
+                        if std::env::var_os("RG_LOSSES").is_some() {
+                eprintln!("loss\t{}\tsymbol\t{}", deep_run::current(), detail);
+            }
+return verdict(Some("symbol"), detail, accepted);
         }
     }
     phase!(1);
@@ -1625,7 +1642,10 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
                     continue;
                 }
                 let detail = format!("call {} line {} in {}", call.path, call.line, symbol.name);
-                return verdict(Some("call"), detail, accepted);
+                            if std::env::var_os("RG_LOSSES").is_some() {
+                eprintln!("loss\t{}\tcall\t{}", deep_run::current(), detail);
+            }
+return verdict(Some("call"), detail, accepted);
             }
         }
     }
@@ -1648,7 +1668,10 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
         let found = deep_var_counts.get(&key).copied().unwrap_or(0);
         if found < wanted {
             let detail = format!("var {} = {}", pair.0, pair.1);
-            return verdict(Some("var"), detail, accepted);
+                        if std::env::var_os("RG_LOSSES").is_some() {
+                eprintln!("loss\t{}\tvar\t{}", deep_run::current(), detail);
+            }
+return verdict(Some("var"), detail, accepted);
         }
     }
     phase!(3);
@@ -1709,8 +1732,9 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
             // fallback names, so a corpus sweep can be grouped by construct
             // instead of guessed at from the first line of each file.
             if std::env::var_os("RG_LOSSES").is_some() {
+                let at = deep_run::current();
                 for detail in &details {
-                    eprintln!("loss\t{}", detail);
+                    eprintln!("loss\t{at}\tevent\t{}", detail);
                 }
             }
             let mut found = verdict(Some("event"), first.clone(), accepted);
@@ -2213,12 +2237,22 @@ fn is_type_property_line(src: &Lines<'_>, line: u32) -> bool {
     let modified = ["private ", "protected ", "public ", "static ", "readonly ", "declare ", "abstract "]
         .iter()
         .any(|keyword| text.starts_with(keyword));
-    if colon == text.len() && !modified {
+    // `#private;` declares a private field with no type and no modifier word.
+    if colon == text.len() && !modified && !head.starts_with('#') {
         return false;
     }
-    for keyword in ["declare ", "var ", "let ", "const ", "readonly ", "static ", "public ", "private ", "protected "] {
-        if let Some(rest) = head.strip_prefix(keyword) {
-            head = rest.trim();
+    // Modifiers come in any order — `private static`, `public readonly` — and
+    // one pass over the list strips only the first it happens to meet, because
+    // the later keyword has already been tested. Strip until nothing changes.
+    loop {
+        let before = head;
+        for keyword in ["declare ", "var ", "let ", "const ", "readonly ", "static ", "public ", "private ", "protected "] {
+            if let Some(rest) = head.strip_prefix(keyword) {
+                head = rest.trim();
+            }
+        }
+        if head == before {
+            break;
         }
     }
     // `private _isDirty;` has no colon at all, so the semicolon is the end of
@@ -2232,9 +2266,12 @@ fn is_type_property_line(src: &Lines<'_>, line: u32) -> bool {
     // not an expression. Three `.d.ts` files in the corpus write about a
     // thousand of these each, which made them the largest loss bucket by far.
     let quoted = (head.starts_with('"') && head.ends_with('"')) || (head.starts_with('\'') && head.ends_with('\''));
+    // `#private;` is a private field: the `#` is part of the name.
+    let hashed = head.starts_with('#') && head[1..].chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$');
     let computed = head.starts_with('[') && head.ends_with(']');
     !head.is_empty()
-        && (quoted
+        && (hashed
+            || quoted
             || computed
             || head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.'))
 }
@@ -3358,6 +3395,7 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
     use gate::deep_integration::{self, Lang};
 
     let mode = deep_run::get();
+    deep_run::enter(path);
     if mode == PathMode::Lexer {
         deep_run::record(path, deep_run::Taken::default());
         return parser::parse(bytes, language);

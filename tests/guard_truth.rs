@@ -703,3 +703,19 @@ fn wrapped_type_continuation_lines_are_not_statements() {
     let verdict = pipeline::loses_in(&lexer, &deep, source);
     assert!(!verdict.lost(), "a wrapped type is not a statement: {verdict:?}");
 }
+
+/// Modifiers come in any order, and a private field's name starts with `#`:
+/// `private static splitStringBySpace;`, `private readonly _textureMatrix: Matrix;`
+/// and `#private;` are all declarations. The strip loop used to run once over a
+/// fixed keyword list, so `private static` kept its `static` and never matched a
+/// name — the largest single loss cluster in the TypeScript corpus.
+#[test]
+fn member_modifiers_in_any_order_are_declarations() {
+    let source = "class A {\n    #private;\n    private static splitStringBySpace;\n    private readonly _textureMatrix: Matrix;\n}\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "a member with modifiers is a declaration: {verdict:?}");
+}
