@@ -125,6 +125,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "function f(a) {\n  const o = { a, b: 1, c(x) { return x; }, ...a };\n  return o.b;\n}\n",
     ),
     (
+        "multi-line ternary",
+        "function f(a, b) {\n  const x = a\n    ? b\n    : 0;\n  return x;\n}\n",
+    ),
+    (
         "null and undefined literals",
         "function f(x) {\n  if (x) return null;\n  return undefined;\n}\n",
     ),

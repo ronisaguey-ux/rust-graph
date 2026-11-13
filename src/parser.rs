@@ -126,6 +126,42 @@ impl<'a> Parser<'a> {
         toks.get(index).filter(|token| token.kind == Kind::Ident).map(|token| self.text(token))
     }
 
+    /// Whether the statement being read is a `var` / `let` / `const` declaration,
+    /// possibly behind `export`, `declare` or `default`. Only those statements
+    /// keep several bindings behind top-level commas; anywhere else a comma is
+    /// the comma operator and belongs to the expression.
+    fn declarator_list(&self) -> bool {
+        for token in &self.stmt {
+            if token.kind == Kind::Ident {
+                return matches!(self.raw(token), b"var" | b"let" | b"const");
+            }
+            match self.raw(token) {
+                b"export" | b"declare" | b"default" => continue,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Whether the statement so far is inside a `<...>` type-argument list.
+    /// `const cfg = x satisfies Record<string, number>` has a comma at bracket
+    /// depth zero - `<` is not a bracket - but it is a type, not a declarator
+    /// separator, so the declarator rule must not split there.
+    fn inside_type_arguments(&self) -> bool {
+        let mut depth = 0i32;
+        for token in &self.stmt {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"<" | b"<=" => depth += 1,
+                b">" | b">=" | b"->" | b"=>" => depth -= 1,
+                _ => {}
+            }
+        }
+        depth > 0
+    }
+
     fn top(&self) -> &Frame {
         self.frames.last().expect("the module frame is never popped")
     }
@@ -314,6 +350,18 @@ impl<'a> Parser<'a> {
             // ended at `}`, so its trailing comma is not the start of the next
             // arm.
             b',' if self.brackets.is_empty() && self.stmt.is_empty() => {}
+            // A declarator list is several bindings, and the CST writes one
+            // event per binding: `var x0 = 0,` newline `x1 = 1;` is two
+            // declarations on two lines, not one tuple on the first. Ending the
+            // statement at a top-level comma inside var/let/const makes the
+            // reader write the same two.
+            b',' if self.brackets.is_empty()
+                && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                && self.declarator_list()
+                && !self.inside_type_arguments() =>
+            {
+                self.end_statement();
+            }
             b',' if self.brackets.is_empty() && self.stmt.iter().any(|token| self.is_op(token, b"=>")) => {
                 self.stmt.push(token);
                 self.end_statement();
@@ -393,6 +441,18 @@ impl<'a> Parser<'a> {
             return false;
         }
         if self.is_op(&last, b"=>") || (self.is_op(&last, b"->") && !self.brackets.is_empty()) {
+            return true;
+        }
+        // `case 1: { ... }` and `default: { ... }`: the brace after a case label
+        // opens a block, not an object. Read as an object the whole block became
+        // one value on the case line, which the CST never writes - every case
+        // with a block body lost its statements to a merge at the label's line.
+        if self.is_op(&last, b":")
+            && matches!(
+                self.word_at(&self.stmt, 0).as_deref(),
+                Some("case") | Some("default")
+            )
+        {
             return true;
         }
         if !self.brackets.is_empty() {
@@ -521,8 +581,21 @@ impl<'a> Parser<'a> {
             self.stmt.clear();
             return;
         }
-        self.import_of(&stmt);
-        if let Some((name, bases)) = self.class_head(&stmt) {
+        // `case 1:` and `default:` label the block that follows: the CST writes
+        // no event for the label, and a label is not a value.
+        let label_only = matches!(
+            self.word_at(&stmt, 0).as_deref(),
+            Some("case") | Some("default")
+        );
+        if !label_only {
+            self.import_of(&stmt);
+        }
+        if label_only {
+            let symbol = self.top().symbol;
+            let class = self.top().class.clone();
+            let receiver = self.top().receiver.clone();
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+        } else if let Some((name, bases)) = self.class_head(&stmt) {
             self.push_class(name, bases, start_col);
         } else if let Some(head) = self.function_head(&stmt, true) {
             self.push_function(head, start_col, None);
