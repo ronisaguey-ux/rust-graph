@@ -680,3 +680,20 @@ fn deep_facts_the_deep_path_parses_every_fixture() {
         let _ = deep_facts::extract(&src, &cst, lang_of(&path));
     }
 }
+
+#[test]
+fn deep_facts_a_pair_key_spelled_like_a_keyword_is_a_name() {
+    // `{ type: "boolean", default: false, class: "solid" }`: each key's node
+    // kind is the keyword itself, so the layout filter drops it and the pair
+    // would read m:[0] where the lexer reads m:[m:[n:type,0]]. The name must
+    // survive whatever is_layout says, which is what this pins.
+    let path = fixtures_dir().join("javascript/keyword_keys.js");
+    let deep = deep_facts(&path);
+    let events = deep.symbols.iter().map(|symbol| symbol.events.as_str()).collect::<Vec<_>>().join(" ");
+    for key in ["type", "default", "class"] {
+        assert!(
+            events.contains(&format!("[\"n\",\"{key}\"]")),
+            "the pair key {key} was read as layout: {events}"
+        );
+    }
+}
