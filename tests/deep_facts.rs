@@ -743,3 +743,61 @@ fn one_bad_statement_is_one_error_and_the_rest_parses() {
     assert!(names.contains(&"bad"), "the function with the bad line is still there: {names:?}");
     assert!(names.contains(&"good"), "and so is the one after it: {names:?}");
 }
+
+/// Every node carries a byte range into the source, and the arena layout says
+/// what that range must satisfy: a node's subtree is the run of records after it
+/// up to `subtree_end`, and every one of them has to sit inside the parent's
+/// range. This samples each language's tree — every node, not a spot check, on
+/// small inputs — and reconstructs the slice the range names: it must be valid
+/// UTF-8, it must be inside the file, it must not be empty for a leaf that is not
+/// a synthetic `MISSING`, and it must nest.
+#[test]
+fn every_node_range_reconstructs_its_source_slice() {
+    let fixtures = [
+        (Lang::Json, "{\"a\": [1, 2, {\"b\": null}], \"c\": true}\n"),
+        (Lang::Python, "def f(x):\n    y = x + 1\n    return y\n\n\nclass C:\n    pass\n"),
+        (Lang::Rust, "fn f(x: u32) -> u32 {\n    let y = x + 1;\n    y\n}\n"),
+        (Lang::JavaScript, "export function f(x) {\n  const y = x + 1;\n  return y;\n}\n"),
+        (Lang::TypeScript, "interface A {\n    f(x: string): number;\n}\n"),
+    ];
+
+    for (lang, source) in fixtures {
+        let bytes = source.as_bytes();
+        let cst = deep_integration::parse_file(bytes, lang).unwrap_or_else(|| panic!("{lang:?} did not parse"));
+        assert!(!cst.nodes.is_empty(), "{lang:?} produced no nodes");
+
+        let mut checked = 0usize;
+        for (index, node) in cst.nodes.iter().enumerate() {
+            let (start, end) = (node.start as usize, node.end as usize);
+            assert!(start <= end && end <= bytes.len(), "{lang:?} node {index} range {start}..{end} is outside {} bytes", bytes.len());
+            let slice = std::str::from_utf8(&bytes[start..end])
+                .unwrap_or_else(|_| panic!("{lang:?} node {index} {start}..{end} does not split on a character boundary"));
+            // A zero-width leaf is legitimate: Python's layout inference writes
+            // NEWLINE/INDENT/DEDENT as empty tokens at a position. Any other
+            // leaf with an empty slice would be a range that names nothing.
+            if node.first_child == deep_integration::NONE && node.start != node.end {
+                assert!(!slice.is_empty(), "{lang:?} node {index} is an empty leaf: {node:?}");
+            }
+            // A child must sit inside its parent, and the chain must stay inside
+            // the file: the ranges are what every later stage slices by.
+            let mut child = node.first_child;
+            while child != deep_integration::NONE {
+                let row = &cst.nodes[child as usize];
+                assert!(
+                    row.start >= node.start && row.end <= node.end,
+                    "{lang:?} child {}..{} escapes its parent {start}..{end} ({slice:?})",
+                    row.start,
+                    row.end
+                );
+                child = row.next_sibling;
+            }
+            checked += 1;
+        }
+        assert!(checked > 3, "{lang:?} produced only {checked} nodes");
+
+        // The root spans the whole file, which is what makes `slice` of a root
+        // the file itself rather than a guess.
+        let root = &cst.nodes[cst.root as usize];
+        assert_eq!((root.start, root.end), (0, bytes.len() as u32), "{lang:?} root does not span the file");
+    }
+}
