@@ -431,3 +431,32 @@ fn an_ambiguous_pair_is_counted_not_silently_resolved() {
         verdict.accepted()
     );
 }
+
+/// Duplicate names are paired by line, not by the first match. Two functions
+/// called `f` in one file — a real shape in bundled JS, where a redefinition
+/// shadows the earlier one — must pair each lexer symbol with the CST symbol on
+/// its own line. Pairing `f` with the first symbol named `f` would hand the
+/// second body the first body's calls and report a loss that does not exist.
+#[test]
+fn duplicate_function_names_are_paired_by_their_line() {
+    let source = "function f() {\n  g(1);\n}\nfunction f() {\n  h(2);\n}\n";
+    let language = langs::by_content("js", source.as_bytes()).expect("a JavaScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::JavaScript);
+    let same_name = |facts: &Facts| facts.symbols.iter().filter(|row| row.name == "f").count();
+    assert_eq!(same_name(&lexer), 2, "the fixture needs two symbols named f: {lexer:?}");
+    assert_eq!(same_name(&deep), 2, "and the CST must write both: {deep:?}");
+
+    // The two symbols are distinguishable only by line, which is why the
+    // preference is the near-line one: a name-keyed lookup would have to guess
+    // which body it was comparing.
+    let lines = |facts: &Facts| {
+        facts.symbols.iter().filter(|row| row.name == "f").map(|row| row.line).collect::<Vec<_>>()
+    };
+    assert_eq!(lines(&lexer), vec![1, 4], "the lexer stamps both bodies");
+    assert_eq!(lines(&deep), vec![1, 4], "and so does the CST");
+
+    let verdict = pipeline::loses(&lexer, &deep);
+    assert!(!verdict.lost(), "near-line pairing pairs each body with its own: {verdict:?}");
+}
