@@ -105,16 +105,15 @@ const COVERAGE: &[(&str, &str)] = &[
         "JS node set: classes, optional chaining and exports",
         "export default class A extends B {\n  #secret = 1;\n  static count = 0;\n  get value(): number {\n    return this.#secret;\n  }\n  call(x?: { d(): number }) {\n    return x?.d() ?? 0;\n  }\n}\n",
     ),
-];
-
-/// Constructs the reader does not cover yet, with the exact disagreement.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[
     (
         "decorators on a class, a method and a property",
         "function dec(...args: unknown[]) {\n  return args;\n}\n@dec\nclass A {\n  @dec\n  field: number = 1;\n  @dec\n  method() {\n    return this.field;\n  }\n}\n",
-        "the CST is the wrong reader here: for `@dec class A {}` it writes both `x n:dec` and an assignment `a dec` at the decorator line, which a decorator is not - `@dec` is a call of dec on the class. The lexer writes only `x n:dec`. Closing this means fixing the CST's decorator handling, not the lexer's",
     ),
 ];
+
+/// Constructs the reader does not cover yet, with the exact disagreement.
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[];
+
 
 #[test]
 fn every_claimed_typescript_construct_reads_the_same_on_both_paths() {

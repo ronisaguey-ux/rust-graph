@@ -962,8 +962,15 @@ impl<'a> Walker<'a> {
     pub(crate) fn field(&mut self, id: u32) {
         let children = self.children(id);
         // `static count = 0` has the modifier first: the name is the first child
-        // that is not layout, not the first child outright.
-        let Some(&name_node) = children.iter().find(|&&child| !self.is_layout(child)) else { return };
+        // that is not layout, not the first child outright. A decorator is also
+        // not the name: `@dec\nfield: number = 1` opens with the decorator node,
+        // and reading it as the binder wrote `a dec` on the decorator's line
+        // while the member's own event vanished.
+        let Some(&name_node) = children.iter().find(|&&child| {
+            !self.is_layout(child) && !matches!(self.kind(child), "decorator" | "decorator_call_expression")
+        }) else {
+            return
+        };
         let Some(equal) = children.iter().position(|&child| self.kind(child) == "=") else { return };
         let Some(&value) = children.get(equal + 1) else { return };
         let targets = self.pattern_names(name_node);
