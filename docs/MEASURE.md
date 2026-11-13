@@ -44,6 +44,28 @@ other people's code.
 A record is the JSON `build --stdout` prints; the fields that matter are
 `files`, `sources[].deep_fallback` and `deep.mode`.
 
+Sweep with the harness in this repository, not a copy in `/tmp`, so the record it
+writes outlives the box:
+
+```bash
+python3 tools/shard_sweep.py /tmp/opencode/sweep-local/js /tmp/js.json 6
+```
+
+It writes `/tmp/js.json` and `/tmp/js.json.reasons.json`. The second file is the
+per-language reason histogram, and it exists because a single number hides a
+trade: a phase that fixes twelve missing events and introduces twelve missing
+symbols reports the same total as a phase that did nothing. Compare the two
+histograms, not just the two totals:
+
+```bash
+python3 - <<'EOF'
+import json
+for phase in ("before", "after"):
+    d = json.load(open(f"/tmp/{phase}.reasons.json"))["reasons"]
+    print(phase, d)
+EOF
+```
+
 ## 3. Prove a delta is explained
 
 ```bash
