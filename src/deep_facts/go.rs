@@ -648,6 +648,14 @@ impl<'a> Walker<'a> {
                 "identifier" | "property_identifier" | "private_property_identifier" => {
                     out.push(self.text_string(node).trim_start_matches('#').to_string())
                 }
+                // The TypeScript grammar gives `is`, `as` and `satisfies` their
+                // own node kind because they are type-position keywords, so
+                // `const is = require('./get')` bound nothing and the import
+                // vanished from the record. A binder is a binder whatever the
+                // keyword table calls the word.
+                "is" | "as" | "satisfies" | "get" | "set" | "static" | "async" | "readonly" | "declare" => {
+                    out.push(self.text_string(node))
+                }
                 _ => {
                     let mut child = self.node(node).first_child;
                     while child != NONE {
