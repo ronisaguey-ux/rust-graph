@@ -86,6 +86,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "class A {\n  readonly id: number = 1;\n  name!: string;\n  get label(): string {\n    return this.name;\n  }\n  set label(v: string) {\n    this.name = v;\n  }\n}\n",
     ),
     (
+        "satisfies and as clauses",
+        "const cfg = { a: 1 } satisfies Record<string, number>;\nconst n = (cfg as unknown as { a: number }).a;\n",
+    ),
+    (
         "JS node set: statements, arrows, destructuring and templates",
         "function f({ a, b }: { a: number; b: number }, [c]: number[]) {\n  const double = (x: number) => x * 2;\n  const s = tag`v ${a} ${b} ${c}`;\n  return double(a) + s.length;\n}\n",
     ),
@@ -101,11 +105,6 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
         "decorators on a class, a method and a property",
         "function dec(...args: unknown[]) {\n  return args;\n}\n@dec\nclass A {\n  @dec\n  field: number = 1;\n  @dec\n  method() {\n    return this.field;\n  }\n}\n",
         "an `@dec` line is skipped, but the class member it decorates is still read at the decorator's line (event `a dec` line 6 against the CST's `field` line 7)",
-    ),
-    (
-        "satisfies and as clauses",
-        "const cfg = { a: 1 } satisfies Record<string, number>;\nconst n = (cfg as unknown as { a: number }).a;\n",
-        "ending the value at `as`/`satisfies` in `expr::mix` is the right rule but the writer emits an empty slot (`[\"a\",30,[...],[\"n\",\"undefined\"],,0]`) and the sweep stops parsing JSON; reverted before any number was trusted",
     ),
     (
         "type aliases: unions, intersections, function and tuple types",
