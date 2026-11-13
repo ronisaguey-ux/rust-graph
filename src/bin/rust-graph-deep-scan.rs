@@ -228,7 +228,7 @@ fn conformance(root: &str, reps: usize) -> Result<(), String> {
     }
     let declared: usize = languages.values().map(|entry| entry.3).max().unwrap_or(0);
     println!(
-        "summary\tfiles={} bytes={} nodes={} kinds={}/{} errors={} clean={}/{} total_ms={:.1} mean_ms={:.3}",
+        "summary\tfiles={} bytes={} nodes={} kinds={}/{} errors={} clean={}/{} total_ms={:.1} mean_ms={:.3} allocations={}",
         total_files,
         total_bytes,
         total_nodes,
@@ -239,6 +239,7 @@ fn conformance(root: &str, reps: usize) -> Result<(), String> {
         total_files,
         total_ms,
         total_ms / total_files.max(1) as f64,
+        Workspace::allocations(),
     );
     for (name, (files, nodes, errors, declared, clean)) in languages {
         println!("language\t{name}\tfiles={files}\tnodes={nodes}\terrors={errors}\tdeclared_kinds={declared}\tclean={clean}/{files}");
