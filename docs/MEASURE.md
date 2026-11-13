@@ -16,9 +16,10 @@ cargo build --features "deep parser"
 The binary lands at
 `$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/debug/rust-graph`.
 
-`--features event-split` and any `cargo test` run in the same target directory
-**overwrite** that binary without the `deep` feature; the symptom is
-`unknown option --lexer`. Rebuild before measuring.
+Any `cargo test` run in the same target directory **overwrites** that binary
+without the `deep` feature; the symptom is `unknown option --lexer`. Rebuild
+before measuring. (The `event-split` feature was deleted on 2026-11-13: it never
+beat the default on the measurement subset, so it is gone rather than dormant.)
 
 ## 2. Measure one corpus
 
@@ -77,7 +78,8 @@ moved clean → fallback without a named reason: that is a regression and the
 commit does not happen. `--by lang,reason` groups the delta; `--json` prints it.
 
 The comparison is only meaningful between records of the same corpus and the same
-binary features. A sweep made with `event-split` compares to nothing.
+binary features. A sweep made against a binary built for another feature set
+compares to nothing.
 
 ## 4. The suites
 
