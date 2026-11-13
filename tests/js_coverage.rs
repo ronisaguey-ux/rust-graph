@@ -121,6 +121,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "const key = 'k';\nconst o = { [key]: 1 };\n",
     ),
     (
+        "object literals: shorthand, keyed, method and spread",
+        "function f(a) {\n  const o = { a, b: 1, c(x) { return x; }, ...a };\n  return o.b;\n}\n",
+    ),
+    (
         "null and undefined literals",
         "function f(x) {\n  if (x) return null;\n  return undefined;\n}\n",
     ),
