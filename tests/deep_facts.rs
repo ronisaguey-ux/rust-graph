@@ -547,6 +547,76 @@ fn deep_facts_a_multiline_definition_is_stamped_where_it_starts() {
     assert_eq!((lexer_line, deep_line), (Some(7), Some(6)));
 }
 
+/// The two readers' facts for one source string, built the way the file
+/// helpers build them. Each test below uses a line copied from the corpus, so a
+/// call shape is pinned to the syntax it really appeared in.
+fn facts_from_source(src: &str) -> (facts::Facts, facts::Facts) {
+    let language = langs::by_content("js", src.as_bytes()).expect("a lexer row");
+    let lexer = parser::parse(src.as_bytes(), language);
+    let cst = deep_integration::parse_file(src.as_bytes(), Lang::JavaScript).expect("a deep parse");
+    let deep = deep_facts::extract(src.as_bytes(), &cst, Lang::JavaScript);
+    (lexer, deep)
+}
+
+fn call_paths(facts: &facts::Facts, symbol: &str) -> Vec<String> {
+    facts
+        .symbols
+        .iter()
+        .filter(|row| row.name == symbol)
+        .flat_map(|row| row.calls.iter().map(|call| call.path.clone()))
+        .collect()
+}
+
+#[test]
+fn deep_facts_a_member_call_from_the_corpus_is_one_path() {
+    // js/000142_index.js:153 `res.setHeader(header.key, header.value);`
+    let (lexer, deep) = facts_from_source(
+        "function f(req, res, header) {\n  res.setHeader(header.key, header.value);\n}\n",
+    );
+    assert_eq!(call_paths(&lexer, "f"), vec!["res.setHeader"]);
+    assert_eq!(call_paths(&deep, "f"), vec!["res.setHeader"]);
+}
+
+#[test]
+fn deep_facts_an_optional_call_from_the_corpus_is_one_path() {
+    // js/000629_index.js:22 `options.skip?.(c.req.path)`
+    let (lexer, deep) = facts_from_source(
+        "function f(req, options) {\n  options.skip?.(req.path);\n}\n",
+    );
+    assert_eq!(call_paths(&lexer, "f"), vec!["options.skip"]);
+    assert_eq!(call_paths(&deep, "f"), vec!["options.skip"]);
+}
+
+#[test]
+fn deep_facts_a_tagged_template_from_the_corpus_names_the_tag() {
+    // js/001905_SqlMessageStorage.js:215 `sql\`INSERT IGNORE INTO ${messagesTableSql} ...\``
+    let (lexer, deep) = facts_from_source(
+        "function f(table, id) {\n  sql`INSERT IGNORE INTO ${table} VALUES (${id})`;\n}\n",
+    );
+    // The CST names the tag as the value the expression produces. The one-pass
+    // lexer does not read a template tag as a call at all — a gap in the lexer,
+    // not a disagreement the guard can see (it only asks whether the lexer's
+    // facts are in the CST's record), asserted here so it cannot change quietly.
+    assert_eq!(call_paths(&deep, "f"), vec!["sql"]);
+    assert!(call_paths(&lexer, "f").is_empty(), "the lexer now reads template tags as calls");
+}
+
+#[test]
+fn deep_facts_a_constructor_chain_from_the_corpus_names_both_halves() {
+    // js/000192_multipart.js:59 `new TextEncoder().encode(...)`
+    let (lexer, deep) = facts_from_source(
+        "function f(x) {\n  const enc = new TextEncoder().encode(x);\n  return enc;\n}\n",
+    );
+    // The CST keeps the constructor and the member call apart; the one-pass
+    // lexer pastes the receiver into the member path. Both name TextEncoder.
+    let deep_calls = call_paths(&deep, "f");
+    assert!(deep_calls.contains(&"TextEncoder".to_string()), "deep: {deep_calls:?}");
+    assert_eq!(deep_calls.iter().filter(|path| path.as_str() == ".encode").count(), 1, "deep: {deep_calls:?}");
+    let lexer_calls = call_paths(&lexer, "f");
+    assert!(lexer_calls.contains(&"TextEncoder".to_string()), "lexer: {lexer_calls:?}");
+    assert!(lexer_calls.iter().any(|path| path == "TextEncoder().encode"), "lexer: {lexer_calls:?}");
+}
+
 #[test]
 fn deep_facts_an_interface_is_not_a_class_and_its_methods_are_not_calls() {
     let path = fixtures_dir().join("typescript/store.ts");
