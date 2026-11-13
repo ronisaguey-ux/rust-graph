@@ -562,6 +562,10 @@ impl<'a> Walker<'a> {
                 | "shorthand_property_identifier"
                 | "true"
                 | "false"
+                // `null` is a literal, not punctuation: the lexer writes it as
+                // the name `n:null`, so a return that read it as layout wrote
+                // the constant 0 and lost the value.
+                | "null"
                 | "self"
                 | "this"
                 | "super"

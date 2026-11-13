@@ -120,6 +120,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "computed object key",
         "const key = 'k';\nconst o = { [key]: 1 };\n",
     ),
+    (
+        "null and undefined literals",
+        "function f(x) {\n  if (x) return null;\n  return undefined;\n}\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
