@@ -682,6 +682,12 @@ impl<'a> Parser<'a> {
     }
 
     fn control_condition_before(&mut self, stmt: &[Token]) {
+        // Python's `match subject:` is a switch and `case pattern:` is a label:
+        // neither writes a value the CST records, and the guard read both
+        // events as lost the moment the CST (rightly) wrote nothing.
+        if self.lang.tag == "PY" && matches!(self.raw(&stmt[0]), b"match" | b"case") {
+            return;
+        }
         if self.binding_index(stmt).is_none() && stmt.len() > 1 {
             self.expression_event("x", &stmt[1..]);
         }
@@ -982,6 +988,16 @@ impl<'a> Parser<'a> {
         }
         let colon = self.suite_colon(stmt);
         let header = &stmt[..colon.unwrap_or(stmt.len())];
+        // A Python `case pattern:` is a branch label, not a statement: it opens
+        // the arm's suite and writes no value. Falling through to
+        // simple_statement wrote an `x` event per case, and the CST writes none.
+        if self.lang.tag == "PY" && word.as_deref() == Some("case") && colon.is_some() {
+            if self.top().kind == FrameKind::Control {
+                self.event("[\"e\"]");
+            }
+            self.after_header(stmt, colon);
+            return;
+        }
         if let Some((name, bases)) = self.class_head(header) {
             self.push_class(name, bases, col);
         } else if let Some(mut head) = self.function_head(header, true) {
@@ -1034,7 +1050,12 @@ impl<'a> Parser<'a> {
                     let opens = CONTROL.contains(&first.as_str())
                         || self.lang.defs.contains(&first.as_str())
                         || self.lang.classes.contains(&first.as_str())
-                        || first == "async";
+                        || first == "async"
+                        // Python's `case pattern:` opens the arm's suite like a
+                        // header, but it is not a control word: without this the
+                        // colon was not a suite colon and the line fell through
+                        // to the expression path as a value named `case`.
+                        || (self.lang.tag == "PY" && first == "case");
                     return opens.then_some(index);
                 }
                 b":" if depth == 0 && index + 1 == stmt.len() => return Some(index),
@@ -1057,7 +1078,11 @@ impl<'a> Parser<'a> {
         if ARMS.contains(&word.as_str()) && self.top().kind == FrameKind::Control {
             self.event("[\"e\"]");
             self.final_arm(stmt);
-            self.expression_event("x", &stmt[1..]);
+            // Python's `case pattern:` is a label, not a value: the CST writes
+            // no event for it, so neither does the lexer.
+            if !(self.lang.tag == "PY" && word == "case") {
+                self.expression_event("x", &stmt[1..]);
+            }
             return;
         }
         if self.import_of(stmt) {
