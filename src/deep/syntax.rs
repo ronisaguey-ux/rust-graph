@@ -114,7 +114,10 @@ impl Language {
     /// only way a language can be incomplete is by declaring nothing, and that is
     /// what these two assertions refuse.
     pub const fn new(name: &'static str, root: Kind, kinds: &'static [KindInfo], lex: fn(&mut Cursor) -> Kind, parse: fn(&mut Parser)) -> Self {
-        assert!(!kinds.is_empty(), "a language must declare at least one kind");
+        // A root that is a runtime kind is always a mistake; an empty table is
+        // not — `crates/deep-fuzz` declares one on purpose to exercise exactly
+        // the "grammar with no kinds" path, so that assertion lives in the test
+        // that every registered grammar parses its own root, not here.
         assert!(root >= FIRST_LANGUAGE_KIND, "a root must be a language kind, not a runtime one");
         Language { name, root, kinds, lex, layout: None, parse }
     }
