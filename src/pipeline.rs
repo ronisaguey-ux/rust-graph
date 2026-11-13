@@ -1649,7 +1649,13 @@ fn uncovered(
         let identical = found.iter().position(|row| {
             row.0 == want.0 && row.1.line == want.1.line && row.1.targets == want.1.targets && row.1.value == want.1.value
         });
+        // `strict-pair` keeps only the identical row: the covering and the
+        // one-line tiers are what make a comparison forgiving, and a
+        // measurement has to say what they buy before trusting them.
         let paired_at = identical.or_else(|| {
+            if cfg!(feature = "strict-pair") {
+                return None;
+            }
             found
                 .iter()
                 .position(|row| row.0 == want.0 && row.1.line == want.1.line && covers(&row.1, &want.1, src).is_ok())
@@ -1662,6 +1668,11 @@ fn uncovered(
         }
     }
     for want in twice {
+        #[cfg(feature = "strict-pair")]
+        {
+            leftover.push(want);
+            continue;
+        }
         // A statement the lexer read as a bare expression is the CST's
         // assignment on the same line (`for (var name in all)` against the
         // CST's `a … name = all`), so that row is the right partner and is

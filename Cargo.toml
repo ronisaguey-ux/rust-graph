@@ -12,6 +12,9 @@ members = [
 [features]
 # owner: gideon | removal: never (the CST path is the product, not a phase)
 deep = ["dep:deep-rt", "dep:deep-lex", "dep:deep-grammars"]
+# owner: gideon | removal: after the P2 measurement (commit recorded when the
+# corpora are compared with and without it, see docs/PAIRING.md)
+strict-pair = []
 # owner: gideon | removal: never (the bridge in src/deep_integration.rs; a build
 # without it is the lexer-only build, which stays supported)
 parser = ["dep:rust-graph-deep"]
