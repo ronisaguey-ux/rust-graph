@@ -548,6 +548,9 @@ pub struct Workspace {
     pub events: Vec<Event>,
     pub tree: Tree,
     links: Vec<Link>,
+    /// How many parses grew a buffer of this workspace. Per-instance, so a test
+    /// measuring one workspace is not disturbed by another running in parallel.
+    allocations: u64,
 }
 
 impl Workspace {
@@ -557,6 +560,11 @@ impl Workspace {
     /// on every file is not reusing anything.
     pub fn allocations() -> u64 {
         ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many parses grew this workspace. The steady state is zero.
+    pub fn growth(&self) -> u64 {
+        self.allocations
     }
 
     /// The capacity of every buffer this workspace owns, summed: a parse that
@@ -614,6 +622,7 @@ impl Workspace {
         };
         self.tree.build(&mut self.events, &self.tokens, language, src.len() as u32);
         if self.capacity() != capacity {
+            self.allocations += 1;
             ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(outcome)
