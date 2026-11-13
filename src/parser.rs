@@ -281,6 +281,23 @@ impl<'a> Parser<'a> {
         matches!(self.src.get(at), Some(b'?') | Some(b':'))
     }
 
+    /// Whether the next line begins with `{`, the body of a function expression
+    /// whose head was written on the line above.
+    fn next_starts_with_brace(&self, end: usize) -> bool {
+        let mut at = end;
+        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r') {
+            at += 1;
+        }
+        if self.src.get(at) != Some(&b'\n') {
+            return false;
+        }
+        at += 1;
+        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r' | b'\n') {
+            at += 1;
+        }
+        self.src.get(at) == Some(&b'{')
+    }
+
     fn on_newline(&mut self) {
         if !self.brackets.is_empty() || self.stmt.is_empty() {
             return;
@@ -307,6 +324,19 @@ impl<'a> Parser<'a> {
             // on the line the statement starts and the split lost it.
             if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
                 && self.next_starts_with_ternary(last.end as usize)
+            {
+                return;
+            }
+            // `this.x = function()` newline `{ ... }`: the body of a function
+            // expression written with the brace on the next line belongs to the
+            // assignment. Ending the statement here wrote `a self.x 0` and left
+            // the body in the enclosing symbol, which the CST never does.
+            if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                && self.is_op(&last, b")")
+                && self.stmt.iter().any(|token| {
+                    token.kind == Kind::Ident && self.raw(token) == b"function"
+                })
+                && self.next_starts_with_brace(last.end as usize)
             {
                 return;
             }
