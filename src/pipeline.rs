@@ -1756,9 +1756,22 @@ fn uncovered(
                 ("no event of that marker within one line".to_string(), "no event on a line both readers can mean")
             }
         };
+        // Three rows, named: the lexer event that wanted a partner, the CST
+        // symbol it was compared inside, and the closest CST event found. A
+        // reader can then see the miss without a debug rebuild — the wanted row
+        // and the found row are the whole diagnosis.
         return Some(format!(
-            "event {} line {} targets {} in {} ({why}): lexer {}; CST {}",
-            want.0 as char, want.1.line, want.1.targets, symbol.name, want.1.value, other
+            "event {} line {} targets {} in {} (paired {} line {}): {why}; wanted line {} targets {} value {}; found {}",
+            want.0 as char,
+            want.1.line,
+            want.1.targets,
+            symbol.name,
+            paired.name,
+            paired.line,
+            want.1.line,
+            want.1.targets,
+            want.1.value,
+            other
         ));
     }
     None
