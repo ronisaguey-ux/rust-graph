@@ -1,0 +1,482 @@
+{
+ "deep": {
+  "000001_borderTopWidth.js": {
+   "events": 22,
+   "imports": 1,
+   "symbols": 5
+  },
+  "000002_index.js": {
+   "edges": 247,
+   "events": 1288,
+   "symbols": 108
+  },
+  "000003_state-manager.js": {
+   "edges": 7,
+   "events": 127,
+   "imports": 1,
+   "symbols": 18
+  },
+  "000004_RandomIdGenerator.js": {
+   "edges": 2,
+   "events": 18,
+   "symbols": 5
+  },
+  "000005_all_18.js": {
+   "events": 1,
+   "symbols": 1
+  },
+  "000006_uniformFloat64.js": {
+   "events": 9,
+   "symbols": 2
+  },
+  "000007_index.js": {
+   "imports": 12
+  },
+  "000008_transitional.js": {
+   "events": 1,
+   "symbols": 1
+  },
+  "000009_set.js": {
+   "events": 18,
+   "imports": 3,
+   "symbols": 2
+  },
+  "000010_OutputSharp.js": {
+   "events": 3,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000011_ImportScriptsChunkLoadingRuntimeModule.js": {
+   "edges": 1,
+   "events": 31,
+   "imports": 9,
+   "symbols": 6
+  },
+  "000012_FlashlightOn.js": {
+   "events": 3,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000013_NonRecordingSpan.js": {
+   "events": 10,
+   "imports": 1,
+   "symbols": 13
+  },
+  "000014_prevent-popads-net.js": {
+   "edges": 3,
+   "events": 55,
+   "symbols": 8
+  },
+  "000015_mcpServerOutputSchema.js": {
+   "edges": 1,
+   "events": 14,
+   "imports": 3,
+   "symbols": 4
+  },
+  "000016_HTMLCollection11.js": {
+   "edges": 1,
+   "events": 50,
+   "symbols": 6
+  },
+  "000017_uniqueBy.js": {
+   "events": 8,
+   "symbols": 2
+  },
+  "000018_equirectangularPanorama.fragment.js": {
+   "events": 7,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000019_data-waterfall.js": {
+   "events": 6,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000020_stubString.js": {
+   "events": 1,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000021_ktx_8h.js": {
+   "events": 1,
+   "symbols": 1
+  },
+  "000022_mode.js": {
+   "edges": 3,
+   "events": 17,
+   "imports": 1,
+   "symbols": 6
+  },
+  "000023_verify.js": {
+   "events": 26,
+   "imports": 7,
+   "symbols": 1
+  },
+  "000024_GetIdCommand.js": {
+   "events": 1,
+   "imports": 4,
+   "symbols": 2
+  },
+  "000025_browser-pool-resource-monitor.js": {
+   "events": 44,
+   "imports": 1,
+   "symbols": 10
+  },
+  "000027_index.js": {
+   "edges": 8,
+   "events": 95,
+   "imports": 2,
+   "symbols": 14
+  },
+  "000028_envelope.js": {
+   "edges": 15,
+   "events": 91,
+   "imports": 4,
+   "symbols": 20
+  },
+  "000029__baseSum.js": {
+   "events": 13,
+   "symbols": 2
+  },
+  "000030_readShebang.js": {
+   "events": 11,
+   "imports": 2,
+   "symbols": 2
+  },
+  "000031_source-map.js": {
+   "edges": 76,
+   "events": 1603,
+   "symbols": 129
+  },
+  "000033_escape.js": {
+   "events": 15,
+   "symbols": 3
+  },
+  "000034_accessible-description.js": {
+   "edges": 11,
+   "events": 61,
+   "imports": 2,
+   "symbols": 14
+  },
+  "000035_date.js": {
+   "edges": 2,
+   "events": 35,
+   "imports": 1,
+   "symbols": 4
+  },
+  "000036_expand.js": {
+   "events": 21,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000037_references.js": {
+   "events": 21,
+   "imports": 3,
+   "symbols": 10
+  },
+  "000038_object.js": {
+   "edges": 2,
+   "events": 62,
+   "imports": 1,
+   "symbols": 3
+  },
+  "000039_7517.b4d8b77497bdb47f.js": {
+   "edges": 65,
+   "events": 547,
+   "symbols": 63
+  },
+  "000040_set-blocking.js": {
+   "events": 10,
+   "symbols": 2
+  },
+  "000041_snapshot.B_Jk1wbt.js": {
+   "events": 17,
+   "imports": 1,
+   "symbols": 3
+  },
+  "000042_internal.js": {
+   "edges": 9,
+   "events": 48,
+   "imports": 8,
+   "symbols": 15
+  },
+  "000043_index.js": {
+   "imports": 1
+  },
+  "000044_index.js": {
+   "edges": 8,
+   "events": 162,
+   "imports": 8,
+   "symbols": 36
+  },
+  "000045_index.js": {
+   "events": 26,
+   "imports": 1,
+   "symbols": 5
+  },
+  "000046_PanoramaPhotosphereRounded.js": {
+   "events": 3,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000047_quantize.js": {
+   "edges": 3,
+   "events": 22,
+   "imports": 3,
+   "symbols": 9
+  },
+  "000048_padCharsEnd.js": {
+   "events": 1,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000049_setImmediate.js": {
+   "events": 10,
+   "symbols": 1
+  },
+  "000050_NG.js": {
+   "events": 1,
+   "symbols": 1
+  }
+ },
+ "lexer": {
+  "000001_borderTopWidth.js": {
+   "events": 13,
+   "imports": 1,
+   "symbols": 3
+  },
+  "000002_index.js": {
+   "edges": 247,
+   "events": 1231,
+   "symbols": 100
+  },
+  "000003_state-manager.js": {
+   "edges": 7,
+   "events": 104,
+   "imports": 1,
+   "symbols": 16
+  },
+  "000004_RandomIdGenerator.js": {
+   "edges": 2,
+   "events": 17,
+   "symbols": 5
+  },
+  "000005_all_18.js": {
+   "events": 1,
+   "symbols": 1
+  },
+  "000006_uniformFloat64.js": {
+   "events": 9,
+   "symbols": 2
+  },
+  "000007_index.js": {
+   "imports": 12
+  },
+  "000008_transitional.js": {
+   "events": 1,
+   "symbols": 1
+  },
+  "000009_set.js": {
+   "events": 19,
+   "imports": 3,
+   "symbols": 2
+  },
+  "000010_OutputSharp.js": {
+   "events": 3,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000011_ImportScriptsChunkLoadingRuntimeModule.js": {
+   "edges": 1,
+   "events": 31,
+   "imports": 9,
+   "symbols": 4
+  },
+  "000012_FlashlightOn.js": {
+   "events": 3,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000013_NonRecordingSpan.js": {
+   "events": 10,
+   "imports": 1,
+   "symbols": 13
+  },
+  "000014_prevent-popads-net.js": {
+   "edges": 3,
+   "events": 53,
+   "symbols": 7
+  },
+  "000015_mcpServerOutputSchema.js": {
+   "edges": 1,
+   "events": 14,
+   "imports": 3,
+   "symbols": 4
+  },
+  "000016_HTMLCollection11.js": {
+   "edges": 1,
+   "events": 50,
+   "symbols": 6
+  },
+  "000017_uniqueBy.js": {
+   "events": 8,
+   "symbols": 2
+  },
+  "000018_equirectangularPanorama.fragment.js": {
+   "events": 7,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000019_data-waterfall.js": {
+   "events": 6,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000020_stubString.js": {
+   "events": 1,
+   "imports": 2,
+   "symbols": 1
+  },
+  "000021_ktx_8h.js": {
+   "events": 1,
+   "symbols": 1
+  },
+  "000022_mode.js": {
+   "edges": 3,
+   "events": 19,
+   "imports": 1,
+   "symbols": 6
+  },
+  "000023_verify.js": {
+   "events": 26,
+   "imports": 7,
+   "symbols": 1
+  },
+  "000024_GetIdCommand.js": {
+   "events": 1,
+   "imports": 4,
+   "symbols": 2
+  },
+  "000025_browser-pool-resource-monitor.js": {
+   "events": 43,
+   "imports": 1,
+   "symbols": 9
+  },
+  "000027_index.js": {
+   "edges": 8,
+   "events": 91,
+   "imports": 2,
+   "symbols": 13
+  },
+  "000028_envelope.js": {
+   "edges": 15,
+   "events": 88,
+   "imports": 4,
+   "symbols": 18
+  },
+  "000029__baseSum.js": {
+   "events": 11,
+   "symbols": 2
+  },
+  "000030_readShebang.js": {
+   "events": 12,
+   "imports": 2,
+   "symbols": 2
+  },
+  "000031_source-map.js": {
+   "edges": 80,
+   "events": 1564,
+   "symbols": 129
+  },
+  "000033_escape.js": {
+   "events": 15,
+   "symbols": 3
+  },
+  "000034_accessible-description.js": {
+   "edges": 11,
+   "events": 62,
+   "imports": 2,
+   "symbols": 12
+  },
+  "000035_date.js": {
+   "edges": 1,
+   "events": 36,
+   "imports": 1,
+   "symbols": 3
+  },
+  "000036_expand.js": {
+   "events": 15,
+   "imports": 1,
+   "symbols": 1
+  },
+  "000037_references.js": {
+   "events": 12,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000038_object.js": {
+   "edges": 2,
+   "events": 65,
+   "imports": 1,
+   "symbols": 3
+  },
+  "000039_7517.b4d8b77497bdb47f.js": {
+   "edges": 49,
+   "events": 340,
+   "symbols": 33
+  },
+  "000040_set-blocking.js": {
+   "events": 7,
+   "symbols": 2
+  },
+  "000041_snapshot.B_Jk1wbt.js": {
+   "events": 14,
+   "imports": 1,
+   "symbols": 2
+  },
+  "000042_internal.js": {
+   "edges": 7,
+   "events": 48,
+   "imports": 8,
+   "symbols": 12
+  },
+  "000043_index.js": {
+   "imports": 1
+  },
+  "000044_index.js": {
+   "edges": 7,
+   "events": 112,
+   "imports": 8,
+   "symbols": 12
+  },
+  "000045_index.js": {
+   "events": 23,
+   "imports": 1,
+   "symbols": 4
+  },
+  "000046_PanoramaPhotosphereRounded.js": {
+   "events": 3,
+   "imports": 3,
+   "symbols": 1
+  },
+  "000047_quantize.js": {
+   "edges": 3,
+   "events": 20,
+   "imports": 3,
+   "symbols": 9
+  },
+  "000048_padCharsEnd.js": {
+   "events": 1,
+   "imports": 2,
+   "symbols": 1
+  },
+  "000049_setImmediate.js": {
+   "events": 6,
+   "symbols": 1
+  },
+  "000050_NG.js": {
+   "events": 1,
+   "symbols": 1
+  }
+ }
+}
