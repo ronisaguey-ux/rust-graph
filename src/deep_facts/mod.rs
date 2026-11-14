@@ -826,7 +826,7 @@ impl<'a> Walker<'a> {
                 self.condition_before(id);
                 self.event("[\"b\"]");
             }
-            "try_statement" | "match_statement" => self.event("[\"b\"]"),
+            "try_statement" | "match_statement" | "do_statement" => self.event("[\"b\"]"),
             // `switch (x)` carries a condition the one-pass reader writes as an
             // expression on the header line; the clause events below are the
             // body. Reading the body alone dropped the scrutinee, which is a
@@ -918,12 +918,27 @@ impl<'a> Walker<'a> {
                 | "for_statement"
                 | "for_in_statement"
                 | "while_statement"
+                | "do_statement"
                 | "try_statement"
                 | "switch_statement"
                 | "match_statement"
                 | "with_statement"
         ) {
             self.event("[\"j\"]");
+            if kind == "do_statement" {
+                if let Some(cond) = self
+                    .children(id)
+                    .into_iter()
+                    .rev()
+                    .find(|&c| !self.is_layout(c) && !matches!(self.kind(c), "statement_block" | "block"))
+                {
+                    let value = self.form(cond);
+                    if value != "0" {
+                        let line = self.line(cond);
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
+                }
+            }
         }
         if self.frame().node != id {
             return;

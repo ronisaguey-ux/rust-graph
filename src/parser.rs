@@ -667,7 +667,35 @@ impl<'a> Parser<'a> {
         self.stmt = stmt;
     }
 
-    fn open_control(&mut self, stmt: &[Token], col: u32) {
+    fn open_control(&mut self, mut stmt: &[Token], col: u32) {
+        let mut peeled_for = false;
+        while matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && self.word_at(stmt, 0).as_deref() == Some("for")
+        {
+            let Some(end) = self.matching_close(stmt, 1) else { break };
+            if !self
+                .word_at(stmt, end + 1)
+                .as_deref()
+                .is_some_and(|w| matches!(w, "if" | "for" | "while"))
+            {
+                break;
+            }
+            self.loop_header(&stmt[2..end], stmt[0].line);
+            peeled_for = true;
+            self.event("[\"b\"]");
+            stmt = &stmt[end + 1..];
+        }
+        if peeled_for && self.word_at(stmt, 0).as_deref() == Some("for") {
+            if let Some(end) = self.matching_close(stmt, 1) {
+                self.loop_header(&stmt[2..end], stmt[0].line);
+                self.event("[\"b\"]");
+                let symbol = self.top().symbol;
+                let class = self.top().class.clone();
+                let receiver = self.top().receiver.clone();
+                self.frames.push(Frame { kind: FrameKind::Control, symbol, class, receiver, col, saved: None, defines: None, type_only: false });
+                return;
+            }
+        }
         self.control_condition_before(stmt);
         self.event("[\"b\"]");
         self.loop_binding(stmt);
@@ -967,6 +995,9 @@ impl<'a> Parser<'a> {
                     self.simple_statement(&stmt[end + 1..]);
                     self.event("[\"j\"]");
                     return;
+                } else if word == "for" {
+                    self.loop_header(&stmt[2..end], stmt[0].line);
+                    return;
                 }
             }
         }
@@ -993,8 +1024,16 @@ impl<'a> Parser<'a> {
         match rest.iter().position(|token| matches!(self.raw(token), b"in" | b"of")) {
             Some(bound) => self.assignment(&rest[..bound], &rest[bound + 1..], line, false),
             None => {
-                let end = rest.iter().position(|token| self.is_op(token, b"=")).unwrap_or(rest.len());
-                self.assignment(&rest[..end], &[], line, false);
+                let semi = rest.iter().position(|token| self.is_op(token, b";")).unwrap_or(rest.len());
+                let init = &rest[..semi];
+                if let Some(eq) = init.iter().position(|token| self.is_op(token, b"=")) {
+                    self.assignment(&init[..eq], &init[eq + 1..], line, false);
+                } else if !init.is_empty() {
+                    self.assignment(init, &[], line, false);
+                }
+                if semi < rest.len() {
+                    let _ = self.values(&rest[semi..]);
+                }
             }
         }
     }
