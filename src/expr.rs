@@ -23,6 +23,10 @@ const JS_NOISE: [&str; 28] = [
     "instanceof", "return", "let", "var", "const", "function", "class", "switch", "case", "try", "catch", "finally",
     "while", "as",
 ];
+const PY_NOISE: [&str; 16] = [
+    "await", "yield", "not", "raise", "async", "lambda", "in", "is", "and", "or", "if", "else", "for", "as", "return",
+    "from",
+];
 const NOISE: [&str; 38] = [
     "await", "yield", "new", "not", "typeof", "delete", "void", "throw", "raise", "async", "lambda", "in", "is", "and",
     "or", "if", "else", "for", "of", "as", "then", "do", "instanceof", "sizeof", "return", "my", "local", "let", "var",
@@ -673,10 +677,11 @@ impl Emit<'_> {
         let js_family = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
         let noise = if js_family {
             JS_NOISE.contains(&word.as_str())
+        } else if self.lang.tag == "PY" {
+            PY_NOISE.contains(&word.as_str())
         } else {
             NOISE.contains(&word.as_str())
-        } && !(self.lang.tag == "RS" && word == "new")
-            && !(self.lang.tag == "PY" && word == "local");
+        } && !(self.lang.tag == "RS" && word == "new");
         if noise && !go_word {
             self.pos += 1;
             return;
@@ -725,6 +730,8 @@ impl Emit<'_> {
         }
         let noise_list: &[&str] = if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") {
             &JS_NOISE
+        } else if self.lang.tag == "PY" {
+            &PY_NOISE
         } else {
             &NOISE
         };
