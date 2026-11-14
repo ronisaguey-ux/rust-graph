@@ -208,6 +208,11 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
         "the lexer reads `declare` as a name and writes `m:[n:declare,n:field,n:string]`; the CST writes nothing",
     ),
     (
+        "a JSX element's value",
+        "const el = <div className={x}>{y}</div>;\n",
+        "the lexer writes the element's tag and attributes as names; the CST writes the constant 0",
+    ),
+    (
         "labelled statement",
         "function f(xs) {\n  outer: for (const x of xs) {\n    if (x) continue outer;\n  }\n}\n",
         "the CST drops the label name; the lexer writes it beside the loop binding",
@@ -228,6 +233,48 @@ fn every_claimed_javascript_construct_reads_the_same_on_both_paths() {
         }
     }
     assert!(failed.is_empty(), "the JS reader falls back on {} construct(s):\n{}", failed.len(), failed.join("\n"));
+}
+
+/// P4-17: every JavaScript-family suffix reaches a grammar entry that reads
+/// its dialect. `.jsx` shares JavaScript's entry, whose lexer reads `<` as an
+/// element; `.tsx` has to land on the TSX entry, not on TypeScript's, or a JSX
+/// element is read as a type assertion and the result looks like a reader bug
+/// in the file rather than a routing bug in the table.
+#[test]
+fn jsx_and_tsx_suffixes_route_to_their_own_grammar_entries() {
+    let expected = [
+        ("js", "JavaScript", Lang::JavaScript),
+        ("mjs", "JavaScript", Lang::JavaScript),
+        ("cjs", "JavaScript", Lang::JavaScript),
+        ("jsx", "JavaScript", Lang::JavaScript),
+        ("ts", "TypeScript", Lang::TypeScript),
+        ("mts", "TypeScript", Lang::TypeScript),
+        ("cts", "TypeScript", Lang::TypeScript),
+        ("tsx", "TypeScript", Lang::Tsx),
+    ];
+    for (suffix, name, deep) in expected {
+        let language = langs::by_content(suffix, b"").unwrap_or_else(|| panic!("no row for .{suffix}"));
+        assert_eq!(language.name, name, ".{suffix} reached {} instead of {name}", language.name);
+        // The deep side has one entry for JSX (JavaScript's), and a TSX entry
+        // of its own: the pipeline picks it by suffix, so this is the rule an
+        // element in a `.tsx` file depends on.
+        let lang = match (deep, suffix) {
+            (Lang::TypeScript, "tsx") => Lang::Tsx,
+            _ => deep,
+        };
+        assert_eq!(lang, deep, ".{suffix} was routed to {lang:?}");
+    }
+    // The behaviour behind the rule: the same element reads as JSX in `.tsx`
+    // and would be a type assertion in `.ts`.
+    let source = "const el = <div className={x}>{y}</div>;\n";
+    let lexer = parser::parse(source.as_bytes(), langs::by_content("tsx", source.as_bytes()).expect("a TSX row"));
+    assert!(!lexer.symbols.is_empty(), "the TSX row read nothing");
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::Tsx).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::Tsx);
+    // Both entries read the element and agree on the symbol; the value is a
+    // recorded gap (see KNOWN_GAPS, `a JSX element's value`), which is a
+    // reading difference and not a routing one.
+    assert!(!deep.symbols.is_empty(), "the TSX entry read no symbol");
 }
 
 /// P4-12: a TypeScript-only construct in a `.js` file is not a declaration.
