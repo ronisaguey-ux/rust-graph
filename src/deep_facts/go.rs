@@ -956,6 +956,15 @@ impl<'a> Walker<'a> {
             }
             return;
         }
+        if self.kind(value) == "call_expression" {
+            if let Some(callee) = self.children(value).into_iter().next() {
+                if self.kind(callee) == "function_expression" {
+                    if let Some(name) = self.pattern_names(name_node).into_iter().next() {
+                        self.bound.push((callee, name));
+                    }
+                }
+            }
+        }
         if let Some(module) = self.require_module(value) {
             // `const { a, b } = require('m')` takes named members; `const x =
             // require('m')` binds the module itself, so it has no member name.
@@ -1013,6 +1022,11 @@ impl<'a> Walker<'a> {
         let Some(equal) = children.iter().position(|&child| self.kind(child) == "=") else { return };
         let Some(&value) = children.get(equal + 1) else { return };
         let targets = self.pattern_names(name_node);
+        if self.kinds.definitions.iter().any(|def| def.kind == self.kind(value)) {
+            if let Some(name) = targets.first() {
+                self.bound.push((value, name.clone()));
+            }
+        }
         self.assignment_parts(targets, value, self.line(id), false);
     }
 
@@ -2158,7 +2172,8 @@ impl<'a> Walker<'a> {
                 out
             }
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
-            | "none" | "null" | "undefined" | "regex" | "comment" => "0".to_string(),
+            | "none" | "null" | "undefined" | "regex" | "comment"
+            | "arrow_function" | "function_expression" | "generator_function" => "0".to_string(),
             // A region the grammar could not name. The tokens are still there —
             // recovery keeps every byte — so the values inside it are read like
             // any other: `("prefix " f"{call(x)}")` is an ERROR today because
@@ -2330,15 +2345,27 @@ impl<'a> Walker<'a> {
                 receiver_call = Some(value);
             }
         }
-        let (path, receiver) = self.call_target(callee, receiver_call);
+        let (path, mut receiver) = self.call_target(callee, receiver_call);
         let line = self.call_line(callee, id);
-        let index = self.push_call(path, line);
         let args = children
             .iter()
             .copied()
-            .find(|&child| matches!(self.kind(child), "argument_list" | "arguments"));
+            .find(|&child| matches!(self.kind(child), "argument_list" | "arguments" | "template_string"));
+        let mut targ = None;
+        if let Some(list) = args.filter(|&list| self.kind(list) == "template_string") {
+            let inner = self.form(list);
+            if path.is_empty() && inner != "0" {
+                receiver = format!("[\"m\",[{receiver},{inner}]]");
+            } else if inner != "0" {
+                targ = Some(format!("[{inner}]"));
+            }
+        }
+        let index = self.push_call(path, line);
         let mut out = format!("[\"c\",{index},{receiver},");
         match args {
+            Some(list) if self.kind(list) == "template_string" => {
+                out.push_str(targ.as_deref().unwrap_or("[]"));
+            }
             Some(list) => out.push_str(&self.arguments(list)),
             None => out.push_str("[]"),
         }

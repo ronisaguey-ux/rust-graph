@@ -1067,7 +1067,10 @@ impl<'a> Walker<'a> {
         // either one hides the assignment name that used to fill it.
         if !matches!(
             def.kind,
-            "method_definition" | "function_declaration" | "generator_function_declaration"
+            "method_definition"
+                | "function_declaration"
+                | "generator_function_declaration"
+                | "function_expression"
         ) {
             return None;
         }
