@@ -2356,7 +2356,18 @@ fn is_type_continuation_line(src: &Lines<'_>, line: u32) -> bool {
     // as a loss.
     let head: String = text.chars().take_while(|ch| !ch.is_alphanumeric() && !matches!(ch, '_' | '$' | '"' | '\'' | '(')).collect();
     let head = head.trim();
-    matches!(head, ")" | "=>" | ">" | "]" | "?" | ":" | ") =>" | "):")
+    if matches!(head, ")" | "=>" | ">" | "]" | "?" | ":" | ") =>" | "):") {
+        return true;
+    }
+    // A generic parameter list wrapped over several lines closes with a brace
+    // and then carries on with the service type: `}>(`, `}): Layer<…>`,
+    // `}) => Effect<…>`, `}, never, Store>`. The lexer reads the tail as an
+    // expression and the CST records nothing on the line, so the fragment is a
+    // type continuation like the arms above, not a statement.
+    if let Some(rest) = head.strip_prefix('}') {
+        return matches!(rest.trim_start().chars().next(), Some('>' | ')' | ',' | '?' | ':'));
+    }
+    false
 }
 
 /// `import clearImmediate = globalThis.clearImmediate;`: a TypeScript import

@@ -698,6 +698,23 @@ fn wrapped_type_continuation_lines_are_not_statements() {
     assert!(!verdict.lost(), "a wrapped type is not a statement: {verdict:?}");
 }
 
+/// A generic parameter list wrapped over several lines closes with a brace and
+/// then carries the return or service type: `}>(`, `}): Layer<…>`,
+/// `}) => Effect<…>`, `}, never, Store>`. The lexer reads each tail as an
+/// expression and the CST records nothing there, so the fragment is a type
+/// continuation like the arms above — 51 losses over eleven `.d.ts` files were
+/// this one shape.
+#[test]
+fn generic_lists_closing_on_a_brace_are_continuations() {
+    let source = "export declare const make: <S extends Schema.Top>(options: {\n    readonly name: string;\n    readonly schema: S;\n}) => Effect.Effect<PersistedQueue<S[\"Type\"]>, never, PersistedQueueFactory>;\n\nexport const run = <Input, E, R, Output>(\n    self: Effect<Input, E, R>,\n    builder: (\n      $: <O, E, R>(_: Schedule.Schedule<O, NoInfer<Input>, E, R>) => Schedule.Schedule<O, Input, E, R>\n    ) => Schedule.Schedule<Output, NoInfer<Input>, Error, Env>\n  ): Effect<Output, E | Error, R | Env> => self;\n";
+    let language = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let cst = deep_integration::parse_file(source.as_bytes(), Lang::TypeScript).expect("a deep parse");
+    let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::TypeScript);
+    let verdict = pipeline::loses_in(&lexer, &deep, source);
+    assert!(!verdict.lost(), "a wrapped generic list is not a statement: {verdict:?}");
+}
+
 /// Modifiers come in any order, and a private field's name starts with `#`:
 /// `private static splitStringBySpace;`, `private readonly _textureMatrix: Matrix;`
 /// and `#private;` are all declarations. The strip loop used to run once over a
