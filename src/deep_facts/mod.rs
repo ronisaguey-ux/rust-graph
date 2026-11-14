@@ -768,22 +768,37 @@ impl<'a> Walker<'a> {
                 let bound_value = bound.as_ref().map(|(_, value)| *value);
                 if let Some((targets, value)) = bound {
                     self.assignment_event(targets, value, self.line(id), false);
-                }
-                for child in self.children(id) {
-                    if Some(child) == bound_value
-                        || self.is_layout(child)
-                        || matches!(self.kind(child), "block" | "statement_block")
-                    {
-                        continue;
+                    for child in self.children(id) {
+                        if Some(child) == bound_value
+                            || self.is_layout(child)
+                            || matches!(self.kind(child), "block" | "statement_block")
+                        {
+                            continue;
+                        }
+                        let value = self.form(child);
+                        if value != "0" {
+                            let line = self.line(child);
+                            self.event(&format!("[\"x\",{line},{value}]"));
+                        }
                     }
-                    // `with self._lock:` binds nothing, and the lexer still
-                    // reads the context manager as a statement of its own.
-                    // Reading the form for its calls alone left the names in
-                    // it with no event to sit on.
-                    let value = self.form(child);
-                    if value != "0" {
-                        let line = self.line(child);
-                        self.event(&format!("[\"x\",{line},{value}]"));
+                } else {
+                    // `with self._lock:` binds nothing, and `with a, b:` is read
+                    // by the lexer as one tuple event on the header line.
+                    let mut values = Vec::new();
+                    for child in self.children(id) {
+                        if self.is_layout(child) || matches!(self.kind(child), "block" | "statement_block") {
+                            continue;
+                        }
+                        let value = self.form(child);
+                        if value != "0" {
+                            values.push(value);
+                        }
+                    }
+                    let line = self.line(id);
+                    match values.len() {
+                        0 => {}
+                        1 => self.event(&format!("[\"x\",{line},{}]", values[0])),
+                        _ => self.event(&format!("[\"x\",{line},[\"t\",[{}]]]", values.join(","))),
                     }
                 }
             }

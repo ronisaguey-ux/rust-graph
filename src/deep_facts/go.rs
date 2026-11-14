@@ -1333,7 +1333,17 @@ impl<'a> Walker<'a> {
             let inner = self.children(pattern);
             let at = inner.iter().position(|&child| self.kind(child) == "as")?;
             let value = *inner[..at].iter().rev().find(|&&child| !self.is_layout(child))?;
-            let targets = inner.get(at + 1).map(|&child| self.pattern_names(child)).unwrap_or_default();
+            let mut targets = Vec::new();
+            for &child in &children {
+                if self.kind(child) == "as_pattern" {
+                    let parts = self.children(child);
+                    if let Some(as_at) = parts.iter().position(|&part| self.kind(part) == "as") {
+                        if let Some(&target) = parts.get(as_at + 1) {
+                            targets.extend(self.pattern_names(target));
+                        }
+                    }
+                }
+            }
             return Some((targets, value));
         }
         let mut split = None;
