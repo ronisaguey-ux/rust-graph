@@ -44,7 +44,14 @@ def short_reason(text: str) -> str:
 def load(path: str) -> dict[str, dict]:
     with open(path) as fh:
         data = json.load(fh)
-    sources = data.get("sources", data if isinstance(data, list) else [])
+    # A record is either the object `build --stdout` prints or the bare list of
+    # sources; calling `.get` on the list crashed the very gate it enforces.
+    if isinstance(data, dict):
+        sources = data.get("sources", [])
+    elif isinstance(data, list):
+        sources = data
+    else:
+        sources = []
     return {row["path"]: row for row in sources}
 
 
