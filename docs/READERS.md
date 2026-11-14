@@ -90,9 +90,24 @@ Known gaps (0):
 
 - none: every construct the table claims reads the same on both paths
 
+## Rust — `tests/rust_coverage.rs`
+
+Covered (7):
+
+- struct literal: named fields, shorthand and spread
+- struct literal as a call argument
+- match arms: block body, guard, call value and wildcard
+- closures: annotated return type with a block, and an expression body
+- trait bounds on a parameter and a where clause
+- dynamic types: dyn in a reference and behind Box
+- let declarations: mut, annotated and tuple-pattern bindings
+
+Known gaps (0):
+
+- none: every construct the table claims reads the same on both paths
+
 ## Languages claimed by named tests
 
-- **Rust** (`tests/facts_rust_json.rs`): a struct, a trait, an impl, a `use`, a module and a JSON data file, each asserted by a named test.
 - **Go and Java** (`tests/facts_go_java.rs`): the facts a Go or Java file must produce, asserted by named tests.
 
 ## What neither reader claims

@@ -30,13 +30,9 @@ TABLES = (
     ("JavaScript", "tests/js_coverage.rs"),
     ("TypeScript", "tests/ts_coverage.rs"),
     ("Python", "tests/python_coverage.rs"),
+    ("Rust", "tests/rust_coverage.rs"),
 )
 PROSE = (
-    (
-        "Rust",
-        "tests/facts_rust_json.rs",
-        "a struct, a trait, an impl, a `use`, a module and a JSON data file, each asserted by a named test",
-    ),
     (
         "Go and Java",
         "tests/facts_go_java.rs",
