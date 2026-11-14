@@ -14,6 +14,15 @@ use crate::langs::Language;
 use crate::lexer::{Kind, Lexer, Token};
 
 /// Words that say something about a value without being one.
+/// Keywords the lexer skips in the JavaScript family. `NOISE` below is the
+/// cross-language list, and most of its entries (`lambda`, `is`, `and`, `my`,
+/// `pub`) are ordinary identifiers in JavaScript: dropping them lost names the
+/// source really read.
+const JS_NOISE: [&str; 28] = [
+    "await", "yield", "new", "typeof", "delete", "void", "throw", "async", "in", "of", "if", "else", "for", "do",
+    "instanceof", "return", "let", "var", "const", "function", "class", "switch", "case", "try", "catch", "finally",
+    "while", "as",
+];
 const NOISE: [&str; 38] = [
     "await", "yield", "new", "not", "typeof", "delete", "void", "throw", "raise", "async", "lambda", "in", "is", "and",
     "or", "if", "else", "for", "of", "as", "then", "do", "instanceof", "sizeof", "return", "my", "local", "let", "var",
@@ -661,8 +670,12 @@ impl Emit<'_> {
         let go_word = matches!(word.as_str(), "go" | "defer") && self.lang.tag != "GO";        // `new` is a keyword in the JavaScript family and an ordinary name in
         // Rust: reading it as noise left `new.is_none()` calling nothing, and
         // the record differed by a constant that was never there.
-        let noise = NOISE.contains(&word.as_str())
-            && !(self.lang.tag == "RS" && word == "new")
+        let js_family = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
+        let noise = if js_family {
+            JS_NOISE.contains(&word.as_str())
+        } else {
+            NOISE.contains(&word.as_str())
+        } && !(self.lang.tag == "RS" && word == "new")
             && !(self.lang.tag == "PY" && word == "local");
         if noise && !go_word {
             self.pos += 1;
@@ -710,7 +723,12 @@ impl Emit<'_> {
         if !is_value || next.line != line || !out.ends_with("\"]") {
             return;
         }
-        if next.kind == Kind::Ident && self.word(0).is_some_and(|word| NOISE.contains(&word.as_str())) {
+        let noise_list: &[&str] = if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") {
+            &JS_NOISE
+        } else {
+            &NOISE
+        };
+        if next.kind == Kind::Ident && self.word(0).is_some_and(|word| noise_list.contains(&word.as_str())) {
             return;
         }
         let Some(open) = out.rfind("[\"n\",") else { return };
