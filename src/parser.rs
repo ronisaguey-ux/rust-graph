@@ -350,6 +350,15 @@ impl<'a> Parser<'a> {
                 return;
             }
         }
+        // `x = a ? b : // a comment` newline `c[0];`: the line ends with the
+        // ternary's colon, so the next line continues the statement. Ending it
+        // here gave the continuation its own event on the wrong line.
+        if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && self.stmt.last().is_some_and(|last| self.is_op(last, b":"))
+            && self.stmt.iter().any(|token| self.is_op(token, b"?"))
+        {
+            return;
+        }
         if let Some(last) = self.stmt.last() {
             let continues = self.lang.operator_continues
                 && last.kind == Kind::Op
