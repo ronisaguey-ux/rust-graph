@@ -1893,8 +1893,15 @@ impl<'a> Walker<'a> {
                         .children(items[0])
                         .into_iter()
                         .find(|&child| !self.is_layout(child));
-                    let value = inner.map(|child| self.form(child)).unwrap_or_else(|| "0".to_string());
-                    return format!("[\"t\",[{value}]]");
+                    let key = inner.map(|child| self.form(child)).unwrap_or_else(|| "0".to_string());
+                    // `{ [TypeId]: { … } }` is a pair like any other: the key
+                    // is a computed list and the value is the pair's last item.
+                    // Returning the key alone dropped the value (14 js files).
+                    let value = match items.last() {
+                        Some(&last) if last != items[0] => self.form(last),
+                        _ => "0".to_string(),
+                    };
+                    return format!("[\"m\",[[\"t\",[{key}]],{value}]]");
                 }
                 match items.len() {
                     // `{ type: "boolean" }`: a key spelled like a keyword (`type`,
