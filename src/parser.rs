@@ -2605,6 +2605,15 @@ impl<'a> Parser<'a> {
             at_token += 1;
             if token.kind == Kind::Ident {
                 let word = self.text(token);
+                // `#cache` is the syntactic spelling of the private name
+                // `cache`; the CST names the binding, never the sigil, so a
+                // private field recorded with its `#` was a var the CST does
+                // not have.
+                let word = if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") {
+                    word.trim_start_matches('#').to_string()
+                } else {
+                    word
+                };
                 let receiver = self.top().receiver.as_str();
                 if word == "this" || (!receiver.is_empty() && word == receiver) {
                     path.push_str("self");

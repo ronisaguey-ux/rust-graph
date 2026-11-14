@@ -818,7 +818,10 @@ impl Emit<'_> {
         // `++i` and `i++`: an increment is not a read of the variable, and the
         // CST writes the whole update expression as a constant. Reading the
         // name here made the file lose a value the source never produced.
+        // `++this.counter` increments a member, not a name: the CST reads the
+        // path, so only a bare operand is written as the constant.
         if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && self.op_byte(0) != b'.'
             && (self.increment_token(-2) || self.increment_token(0))
         {
             out.push('0');
