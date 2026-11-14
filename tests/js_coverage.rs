@@ -136,6 +136,14 @@ const COVERAGE: &[(&str, &str)] = &[
         "null and undefined literals",
         "function f(x) {\n  if (x) return null;\n  return undefined;\n}\n",
     ),
+    (
+        "for-of statement with an inline body",
+        "function f(xs) {\n  for (const x of xs) console.log(x);\n}\n",
+    ),
+    (
+        "c-style for with an inline body",
+        "function f(xs) {\n  for (var i = 0; i < 2; i++) console.log(i);\n}\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
@@ -144,16 +152,6 @@ const COVERAGE: &[(&str, &str)] = &[
 /// closed and the row moved up to `COVERAGE`, which is how a known gap stops
 /// being a comment and starts being a checklist.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[
-    (
-        "for-of statement with an inline body",
-        "function f(xs) {\n  for (const x of xs) console.log(x);\n}\n",
-        "the header's junk value covers the call row and steals it; ordering the assignment tier first fixed this fixture and measured js 573 -> 584 files, so it was reverted",
-    ),
-    (
-        "c-style for with an inline body",
-        "function f(xs) {\n  for (var i = 0; i < 2; i++) console.log(i);\n}\n",
-        "same pairing order as the for-of row: the header mentions the binding three times and the dedupe that fixed it measured the same regression",
-    ),
     (
         "labelled statement",
         "function f(xs) {\n  outer: for (const x of xs) {\n    if (x) continue outer;\n  }\n}\n",

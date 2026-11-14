@@ -938,7 +938,15 @@ impl<'a> Parser<'a> {
             let _ = word;
             if let Some(end) = self.matching_close(stmt, 1) {
                 if end + 1 < stmt.len() {
-                    self.expression_event("x", &stmt[2..end]);
+                    // The loop header is an assignment of its variable to the
+                    // iterable, not an expression: the CST writes `a` with the
+                    // binder as the target. Read as `x` the header lost the
+                    // iterable name it does read.
+                    if word == "for" {
+                        self.loop_header(&stmt[2..end], stmt[0].line);
+                    } else {
+                        self.expression_event("x", &stmt[2..end]);
+                    }
                     self.event("[\"b\"]");
                     self.simple_statement(&stmt[end + 1..]);
                     self.event("[\"j\"]");
@@ -955,6 +963,24 @@ impl<'a> Parser<'a> {
             return;
         }
         self.simple_statement(stmt);
+    }
+
+    /// `for (var k in m)` reads as `a` with the binder as the target and, for
+    /// for-in/of, the iterable as the value; a classic `for` keeps only its
+    /// declarator and writes the constant value the CST writes.
+    fn loop_header(&mut self, header: &[Token], line: u32) {
+        let mut at = 0;
+        if header.first().is_some_and(|token| matches!(self.raw(token), b"var" | b"let" | b"const")) {
+            at = 1;
+        }
+        let rest = &header[at..];
+        match rest.iter().position(|token| matches!(self.raw(token), b"in" | b"of")) {
+            Some(bound) => self.assignment(&rest[..bound], &rest[bound + 1..], line, false),
+            None => {
+                let end = rest.iter().position(|token| self.is_op(token, b"=")).unwrap_or(rest.len());
+                self.assignment(&rest[..end], &[], line, false);
+            }
+        }
     }
 
     fn matching_close(&self, stmt: &[Token], open: usize) -> Option<usize> {
