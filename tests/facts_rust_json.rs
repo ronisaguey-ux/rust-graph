@@ -168,6 +168,42 @@ fn rust_a_struct_a_trait_an_impl_and_a_use_are_every_record_they_should_be() {
     assert!(facts.vars.is_empty());
 }
 
+/// P5-04: a macro invocation is one constant, not a call. `vec![1, 2]` and
+/// `max!(1, 2) + 1` are merges of the macro's name and its token tree — the
+/// name is not a callee, and a resolver looking for `assert_eq!` finds nothing.
+/// Nested macros and macro calls in expression position are the two shapes that
+/// cost files when the reader treats the name as a call, so both are pinned
+/// here, and the calls the token tree really does evaluate (the `len` in
+/// `v.len()`) stay calls.
+#[test]
+fn rust_a_macro_invocation_is_one_constant_not_a_call() {
+    let source = "fn main() {\n    let v = vec![1, 2];\n    let n = vec![vec![3]];\n    println!(\"{}\", v.len());\n    let m = max!(1, 2) + 1;\n    assert_eq!(n.len(), 1);\n    dbg!(&m);\n}\n";
+    let facts = extract(source, Lang::Rust);
+    let main = facts.symbols.iter().find(|symbol| symbol.name == "main").expect("main");
+    for name in ["vec", "max", "assert_eq", "dbg", "println"] {
+        assert!(
+            main.calls.iter().all(|call| call.path != name && !call.path.starts_with(&format!("{name}!"))),
+            "the macro {name}! was read as a call: {:?}",
+            calls(main)
+        );
+        assert!(
+            main.events.contains(&format!("[\"n\",\"{name}\"]")),
+            "the macro {name}! is missing from the events: {}",
+            main.events
+        );
+    }
+    assert!(
+        main.events.matches("[\"n\",\"vec\"]").count() >= 2,
+        "the nested macro lost its name: {}",
+        main.events
+    );
+    assert!(
+        main.calls.iter().any(|call| call.path.ends_with("len")),
+        "a call inside a macro tree was dropped: {:?}",
+        calls(main)
+    );
+}
+
 #[test]
 fn rust_is_eligible_and_json_is_not() {
     assert_eq!(deep_facts::lang_for("RS"), Some(Lang::Rust));
