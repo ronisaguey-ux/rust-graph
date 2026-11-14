@@ -104,6 +104,51 @@
       "evidence": "/tmp/ts-as/a.ts (4 lines): 2 losses -> 0 under both readers. Fixed by skipping the type expression after `as` in TS/TSX (Emit::skip_type: runs to the first token that cannot continue a type at depth zero). ts 84/2000 (107) -> 82/2000 (101); js, python and rust unchanged.",
       "status": "fixed",
       "commit": null
+    },
+    {
+      "at": "2026-11-14T15:10:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "thought",
+      "item": "ts declaration classes with multi-line type-parameter lists",
+      "thought": "16 rows, all in declaration files (types.d.ts, index.ts declare class). A one-line signature in a class body is already suppressed, so the shape that breaks must be the type-parameter list that spans lines: `$$eval<` newline `Selector extends string,` newline `>(\u2026): Promise<\u2026>;`. The type parameters look like a group the statement never closes, so the class frame never opens and the members are read as module-level statements - my 2-file reproduction emits both signatures at `a.ts:<module>`. Cheapest next probe: check whether an unmatched `<` is what keeps the statement alive across those lines, before writing any rule.",
+      "reader": "lexer",
+      "evidence": "/tmp/ts-decl2/a.ts: 2 losses, both `no event on a line both readers can mean` at module level; /tmp/ts-c1 and /tmp/ts-c2 (one-line signatures, with and without `declare`) have 0 losses, so length is the trigger.",
+      "status": "thinking",
+      "commit": null
+    },
+    {
+      "at": "2026-11-14T15:25:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "thought",
+      "item": "js for-header events: extra lexer events are tolerated, so the 14 rows are pairing noise",
+      "thought": "/tmp/js-for3/a.js compares `for (i = 0; \u2026)` against `for (var j = 0; \u2026)`: the lexer emits an extra `x` (the condition merge) on both header lines and the CST emits neither, yet the file measures 0 losses. So a lone extra header event is not itself a loss - the corpus rows come from somewhere else (a line the CST attributes differently), and chasing them from the header side would be guessing. Leave this cluster alone until a reproduction shows a real disagreement.",
+      "reader": "both",
+      "evidence": "/tmp/js-for3: lexer x+body vs deep body on lines 3 and 4, losses 0. Corpus rows: 000399_index.js:82, 000995_natural.js:63/67/75, 001055_index.js:105.",
+      "status": "thinking",
+      "commit": null
+    },
+    {
+      "at": "2026-11-14T16:40:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "rust was skipping JavaScript and Python keywords as if they were its own",
+      "thought": null,
+      "finding": "The generic NOISE list is a mix of JS, Python and Perl operators, and Rust went through it with only `new` excepted. So a Rust variable named `lambda`, `is`, `and`, `or`, `var`, `my`, `our`, `then`, `of`, `do` or `local` was skipped as if it were a keyword, and the value lost the name the CST writes (`self.line(lambda)` came out as a call whose argument was the constant 0).",
+      "reader": "lexer",
+      "evidence": "/tmp/rgn-lam/a.rs (7 lines): 1 loss -> 0. Fix: a Rust-only RS_NOISE list holding just the words that really are Rust keywords (await, yield, async, in, as, if, else, for, return, let, const, mut, ref, unsafe, pub, move). Measured: rust 255/1816 (282) -> 246/1816 (267); js, ts and python unchanged.",
+      "status": "fixed",
+      "commit": null
+    },
+    {
+      "at": "2026-11-14T16:15:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "thought",
+      "item": "ts nested type arguments with a comma break the statement, not the type parameters",
+      "thought": "Correction to my earlier note. A one-line generic signature is fine (`first<T>`, `first<T = unknown>`, `first<T extends unknown>` all measure 0 losses), and a multi-line type-parameter list without a nested comma is fine too. What breaks is a nested type argument carrying a COMMA: `first<T = Record<string, unknown>>(): Promise<T | null>;` inside `declare class D` emits at `<module>` instead of opening the class frame - one loss. So the trigger is the comma inside `<\u2026>` being taken as a statement separator because the angle brackets are not bracket depth for the splitter. That is the thing to fix, and it is a general type-argument scanner, not a class-member rule.",
+      "reader": "lexer",
+      "evidence": "/tmp/ts-b1/a.ts 1 loss; /tmp/ts-b2/{a,b,c}.ts 0 losses.",
+      "status": "thinking",
+      "commit": null
     }
   ]
 }
