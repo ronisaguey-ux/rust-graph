@@ -820,6 +820,15 @@ impl<'a> Walker<'a> {
                 self.event("[\"b\"]");
                 if let Some((target, value)) = self.loop_binding(id) {
                     self.assignment_event(target, value, self.line(id), false);
+                } else if let Some(header) = self.child_of_kind(id, "for_header") {
+                    let inner = self.children(header);
+                    if let Some(semi) = inner.iter().position(|&c| self.kind(c) == ";") {
+                        for &child in &inner[semi + 1..] {
+                            if !self.is_layout(child) {
+                                let _ = self.form(child);
+                            }
+                        }
+                    }
                 }
             }
             "while_statement" => {

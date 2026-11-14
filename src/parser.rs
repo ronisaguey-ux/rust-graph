@@ -668,9 +668,12 @@ impl<'a> Parser<'a> {
     }
 
     fn open_control(&mut self, mut stmt: &[Token], col: u32) {
-        let mut peeled_for = false;
+        let mut peeled = false;
         while matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
-            && self.word_at(stmt, 0).as_deref() == Some("for")
+            && self
+                .word_at(stmt, 0)
+                .as_deref()
+                .is_some_and(|w| matches!(w, "if" | "for" | "while"))
         {
             let Some(end) = self.matching_close(stmt, 1) else { break };
             if !self
@@ -680,12 +683,21 @@ impl<'a> Parser<'a> {
             {
                 break;
             }
-            self.loop_header(&stmt[2..end], stmt[0].line);
-            peeled_for = true;
+            if self.word_at(stmt, 0).as_deref() == Some("for") {
+                self.loop_header(&stmt[2..end], stmt[0].line);
+            } else {
+                self.expression_event("x", &stmt[2..end]);
+            }
+            peeled = true;
             self.event("[\"b\"]");
             stmt = &stmt[end + 1..];
         }
-        if peeled_for && self.word_at(stmt, 0).as_deref() == Some("for") {
+        if (peeled
+            || (matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                && stmt.iter().any(|t| self.is_op(t, b","))
+                && stmt.iter().any(|t| self.is_op(t, b";"))))
+            && self.word_at(stmt, 0).as_deref() == Some("for")
+        {
             if let Some(end) = self.matching_close(stmt, 1) {
                 self.loop_header(&stmt[2..end], stmt[0].line);
                 self.event("[\"b\"]");
@@ -966,16 +978,20 @@ impl<'a> Parser<'a> {
                 self.event("[\"e\"]");
             }
             if let Some(colon) = stmt.iter().position(|token| self.is_op(token, b":")) {
-                self.simple_statement(&stmt[colon + 1..]);
+                self.brace_statement(&stmt[colon + 1..]);
             }
             return;
         }
         if rearmed {
             // `else x = y;`: the arm is this one statement.
             self.final_arm(&stmt[..1]);
-            self.simple_statement(&stmt[1..]);
+            self.brace_statement(&stmt[1..]);
             self.event("[\"j\"]");
             self.pop_frame();
+            return;
+        }
+        if word.as_deref() == Some("else") && stmt.len() > 1 {
+            self.brace_statement(&stmt[1..]);
             return;
         }
         if let Some(word) = word.filter(|word| matches!(word.as_str(), "if" | "for" | "while" | "foreach")) {
@@ -992,7 +1008,7 @@ impl<'a> Parser<'a> {
                         self.expression_event("x", &stmt[2..end]);
                     }
                     self.event("[\"b\"]");
-                    self.simple_statement(&stmt[end + 1..]);
+                    self.brace_statement(&stmt[end + 1..]);
                     self.event("[\"j\"]");
                     return;
                 } else if word == "for" {
@@ -1017,19 +1033,48 @@ impl<'a> Parser<'a> {
     /// declarator and writes the constant value the CST writes.
     fn loop_header(&mut self, header: &[Token], line: u32) {
         let mut at = 0;
-        if header.first().is_some_and(|token| matches!(self.raw(token), b"var" | b"let" | b"const")) {
+        let has_decl = header
+            .first()
+            .is_some_and(|token| matches!(self.raw(token), b"var" | b"let" | b"const"));
+        if has_decl {
             at = 1;
         }
         let rest = &header[at..];
-        match rest.iter().position(|token| matches!(self.raw(token), b"in" | b"of")) {
+        let semi = rest.iter().position(|token| self.is_op(token, b";")).unwrap_or(rest.len());
+        let bound = (semi == rest.len())
+            .then(|| rest.iter().position(|token| token.kind == Kind::Ident && matches!(self.raw(token), b"in" | b"of")))
+            .flatten();
+        match bound {
             Some(bound) => self.assignment(&rest[..bound], &rest[bound + 1..], line, false),
             None => {
-                let semi = rest.iter().position(|token| self.is_op(token, b";")).unwrap_or(rest.len());
                 let init = &rest[..semi];
-                if let Some(eq) = init.iter().position(|token| self.is_op(token, b"=")) {
-                    self.assignment(&init[..eq], &init[eq + 1..], line, false);
-                } else if !init.is_empty() {
-                    self.assignment(init, &[], line, false);
+                let mut depth = 0i32;
+                let mut start = 0usize;
+                for (i, token) in init.iter().enumerate() {
+                    if token.kind == Kind::Op {
+                        match self.raw(token) {
+                            b"(" | b"[" | b"{" => depth += 1,
+                            b")" | b"]" | b"}" => depth -= 1,
+                            b"," if depth == 0 => {
+                                let part = &init[start..i];
+                                if let Some(eq) = part.iter().position(|t| self.is_op(t, b"=")) {
+                                    self.assignment(&part[..eq], &part[eq + 1..], line, false);
+                                } else if has_decl && part.len() == 1 && part[0].kind == Kind::Ident {
+                                    self.expression_event("x", part);
+                                }
+                                start = i + 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let part = &init[start..];
+                if let Some(eq) = part.iter().position(|t| self.is_op(t, b"=")) {
+                    self.assignment(&part[..eq], &part[eq + 1..], line, false);
+                } else if has_decl && part.len() == 1 && part[0].kind == Kind::Ident {
+                    self.expression_event("x", part);
+                } else if start == 0 && !part.is_empty() {
+                    self.assignment(part, &[], line, false);
                 }
                 if semi < rest.len() {
                     let _ = self.values(&rest[semi..]);
