@@ -3,6 +3,12 @@
     "js": 150,
     "ts": 120
   },
+  "recorded": {
+    "js": 136,
+    "ts": 91,
+    "python": 14,
+    "rust": 308
+  },
   "pinned": {
     "python": 14,
     "rust": 308

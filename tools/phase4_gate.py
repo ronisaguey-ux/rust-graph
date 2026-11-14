@@ -35,6 +35,7 @@ DEFAULT_BINARY = Path(
     )
 )
 LIMITS = {"js": 150, "ts": 120}
+LANGS_LINE = "js {js} / ts {ts} / python {python} / rust {rust}"
 
 
 def measure(binary: Path, corpus: Path) -> list[dict]:
@@ -72,6 +73,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
     parser.add_argument("--save", action="store_true", help="re-pin python and rust to what the corpus says now")
+    parser.add_argument("--json", type=Path, help="write the measurement as a record beside the code it measured")
     args = parser.parse_args(argv)
 
     if not args.binary.exists():
@@ -79,17 +81,42 @@ def main(argv: list[str]) -> int:
         return 2
 
     counts, problems = report(args.binary)
+    if args.json:
+        rev = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+        record = {
+            "measured_at": __import__("datetime").date.today().isoformat(),
+            "commit": rev,
+            "binary": str(args.binary),
+            "corpora": {name: count for name, count in sorted(counts.items())},
+            "attribution_problems": problems,
+        }
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps(record, indent=2) + "\n")
+        print(f"phase4_gate: wrote {args.json}")
     pinned = json.loads(BASELINE.read_text()) if BASELINE.exists() else {}
     if args.save:
         BASELINE.parent.mkdir(parents=True, exist_ok=True)
-        BASELINE.write_text(json.dumps({"limits": LIMITS, "pinned": {k: counts[k] for k in ("python", "rust")}}, indent=2) + "\n")
-        print(f"phase4_gate: pinned {BASELINE}")
-        return 0
+        BASELINE.write_text(
+            json.dumps({"limits": LIMITS, "recorded": counts, "pinned": {k: counts[k] for k in ("python", "rust")}}, indent=2)
+            + "\n"
+        )
+        print(f"phase4_gate: recorded {LANGS_LINE.format(**counts)}")
+        pinned = json.loads(BASELINE.read_text())
 
     failed = False
     for name, limit in LIMITS.items():
+        # Two bounds: the plan's limit, and the number recorded when the gate was
+        # last pinned. A rise above the record is a regression even while it is
+        # still under the limit — "must not move" is not satisfied by staying
+        # inside a generous ceiling.
+        recorded = pinned.get("recorded", {}).get(name)
         verdict = "ok" if counts[name] <= limit else "OVER"
         failed |= counts[name] > limit
+        if recorded is not None and counts[name] > recorded:
+            verdict = f"MOVED +{counts[name] - recorded}"
+            failed = True
         print(f"  {name:<8} {counts[name]:>5} fallbacks   limit {limit:>4}   {verdict}")
     for name in ("python", "rust"):
         was = pinned.get("pinned", {}).get(name)
