@@ -837,6 +837,17 @@ impl Emit<'_> {
             out.push('0');
             return;
         }
+        // `b'A'` / `b"…"` (and raw `br"…"`): a byte literal is one constant.
+        // The lexer read the prefix as a name and merged it with the literal,
+        // so the value was `m:[n:b,0]` where the CST writes the constant 0.
+        if self.lang.tag == "RS" && matches!(word.as_str(), "b" | "br") {
+            if let (Some(current), Some(next)) = (self.tok(0), self.tok(1)) {
+                if next.kind == Kind::Str && current.end == next.start {
+                    self.pos += 1;
+                    return;
+                }
+            }
+        }
         // `pub(crate) meter: T`: the visibility is not part of the field. `pub`
         // is already noise, but the parenthesised group survived it and its
         // constant became a member of the merge - the CST writes neither.
