@@ -1097,8 +1097,14 @@ impl<'a> Walker<'a> {
                 self.assignment_targets(base)
             }
             "pattern_list" | "tuple_pattern" | "array_pattern" | "list_pattern" | "tuple" | "list"
-            | "expression_list" => {
-                self.children(id).into_iter().filter_map(|child| self.value_path(child)).collect()
+            | "expression_list" => self.children(id).into_iter().filter_map(|child| self.unpacked_name(child)).collect(),
+            // `(fd, path) = mkstemp()`: the Python grammar keeps a parenthesised
+            // target list as a `parenthesized_expression` with one child per
+            // name, so it fell to the path arm below and bound only the first.
+            "parenthesized_expression"
+                if self.children(id).into_iter().filter(|&child| !self.is_layout(child)).count() > 1 =>
+            {
+                self.children(id).into_iter().filter_map(|child| self.unpacked_name(child)).collect()
             }
             // The left side of a Python multi-target assignment (`a, b = g(x),
             // 1`) is a `pattern_list` here, and this arm maps it, so the
@@ -1142,6 +1148,15 @@ impl<'a> Walker<'a> {
                 }
             },
         }
+    }
+
+    /// One name of an unpacking target list. `head, *rest = xs` binds `rest`
+    /// too: the star is how the list is split, not a different kind of binder.
+    fn unpacked_name(&self, id: u32) -> Option<String> {
+        if self.kind(id) == "list_splat" {
+            return self.children(id).into_iter().find_map(|child| self.value_path(child));
+        }
+        self.value_path(id)
     }
 
     pub(crate) fn assignment_event(&mut self, targets: Vec<String>, value: u32, line: u32, augmented: bool) {
