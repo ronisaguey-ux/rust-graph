@@ -93,6 +93,12 @@ pub struct Parser<'a> {
     /// comma ends a declaration too, because the CST writes one event per
     /// declarator even when the list is broken over lines.
     declaring: bool,
+    /// The `{` that just opened was a conditional type's object type
+    /// (`typeof X extends { … } ? T : U`), so the `}` closes a type, and the
+    /// `? T : U` that follows it is a type too.
+    conditional_type_open: bool,
+    /// The statement after such a `}` writes no fact: it is the type's tail.
+    suppress_event: bool,
 }
 
 pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
@@ -110,6 +116,8 @@ pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
         last_line: 1,
         ahead: VecDeque::new(),
         declaring: false,
+        conditional_type_open: false,
+        suppress_event: false,
     };
     parser.run()
 }
@@ -340,6 +348,18 @@ impl<'a> Parser<'a> {
             // expression written with the brace on the next line belongs to the
             // assignment. Ending the statement here wrote `a self.x 0` and left
             // the body in the enclosing symbol, which the CST never does.
+            // `typeof globalThis extends` newline `{ onmessage: any; … } ? T : U`:
+            // the object type of a conditional type opens on the next line, and
+            // ending the statement here made that brace a block whose members
+            // became statements the CST never writes.
+            if matches!(self.lang.tag, "TS" | "TSX")
+                && last.kind == Kind::Ident
+                && self.raw(last) == b"extends"
+                && self.stmt.iter().any(|token| token.kind == Kind::Ident && self.raw(token) == b"typeof")
+                && self.next_starts_with_brace(last.end as usize)
+            {
+                return;
+            }
             if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
                 && self.is_op(&last, b")")
                 && self.stmt.iter().any(|token| {
@@ -443,11 +463,36 @@ impl<'a> Parser<'a> {
             // `interface User extends Base {` opens a body of type members:
             // `greet(who: string): string` is a signature, not a call, and the
             // CST writes nothing for any of it.
-            let type_body = matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(&self.stmt);
+            let conditional = matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt);
+            let type_body = matches!(self.lang.tag, "TS" | "TSX")
+                && (self.type_declaration(&self.stmt) || conditional);
+            // The header is a declaration and a type: `declare var M: typeof
+            // globalThis extends`. Only the declarator is a name the CST writes;
+            // `globalThis` and `extends` are type text here, and writing them
+            // made the header line disagree on every conditional-type
+            // declaration in the corpus. Truncate before the block saves it.
+            if conditional {
+                if let Some(colon) = self.stmt.iter().position(|token| self.is_op(token, b":")) {
+                    // `declare var M:` — the declarator is the last name before
+                    // the colon; the modifiers and the type are not values.
+                    let name = self.stmt[..colon]
+                        .iter()
+                        .rposition(|token| token.kind == Kind::Ident)
+                        .filter(|&name| name > 0);
+                    if let Some(name) = name {
+                        self.stmt = self.stmt[name..colon].to_vec();
+                    } else {
+                        self.stmt.truncate(colon);
+                    }
+                }
+            }
             let before = self.frames.len();
             self.open_block();
             if type_body && self.frames.len() > before {
                 self.frames[before].type_only = true;
+            }
+            if conditional {
+                self.conditional_type_open = true;
             }
         } else {
             self.brackets.push(b'{');
@@ -467,7 +512,13 @@ impl<'a> Parser<'a> {
         }
         self.end_statement();
         self.settle_branch(None);
+        let conditional = std::mem::take(&mut self.conditional_type_open);
         self.close_block();
+        // `… extends { onmessage: any } ? T : typeof undici.M;`: what follows
+        // the object type is the rest of the type, and a type writes no fact.
+        if conditional {
+            self.suppress_event = true;
+        }
     }
 
     /// Whether a `{` here starts statements rather than a value.
@@ -921,6 +972,12 @@ impl<'a> Parser<'a> {
     }
 
     fn end_statement(&mut self) {
+        if self.suppress_event {
+            self.suppress_event = false;
+            self.stmt.clear();
+            self.brackets.clear();
+            return;
+        }
         if self.stmt.is_empty() {
             self.brackets.clear();
             return;
@@ -2453,6 +2510,22 @@ impl<'a> Parser<'a> {
             self.word_at(stmt, at).as_deref(),
             Some("type") | Some("interface") | Some("namespace") | Some("module") | Some("enum")
         ) && self.word_at(stmt, at + 1).is_some()
+    }
+
+    /// `declare var M: typeof globalThis extends { onmessage: any; M: infer T }
+    /// ? T : U`: the brace opens a conditional type's object type, not a block.
+    /// Read as a block, its members became statements and the lexer wrote three
+    /// events on the continuation line that the CST never writes.
+    fn conditional_type_head(&self, stmt: &[Token]) -> bool {
+        let mut seen_typeof = false;
+        for at in 0..stmt.len() {
+            match self.word_at(stmt, at).as_deref() {
+                Some("typeof") => seen_typeof = true,
+                Some("extends") if seen_typeof => return true,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Where a class member's type annotation starts, if it has one: the first
