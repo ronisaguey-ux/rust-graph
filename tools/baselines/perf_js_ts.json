@@ -1,0 +1,22 @@
+{
+  "corpora": {
+    "js": {
+      "files": 1995,
+      "micros_max": 30620086,
+      "micros_mean": 139933.84,
+      "micros_p50": 3268,
+      "micros_p95": 211856,
+      "micros_total": 279168014,
+      "recoveries": 19
+    },
+    "ts": {
+      "files": 2000,
+      "micros_max": 1334440,
+      "micros_mean": 7116.97,
+      "micros_p50": 695,
+      "micros_p95": 19764,
+      "micros_total": 14233949,
+      "recoveries": 280
+    }
+  }
+}
