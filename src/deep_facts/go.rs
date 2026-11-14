@@ -1663,7 +1663,11 @@ impl<'a> Walker<'a> {
             return out;
         }
         match kind {
-            "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" | "_" => {
+            // `return { type, value, line }`: a shorthand property whose name
+            // is a keyword in another position carries that keyword's kind, so
+            // it read as a leaf and the property vanished from the value.
+            "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" | "_" | "type" | "from"
+            | "of" => {
                 let text = self.text_string(id);
                 let text = if text == "this" { "self".to_string() } else { text };
                 if text.is_empty() {

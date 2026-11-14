@@ -578,6 +578,16 @@ impl<'a> Walker<'a> {
         ) {
             return false;
         }
+        // `{ type, value, line }`: in the JavaScript family a shorthand
+        // property whose name is a keyword in another position carries that
+        // keyword's kind and read as layout, so the property left the record.
+        // Python's `from` is a real keyword (`from x import y`) and must stay
+        // layout: reading it as a name cost 15 python files.
+        if matches!(self.language.name, "javascript" | "typescript" | "tsx")
+            && matches!(self.kind(id), "type" | "from" | "of")
+        {
+            return false;
+        }
         if self.kind(id).as_bytes() == text {
             // Python spells its three constants as keywords, and the lexer
             // reads each of them as a name: `default=True` is
