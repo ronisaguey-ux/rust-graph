@@ -1,0 +1,83 @@
+{
+  "purpose": "Every finding from the unsolved.md work, written at the moment it lands, so an agent that runs out of usage mid-task loses nothing. Append-only. Read this file FIRST on resume.",
+  "schema": {
+    "at": "ISO 8601 local time the finding was made",
+    "by": "agent that made it (fable-5.2, deepseek-v4.1-flash, argon, human)",
+    "item": "the construct or task, one line",
+    "finding": "what is actually true, in plain words",
+    "reader": "lexer | cst | both | corpus | tooling",
+    "evidence": "reproduction path and the numbers that prove it",
+    "status": "open | fixed | reverted | blocked",
+    "commit": "sha when landed, else null"
+  },
+  "resume": {
+    "worktree": "/tmp/rg-fable-wt",
+    "brief": "/tmp/rg-fable-brief.md",
+    "build": "export PATH=$HOME/.cargo/bin:$PATH; cd /tmp/rg-fable-wt && CARGO_TARGET_DIR=/tmp/rg-fable-target cargo build --release --target x86_64-unknown-linux-musl --features \"deep parser\"",
+    "measure": "python3 tools/loss_count.py --binary /tmp/rg-fable-target/x86_64-unknown-linux-musl/release/rust-graph",
+    "tests": "CARGO_TARGET_DIR=/tmp/rg-fable-test cargo test  (then again with --features \"deep parser\")",
+    "rule": "Write one entry here the moment a finding survives a reproduction. Do not batch them to the end of the run - the last run died mid-task and only the uncommitted diff survived."
+  },
+  "entries": [
+    {
+      "at": "2026-11-14T11:50:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "item": "js corpus is a random sample of every .js under both home trees",
+      "finding": "A large share of the js corpus was built output - webpack chunks, .next/static, dist, .min.js. Each is one enormous line, so per-line pairing has nothing to compare and its losses are noise no reader fix can remove. That is why js had been stuck at a low file count with high losses.",
+      "reader": "corpus",
+      "evidence": "old sample /tmp/opencode/sweep-local/js-minified-baseline: 96/1995 files, 164 losses. New source-only sample: 149/2000 files, 270 losses - fewer files pass because they contain constructs. Filter: /tmp/opencode/js-source-filter.py (>=15 lines, no line >400 chars, built dirs excluded); sweep-local.sh pipes through it.",
+      "status": "fixed",
+      "commit": null
+    },
+    {
+      "at": "2026-11-14T12:10:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "item": "class field with a computed key: `static [entityKind] = \"x\"`",
+      "finding": "The lexer named the target `static` because unpack_targets only stripped const/let/var/my/our/local/val/mut; a class-field modifier is not a binding. The CST names the computed key, which is right.",
+      "reader": "lexer",
+      "evidence": "/tmp/js-static/a.js (4 lines): 1 loss -> 0. js 149/270 -> 138/244, ts 91/114 -> 84/107, python and rust held.",
+      "status": "fixed",
+      "commit": "c33d844"
+    },
+    {
+      "at": "2026-11-14T12:30:00-05:00",
+      "by": "fable-5.2",
+      "item": "rust method call after a block-like operand: `async { s }.boxed()`",
+      "finding": "After a block-like operand in statement position the grammar writes `.name(args)` as one field_expression carrying its own arguments, so no call_expression exists to read and the call left the record. Treating a field_expression with an arguments child as a call repairs it.",
+      "reader": "cst",
+      "evidence": "src/deep_facts/rust.rs: rust_block_method + rust_call/rust_callee. Measured by deepseek-v4.1-flash in /tmp/rg-fable-wt: rust 260/1816 (287) -> 255/1816 (282); js, ts, python untouched.",
+      "status": "fixed",
+      "commit": "0e1b825"
+    },
+    {
+      "at": "2026-11-14T12:20:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "item": "js for-header assignment emits an event the CST does not have",
+      "finding": "For `for (i = length; i-- !== 0;)` the lexer emits an `a` event with targets [i]; the CST emits nothing on that line because it records a for header's binder in the statement's target list. Suspect double accounting on the lexer side, but not yet confirmed against pipeline.rs.",
+      "reader": "lexer",
+      "evidence": "/tmp/js-for/a.js reproduces 2 losses (lines 17 and 32); the corpus shows 11 rows, but only about 2 distinct files.",
+      "status": "open",
+      "commit": null
+    },
+    {
+      "at": "2026-11-14T12:25:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "item": "corpus duplication inflates every corpus, worst in rust",
+      "finding": "Measured by content hash: js 2000 files / 1854 unique (7% dup), ts 2000 / 1537 (23%), rust 1816 / 1000 (45%). The rust corpus is every .rs in the workspace, which now holds many near-identical worktrees, so almost half the rust losses are the same code counted again. Dedupe would reset every rust baseline - owner decision, not a lane decision.",
+      "reader": "corpus",
+      "evidence": "sha256 over each corpus directory, 2026-11-14.",
+      "status": "open",
+      "commit": null
+    },
+    {
+      "at": "2026-11-14T12:36:00-05:00",
+      "by": "fable-5.2",
+      "item": "usage limit stopped the run mid-task",
+      "finding": "Fable 5.2 hit its 5-hour limit at 12:36 EST, resets 17:10 (America/New_York). It had applied the rust field_expression fix but not committed it. Its measurement helpers and reproductions are in /tmp/fable-m/tools and /tmp/fable-r.",
+      "reader": "tooling",
+      "evidence": "session 4bacd5d1-85a3-4e2c-9a91-c8453e069d67.jsonl, last assistant message.",
+      "status": "blocked",
+      "commit": null
+    }
+  ]
+}
