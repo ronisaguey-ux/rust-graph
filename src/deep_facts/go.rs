@@ -2463,7 +2463,11 @@ impl<'a> Walker<'a> {
                     format!("{base}.{name}")
                 }
             }
-            "subscript" | "subscript_expression" => {
+            // A subscript is transparent in a path: `elements[i].innerHTML`
+            // names `elements.innerHTML`, and `x[0].y` names `x.y`. Rust spells
+            // it `index_expression`, and reading it as a leaf dropped the
+            // receiver of every indexed assignment target.
+            "subscript" | "subscript_expression" | "index_expression" => {
                 let base = self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default();
                 base
             }

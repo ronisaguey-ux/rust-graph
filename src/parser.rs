@@ -2359,9 +2359,36 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
+            // `elements[i].innerHTML`: the subscript belongs to the receiver,
+            // so the path continues before its `[`. Stopping at the `]` named
+            // the target `.innerHTML` and the assignment lost its receiver.
+            if self.is_op(&toks[start - 1], b"]") {
+                let mut depth = 0usize;
+                let mut index = start - 1;
+                loop {
+                    if self.is_op(&toks[index], b"]") {
+                        depth += 1;
+                    } else if self.is_op(&toks[index], b"[") {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    if index == 0 {
+                        break;
+                    }
+                    index -= 1;
+                }
+                start = index;
+                continue;
+            }
             let token = &toks[start - 1];
             let joins = token.kind == Kind::Op && matches!(self.raw(token), b"." | b"->" | b"::");
-            if token.kind == Kind::Ident && (start == at || self.raw(&toks[start]) != b".") && start != at {
+            if token.kind == Kind::Ident
+                && (start == at || self.raw(&toks[start]) != b".")
+                && start != at
+                && !self.is_op(&toks[start], b"[")
+            {
                 if !self.is_join(&toks[start]) {
                     break;
                 }
@@ -2372,7 +2399,27 @@ impl<'a> Parser<'a> {
             start -= 1;
         }
         let mut path = String::new();
-        for token in &toks[start..at] {
+        let mut at_token = start;
+        while at_token < at {
+            let token = &toks[at_token];
+            // A subscript names no part of the path, but its receiver does.
+            if token.kind == Kind::Op && self.raw(token) == b"[" {
+                let mut depth = 0usize;
+                while at_token < at {
+                    if self.is_op(&toks[at_token], b"[") {
+                        depth += 1;
+                    } else if self.is_op(&toks[at_token], b"]") {
+                        depth -= 1;
+                        if depth == 0 {
+                            at_token += 1;
+                            break;
+                        }
+                    }
+                    at_token += 1;
+                }
+                continue;
+            }
+            at_token += 1;
             if token.kind == Kind::Ident {
                 let word = self.text(token);
                 let receiver = self.top().receiver.as_str();
