@@ -89,6 +89,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "pub(crate) use crate::inner::Thing;\npub(super) use crate::other::*;\npub(in crate::x) use c::d;\n",
     ),
     (
+        "a method in an impl with a return type and a doc comment",
+        "struct S {\n    v: u64,\n}\n\nimpl S {\n    /// Adds `other`; true if that changed anything.\n    pub fn union(&mut self, other: &S) -> bool {\n        let mut changed = false;\n        changed |= other.v != self.v;\n        changed\n    }\n}\n",
+    ),
+    (
         "function types: dyn Fn in a parameter and a Box<dyn Fn>",
         "fn g(x: &dyn Fn(i32) -> i32, y: Box<dyn Fn() -> i32>) {}\n",
     ),

@@ -205,7 +205,11 @@ rust_graph_deep::grammar! { RUST {
     // `fn default()` is legal Rust: `default` is a contextual keyword, and a
     // function may be named by it. The name node keeps its own kind, so the
     // fact layer reads both.
-    function_item: [visibility_modifier] _fn_qualifiers "fn" _name [type_parameters] parameters ["->" _type] [where_clause] (block | ";"),
+    function_item: [visibility_modifier] _fn_qualifiers "fn" _name [type_parameters] parameters ["->" return_type] [where_clause] (block | ";"),
+    // The return type keeps a node of its own. Left as a hidden `_type` its
+    // name was a bare `identifier` child of `function_item`, so `fn union() ->
+    // bool` was recorded as a function called `bool` and the real name was lost.
+    return_type: _type,
     parameters: "(" (_any_parameter %? ",") ")",
     _any_parameter: attribute_item* (self_parameter | parameter | variadic_parameter),
     self_parameter: [("&" | "&&") [LIFETIME]] ["mut"] "self" [":" _type],
