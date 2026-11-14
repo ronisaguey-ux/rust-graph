@@ -94,8 +94,8 @@ struct Def {
 }
 
 const PY_DEFS: &[Def] = &[
-    Def { kind: "class_definition", name: &["identifier"], params: Some("argument_list"), params_nth: 0, name_last: false, receiver: false, container: true },
-    Def { kind: "function_definition", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "class_definition", name: &["identifier", "match", "case", "type"], params: Some("argument_list"), params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_definition", name: &["identifier", "match", "case", "type"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 
 const JS_DEFS: &[Def] = &[
@@ -1154,7 +1154,9 @@ impl<'a> Walker<'a> {
     }
 
     pub(crate) fn first_identifier(&self, id: u32) -> Option<String> {
-        if matches!(self.kind(id), "identifier" | "property_identifier") {
+        if matches!(self.kind(id), "identifier" | "property_identifier")
+            || self.kinds.soft.contains(&self.kind(id))
+        {
             return Some(self.text_string(id));
         }
         let mut child = self.node(id).first_child;
