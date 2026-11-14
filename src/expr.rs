@@ -198,7 +198,12 @@ impl Emit<'_> {
     fn argument(&mut self, out: &mut String, close: u8) {
         if let Some(name) = self.word(0) {
             let colon = self.op_byte(1) == b':' && NAMED_ARGS_WITH_COLON.contains(&self.lang.tag);
-            if self.op_byte(1) == b'=' || colon {
+            // `isNaN(it = +it)`: in JavaScript an `=` in an argument is an
+            // assignment expression, not a keyword argument — the CST writes
+            // the merge `m:[n:it,m:[n:it]]`, and `k(it)` was a shape the source
+            // never had.
+            let assigned = self.op_byte(1) == b'=' && !matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
+            if assigned || colon {
                 self.pos += 2;
                 out.push_str("[\"k\",");
                 push_string(out, &name);
