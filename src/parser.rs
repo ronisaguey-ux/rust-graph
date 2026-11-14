@@ -2508,10 +2508,16 @@ impl<'a> Parser<'a> {
 
     fn unpack_one(&self, part: &[Token]) -> Option<String> {
         // `{ a: b }` binds `b`; `a, *b` binds `b`.
-        match part.iter().rposition(|token| self.is_op(token, b":")) {
+        let bound = match part.iter().rposition(|token| self.is_op(token, b":")) {
             Some(colon) => self.target_path(&part[colon + 1..]),
             None => self.target_path(part),
+        };
+        // `{ a = true, b = null }`: a literal default is not a bound name, so
+        // the CST keeps neither. `undefined` is an identifier and it does.
+        if matches!(bound.as_deref(), Some("true" | "false" | "null")) {
+            return None;
         }
+        bound
     }
 
     fn assignment(&mut self, targets: &[Token], value: &[Token], line: u32, augmented: bool) {
