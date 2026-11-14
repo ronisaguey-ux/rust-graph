@@ -80,6 +80,30 @@
       "evidence": "session 4bacd5d1-85a3-4e2c-9a91-c8453e069d67.jsonl, last assistant message.",
       "status": "blocked",
       "commit": null
+    },
+    {
+      "at": "2026-11-14T13:05:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "js corpus carried duplicate content",
+      "thought": null,
+      "finding": "The 2000-file js sample held 146 files that were byte-identical to another file in the sample (webpack copies of one library across build dirs). Every such file counted as its own fallback, so one construct moved the js number several times over.",
+      "reader": "corpus",
+      "evidence": "sha256 over the sample: 2000 files, 1854 unique. After dropping the duplicates the same binary reads js 125/1854 (223) instead of 138/2000 (244) - 13 files and 21 losses were pure duplicates. tools/js_source_filter.py now drops repeats by content hash during collection.",
+      "status": "fixed",
+      "commit": "19160c5"
+    },
+    {
+      "at": "2026-11-14T13:35:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "ts `{} as Record<string, number>`: the type after `as` is not a value",
+      "thought": null,
+      "finding": "`as` is already noise, so the lexer skipped the keyword but then read the type like an expression: the value of `const total = {} as Record<string, number>` came out as the type argument tuple, while the CST writes only the cast value `{}`.",
+      "reader": "lexer",
+      "evidence": "/tmp/ts-as/a.ts (4 lines): 2 losses -> 0 under both readers. Fixed by skipping the type expression after `as` in TS/TSX (Emit::skip_type: runs to the first token that cannot continue a type at depth zero). ts 84/2000 (107) -> 82/2000 (101); js, python and rust unchanged.",
+      "status": "fixed",
+      "commit": null
     }
   ]
 }
