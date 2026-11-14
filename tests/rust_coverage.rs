@@ -77,6 +77,18 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn g(x: &dyn Fn() -> i32, y: Box<dyn Send>) {}\n",
     ),
     (
+        "use lists: nested braces with a glob and a self item",
+        "use crate::deep::{facts, sink::{self, write}};\nuse std::collections::*;\n",
+    ),
+    (
+        "use lists: super, crate and self paths with an alias",
+        "use super::parent::{self, Child};\nuse self::local::helper as h;\nuse crate::inner::Thing;\n",
+    ),
+    (
+        "use lists: pub(crate), pub(super) and pub(in path)",
+        "pub(crate) use crate::inner::Thing;\npub(super) use crate::other::*;\npub(in crate::x) use c::d;\n",
+    ),
+    (
         "let declarations: mut, annotated and tuple-pattern bindings",
         "fn f() {\n    let mut c = 3;\n    let d: i32 = 4;\n    let (a, b) = (1, 2);\n    let e = c + d + a + b;\n}\n",
     ),
@@ -98,6 +110,39 @@ fn every_claimed_rust_form_reads_the_same_on_both_paths() {
         }
     }
     assert!(failed.is_empty(), "the Rust reader falls back on {} form(s):\n{}", failed.len(), failed.join("\n"));
+}
+
+/// P5-06: a use list parses to the import shape the guard expects, tuple for
+/// tuple — the module path, the name, the alias and whether it is a glob. The
+/// guard only says "no loss"; this says the two readers agree on what was
+/// imported, which is what a resolver consumes.
+#[test]
+fn use_lists_parse_to_the_import_shape_both_readers_agree_on() {
+    let source = "use crate::deep::{facts, sink::{self, write}};\nuse std::collections::*;\nuse super::parent::{self, Child};\npub(crate) use crate::inner::Thing;\npub(super) use crate::other::*;\nuse self::local::helper as h;\n";
+    fn shape(facts: &Facts) -> Vec<(String, String, String, bool)> {
+        let mut out: Vec<(String, String, String, bool)> = facts
+            .imports
+            .iter()
+            .map(|import| (import.module.clone(), import.name.clone(), import.alias.clone(), import.kind == facts::IMPORT_STAR))
+            .collect();
+        out.sort();
+        out
+    }
+    let lexer = shape(&lexer_facts(source));
+    let deep = shape(&deep_facts(source));
+    assert_eq!(lexer, deep, "the two readers import different things");
+    for expected in [
+        ("crate.deep".to_string(), "facts".to_string(), "facts".to_string(), false),
+        ("crate.deep.sink".to_string(), "self".to_string(), "self".to_string(), false),
+        ("crate.deep.sink".to_string(), "write".to_string(), "write".to_string(), false),
+        ("std.collections".to_string(), String::new(), String::new(), true),
+        ("super.parent".to_string(), "Child".to_string(), "Child".to_string(), false),
+        ("crate.inner.Thing".to_string(), String::new(), "Thing".to_string(), false),
+        ("crate.other".to_string(), String::new(), String::new(), true),
+        ("self.local.helper".to_string(), String::new(), "h".to_string(), false),
+    ] {
+        assert!(deep.contains(&expected), "missing import {expected:?} in {deep:?}");
+    }
 }
 
 /// A recorded gap is asserted to disagree, so closing one without moving the row

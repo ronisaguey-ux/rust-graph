@@ -92,7 +92,7 @@ Known gaps (0):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (7):
+Covered (10):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
@@ -100,6 +100,9 @@ Covered (7):
 - closures: annotated return type with a block, and an expression body
 - trait bounds on a parameter and a where clause
 - dynamic types: dyn in a reference and behind Box
+- use lists: nested braces with a glob and a self item
+- use lists: super, crate and self paths with an alias
+- use lists: pub(crate), pub(super) and pub(in path)
 - let declarations: mut, annotated and tuple-pattern bindings
 
 Known gaps (0):
