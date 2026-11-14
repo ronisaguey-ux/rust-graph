@@ -117,14 +117,30 @@ const TWO_FILES: &[(&str, &str)] = &[
     ("app/c.c", "int main(void) {\n  return helper(1);\n}\n"),
 ];
 
+/// The graph without the per-file timing: `micros` is how long the read took,
+/// not a fact about the source, so two builds — or a build and its cache —
+/// cannot be required to reproduce it. Everything else is compared exactly.
+fn without_timing(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(",\"micros\":") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + ",\"micros\":".len()..];
+        let digits = after.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(after.len());
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[test]
 fn the_default_takes_the_cst_where_there_is_one_and_the_lexer_elsewhere() {
     let tree = Tree::new("auto", TWO_FILES);
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
     // Per file, so the choice can be audited from one result.
-    assert!(source_row(&json, "app/a.py").contains(",\"parsed_by\":\"deep\"}"), "{json}");
-    assert!(source_row(&json, "app/c.c").contains(",\"parsed_by\":\"lexer\"}"), "{json}");
+    assert!(source_row(&json, "app/a.py").contains("\"parsed_by\":\"deep\""), "{json}");
+    assert!(source_row(&json, "app/c.c").contains("\"parsed_by\":\"lexer\""), "{json}");
     // The summary says the same, and no language was downgraded by force.
     assert!(json.contains(r#""deep":{"mode":"auto","deep":2,"lexer":1,"fallbacks":0}"#), "{json}");
 }
@@ -328,7 +344,7 @@ fn a_warm_build_repeats_the_provenance_of_the_build_that_parsed() {
     let (cold, _) = tree.json(&["--stdout", "--deep"]);
     let (warm, stderr) = tree.json(&["--stdout", "--deep"]);
     assert!(stderr.contains("0 parsed, 3 cached"), "{stderr}");
-    assert_eq!(cold, warm, "a cached build must equal a clean one");
+    assert_eq!(without_timing(&cold), without_timing(&warm), "a cached build must equal a clean one");
     assert!(warm.contains(r#""parsed_by":"deep""#), "{warm}");
 }
 
@@ -401,7 +417,7 @@ fn the_same_input_yields_byte_identical_facts() {
 
     let (first, _) = tree.json(&["--stdout", "--no-cache"]);
     let (second, _) = tree.json(&["--stdout", "--no-cache"]);
-    assert_eq!(first, second, "two builds of the same tree differ");
+    assert_eq!(without_timing(&first), without_timing(&second), "two builds of the same tree differ");
     assert!(first.contains("\"path\":\"app/a.py\""), "{first}");
 
     // The extraction runs inside the pipeline above; a second build is the

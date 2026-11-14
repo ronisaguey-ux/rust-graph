@@ -3472,6 +3472,7 @@ fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts 
     facts
 }
 
+#[cfg(all(feature = "deep", feature = "parser"))]
 fn parse_source_untimed(bytes: &[u8], path: &str, language: &'static Language) -> Facts {
     use gate::deep_integration::{self, Lang};
 
