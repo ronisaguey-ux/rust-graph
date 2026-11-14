@@ -343,6 +343,15 @@ impl Emit<'_> {
                         break;
                     }
                     match byte {
+                        // `xs.map(f => …).join('…')`: a dot after a finished
+                        // item continues that item's chain. Left to the default
+                        // arm the dot was dropped and the member read as a call
+                        // with no target, which the CST never writes.
+                        b'.' if count > 0 && self.word(1).is_some() && out.ends_with(']') => {
+                            let value = out.split_off(body);
+                            let line = self.toks[self.pos].line;
+                            self.chain(out, value, String::new(), line);
+                        }
                         b'(' => {
                             // `(function (g, f) { … })(this, fn)`: a
                             // parenthesised function expression followed by a
