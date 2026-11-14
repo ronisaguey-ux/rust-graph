@@ -223,3 +223,31 @@ fn rust_an_abi_block_header_and_an_extern_crate_are_events() {
         ]
     );
 }
+
+// `fn union` and `fn default` are names in Rust even though both words are
+// keywords elsewhere: the lexer reads them as names, and the CST used to fall
+// through to the return type and name the method `bool`.
+const WEAK_KEYWORD_NAMES: &str = r#"struct S;
+
+impl S {
+    fn union(&self) -> bool {
+        true
+    }
+    fn default(&self) -> bool {
+        true
+    }
+}
+"#;
+
+#[test]
+fn rust_a_weak_keyword_names_its_function() {
+    let facts = extract(WEAK_KEYWORD_NAMES, Lang::Rust);
+    let names: Vec<(&str, u8)> = facts
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.name.as_str(), symbol.kind))
+        .collect();
+    assert!(names.contains(&("union", facts::KIND_FUNCTION)), "union is not named: {names:?}");
+    assert!(names.contains(&("default", facts::KIND_FUNCTION)), "default is not named: {names:?}");
+    assert!(!names.iter().any(|(name, _)| *name == "bool"), "the return type named a function: {names:?}");
+}

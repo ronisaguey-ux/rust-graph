@@ -1113,6 +1113,22 @@ impl<'a> Walker<'a> {
 
     /// The name a definition node carries, if any.
     pub(crate) fn def_name(&self, id: u32, def: &Def) -> Option<String> {
+        // Rust: a function named with a weak keyword (`fn union`,
+        // `fn default`) has no identifier node — the grammar reads the word as
+        // the keyword it is elsewhere — and the generic lookup then fell
+        // through to the return type, naming the method `bool`. The name is
+        // the leaf right after `fn`.
+        if self.kinds.family == Family::Rust && matches!(def.kind, "function_item" | "function_signature_item") {
+            let children = self.children(id);
+            if let Some(at) = children.iter().position(|&child| self.text_string(child) == "fn") {
+                if let Some(&name) = children.get(at + 1) {
+                    let text = self.text_string(name);
+                    if !text.is_empty() && !text.contains('(') && !text.contains(' ') {
+                        return Some(text);
+                    }
+                }
+            }
+        }
         if def.name_last {
             // Java writes the return type before the name: `Item find(int id)`.
             let node = self
