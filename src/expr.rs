@@ -573,6 +573,17 @@ impl Emit<'_> {
         self.chain(out, value, String::new(), line);
     }
 
+    /// Whether the token `offset` places from the cursor is `++` or `--`.
+    fn increment_token(&self, offset: i32) -> bool {
+        let at = self.pos as i64 + offset as i64;
+        let at = usize::try_from(at).ok();
+        let Some(token) = at.and_then(|at| self.toks.get(at)) else { return false };
+        if token.kind != Kind::Op {
+            return false;
+        }
+        matches!(&self.src[token.start as usize..token.end as usize], b"++" | b"--")
+    }
+
     fn ident(&mut self, out: &mut String, close: u8) {
         let token = &self.toks[self.pos];
         let line = token.line;
@@ -669,6 +680,15 @@ impl Emit<'_> {
         }
         if self.lang.arg_words.contains(&word.as_str()) {
             out.push_str("[\"n\",\"_\"]");
+            return;
+        }
+        // `++i` and `i++`: an increment is not a read of the variable, and the
+        // CST writes the whole update expression as a constant. Reading the
+        // name here made the file lose a value the source never produced.
+        if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && (self.increment_token(-2) || self.increment_token(0))
+        {
+            out.push('0');
             return;
         }
         let head = if word == "this" || word == "self" || (!self.receiver.is_empty() && word == self.receiver) {
