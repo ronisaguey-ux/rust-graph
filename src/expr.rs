@@ -283,13 +283,13 @@ impl Emit<'_> {
                 while let Some(token) = self.tok(0) {
                     let byte = self.op_byte(0);
                     if token.kind == Kind::Op {
+                        if depth == 0 && (byte == b',' || (close != 0 && byte == close)) {
+                            break;
+                        }
                         match byte {
                             b'(' | b'[' | b'{' => depth += 1,
                             b')' | b']' | b'}' if depth > 0 => depth -= 1,
                             _ => {}
-                        }
-                        if depth == 0 && (byte == b',' || (close != 0 && byte == close)) {
-                            break;
                         }
                     }
                     self.pos += 1;
@@ -691,6 +691,9 @@ impl Emit<'_> {
         // blamed for a call the source never made.
         if word == "function" && self.lang.defs.contains(&word.as_str()) {
             self.pos += 1;
+            if self.op_byte(0) == b'*' {
+                self.pos += 1;
+            }
             if self.word(0).is_some() {
                 self.pos += 1;
             }

@@ -252,54 +252,54 @@ impl<'a> Parser<'a> {
         self.lang.blocks == Blocks::Brace
     }
 
-    /// Whether the next bytes after `end` are a member access that begins a
-    /// new line, ignoring spaces and tabs: `.name` or `?.name`.
-    fn next_is_member_access(&self, end: usize) -> bool {
+    fn next_line_start(&self, end: usize) -> Option<usize> {
         let mut at = end;
         while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r') {
             at += 1;
         }
-        if at >= self.src.len() || self.src[at] != b'\n' {
-            return false;
+        if self.src.get(at..at + 2) == Some(b"//") {
+            while at < self.src.len() && self.src[at] != b'\n' {
+                at += 1;
+            }
+        }
+        if self.src.get(at) != Some(&b'\n') {
+            return None;
         }
         at += 1;
-        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r' | b'\n') {
-            at += 1;
+        loop {
+            while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r' | b'\n') {
+                at += 1;
+            }
+            if self.src.get(at..at + 2) == Some(b"//") {
+                while at < self.src.len() && self.src[at] != b'\n' {
+                    at += 1;
+                }
+                continue;
+            }
+            break;
         }
+        Some(at)
+    }
+
+    /// Whether the next bytes after `end` are a member access that begins a
+    /// new line, ignoring spaces and tabs: `.name` or `?.name`.
+    fn next_is_member_access(&self, end: usize) -> bool {
+        let Some(at) = self.next_line_start(end) else { return false };
         matches!(self.src.get(at), Some(b'.')) || self.src.get(at..at + 2) == Some(b"?.")
     }
 
     /// Whether the next line begins with `?` or `:` — the continuation of a
     /// ternary, never the start of a statement.
     fn next_starts_with_ternary(&self, end: usize) -> bool {
-        let mut at = end;
-        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r') {
-            at += 1;
-        }
-        if self.src.get(at) != Some(&b'\n') {
-            return false;
-        }
-        at += 1;
-        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r' | b'\n') {
-            at += 1;
-        }
+        let Some(at) = self.next_line_start(end) else { return false };
         matches!(self.src.get(at), Some(b'?') | Some(b':') | Some(b'>'))
+            || matches!(self.src.get(at..at + 2), Some(b"||" | b"&&" | b"??" | b"* " | b"+ "))
     }
 
     /// Whether the next line begins with `{`, the body of a function expression
     /// whose head was written on the line above.
     fn next_starts_with_brace(&self, end: usize) -> bool {
-        let mut at = end;
-        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r') {
-            at += 1;
-        }
-        if self.src.get(at) != Some(&b'\n') {
-            return false;
-        }
-        at += 1;
-        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r' | b'\n') {
-            at += 1;
-        }
+        let Some(at) = self.next_line_start(end) else { return false };
         self.src.get(at) == Some(&b'{')
     }
 
@@ -364,7 +364,10 @@ impl<'a> Parser<'a> {
                 && last.kind == Kind::Op
                 && !matches!(self.raw(last), b")" | b"]" | b"}" | b":" | b"++" | b"--" | b"=" | b"!" | b"?");
             let trailing_equal = last.kind == Kind::Op && self.raw(last) == b"=" && self.lang.blocks != Blocks::Indent;
-            if continues || trailing_equal {
+            let trailing_nullish = self.stmt.len() >= 2
+                && self.is_op(&self.stmt[self.stmt.len() - 1], b"?")
+                && self.is_op(&self.stmt[self.stmt.len() - 2], b"?");
+            if continues || trailing_equal || trailing_nullish {
                 return;
             }
         }
@@ -623,6 +626,7 @@ impl<'a> Parser<'a> {
             // assignment cannot name, so that one stays anonymous.
             && self.top_level_assign(&stmt).map_or(true, |equal| {
                 stmt[..equal].iter().any(|token| self.is_op(token, b".") || self.is_op(token, b"["))
+                    || stmt[equal + 1..].iter().any(|token| self.is_op(token, b"?"))
             });
         if in_expression || arrow {
             let head = self.lambda_head(&stmt);
@@ -2114,20 +2118,23 @@ impl<'a> Parser<'a> {
             }
             return Some(head);
         }
-        let arrow = rhs.iter().position(|token| self.is_op(token, b"=>"))?;
-        let mut depth = 0;
-        for token in &rhs[..arrow] {
+        let mut depth = 0i32;
+        let mut arrow = None;
+        for (index, token) in rhs.iter().enumerate() {
             if token.kind == Kind::Op {
                 match self.raw(token) {
                     b"(" | b"[" | b"{" => depth += 1,
                     b")" | b"]" | b"}" => depth -= 1,
+                    b"?" if depth == 0 => return None,
+                    b"=>" if depth == 0 => {
+                        arrow = Some(index);
+                        break;
+                    }
                     _ => {}
                 }
             }
         }
-        if depth != 0 {
-            return None;
-        }
+        let arrow = arrow?;
         let params = self.arrow_params(&rhs[skip..arrow]);
         let body = equal + 1 + arrow + 1;
         Some(Head { name, owner, params, body: Some(body), ..Head::default() })
