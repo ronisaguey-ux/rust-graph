@@ -121,6 +121,18 @@ const COVERAGE: &[(&str, &str)] = &[
         "function f(a) {\n  const c = a?.();\n  return c;\n}\n",
     ),
     (
+        "ternary with a nested ternary branch",
+        "function f(a, b, c) {\n  const v = a ? b : c ? b : a;\n  return a ?? (b || c);\n}\nconst o = { k: a ? b : c, n: d ?? e };\ncall(a ? b : c, d ?? e);\n",
+    ),
+    (
+        "logical and nullish assignment operators",
+        "a ||= b;\nc &&= d;\ne ??= f;\nobj.x ??= y;\nobj['k'] ||= z;\ny ||= a ? b : c;\n",
+    ),
+    (
+        "nullish coalescing on either side and a conditional condition",
+        "x = a ? 1 : b;\nw = a ?? 0;\nv = a || 0;\nu = 0 ?? a;\nt = a && 1;\n",
+    ),
+    (
         "class fields, private names and static blocks",
         "class A {\n  static x = 1;\n  #priv = 2;\n  static #sp = 3;\n  static { init(); }\n  get #g() { return 1; }\n  #m() { return 2; }\n  field;\n  [key] = 4;\n  static *gen() {}\n}\nclass B extends A {\n  #p;\n  static { this.ready = true; }\n}\n",
     ),

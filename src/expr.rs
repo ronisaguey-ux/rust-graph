@@ -229,6 +229,10 @@ impl Emit<'_> {
         // keyword, so ident() never runs for the key and the first value came
         // from the arrow's parameter list: that is not a key/value pair.
         let mut first_word: Option<String> = None;
+        // Where the item just written began. A conditional lifts its condition
+        // out of the list, and the condition's own text holds commas, so the
+        // boundary has to be remembered rather than searched for.
+        let mut item_start = start;
         while let Some(token) = self.tok(0) {
             let kind = token.kind;
             // `"abc" "def"`: Python and friends concatenate adjacent string
@@ -482,6 +486,52 @@ impl Emit<'_> {
                             }
                         }
                         b'{' => self.display(out, b'}', "m"),
+                        // `a ? b : c ? b : a`: the whole conditional is one
+                        // merge to the CST, and a conditional inside a branch
+                        // is a merge inside it. Dropped as layout, the `?` and
+                        // `:` left every name in one flat merge.
+                        b'?' if count > 0
+                            && !self.toks.get(self.pos).is_some_and(|token| {
+                                let before = token.start.checked_sub(1).map(|at| self.src[at as usize]);
+                                let after = self.src.get(token.end as usize).copied();
+                                let nullish = after == Some(b'?')
+                                    || before == Some(b'?')
+                                    || after == Some(b'.')
+                                    || after == Some(b'=');
+                                nullish
+                            })
+                            && matches!(self.lang.tag, "JS" | "JSX")
+                            && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") =>
+                        {
+                            // The condition is the item just written, not the
+                            // `?` itself: lift it (and its separator) out and
+                            // let the conditional be the one item.
+                            let condition = out[item_start..at].to_string();
+                            if condition.is_empty() {
+                                // A constant condition writes no item of its
+                                // own, so there is nothing to lift: only the
+                                // separator this arm had already pushed.
+                                out.truncate(at);
+                            } else {
+                                out.truncate(item_start);
+                                count -= 1;
+                            }
+                            self.pos += 1;
+                            let mut consequent = String::new();
+                            self.mix(&mut consequent, b':');
+                            if self.op_byte(0) == b':' {
+                                self.pos += 1;
+                            }
+                            let mut alternate = String::new();
+                            self.mix(&mut alternate, close);
+                            out.push_str("[\"m\",[");
+                            out.push_str(&condition);
+                            out.push(',');
+                            out.push_str(if consequent.is_empty() { "0" } else { &consequent });
+                            out.push(',');
+                            out.push_str(if alternate.is_empty() { "0" } else { &alternate });
+                            out.push_str("]]");
+                        }
                         b'@' if matches!(self.lang.tag, "RB" | "CR") && self.word(1).is_some() => {
                             let name = self.word(1).unwrap_or_default();
                             let line = self.toks[self.pos].line;
@@ -500,6 +550,7 @@ impl Emit<'_> {
                 if count == 1 {
                     first_end = out.len();
                 }
+                item_start = body;
             }
         }
         match count {
