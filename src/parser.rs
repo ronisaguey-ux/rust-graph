@@ -652,6 +652,33 @@ impl<'a> Parser<'a> {
 
     fn open_block(&mut self) {
         let mut stmt = std::mem::take(&mut self.stmt);
+        // `'descend: loop { … }`: the label names the loop for `continue
+        // 'descend` and is not the loop's value. The CST writes the loop's
+        // block event and no label, so the label and its colon are dropped and
+        // the bare `loop` reads exactly as an unlabelled one.
+        if self.lang.tag == "RS" {
+            let label = match (stmt.first(), stmt.get(1), stmt.get(2)) {
+                (Some(first), Some(colon), _)
+                    if first.kind == Kind::Ident && self.raw(first).starts_with(b"'") && self.is_op(colon, b":") =>
+                {
+                    2
+                }
+                (Some(quote), Some(name), Some(colon))
+                    if self.is_op(quote, b"'") && name.kind == Kind::Ident && self.is_op(colon, b":") =>
+                {
+                    3
+                }
+                _ => 0,
+            };
+            let control = stmt
+                .get(label)
+                .filter(|token| token.kind == Kind::Ident)
+                .map(|token| self.raw(token))
+                .is_some_and(|word| matches!(word, b"loop" | b"while" | b"for"));
+            if label > 0 && control && stmt.len() > label {
+                stmt.drain(..label);
+            }
+        }
         let in_expression = !self.brackets.is_empty();
         let rearmed = std::mem::take(&mut self.rearmed);
         let start_col = stmt.first().map_or(0, |token| token.col);
@@ -901,7 +928,7 @@ impl<'a> Parser<'a> {
             return;
         }
         let frame = self.pop_frame();
-        if let Some((stmt, brackets)) = frame.saved {
+        if let Some((mut stmt, brackets)) = frame.saved {
             self.stmt = stmt;
             self.brackets = brackets;
             self.stmt.push(Token { kind: Kind::Lambda, start: 0, end: 0, line: self.last_line, col: 0, interp: None });
