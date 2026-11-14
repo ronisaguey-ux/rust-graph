@@ -848,6 +848,10 @@ mod deep_run {
         static CURRENT: RefCell<String> = const { RefCell::new(String::new()) };
         // Only `--compare` writes here: one row per file with both weights.
         static COMPARED: RefCell<Vec<Compared>> = const { RefCell::new(Vec::new()) };
+        // Wall time per file, in microseconds. Recorded even when the row is
+        // cached: a coverage fix that cost throughput is only visible when the
+        // time beside the facts is too.
+        static MICROS: RefCell<Vec<(String, u64)>> = const { RefCell::new(Vec::new()) };
     }
 
     pub(super) fn enter(path: &str) {
@@ -856,6 +860,15 @@ mod deep_run {
 
     pub(super) fn current() -> String {
         CURRENT.with(|cell| cell.borrow().clone())
+    }
+
+    /// One file's parse time, in microseconds.
+    pub(super) fn note_micros(path: &str, micros: u64) {
+        MICROS.with(|rows| rows.borrow_mut().push((path.to_string(), micros)));
+    }
+
+    pub(super) fn micros_for(path: &str) -> Option<u64> {
+        MICROS.with(|rows| rows.borrow().iter().rev().find(|(at, _)| at == path).map(|(_, micros)| *micros))
     }
 
     pub(super) fn record(path: &str, taken: Taken) {
@@ -1082,6 +1095,12 @@ mod deep_run {
             row.push_str(",\"parsed_by\":\"");
             row.push_str(parsed_by);
             row.push('"');
+            if let Some(micros) = micros_for(path) {
+                row.push_str(&format!(",\"micros\":{micros}"));
+            }
+            if let Some(taken) = taken {
+                row.push_str(&format!(",\"recoveries\":{}", taken.errors));
+            }
             if let Some(taken) = taken {
                 self.accepted_anonymous_calls += u64::from(taken.accepted.anonymous_calls);
                 self.accepted_keyword_calls += u64::from(taken.accepted.keyword_calls);
@@ -3447,6 +3466,13 @@ fn shape_at(
 /// prints the audit and stops before writing anything.
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn parse_source(bytes: &[u8], path: &str, language: &'static Language) -> Facts {
+    let started = std::time::Instant::now();
+    let facts = parse_source_untimed(bytes, path, language);
+    deep_run::note_micros(path, started.elapsed().as_micros() as u64);
+    facts
+}
+
+fn parse_source_untimed(bytes: &[u8], path: &str, language: &'static Language) -> Facts {
     use gate::deep_integration::{self, Lang};
 
     let mode = deep_run::get();
