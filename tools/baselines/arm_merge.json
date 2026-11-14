@@ -1,0 +1,12 @@
+{
+  "measured_at": "2026-11-14",
+  "commit": "8412e5a80fe83cf4519e9a21e9c593c1fbb2ebb9",
+  "binary": "/home/roni/Roni_workspace/rg-kbuilds/release/x86_64-unknown-linux-musl/release/rust-graph",
+  "corpora": {
+    "js": 136,
+    "python": 14,
+    "rust": 308,
+    "ts": 91
+  },
+  "attribution_problems": []
+}
