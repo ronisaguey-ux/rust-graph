@@ -1738,9 +1738,22 @@ return verdict(Some("var"), detail, accepted);
             deep.symbols
                 .iter()
                 .filter(|row| {
-                    row.name.starts_with("<anonymous>@")
-                        && row.line >= paired.line
-                        && row.end_line <= paired.end_line
+                    // A named function expression gets its own symbol with the
+                    // enclosing name and its own line (`exports.default =
+                    // _typeof = function (obj)` opens a second `_typeof` at
+                    // 11), so keying the pool on `<anonymous>@` alone left
+                    // those rows unmatched: `return typeof obj` was written by
+                    // the lexer on `_typeof` and by the CST on `_typeof` at 11,
+                    // and the file was blamed for an event that is in the
+                    // record one level down.
+                    let inside = row.line >= paired.line && row.end_line <= paired.end_line;
+                    let same =
+                        row.name == paired.name && row.line == paired.line && row.kind == paired.kind;
+                    inside
+                        && !same
+                        && (row.name.starts_with("<anonymous>@")
+                            || row.name == paired.name
+                            || row.name.starts_with(&format!("{}@", paired.name)))
                 })
                 .cloned()
                 .collect()
@@ -1852,7 +1865,7 @@ fn uncovered(
         })
     };
     let mut found: Vec<(u8, Shape)> = rows_of(paired, shapes);
-    for other in extra.iter().filter(|row| row.name != paired.name || row.owner != paired.owner) {
+    for other in extra.iter().filter(|row| row.key != paired.key) {
         found.extend(rows_of(other, shapes));
     }
     // The exact matches are taken first, all of them, before any statement is
