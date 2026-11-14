@@ -640,9 +640,20 @@ impl<'a> Walker<'a> {
                 // `{ a, b: c } = obj` binds `a` and `c`. The key `b` is how the
                 // source names the property; the one-pass reader and the
                 // resolver both want the binders only.
-                "pair" | "pair_pattern" | "object_assignment_pattern" => {
+                "pair" | "pair_pattern" => {
                     if let Some(last) = self.children(node).into_iter().last() {
                         walk.push(last);
+                    }
+                }
+                "object_assignment_pattern" | "assignment_pattern" => {
+                    if let Some(first) = self.children(node).into_iter().next() {
+                        walk.push(first);
+                    }
+                }
+                "member_expression" | "attribute" => {
+                    let path = self.path_of(node);
+                    if !path.is_empty() {
+                        out.push(path);
                     }
                 }
                 "identifier" | "property_identifier" | "private_property_identifier" => {

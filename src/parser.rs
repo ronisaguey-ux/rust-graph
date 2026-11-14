@@ -2508,13 +2508,13 @@ impl<'a> Parser<'a> {
             return None;
         }
         let mut targets = Vec::new();
-        let mut depth = 0;
+        let mut depth = 0i32;
         let mut start = 0;
         for (index, token) in inner.iter().enumerate() {
             if token.kind == Kind::Op {
                 match self.raw(token) {
-                    b"(" | b"[" => depth += 1,
-                    b")" | b"]" => depth -= 1,
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
                     b"," if depth == 0 => {
                         targets.extend(self.unpack_one(&inner[start..index]));
                         start = index + 1;
@@ -2527,18 +2527,52 @@ impl<'a> Parser<'a> {
         Some(targets)
     }
 
-    fn unpack_one(&self, part: &[Token]) -> Option<String> {
-        // `{ a: b }` binds `b`; `a, *b` binds `b`.
-        let bound = match part.iter().rposition(|token| self.is_op(token, b":")) {
-            Some(colon) => self.target_path(&part[colon + 1..]),
-            None => self.target_path(part),
+    fn unpack_one(&self, part: &[Token]) -> Vec<String> {
+        let mut depth = 0i32;
+        let mut cut = part.len();
+        for (index, token) in part.iter().enumerate() {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    b"=" if depth == 0 => {
+                        cut = index;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let lhs = &part[..cut];
+        // `{ a: b }` binds `b`; `{ a: { b, c } }` unpacks the nested pattern.
+        let mut colon = None;
+        let mut cdepth = 0i32;
+        for (index, token) in lhs.iter().enumerate() {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => cdepth += 1,
+                    b")" | b"]" | b"}" => cdepth -= 1,
+                    b":" if cdepth == 0 => colon = Some(index),
+                    _ => {}
+                }
+            }
+        }
+        let target = match colon {
+            Some(at) => &lhs[at + 1..],
+            None => lhs,
         };
+        if target.first().is_some_and(|t| self.is_op(t, b"{") || self.is_op(t, b"[")) {
+            if let Some(nested) = self.unpack_targets(target) {
+                return nested;
+            }
+        }
+        let bound = self.target_path(target);
         // `{ a = true, b = null }`: a literal default is not a bound name, so
         // the CST keeps neither. `undefined` is an identifier and it does.
         if matches!(bound.as_deref(), Some("true" | "false" | "null")) {
-            return None;
+            return Vec::new();
         }
-        bound
+        bound.into_iter().collect()
     }
 
     fn assignment(&mut self, targets: &[Token], value: &[Token], line: u32, augmented: bool) {
