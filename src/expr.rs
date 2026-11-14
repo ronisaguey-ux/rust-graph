@@ -847,7 +847,11 @@ impl Emit<'_> {
             PY_NOISE.contains(&word.as_str())
         } else {
             NOISE.contains(&word.as_str())
-        } && !(self.lang.tag == "RS" && word == "new");
+        } && !(self.lang.tag == "RS" && word == "new")
+            // `async move { … }` / `move ||`: `move` is a keyword on a closure
+            // or an async block, not a name, and the CST writes no value for
+            // it. Read as a name it became the whole event on that line.
+            || (self.lang.tag == "RS" && word == "move");
         if noise && !go_word {
             self.pos += 1;
             return;
