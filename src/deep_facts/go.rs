@@ -656,7 +656,13 @@ impl<'a> Walker<'a> {
                 // `const { offset, type, source, end } = x` binds four names in
                 // that order; the grammar spells `type` with its own keyword
                 // kind, and reading it as a leaf dropped it from the targets.
-                "is" | "as" | "satisfies" | "get" | "set" | "static" | "async" | "readonly" | "declare" | "type" => {
+                // `const { from, to } = x` binds `from`, and the grammar gives
+                // `from` (like `type`) its own kind because both are keywords in
+                // another position. A blanket rule for keyword leaves also
+                // picked up `catch` in `try {…} catch (e)`, so the list stays
+                // explicit.
+                "is" | "as" | "satisfies" | "get" | "set" | "static" | "async" | "readonly" | "declare" | "type"
+                | "from" | "of" => {
                     out.push(self.text_string(node))
                 }
                 _ => {
