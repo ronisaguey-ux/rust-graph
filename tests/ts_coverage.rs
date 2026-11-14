@@ -109,6 +109,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "decorators on a class, a method and a property",
         "function dec(...args: unknown[]) {\n  return args;\n}\n@dec\nclass A {\n  @dec\n  field: number = 1;\n  @dec\n  method() {\n    return this.field;\n  }\n}\n",
     ),
+    (
+        "conditional type on a declaration, object type opened on the next line",
+        "declare var M: typeof globalThis extends\n    { onmessage: any; M: infer T } ? T : typeof undici.M;\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
