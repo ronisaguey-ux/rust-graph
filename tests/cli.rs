@@ -51,8 +51,9 @@ fn stderr(out: &Output) -> String {
 fn two_builds_and_two_locations_give_the_same_bytes() {
     let one = Tree::new("det-one", TWO_FILES);
     let two = Tree::new("det-two", TWO_FILES);
-    assert_eq!(one.json(), one.json());
-    assert_eq!(one.json(), two.json());
+    let first = without_timing(one.json().as_bytes());
+    assert_eq!(first, without_timing(one.json().as_bytes()));
+    assert_eq!(first, without_timing(two.json().as_bytes()));
 }
 
 #[test]
@@ -72,6 +73,23 @@ fn a_name_implied_by_the_tree_is_inferred() {
     assert!(tree.json().contains(r#""tag":"INFERRED","strategy":"same-directory""#));
 }
 
+/// The graph without the per-file timing: `micros` is how long the read took,
+/// not a fact about the source, so a cached build cannot be required to
+/// reproduce it. Everything else in the document is compared byte for byte.
+fn without_timing(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find(",\"micros\":") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + ",\"micros\":".len()..];
+        let digits = after.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(after.len());
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[test]
 fn an_unchanged_tree_parses_nothing_and_gives_the_same_graph() {
     let tree = Tree::new("cache", TWO_FILES);
@@ -80,7 +98,7 @@ fn an_unchanged_tree_parses_nothing_and_gives_the_same_graph() {
     assert!(stderr(&cold).contains("2 parsed, 0 cached"), "{}", stderr(&cold));
     let warm = tree.build(&["--stdout"]);
     assert!(stderr(&warm).contains("0 parsed, 2 cached"), "{}", stderr(&warm));
-    assert_eq!(cold.stdout, warm.stdout);
+    assert_eq!(without_timing(&cold.stdout), without_timing(&warm.stdout));
     assert!(cache.join("facts.pack").exists());
 }
 
@@ -93,7 +111,7 @@ fn an_edit_reparses_that_file_and_re_resolves_its_callers() {
     assert!(stderr(&out).contains("1 parsed, 1 cached"), "{}", stderr(&out));
     let json = String::from_utf8(out.stdout).unwrap();
     assert!(!json.contains(r#""callee":"app/b.py:helper""#), "a stale edge survived: {json}");
-    assert_eq!(json, tree.json(), "a cached build must equal a clean one");
+    assert_eq!(without_timing(json.as_bytes()), without_timing(&tree.json().into_bytes()), "a cached build must equal a clean one");
 }
 
 #[test]
