@@ -121,6 +121,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "function f(a) {\n  const c = a?.();\n  return c;\n}\n",
     ),
     (
+        "object literal families: keyword keys, computed keys, shorthand, methods and spread",
+        "const a = { delete: 1, default: 2, class: 3, new: 4, in: 5, of: 6, function: 7 };\nconst b = { [key]: 1, [a.b]: 2, ['str']: 3 };\nconst c = { x, y, z };\nconst d = { m() {}, get g() { return 1; }, set s(v) {}, async am() {}, *gen() {} };\nconst e = { ...rest, q: 1 };\nconst f = { type, value, size };\n",
+    ),
+    (
         "computed object key",
         "const key = 'k';\nconst o = { [key]: 1 };\n",
     ),

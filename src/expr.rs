@@ -324,7 +324,28 @@ impl Emit<'_> {
                     // the CST, and the lexer read its body as part of the
                     // object. The key is dropped with it, exactly as the CST
                     // drops it, so the merge lists the same items.
-                    if close == b'}' {
+                    let js_family = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
+                    if js_family && close == b'}' && self.op_byte(1) == b':' {
+                        // `{ delete: 1 }` and `{ q: 1 }`: a key whose value is
+                        // a constant is one pair to the CST. The keyword key is
+                        // dropped by ident() as noise, and a number writes no
+                        // item of its own, so the pair vanished.
+                        let word = self.word(0).unwrap_or_default();
+                        let constant = self.toks.get(self.pos + 2).is_some_and(|token| token.kind == Kind::Num);
+                        if constant {
+                            self.pos += 3;
+                            out.push_str("[\"m\",[[\"n\",");
+                            push_string(out, &word);
+                            out.push_str("],0]]");
+                        } else if NOISE.contains(&word.as_str()) && !self.lang.defs.contains(&word.as_str()) {
+                            self.pos += 1;
+                            out.push_str("[\"n\",");
+                            push_string(out, &word);
+                            out.push(']');
+                        } else {
+                            self.ident(out, close);
+                        }
+                    } else if close == b'}' {
                         if let Some(end) = self.method_end(self.pos) {
                             self.pos = end;
                             out.push('0');
@@ -399,6 +420,20 @@ impl Emit<'_> {
                                 out.push_str(&format!("[\"c\",{id},0,[{args}]]"));
                             }
                         }
+                        // `{ *gen() { … } }`: a generator method is one
+                        // constant to the CST. Read as a call it was a call the
+                        // source never made.
+                        b'*' if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                            && close == b'}'
+                            && self.toks.get(self.pos + 1).is_some_and(|token| token.kind == Kind::Ident)
+                            && self.op_byte(2) == b'(' =>
+                        {
+                            self.pos += 2;
+                            let mut params = String::new();
+                            self.list(&mut params, b')', false);
+                            self.skip_block();
+                            out.push('0');
+                        }
                         b'[' if close == b'}' && self.display_is_method() => {
                             let key_path = self.computed_key_path();
                             // `{ [Symbol.iterator]() { … } }`: a computed-key
@@ -428,7 +463,24 @@ impl Emit<'_> {
                                 out.push('0');
                             }
                         }
-                        b'[' => self.display(out, b']', "t"),
+                        b'[' => {
+                            let mut key = String::new();
+                            self.display(&mut key, b']', "t");
+                            // `{ [key]: 1 }`: a constant value is written with
+                            // its key as one pair, as the CST has it.
+                            if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                                && close == b'}'
+                                && self.op_byte(0) == b':'
+                                && self.toks.get(self.pos + 1).is_some_and(|token| token.kind == Kind::Num)
+                            {
+                                self.pos += 2;
+                                out.push_str("[\"m\",[");
+                                out.push_str(&key);
+                                out.push_str(",0]]");
+                            } else {
+                                out.push_str(&key);
+                            }
+                        }
                         b'{' => self.display(out, b'}', "m"),
                         b'@' if matches!(self.lang.tag, "RB" | "CR") && self.word(1).is_some() => {
                             let name = self.word(1).unwrap_or_default();
