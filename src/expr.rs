@@ -844,6 +844,18 @@ impl Emit<'_> {
                 continue;
             }
             if self.op_byte(0) == b'(' {
+                // `f()()`, `Function(source)()`: the CST records the inner call
+                // and nothing else — the outer call, its target and its
+                // arguments never reach the record.
+                if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                    && path.is_empty()
+                    && value.starts_with("[\"c\",")
+                {
+                    self.pos += 1;
+                    let mut args = String::new();
+                    self.list(&mut args, b')', true);
+                    continue;
+                }
                 let line = self.toks[self.pos].line;
                 self.pos += 1;
                 let (receiver, mut target) = self.split_receiver(&value, &path);
