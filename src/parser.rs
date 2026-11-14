@@ -2365,6 +2365,19 @@ impl<'a> Parser<'a> {
             return;
         }
         let line = first.line;
+        // `for (var t = arguments.length, o = new Array(t), i = 1; i < t; i++) …`:
+        // a loop header declares its binding even when the body is a bare
+        // statement on the same line. Read as an assignment the whole header
+        // became one tuple value of the first binding.
+        if self.word_at(stmt, 0).as_deref() == Some("for") {
+            if let Some(end) = self.matching_close(stmt, 1) {
+                self.loop_header(&stmt[2..end], line);
+                if end + 1 < stmt.len() {
+                    self.simple_statement(&stmt[end + 1..]);
+                }
+                return;
+            }
+        }
         // `X = class Y { … }` and `module.exports = class …`: a class
         // expression is the definition an assigned function is — the walk
         // opens the class body as its own symbol and the CST writes no event.
