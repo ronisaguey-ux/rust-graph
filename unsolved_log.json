@@ -1,13 +1,15 @@
 {
-  "purpose": "Every finding from the unsolved.md work, written at the moment it lands, so an agent that runs out of usage mid-task loses nothing. Append-only. Read this file FIRST on resume.",
+  "purpose": "Every important thought from the unsolved.md work, written the moment it is thought, so an agent that runs out of usage mid-task loses nothing. Append-only, newest last. Read THIS FILE FIRST on resume.",
   "schema": {
-    "at": "ISO 8601 local time the finding was made",
-    "by": "agent that made it (fable-5.2, deepseek-v4.1-flash, argon, human)",
+    "at": "ISO 8601 local time the entry was written",
+    "by": "agent that wrote it (fable-5.2, deepseek-v4.1-flash, argon, human)",
+    "kind": "thought | decision | finding",
     "item": "the construct or task, one line",
+    "thought": "what the writer is considering or has just realised - write it here the moment it occurs, before proving anything",
     "finding": "what is actually true, in plain words",
     "reader": "lexer | cst | both | corpus | tooling",
-    "evidence": "reproduction path and the numbers that prove it",
-    "status": "open | fixed | reverted | blocked",
+    "evidence": "reproduction path and the numbers that prove it, or null when it is still a thought",
+    "status": "thinking | open | fixed | reverted | blocked",
     "commit": "sha when landed, else null"
   },
   "resume": {
@@ -16,7 +18,7 @@
     "build": "export PATH=$HOME/.cargo/bin:$PATH; cd /tmp/rg-fable-wt && CARGO_TARGET_DIR=/tmp/rg-fable-target cargo build --release --target x86_64-unknown-linux-musl --features \"deep parser\"",
     "measure": "python3 tools/loss_count.py --binary /tmp/rg-fable-target/x86_64-unknown-linux-musl/release/rust-graph",
     "tests": "CARGO_TARGET_DIR=/tmp/rg-fable-test cargo test  (then again with --features \"deep parser\")",
-    "rule": "Write one entry here the moment a finding survives a reproduction. Do not batch them to the end of the run - the last run died mid-task and only the uncommitted diff survived."
+    "rule": "Append an entry the moment a thought matters: which construct you are about to test and why, which reader you suspect, which file you are about to change, what the last measurement showed. kind=thought, status=thinking, no evidence yet - that is fine. Never batch to the end of a run: the account can cut you off at any tool call and anything not in this file or in a commit is lost. When a thought becomes a finding, append a new entry with the evidence and leave the thought where it is."
   },
   "entries": [
     {
