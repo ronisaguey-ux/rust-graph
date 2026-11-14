@@ -10,10 +10,11 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const TABLES: [&str; 3] = [
+const TABLES: [&str; 4] = [
     "tests/js_coverage.rs",
     "tests/ts_coverage.rs",
     "tests/python_coverage.rs",
+    "tests/rust_coverage.rs",
 ];
 
 fn root() -> PathBuf {
