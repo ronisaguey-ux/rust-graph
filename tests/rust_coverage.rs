@@ -89,6 +89,14 @@ const COVERAGE: &[(&str, &str)] = &[
         "pub(crate) use crate::inner::Thing;\npub(super) use crate::other::*;\npub(in crate::x) use c::d;\n",
     ),
     (
+        "function types: dyn Fn in a parameter and a Box<dyn Fn>",
+        "fn g(x: &dyn Fn(i32) -> i32, y: Box<dyn Fn() -> i32>) {}\n",
+    ),
+    (
+        "function types: impl Fn as a parameter bound",
+        "fn h(f: impl Fn(i32) -> i32) -> i32 { f(1) }\n",
+    ),
+    (
         "let declarations: mut, annotated and tuple-pattern bindings",
         "fn f() {\n    let mut c = 3;\n    let d: i32 = 4;\n    let (a, b) = (1, 2);\n    let e = c + d + a + b;\n}\n",
     ),

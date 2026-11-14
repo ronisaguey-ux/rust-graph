@@ -1026,6 +1026,21 @@ impl Emit<'_> {
     }
 
     /// A value followed by any run of `.name`, `[index]` and `(args)`.
+    /// Whether the `(` at the cursor closes a Rust type rather than a call:
+    /// `dyn Fn(..)`, `: Fn(..)`, `impl Fn(..)`, `fn(..)`.
+    fn rust_type_group(&self) -> bool {
+        let Some(token) = self.pos.checked_sub(2).and_then(|at| self.toks.get(at)) else {
+            return false;
+        };
+        // Only a word that can find nothing else: `:` and `<` also precede a
+        // real call (`f: g(x)`, `a < b(1)`), and reading those as types broke
+        // 133 corpus files.
+        if self.raw_is(token, b"fn") {
+            return true;
+        }
+        matches!(lexeme(self.src, token, self.lang).as_str(), "dyn" | "impl")
+    }
+
     fn chain(&mut self, out: &mut String, mut value: String, mut path: String, line: u32) {
         let mut constructed = None;
         loop {
@@ -1107,6 +1122,16 @@ impl Emit<'_> {
                     && path.is_empty()
                     && value.starts_with("[\"c\",")
                 {
+                    self.pos += 1;
+                    let mut args = String::new();
+                    self.list(&mut args, b')', true);
+                    continue;
+                }
+                // `dyn Fn(i32) -> Fut`, `where F: Fn(..) -> Self`, `Arc<dyn
+                // Fn(..)>`: in Rust a group after a type context is a function
+                // *type*. Read as a call it invented a callee called `Fn` on
+                // every trait bound in the corpus.
+                if self.lang.tag == "RS" && self.rust_type_group() {
                     self.pos += 1;
                     let mut args = String::new();
                     self.list(&mut args, b')', true);
