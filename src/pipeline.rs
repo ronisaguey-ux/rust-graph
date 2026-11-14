@@ -1724,7 +1724,28 @@ return verdict(Some("var"), detail, accepted);
         // whole impl body can land in the module's symbol while the CST files it
         // under the method. For the module, every symbol's events are the
         // module's: the fact is in the file either way.
-        let extra: &[crate::facts::Symbol] = if symbol.kind == KIND_MODULE { &deep.symbols } else { &[] };
+        //
+        // The same holds one level down: the CST gives an arrow body its own
+        // symbol and writes its statements' events there (`f => (...a) => { …
+        // return f(...a) }` puts the return on `<anonymous>@1`), while the
+        // lexer keeps them on the arrow's enclosing symbol. Those rows are in
+        // the record, just under a name the lexer never invents, so a nested
+        // anonymous symbol whose span sits inside the paired one contributes
+        // its events to the comparison.
+        let nested: Vec<crate::facts::Symbol> = if symbol.kind == KIND_MODULE {
+            Vec::new()
+        } else {
+            deep.symbols
+                .iter()
+                .filter(|row| {
+                    row.name.starts_with("<anonymous>@")
+                        && row.line >= paired.line
+                        && row.end_line <= paired.end_line
+                })
+                .cloned()
+                .collect()
+        };
+        let extra: &[crate::facts::Symbol] = if symbol.kind == KIND_MODULE { &deep.symbols } else { &nested };
         phase!(4);
         let details = uncovered(lexer, symbol, paired, &mut accepted, &lines, &macro_lines, extra, &mut shapes);
         if let Some(first) = details.first() {
