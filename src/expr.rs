@@ -465,6 +465,26 @@ impl Emit<'_> {
             }
             return;
         }
+        // `new Fab;` with no parentheses is still a constructor call: the
+        // grammar writes the call, the lexer dropped `new` as layout and left
+        // the callee standing as a name. `new.target` is not a call, and a
+        // dotted or parenthesised callee keeps the old path.
+        if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && word == "new"
+            && self.op_byte(1) != b'.'
+            && self.op_byte(1) != b'('
+            && self.word(1).is_some()
+            && self.op_byte(2) != b'.'
+            && self.op_byte(2) != b'('
+            && self.op_byte(2) != b'['
+        {
+            let name = self.word(1).unwrap_or_default();
+            let target = self.toks[self.pos + 1].line;
+            self.pos += 2;
+            let id = self.new_call(name, target);
+            out.push_str(&format!("[\"c\",{id},0,[]]"));
+            return;
+        }
         // `f(function (st) { ... })`: a function expression is a value, and the
         // CST records it as one constant. Read as a name, `function` became a
         // call whose arguments were its parameter list, and the statement was
@@ -762,6 +782,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_new_without_parentheses_is_still_a_call() {
+        // `var fab = new Fab;` invokes a constructor with no arguments. The
+        // grammar writes the call and the lexer dropped `new` as layout, so the
+        // callee stood as a name the CST never wrote — 32 losses in the corpus.
+        let (value, calls) = form("js", "var fab = new Fab;");
+        assert!(value.contains(r#"["c""#), "`new Fab` is a constructor call: {value}");
+        assert_eq!(calls, vec!["Fab".to_string()]);
+        // `new.target` is a property, not a call, and a parenthesised callee is
+        // read by the normal call path.
+        assert_eq!(form("js", "new.target").1.len(), 0);
+        assert_eq!(form("js", "new Foo()").1, vec!["Foo".to_string()]);
     }
 
     #[test]
