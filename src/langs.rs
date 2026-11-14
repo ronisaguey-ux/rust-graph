@@ -148,7 +148,10 @@ const JS_LIKE: Language = Language {
     regex_literals: true,
     semicolons: false,
     defs: &["function"],
-    classes: &["class", "interface"],
+    // `interface` is TypeScript's: in a `.js` file it is an ordinary name, and
+    // a reader that opened a class symbol for it named a construct the CST
+    // does not have. TypeScript's own row adds it back.
+    classes: &["class"],
     imports: Imports::Js,
     ..BASE
 };
@@ -222,7 +225,13 @@ pub const LANGUAGES: &[Language] = &[
         ..BASE
     },
     Language { name: "JavaScript", tag: "JS", extensions: &["js", "mjs", "cjs", "jsx"], ..JS_LIKE },
-    Language { name: "TypeScript", tag: "TS", extensions: &["ts", "tsx", "mts", "cts"], ..JS_LIKE },
+    Language {
+        name: "TypeScript",
+        tag: "TS",
+        extensions: &["ts", "tsx", "mts", "cts"],
+        classes: &["class", "interface"],
+        ..JS_LIKE
+    },
     C,
     CPP,
     OBJC,

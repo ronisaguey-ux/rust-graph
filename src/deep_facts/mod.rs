@@ -98,13 +98,37 @@ const PY_DEFS: &[Def] = &[
     Def { kind: "function_definition", name: &["identifier", "match", "case", "type"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 
+/// JavaScript's declarations. Nothing in this table is a TypeScript-only
+/// construct: `interface`, `enum` and `type` are names in a `.js` file, and a
+/// reader that treated them as declarations would invent symbols the CST does
+/// not have. They live in [`TS_ONLY_DEFS`], and the assertion below keeps the
+/// two tables from ever meeting.
 const JS_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["identifier"], params: Some("class_heritage"), params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "class", name: &["identifier"], params: Some("class_heritage"), params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "generator_function_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "method_definition", name: &["property_identifier", "identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "function_expression", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "arrow_function", name: &[], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+
+/// The declarations only TypeScript has: an interface, an enum and a type
+/// alias. `export type Check = (a: number) => boolean;` declares a named type
+/// and the one-pass lexer opens a symbol for it, which is why TypeScript reads
+/// this table and JavaScript does not.
+const TS_ONLY_DEFS: &[Def] = &[
+    Def { kind: "interface_declaration", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["identifier", "type_identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "type_alias_declaration", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+];
+
+/// TypeScript's declarations: JavaScript's, then the constructs only it has.
+const TS_DEFS: &[Def] = &[
     Def { kind: "class_declaration", name: &["identifier"], params: Some("class_heritage"), params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "class", name: &["identifier"], params: Some("class_heritage"), params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "interface_declaration", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "enum_declaration", name: &["identifier", "type_identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
-    // `export type Check = (a: number) => boolean;` declares a named type, and
-    // the one-pass lexer opens a symbol for it.
     Def { kind: "type_alias_declaration", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
     Def { kind: "function_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
     Def { kind: "generator_function_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
@@ -112,6 +136,47 @@ const JS_DEFS: &[Def] = &[
     Def { kind: "function_expression", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
     Def { kind: "arrow_function", name: &[], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
+
+/// Byte equality, so the disjointness check runs in a `const` context where
+/// `str` comparison is not available.
+const fn same_name(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut at = 0;
+    while at < a.len() {
+        if a[at] != b[at] {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
+/// Whether any declaration kind appears in both tables.
+const fn defs_overlap(a: &[Def], b: &[Def]) -> bool {
+    let mut i = 0;
+    while i < a.len() {
+        let mut j = 0;
+        while j < b.len() {
+            if same_name(a[i].kind, b[j].kind) {
+                return true;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The build-time guarantee: a TypeScript-only declaration kind in JavaScript's
+/// table would be read as a JS definition, and the JS reader would name a
+/// construct only TypeScript has. Adding one to `JS_DEFS` fails the build here.
+const _: () = assert!(
+    !defs_overlap(JS_DEFS, TS_ONLY_DEFS),
+    "a TypeScript-only kind is in JavaScript's definition table"
+);
 
 /// Go has no class declaration: a `struct` or `interface` is a type, and the
 /// lexer keeps it as a statement. A `func` with a receiver list is a method, and
@@ -264,8 +329,11 @@ fn kinds(lang: Lang) -> Kinds {
         Lang::Json => {
             Kinds { definitions: JSON_DEFS, calls: JSON_CALLS, imports: JSON_IMPORTS, soft: &[], family: Family::Plain }
         }
-        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+        Lang::JavaScript => {
             Kinds { definitions: JS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: JS_SOFT, family: Family::Js }
+        }
+        Lang::TypeScript | Lang::Tsx => {
+            Kinds { definitions: TS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: JS_SOFT, family: Family::Js }
         }
         // Go and Java write their statements and their calls themselves: the
         // lexer's statement model is mirrored by `decl_value` rather than by
