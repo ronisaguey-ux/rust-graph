@@ -326,6 +326,24 @@ impl Emit<'_> {
                     }
                     match byte {
                         b'(' => self.group(out),
+                        b'[' if close == b'}' && self.display_is_method() => {
+                            // `{ [Symbol.iterator]() { … } }`: a computed-key
+                            // method is one constant to the CST. Read as a
+                            // display it became a pair with the method's body
+                            // hanging off it.
+                            self.display(out, b']', "t");
+                            out.truncate(at);
+                            if count > 0 {
+                                out.push(',');
+                            }
+                            if self.op_byte(0) == b'(' {
+                                self.pos += 1;
+                                let mut params = String::new();
+                                self.list(&mut params, b')', false);
+                            }
+                            self.skip_block();
+                            out.push('0');
+                        }
                         b'[' => self.display(out, b']', "t"),
                         b'{' => self.display(out, b'}', "m"),
                         b'@' if matches!(self.lang.tag, "RB" | "CR") && self.word(1).is_some() => {
@@ -354,6 +372,60 @@ impl Emit<'_> {
             _ => {
                 out.insert_str(start, "[\"m\",[");
                 out.push_str("]]");
+            }
+        }
+    }
+
+    /// Whether the `[` at the cursor opens a computed property name that is a
+    /// method (`[key]() { … }`) rather than a plain computed key.
+    fn display_is_method(&self) -> bool {
+        let mut depth = 0usize;
+        let mut at = self.pos;
+        while let Some(token) = self.toks.get(at) {
+            if token.kind == Kind::Op {
+                match self.op_byte_at(at) {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return self.toks.get(at + 1).is_some_and(|next| next.kind == Kind::Op && self.raw_is(next, b"("));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            at += 1;
+        }
+        false
+    }
+
+    fn op_byte_at(&self, at: usize) -> u8 {
+        self.toks.get(at).filter(|t| t.kind == Kind::Op).map_or(0, |t| self.src[t.start as usize])
+    }
+
+    fn raw_is(&self, token: &Token, byte: &[u8]) -> bool {
+        &self.src[token.start as usize..token.end as usize] == byte
+    }
+
+    /// Skip a `{ … }` block at the cursor.
+    fn skip_block(&mut self) {
+        if self.op_byte(0) != b'{' {
+            return;
+        }
+        let mut depth = 0usize;
+        loop {
+            let Some(kind) = self.tok(0).map(|token| token.kind) else { break };
+            let byte = self.op_byte(0);
+            self.pos += 1;
+            if kind == Kind::Op {
+                if byte == b'{' {
+                    depth += 1;
+                } else if byte == b'}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
             }
         }
     }
