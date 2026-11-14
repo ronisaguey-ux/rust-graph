@@ -110,8 +110,8 @@ binary 2,796,192 B; default build unchanged.
 - `rust-graph-deep-scan` (`--features parser`): `tree`, `sexp`, `probe`,
   `bench` and `compare`, for inspecting a tree or timing a corpus.
 - `crates/deep-grammars`: 43 `grammar!` blocks with hand lexers and fixtures,
-  covering 40 of the project's 42 languages in that crate. The shipped
-  `--deep` path wires 6 of the 42 languages (Python, Rust, JavaScript,
+  covering 40 of the project's 45 languages in that crate. The shipped
+  `--deep` path wires 6 of the 45 languages (Python, Rust, JavaScript,
   TypeScript, Go, Java) plus JSON; every other language falls back to the
   one-pass lexer and the fallback is reported.
 - `deep-conformance`: scan, summary, gates and diff over a corpus.

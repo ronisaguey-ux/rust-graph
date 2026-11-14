@@ -1,6 +1,6 @@
 # rust-graph
 
-A code knowledge graph for **42 languages** in one static binary. No parser
+A code knowledge graph for **45 languages** in one static binary. No parser
 libraries, no crates: Rust standard library only.
 
 It walks a source tree, lexes each file once, and writes a single JSON document
@@ -136,7 +136,7 @@ beyond direct assignment, no points-to analysis, no interprocedural fixpoint.
 
 ## Languages
 
-42 languages, 89 extensions. `.m` is resolved by content — Objective-C and
+45 languages, 89 extensions. `.m` is resolved by content — Objective-C and
 MATLAB look alike at a glance and do not at the first line.
 
 | Language | Extensions |
