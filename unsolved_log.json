@@ -196,6 +196,18 @@
       "evidence": "built with the guard (2m24s), /tmp/ts-decl2 losses=1 (unchanged), /tmp/ts-b1 and /tmp/ts-m still 0. Patch reverted with git checkout.",
       "status": "reverted",
       "commit": null
+    },
+    {
+      "at": "2026-11-15T01:40:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "js: the deep reader writes a constant for an identifier named async",
+      "thought": "loss_shapes on js put `c(n:env.stack;[m:[m:[n:value,n:value],...` at 7 rows: `env.stack.push({ value: value, dispose: dispose, async: async })`. I first patched expr.rs (the lexer's object-pair path) to collapse `k: k` shorthand - that made the LEXER wrong for all pairs and I reverted it (`git checkout`). The flows show the lexer is right and the deep reader is wrong.",
+      "finding": "/tmp/js-obj2 isolates it: `f({async: async})` is the only failing shape (`{x: async}`, `{async: 1}`, `{async}`, `{yield: yield}` all pass). --lexer writes `m:[n:async]`, --deep writes `0`. So the deep reader's value rendering treats an identifier named `async` as a keyword and emits the constant, in an object property value position. Fix belongs in deep_facts (go.rs value rendering), not in expr.rs.",
+      "reader": "cst",
+      "evidence": "/tmp/js-obj2/{a,b,c,d,e}.js: only a.js loses 1. Flows: --lexer a.js:f [['x',2,['c',0,['n','env.stack'],[['m',[['n','value'],['n','dispose'],['n','async']]]]]]] vs --deep [['m',[['m',[['n','value'],['n','value']]],['m',[['n','dispose'],['n','dispose']]],0]]]. Corpus rows: 7 (000249_Frame.js:55 first).",
+      "status": "open",
+      "commit": null
     }
   ]
 }
