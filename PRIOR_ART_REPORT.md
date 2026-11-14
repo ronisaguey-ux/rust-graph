@@ -46,7 +46,7 @@ no measurement can support either.
 | Tree-sitter overflows on deep nesting | **Not in parsing.** It parsed 1,000,000 nesting levels on an 8 MB stack with no crash [M]. The overflows were in tree *walkers* and `stack_node_add_link` |
 | Tree-sitter uses a pool allocator | **Overstated.** Each heap subtree is a separate malloc; the "pool" is a 32-entry free list (`subtree.c:23`) [S]. There is no arena |
 | Mesquite needed `regex` | **Only for queries.** `regex` serves `#match?` predicates and `streaming-iterator` the query API (`runtime/src/query_api.rs:127`) [S]. Its parser core does not need them |
-| 42 languages | **43 reachable rows.** `rust-graph languages` lists 42 tags, but MATLAB (tag `M`) is reached by content detection from `.m` and is not listed [S] |
+| 45 languages | **46 reachable rows.** `rust-graph languages` lists 45 tags, but MATLAB (tag `M`) is reached by content detection from `.m` and is not listed [S] |
 | Max 512 GLR forks | Not applicable under this design. For scale, Tree-sitter caps versions at 6 (+4 overflow), and that cap is itself an open bug (#6057) |
 | Felicity's rust-graph backend | **Not found.** Zero references on `master` (`4c2ff7c`) or `audit-15` (`2b92928`) [M]. `felicity-run` was not inspected, per your constraint. See section 9 |
 
@@ -415,7 +415,7 @@ they are excluded from the 651.7 MB figure.
    improves `resolve.rs`, but "complete resolved call graph" is more than this will
    deliver. **I suggest** promising better resolution, with `unresolved` kept honest.
 3. **Targets and metrics (section 8).** Please approve or amend, ideally before Slice 3.
-4. **Language scope:** 42, or 43 with MATLAB? **I suggest** 43, since it is reachable.
+4. **Language scope:** 45, or 46 with MATLAB? **I suggest** 46, since it is reachable.
 5. **Build shape.** Workspace plus `dep:` feature changes `Cargo.toml` and
    `Cargo.lock`. Does "exactly as it is" cover those, or just behaviour, speed and
    size? **I suggest** the latter, verified by hashing the default binary, which is

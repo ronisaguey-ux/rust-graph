@@ -16,7 +16,7 @@ beside it. Numbers are in the measurement table, never in the prose.
 | `crates/deep-lex` | the hand lexer crate | see its `README.md` |
 | `crates/deep-tables` | LR(1)/LALR(1) table generator for the `tables` path | see its `README.md` |
 | `crates/rust-graph-deep` | the `grammar!` proc macro (`check.rs`, `decide.rs`, `emit.rs`, `tables/`) | `grammar!` |
-| `crates/deep-grammars` | 43 `grammar!` blocks (40 of the 42 languages), their lexers, and the fixtures | `Language` statics |
+| `crates/deep-grammars` | 43 `grammar!` blocks (40 of the 45 languages), their lexers, and the fixtures | `Language` statics |
 | `crates/deep-rt` | the unified runtime: descent driver, GLR driver, arena, recovery, budgets, incremental re-parse | `Workspace::parse` |
 | `src/deep` | a path copy of the descent runtime that `crates/deep-grammars` compiles against today (`crates/deep-grammars/src/deep.rs` includes it by `#[path]`) | `Workspace::parse` |
 | `src/deep_integration.rs` | the `parser`-feature bridge from the graph build to the parser | `parse_file` |
