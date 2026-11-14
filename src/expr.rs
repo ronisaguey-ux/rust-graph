@@ -760,6 +760,29 @@ impl Emit<'_> {
         matches!(&self.src[token.start as usize..token.end as usize], b"++" | b"--")
     }
 
+    /// Skip one type expression written after `as` (or `satisfies`): it runs to
+    /// the first token that cannot continue a type at depth zero.
+    fn skip_type(&mut self) {
+        let mut depth = 0usize;
+        while let Some(token) = self.tok(0) {
+            let raw = &self.src[token.start as usize..token.end as usize];
+            if token.kind == Kind::Op {
+                match raw {
+                    b"(" | b"[" | b"{" | b"<" => depth += 1,
+                    b")" | b"]" | b"}" | b">" => {
+                        if depth == 0 {
+                            return;
+                        }
+                        depth -= 1;
+                    }
+                    b";" | b"," | b"=" if depth == 0 => return,
+                    _ => {}
+                }
+            }
+            self.pos += 1;
+        }
+    }
+
     fn ident(&mut self, out: &mut String, close: u8) {
         let token = &self.toks[self.pos];
         let line = token.line;
@@ -835,6 +858,15 @@ impl Emit<'_> {
                 }
             }
             out.push('0');
+            return;
+        }
+        // `{} as Record<string, number>`: a type assertion's type is not a
+        // value. `as` is already noise, but the type that followed it was read
+        // like an expression, so the lexer's value carried the type arguments
+        // while the CST writes only the value being cast.
+        if matches!(self.lang.tag, "TS" | "TSX") && word == "as" {
+            self.pos += 1;
+            self.skip_type();
             return;
         }
         // `b'A'` / `b"…"` (and raw `br"…"`): a byte literal is one constant.
