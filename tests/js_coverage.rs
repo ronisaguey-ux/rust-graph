@@ -121,6 +121,18 @@ const COVERAGE: &[(&str, &str)] = &[
         "function f(a) {\n  const c = a?.();\n  return c;\n}\n",
     ),
     (
+        "class fields, private names and static blocks",
+        "class A {\n  static x = 1;\n  #priv = 2;\n  static #sp = 3;\n  static { init(); }\n  get #g() { return 1; }\n  #m() { return 2; }\n  field;\n  [key] = 4;\n  static *gen() {}\n}\nclass B extends A {\n  #p;\n  static { this.ready = true; }\n}\n",
+    ),
+    (
+        "private members in static blocks, iterators and arrow fields",
+        "class C {\n  static { var t = 1; if (t) { setup(t); } }\n  #cache = new Map();\n  static counter = 0;\n  #inc() { return ++this.counter; }\n  static async #load(id) { return await fetch(id); }\n  field = () => this.#inc();\n  static { C.ready = true; }\n}\n",
+    ),
+    (
+        "TypeScript class modifiers and private names",
+        "class D {\n  private static readonly x: number = 1;\n  protected #y = 2;\n  public static async init(): Promise<void> { await D.load(); }\n  private handler = () => this.#y;\n  static #registry = new Map<string, D>();\n  #hidden(): void {}\n}\n",
+    ),
+    (
         "arrow functions: async, parenthesised body and object-literal return",
         "const a = x => x + 1;\nconst b = async x => await f(x);\nconst c = (x, y) => (x + y);\nconst d = (x) => ({ a: x });\nconst e = async (x) => { return x; };\nconst f = () => {};\ncall(x => x, y => y);\nconst g = x => y => x + y;\n",
     ),
@@ -172,6 +184,16 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
         "arrow returning a class expression",
         "const r = x => class { m() {} };\n",
         "the lexer writes the value as the one-item merge `m:[0]`; the CST writes the constant 0",
+    ),
+    (
+        "computed method key in a class body",
+        "class C {\n  [Symbol.iterator]() { return this; }\n}\n",
+        "the lexer writes the computed key as an event value `t:[n:Symbol.iterator]`; the CST writes no event for it",
+    ),
+    (
+        "declare field without an initialiser",
+        "class D {\n  declare field: string;\n}\n",
+        "the lexer reads `declare` as a name and writes `m:[n:declare,n:field,n:string]`; the CST writes nothing",
     ),
     (
         "labelled statement",
