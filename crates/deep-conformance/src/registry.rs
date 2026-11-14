@@ -2,7 +2,7 @@
 //! which parser to call.
 //!
 //! The language modules are written by other agents and may not exist in this
-//! worktree. This file is the seam: the 42 languages of `src/langs.rs` are named
+//! worktree. This file is the seam: the 45 languages the project ships are named
 //! with their extensions, and each one carries an *optional* parse function.
 //!
 //! ```text
@@ -100,7 +100,7 @@ impl Default for Registry {
 }
 
 impl Registry {
-    /// The 42 languages of `src/langs.rs`, none registered yet.
+    /// The 45 languages the project ships. 42 are registered here so far.
     ///
     /// Shared suffixes are deliberately not guessed: `.h` can be C, C++ or
     /// Objective-C and `.m` can be Objective-C or MATLAB, so those files stay
@@ -227,8 +227,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn table_is_the_projects_42_languages() {
+    fn table_holds_every_registered_language() {
         let registry = Registry::new();
+        // 42 of the project's 45 languages are registered here; the rest land as
+        // their grammars are wired in, one per commit.
         assert_eq!(registry.languages().len(), 42);
         assert_eq!(registry.registered_count(), 0);
         assert_eq!(registry.language_for_extension("py").unwrap().name, "Python");

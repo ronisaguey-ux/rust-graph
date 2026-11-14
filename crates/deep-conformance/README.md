@@ -19,7 +19,7 @@ file; `summary`, `gates` and `diff` only read it.
 ## scan
 
 Walks `--root`, and for every file whose extension maps to one of the project's
-42 languages (`crates/deep-conformance/src/registry.rs`, taken from
+45 languages (`crates/deep-conformance/src/registry.rs`, taken from
 `src/langs.rs`) writes:
 
 | field | meaning |
@@ -102,7 +102,7 @@ The `deep-grammars` feature does this for the three grammars in this worktree:
 cargo run -p deep-conformance --features deep-grammars -- languages
 ```
 
-That build reports `3 of 42 languages have a parser`; every other language is
+That build reports `3 of 45 languages have a parser`; every other language is
 `not measured`.
 
 ## A measured run
