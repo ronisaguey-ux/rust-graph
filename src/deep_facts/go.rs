@@ -653,14 +653,23 @@ impl<'a> Walker<'a> {
                 // `const is = require('./get')` bound nothing and the import
                 // vanished from the record. A binder is a binder whatever the
                 // keyword table calls the word.
-                "is" | "as" | "satisfies" | "get" | "set" | "static" | "async" | "readonly" | "declare" => {
+                // `const { offset, type, source, end } = x` binds four names in
+                // that order; the grammar spells `type` with its own keyword
+                // kind, and reading it as a leaf dropped it from the targets.
+                "is" | "as" | "satisfies" | "get" | "set" | "static" | "async" | "readonly" | "declare" | "type" => {
                     out.push(self.text_string(node))
                 }
                 _ => {
+                    // Children are pushed in reverse so the stack pops them in
+                    // source order: the binding order is part of the record.
+                    let mut kids = Vec::new();
                     let mut child = self.node(node).first_child;
                     while child != NONE {
-                        walk.push(child);
+                        kids.push(child);
                         child = self.node(child).next_sibling;
+                    }
+                    for &kid in kids.iter().rev() {
+                        walk.push(kid);
                     }
                 }
             }
