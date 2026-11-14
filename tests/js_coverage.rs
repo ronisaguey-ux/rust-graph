@@ -230,6 +230,43 @@ fn every_claimed_javascript_construct_reads_the_same_on_both_paths() {
     assert!(failed.is_empty(), "the JS reader falls back on {} construct(s):\n{}", failed.len(), failed.join("\n"));
 }
 
+/// P4-12: a TypeScript-only construct in a `.js` file is not a declaration.
+/// In JavaScript `interface`, `enum` and `type` are names, so the reader must
+/// not open a symbol for them — the CST does not, and a symbol the CST has no
+/// counterpart for is a fact the source never produced. `deep_facts` asserts
+/// the tables are disjoint at build time; this pins the same rule on text, in
+/// both dialects.
+#[test]
+fn typescript_only_constructs_do_not_reach_the_javascript_reader() {
+    const SOURCES: &[&str] = &[
+        "interface Shape { area(): number; }\nconst s = build();\n",
+        "enum Color { Red }\nconst c = 1;\n",
+        "type Id = string | number;\nconst i = 1;\n",
+    ];
+    for source in SOURCES {
+        let lexer = lexer_facts(source);
+        let declared: Vec<&str> = lexer
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.key != "<module>")
+            .map(|symbol| symbol.key.as_str())
+            .collect();
+        assert!(declared.is_empty(), "the JS reader declared {declared:?} for a TypeScript-only construct: {source}");
+    }
+    // The same text in a TypeScript file does declare: the interface is the
+    // construct the split moved, and it is read where it belongs.
+    let source = SOURCES[0];
+    let ts = langs::by_content("ts", source.as_bytes()).expect("a TypeScript row");
+    let ts_lexer = parser::parse(source.as_bytes(), ts);
+    let named: Vec<&str> = ts_lexer
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.key != "<module>")
+        .map(|symbol| symbol.key.as_str())
+        .collect();
+    assert!(named.iter().any(|name| name.starts_with("Shape")), "TypeScript did not declare the interface: {named:?}");
+}
+
 #[test]
 fn the_known_gaps_are_still_gaps() {
     let mut closed: Vec<&str> = Vec::new();
