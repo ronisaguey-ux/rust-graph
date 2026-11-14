@@ -32,6 +32,14 @@ const NOISE: [&str; 38] = [
     "or", "if", "else", "for", "of", "as", "then", "do", "instanceof", "sizeof", "return", "my", "local", "let", "var",
     "const", "final", "mut", "ref", "unsafe", "defer", "go", "our", "pub",
 ];
+/// Words the Rust reader must skip. `NOISE` above is a mix of JavaScript,
+/// Python and Perl operators, and only a handful of them are Rust keywords;
+/// skipping the rest lost real names (`self.line(lambda)` read as a call with
+/// the constant 0, because `lambda` was treated as Python's lambda keyword).
+const RS_NOISE: [&str; 16] = [
+    "await", "yield", "async", "in", "as", "if", "else", "for", "return", "let", "const", "mut", "ref", "unsafe",
+    "pub", "move",
+];
 const NAMED_ARGS_WITH_COLON: [&str; 5] = ["RB", "CR", "SWIFT", "DART", "EX"];
 
 pub fn lexeme(src: &[u8], token: &Token, lang: &Language) -> String {
@@ -913,13 +921,13 @@ impl Emit<'_> {
             JS_NOISE.contains(&word.as_str())
         } else if self.lang.tag == "PY" {
             PY_NOISE.contains(&word.as_str())
+        } else if self.lang.tag == "RS" {
+            // `async move { … }` / `move ||`: `move` names a closure, not a
+            // binding; the CST writes no value for it.
+            RS_NOISE.contains(&word.as_str())
         } else {
             NOISE.contains(&word.as_str())
-        } && !(self.lang.tag == "RS" && word == "new")
-            // `async move { … }` / `move ||`: `move` is a keyword on a closure
-            // or an async block, not a name, and the CST writes no value for
-            // it. Read as a name it became the whole event on that line.
-            || (self.lang.tag == "RS" && word == "move");
+        };
         if noise && !go_word {
             self.pos += 1;
             return;
