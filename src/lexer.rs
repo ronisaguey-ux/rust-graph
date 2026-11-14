@@ -280,7 +280,8 @@ impl<'a> Lexer<'a> {
                         self.pos += 2;
                     } else {
                         self.pos += 1;
-                        parts.push(self.balanced(b'{', b'}'));
+                        let (start, end) = self.balanced(b'{', b'}');
+                        self.py_format_parts(start, end, &mut parts);
                     }
                 }
                 b'$' if interp == Interp::Template && self.peek(1) == b'{' => {
@@ -333,6 +334,67 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
         }
         (start as u32, self.pos as u32)
+    }
+
+    fn py_format_parts(&self, start: u32, end: u32, parts: &mut Vec<(u32, u32)>) {
+        let bytes = &self.src[start as usize..end as usize];
+        let mut depth = 0usize;
+        let mut i = 0usize;
+        let mut expr_end = bytes.len();
+        let mut spec_start = None;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\'' | b'"' => {
+                    let q = bytes[i];
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == b'\\' {
+                            i += 2;
+                        } else if bytes[i] == q {
+                            i += 1;
+                            break;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    continue;
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                b'!' if depth == 0 && bytes.get(i + 1) != Some(&b'=') => {
+                    expr_end = expr_end.min(i);
+                }
+                b':' if depth == 0 && bytes.get(i + 1) != Some(&b'=') => {
+                    expr_end = expr_end.min(i);
+                    spec_start = Some(i + 1);
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        parts.push((start, start + expr_end as u32));
+        if let Some(mut j) = spec_start {
+            while j < bytes.len() {
+                if bytes[j] == b'{' {
+                    let mut d = 1usize;
+                    let sub_start = j + 1;
+                    j += 1;
+                    while j < bytes.len() && d > 0 {
+                        match bytes[j] {
+                            b'{' => d += 1,
+                            b'}' => d -= 1,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    let sub_end = if d == 0 { j - 1 } else { j };
+                    self.py_format_parts(start + sub_start as u32, start + sub_end as u32, parts);
+                } else {
+                    j += 1;
+                }
+            }
+        }
     }
 
     fn string(&mut self, start: usize, line: u32, col: u32, formatted: bool) -> Token {

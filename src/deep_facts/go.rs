@@ -2072,6 +2072,18 @@ impl<'a> Walker<'a> {
                     if let Some(value) = value {
                         parts.push(self.form(value));
                     }
+                    for sub in self.children(child) {
+                        if self.kind(sub) == field {
+                            let inner = self.children(sub).into_iter().find(|&part| {
+                                !self.is_layout(part)
+                                    && !matches!(self.kind(part), "{" | "}" | ":" | "!")
+                                    && self.kind(part) != field
+                            });
+                            if let Some(inner) = inner {
+                                parts.push(self.form(inner));
+                            }
+                        }
+                    }
                 }
                 match parts.len() {
                     0 => "0".to_string(),
