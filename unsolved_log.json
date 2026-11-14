@@ -161,6 +161,29 @@
       "evidence": "/tmp/rgn-turbo/a.rs 1 loss; got vs want in the entry above; 7 rows in the rust corpus (001162/001316 matching_core.rs:245, 001548 integrity_tests.rs:138/142/150, 001607 static_flush.rs:37, 001626 side_accent_radius.rs:124).",
       "status": "open",
       "commit": null
+    },
+    {
+      "at": "2026-11-14T21:10:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "ts: a defaulted type parameter closing as >> lost the class member's colon",
+      "thought": "The class frame was never the problem. `member_type_cut` counts `<` as depth and `>` as its closer, but the lexer emits `>>` as ONE op token, so `f<T = Record<string, unknown>>(): void` kept depth 2 at the colon, the cut was never found, and the member fell through to expression_event -- which is why the event carried the whole merged value.",
+      "finding": "Fix: `>>` and `>>>` decrement by 2 and 3 in member_type_cut. The four bracketing repros go to 0 losses (/tmp/ts-b1, /tmp/ts-m, /tmp/ts-m2, /tmp/ts-m3); ts 82/2000 (101) -> 80/2000 (89), js 125/223, python 14/18, rust 246/267 unchanged. Both cargo suites green.",
+      "reader": "lexer",
+      "evidence": "/tmp/ts-b1/a.ts 1 loss -> 0 with no flows at all (a signature writes nothing, which is what the CST does); tools/loss_count.py after the fix: ts 80/2000 (89).",
+      "status": "fixed",
+      "commit": "d0afd80"
+    },
+    {
+      "at": "2026-11-14T21:20:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "thought",
+      "item": "ts multi-line type parameter lists still emit at module level",
+      "thought": "/tmp/ts-decl2/a.ts still loses 1 after d0afd80: a member whose `<` opens at the end of one line and closes several lines later (`$$eval<` newline `Selector extends string,` ...). on_newline() only refuses to split when self.brackets is non-empty, and `<` never enters self.brackets. inside_type_arguments() already exists and is consulted by the comma rule, so the same guard belongs in on_newline -- but it must not swallow a real comparison (`a < b` at end of line), so it needs the `<` to be an opener in a declaration position, not any `<`.",
+      "reader": "lexer",
+      "evidence": "RG_LOSSES=1 on /tmp/ts-decl2 after the fix: 1 loss, 'event x line 3 ... wanted line 3 value t:[m:[n:$$eval,...'",
+      "status": "thinking",
+      "commit": null
     }
   ]
 }
