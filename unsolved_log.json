@@ -208,6 +208,18 @@
       "evidence": "/tmp/js-obj2/{a,b,c,d,e}.js: only a.js loses 1. Flows: --lexer a.js:f [['x',2,['c',0,['n','env.stack'],[['m',[['n','value'],['n','dispose'],['n','async']]]]]]] vs --deep [['m',[['m',[['n','value'],['n','value']]],['m',[['n','dispose'],['n','dispose']]],0]]]. Corpus rows: 7 (000249_Frame.js:55 first).",
       "status": "open",
       "commit": null
+    },
+    {
+      "at": "2026-11-14T16:25:44",
+      "by": "deepseek-v4.1-flash",
+      "status": "diagnosed-not-fixed",
+      "corpus": "js",
+      "repro": "/tmp/js-obj2/a.js",
+      "shape": "object property value named `async` renders as 0 in the deep reader",
+      "attempt": "added \"async\" to the path_of leaf-name arm in src/deep_facts/go.rs, the same treatment get/set/static already get",
+      "result": "loss count unchanged, 1 before and 1 after. The value never reaches path_of, so some other function renders it and falls through to the 0 constant.",
+      "next": "trace the object-literal value child: candidate is form()/decl_value() hitting an unhandled kind, not a name lookup. Grep the 0-fallback in the value renderer next.",
+      "reverted": true
     }
   ]
 }
