@@ -681,6 +681,13 @@ impl<'a> Parser<'a> {
     }
 
     fn binding_index(&self, stmt: &[Token]) -> Option<usize> {
+        // `if x in y` and `while x in y` test membership; only a loop, a
+        // context manager or a handler binds a name across `in`/`of`/`as`.
+        if let Some(first) = stmt.first().filter(|token| token.kind == Kind::Ident) {
+            if !matches!(self.raw(first), b"for" | b"foreach" | b"with" | b"except" | b"catch" | b"rescue") {
+                return None;
+            }
+        }
         let mut depth = 0;
         for (index, token) in stmt.iter().enumerate() {
             if token.kind == Kind::Op {
@@ -1047,6 +1054,11 @@ impl<'a> Parser<'a> {
             self.push_function(head, col, None);
         } else if word.as_deref().is_some_and(|word| CONTROL.contains(&word)) && colon.is_some() {
             self.open_control(header, col);
+        } else if word.as_deref() == Some("async")
+            && self.word_at(header, 1).as_deref().is_some_and(|word| CONTROL.contains(&word))
+            && colon.is_some()
+        {
+            self.open_control(&header[1..], col);
         } else {
             self.simple_statement(stmt);
             return;
