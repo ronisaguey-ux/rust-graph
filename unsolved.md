@@ -1,4 +1,171 @@
-# Unsolved — items bounced off repeatedly
+# Unsolved — every remaining fallback, attributed
+
+Baseline (HEAD `fc1fc07`, 2026-11-14), full sweep over the four local corpora:
+
+| corpus | fallbacks | files |
+|--------|----------:|------:|
+| js | 111 / 1995 | 109 with a first loss |
+| ts | 99 / 2000 | 81 |
+| python | 14 / 568 | 14 |
+| rust | 308 / 1816 | 306 |
+
+Method: `RG_LOSSES=1 rust-graph build <corpus> --no-cache --stdout 2>loss_<lang>.txt`, one line per
+disagreement, then the *first* loss of each file is attributed to a construct. Nothing here is left as
+a general "the CST lost an event": a construct with two or more files is a table row, and every file
+that does not share a row is listed individually by file:line, its source line, and the reader
+disagreement it hit.
+
+Two reader-side facts that explain many rows:
+- a *definition symbol* the lexer opens and the CST does not is a callable shape the CST does not name
+  (arrow chosen by a ternary, minified UMD `!function(e,t){…}`);
+- a *module-level var/import fact* the CST never records is a fact the deep reader drops, not one the
+  lexer invents — those rows are fixed in `src/deep_facts`, not in the lexer.
+
+### JS — 109 fallbacks
+
+| files | construct | example |
+|------:|-----------|---------|
+| 14 | call whose path the readers spell differently | `000011_ImportScriptsChunkLoadingRuntimeModule.js:196` |
+| 14 | definition the lexer opens and the CST does not | `000039_7517.b4d8b77497bdb47f.js:1` |
+| 12 | module-level var fact the CST never records | `000041_snapshot.B_Jk1wbt.js:1` |
+| 10 | declarator | `000092_conversion.js:528` |
+| 9 | parenthesised expression statement | `000222_74fad3407b748f3e.js:1` |
+| 6 | control-flow header | `000031_source-map.js:2` |
+| 6 | import fact the CST never records | `000122_express.js:1` |
+| 6 | return statement | `000251_d3-array.js:506` |
+| 5 | continuation line beginning with `}` | `000086_ReferenceLine.js:188` |
+| 3 | arrow function | `000893_1028.812a1281fd9f7ba1.js:1` |
+| 2 | method call on `this` | `000091_Compilation.js:1638` |
+| 2 | prefix increment of a member | `000488_index.js:3371` |
+| 2 | array literal or computed-key statement | `000721_errors.js:79` |
+
+Remaining 18 files, each named by its own line (no catch-all bucket):
+
+- `000022_mode.js:26` — `options.uid : process.getuid && process.getuid()` — no shared line for the event
+- `000270_Request.js:167` — `Object.assign(this, args);` — no shared line for the event
+- `000275_use-pagination.js:61` — `pageSize - spaceUnderActive` — no shared line for the event
+- `000344_prepared-router.js:162` — `0 && (module.exports = {` — no shared line for the event
+- `000358_options.js:33` — `placeholderPattern,` — no shared line for the event
+- `000569_middleware.js:26` — `c.header(X_HONO_DISABLE_SSG_HEADER_KEY, "true");` — no shared line for the event
+- `000606_offscreen_compiled.js:9` — `$jscomp.setPrototypeOf=$jscomp.ASSUME_ES6||$jscomp.TRUST_ES6_POLYFILLS&&typeof Object.setPrototypeOf` — a name the lexer reads is missing from the CST value
+- `000777_VariantSchema.js:78` — `static [TypeId] = fields;` — target list differs
+- `000908_matrix.js:302` — `a = 1;` — no shared line for the event
+- `001028_react-jsx-dev-runtime.react-server.development.js:236` — `for (` — no shared line for the event
+- `001090_fullscreen-user-rules.js:3147` — `target[protoStoreKey] || (target[protoStoreKey] = []) : // functions are added to the instance store` — no shared line for the event
+- `001120_google-analytics.js:70` — `handleCallback(data, "eventCallback");` — no shared line for the event
+- `001227_metrika-yandex-watch.js:37` — `asyncCallbackFromOptions(options);` — no shared line for the event
+- `001399_import.js:52` — `exports.importJWK = importJWK;` — no shared line for the event
+- `001494_circle.js:147` — `polar = abs(delta - pi) < epsilon,` — a name the lexer reads is missing from the CST value
+- `001669_regeneratorRuntime.js:4` — `module.exports = _regeneratorRuntime = function _regeneratorRuntime() {` — no shared line for the event
+- `001735_source-node.js:74` — `remainingLines[remainingLinesIndex++] : undefined;` — no shared line for the event
+- `001737_ComponentLogger.js:99` — `args.unshift(namespace);` — a name the lexer reads is missing from the CST value
+
+### TS — 81 fallbacks
+
+| files | construct | example |
+|------:|-----------|---------|
+| 21 | call whose path the readers spell differently | `000261_number.d.ts:1` |
+| 17 | declarator | `000196_fetch.d.ts:50` |
+| 9 | class member carrying a modifier (computed key or annotation) | `000404_invalid-stream-part-error.ts:9` |
+| 6 | module-level var fact the CST never records | `000345_PreflightResponseCache.ts:1` |
+| 5 | continuation line beginning with `}` | `000640_PersistedQueue.d.ts:240` |
+| 4 | arrow function | `000291_Utils.d.ts:150` |
+| 3 | definition the lexer opens and the CST does not | `000114_Schema.ts:5020` |
+| 2 | parenthesised expression statement | `000074_dom.d.ts:97` |
+| 2 | control-flow header | `000594_config.ts:67` |
+
+Remaining 12 files, each named by its own line (no catch-all bucket):
+
+- `000038_parseJson.ts:31` — `parseJson.position = 0 as number` — a name the lexer reads is missing from the CST value
+- `000117_types.d.ts:2441` — `$$eval<` — no shared line for the event
+- `000365_memoizer.ts:169` — `kind satisfies never;` — no shared line for the event
+- `000636_RpcClient.ts:239` — `never,` — no shared line for the event
+- `000867_keyword.ts:85` — `gen.assign(` — a name the lexer reads is missing from the CST value
+- `000940_index.ts:1307` — `getRandomValues<` — no shared line for the event
+- `001019_custom-provider.ts:71` — `return {` — a name the lexer reads is missing from the CST value
+- `001284_Sink.ts:803` — `fold<readonly [S, number], In, E, R>(` — no shared line for the event
+- `001414_ElementHandle.d.ts:170` — `evaluate<Params extends unknown[], Func extends EvaluateFuncWith<ElementType, Params> = EvaluateFunc` — no shared line for the event
+- `001587_JSHandle.d.ts:53` — `evaluate<Params extends unknown[], Func extends EvaluateFuncWith<T, Params> = EvaluateFuncWith<T, Pa` — no shared line for the event
+- `001681_schemas.d.ts:256` — `-readonly [k in keyof T["shape"]]: ZodMiniOptional<T["shape"][k]>;` — no shared line for the event
+- `001933_index.ts:1` — `/**` — other
+
+### PYTHON — 14 fallbacks
+
+| files | construct | example |
+|------:|-----------|---------|
+| 4 | module-level var fact the CST never records | `000084_util.py:1` |
+| 2 | return statement | `000117__pyio.py:1962` |
+
+Remaining 8 files, each named by its own line (no catch-all bucket):
+
+- `000124_pydoc.py:2539` — `time.sleep(.01)` — a name the lexer reads is missing from the CST value
+- `000170_calendar.py:97` — `_months.insert(0, lambda x: "")` — a call/constant the lexer reads is missing from the CST value
+- `000219__parser.py:196` — `self.dict: dict[str, Any] = {}` — target list differs
+- `000231___init__.py:175` — `raise Exception` — no shared line for the event
+- `000242_imaplib.py:1510` — `gmtoff = -(time.timezone, time.altzone)[dst]` — a name the lexer reads is missing from the CST value
+- `000310_mod_generics_cache.py:12` — `some_b: 'B'` — a call/constant the lexer reads is missing from the CST value
+- `000358___init__.py:504` — `memmove = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)(_memmove_addr)` — other
+- `000499_request.py:798` — `setattr(self, '%s_open' % type,` — a name the lexer reads is missing from the CST value
+
+### RUST — 306 fallbacks
+
+| files | construct | example |
+|------:|-----------|---------|
+| 95 | call whose path the readers spell differently | `000158_compress.rs:231` |
+| 79 | declarator | `000033_lib.rs:177` |
+| 29 | definition the lexer opens and the CST does not | `000031_check.rs:44` |
+| 13 | module-level var fact the CST never records | `000138_incremental.rs:1` |
+| 12 | `extern` block header | `000662_main.rs:23` |
+| 8 | labelled loop header | `000122_incremental.rs:578` |
+| 8 | async/await | `001081_worker_versioning_tests.rs:164` |
+| 7 | Rust item head inside a block | `000922_metrics.rs:57` |
+| 6 | call whose argument is a match or closure | `001012_complete_workflow_state_machine.rs:63` |
+| 5 | macro/assertion call statement | `001162_matching_core.rs:245` |
+| 4 | arrow function | `000071_visual_basic.rs:323` |
+| 4 | control-flow header | `001480_reviewed_entry.rs:51` |
+
+Remaining 36 files, each named by its own line (no catch-all bucket):
+
+- `000040_mutate.rs:227` — `bytes[at + 1] = b'A';` — CST value is the constant 0
+- `000134_cst.rs:193` — `all.sort_by_key(|&id| self.nodes[id as usize].start);` — a name the lexer reads is missing from the CST value
+- `000254_mutate.rs:227` — `bytes[at + 1] = b'A';` — CST value is the constant 0
+- `000348_cst.rs:193` — `all.sort_by_key(|&id| self.nodes[id as usize].start);` — a name the lexer reads is missing from the CST value
+- `000483_mutate.rs:227` — `bytes[at + 1] = b'A';` — CST value is the constant 0
+- `000577_cst.rs:193` — `all.sort_by_key(|&id| self.nodes[id as usize].start);` — a name the lexer reads is missing from the CST value
+- `000707_mutate.rs:227` — `bytes[at + 1] = b'A';` — CST value is the constant 0
+- `000801_cst.rs:193` — `all.sort_by_key(|&id| self.nodes[id as usize].start);` — a name the lexer reads is missing from the CST value
+- `000918_future.rs:9` — `future: Pin<Box<dyn Future<Output = Result<R, BridgeError>> + Send + 'static>>,` — no shared line for the event
+- `000928_runtime.rs:62` — `Trace = 0,` — no shared line for the event
+- `000941_options.rs:81` — `WorkflowCommand {` — a name the lexer reads is missing from the CST value
+- `000959_test_utils.rs:26` — `StartTimer {` — a call/constant the lexer reads is missing from the CST value
+- `000984_queries.rs:504` — `core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(` — a name the lexer reads is missing from the CST value
+- `000986_updates.rs:67` — `core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(` — a name the lexer reads is missing from the CST value
+- `001023_timer_state_machine.rs:83` — `Self::from_parts(` — a call/constant the lexer reads is missing from the CST value
+- `001073_heartbeat_tests.rs:111` — `core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(` — a name the lexer reads is missing from the CST value
+- `001091_timers.rs:168` — `mock_cfg.expect_fail_wft_matcher = Box::new(move |_, cause, f| {` — a name the lexer reads is missing from the CST value
+- `001096_child_workflows.rs:114` — `worker.register_wf(` — a name the lexer reads is missing from the CST value
+- `001098_appdata_propagation.rs:36` — `worker.register_activity(` — a name the lexer reads is missing from the CST value
+- `001100_activities.rs:755` — `core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(` — a name the lexer reads is missing from the CST value
+- `001129_ids_generator.rs:282` — `value[18] = b'-';` — CST value is the constant 0
+- `001256_dema.rs:166` — `self.value = 2.0f64.mul_add(self.ema1.value(), -self.ema2.value());` — CST value is the constant 0
+- `001257_lr.rs:568` — `lr.update_raw(3.0f64.mul_add(x as f64, noise));` — a name the lexer reads is missing from the CST value
+- `001283_ids_generator.rs:282` — `value[18] = b'-';` — CST value is the constant 0
+- `001410_dema.rs:166` — `self.value = 2.0f64.mul_add(self.ema1.value(), -self.ema2.value());` — CST value is the constant 0
+- `001411_lr.rs:568` — `lr.update_raw(3.0f64.mul_add(x as f64, noise));` — a name the lexer reads is missing from the CST value
+- `001494_providers.rs:443` — `Resolved { root: String, scope: Option<Scope>, agent_scope: Option<Scope>, providers: Vec<&'static s` — a name the lexer reads is missing from the CST value
+- `001499_bundle.rs:296` — `return copy_or_extract_local_bundle(sys, local);` — a call/constant the lexer reads is missing from the CST value
+- `001513_js.rs:118` — `up[i] = b'0';` — CST value is the constant 0
+- `001541_stop_baseline.rs:43` — `sessions(cache)?` — a call/constant the lexer reads is missing from the CST value
+- `001664_live_accept.rs:76` — `Carbonized {` — a name the lexer reads is missing from the CST value
+- `001679_dev_url.rs:78` — `(host, port)` — a name the lexer reads is missing from the CST value
+- `001712_manifest.rs:103` — `packet` — a call/constant the lexer reads is missing from the CST value
+- `001728_context_cli.rs:182` — `parts.push([` — a name the lexer reads is missing from the CST value
+- `001744_ignores.rs:232` — `[` — a call/constant the lexer reads is missing from the CST value
+- `001758_jsnum.rs:54` — `buf[i] = b'0';` — CST value is the constant 0
+
+---
+
+# Historical bounce log (kept for the failed attempts)
 
 Each entry: the shape, the smallest repro, what was tried and why it failed, and the next
 idea worth trying. Nothing here is a guess dressed as a plan; the failed attempts are listed
