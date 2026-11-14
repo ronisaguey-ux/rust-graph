@@ -2568,6 +2568,8 @@ impl<'a> Parser<'a> {
                 // `=` and a `:` inside its generic parameter list, and a member
                 // signature is not an assignment of `TOpaque`.
                 b"(" | b"[" | b"{" | b"<" => depth += 1,
+                b">>" => depth -= 2,
+                b">>>" => depth -= 3,
                 b")" | b"]" | b"}" | b">" => depth -= 1,
                 b"=" | b"=>" if depth == 0 => return None,
                 b":" if depth == 0 => return (index > 0).then_some(index),
