@@ -168,6 +168,35 @@ impl<'a> Walker<'a> {
                 self.rust_import(id);
                 true
             }
+            // `extern "C" { … }` / `unsafe extern "C" { … }`: the lexer files
+            // the ABI block header as `m:[n:extern,0]`; the item was never
+            // read here, so the header line carried no event at all. The
+            // declarations inside are separate items and are still walked.
+            "foreign_mod_item" => {
+                let line = self.line(id);
+                self.event(&format!("[\"x\",{line},[\"m\",[[\"n\",\"extern\"],0]]]"));
+                true
+            }
+            // `extern crate core;` / `extern crate self::macro_defs;`: the
+            // lexer writes the whole declaration as one merge; the CST read
+            // it as a bare import and kept only the last path segment.
+            "extern_crate_declaration" => {
+                let line = self.line(id);
+                let path = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&child| matches!(self.kind(child), "identifier" | "scoped_identifier" | "self" | "super"))
+                    .map(|child| self.path_of(child));
+                let mut parts = vec!["[\"n\",\"extern\"]".to_string(), "[\"n\",\"crate\"]".to_string()];
+                if let Some(path) = path.filter(|path| !path.is_empty()) {
+                    let mut text = "[\"n\",".to_string();
+                    push_string(&mut text, &path);
+                    text.push(']');
+                    parts.push(text);
+                }
+                self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                true
+            }
             "macro_definition" | "decl_macro" => {
                 for child in self.children(id) {
                     if matches!(self.kind(child), "token_tree" | "token_tree_brace" | "token_tree_bracket") {

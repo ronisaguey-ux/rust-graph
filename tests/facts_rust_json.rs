@@ -194,3 +194,32 @@ fn json_a_data_file_is_only_the_module_symbol() {
     assert!(facts.imports.is_empty());
     assert!(facts.vars.is_empty());
 }
+
+// An ABI block header and an `extern crate` bind a name a reader resolves on
+// the same key as any other side-effect-free statement, and the lexer files
+// both; the CST used to walk past them and the header line carried no event.
+const ABI: &str = r#"extern crate core;
+
+extern "C" {
+    fn strlen(s: *const u8) -> usize;
+}
+"#;
+
+#[test]
+fn rust_an_abi_block_header_and_an_extern_crate_are_events() {
+    let facts = extract(ABI, Lang::Rust);
+    assert_eq!(
+        facts.symbols[0].events,
+        r#"["x",1,["m",[["n","extern"],["n","crate"],["n","core"]]]],["x",3,["m",[["n","extern"],0]]]"#
+    );
+
+    // The declaration inside the block is still its own symbol, so reading the
+    // header did not swallow the items it opens.
+    assert_eq!(
+        symbols(&facts),
+        vec![
+            ("<module>".into(), "".into(), "".into(), facts::KIND_MODULE, 1, 6),
+            ("strlen".into(), "strlen".into(), "".into(), facts::KIND_FUNCTION, 4, 4),
+        ]
+    );
+}
