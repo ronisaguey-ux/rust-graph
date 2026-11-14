@@ -3566,8 +3566,19 @@ fn parse_source_untimed(bytes: &[u8], path: &str, language: &'static Language) -
             // looking at a fallback must be able to see what the CST missed
             // without re-running both paths by hand.
             let fallback = Some(match verdict.why() {
-                Some(why) => format!("the CST lost a {why}: {}", verdict.detail()),
-                None => "the CST record lost facts the lexer found".to_string(),
+                // `a call`, `an event`: the article belongs with the word, and a
+                // reason a person reads should not read like a template.
+                Some(why) => {
+                    let article = if why.starts_with(|ch: char| "aeiou".contains(ch)) { "an" } else { "a" };
+                    format!("the CST lost {article} {why}: {}", verdict.detail())
+                }
+                // Even this one names something: how many facts went missing and
+                // the guard's own detail, so no refusal is bare.
+                None => format!(
+                    "the CST record lost {} fact(s) the lexer found: {}",
+                    verdict.losses(),
+                    verdict.detail()
+                ),
             });
             deep_run::record(
                 path,

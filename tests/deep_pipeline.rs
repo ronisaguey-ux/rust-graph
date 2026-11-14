@@ -307,7 +307,10 @@ fn auto_falls_back_when_the_cst_record_loses_what_the_lexer_found() {
     // The fallback names the fact it missed, not just the fact that it missed
     // one: a reader must be able to see what the CST lost without re-running
     // both paths by hand.
-    assert!(lossy.contains("\"deep_fallback\":\"the CST lost a "), "{lossy}");
+    assert!(
+        lossy.contains("\"deep_fallback\":\"the CST lost a ") || lossy.contains("\"deep_fallback\":\"the CST lost an "),
+        "{lossy}"
+    );
     assert!(source_row(&auto, "app/clean.py").contains("\"parsed_by\":\"deep\""), "{auto}");
     assert!(auto.contains(r#""deep":2,"lexer":1,"fallbacks":1"#), "{auto}");
     // The facts are the lexer's: the star import survives.
@@ -332,6 +335,32 @@ fn a_cache_written_by_one_parser_is_never_served_to_the_other() {
     assert!(json.contains(r#""mode":"lexer""#), "{json}");
     let (_, back) = tree.json(&["--stdout", "--deep"]);
     assert!(back.contains("3 parsed, 0 cached"), "a --lexer pack was reused by --deep: {back}");
+}
+
+/// P4-15: a file the reader will not hand to the CST says why in words. The
+/// reason names what it stumbled on — the production and its line, or the
+/// error-node count against the tree's size — so a fallback is something a
+/// person can act on rather than a row that only says "failed".
+#[test]
+fn a_refusal_names_what_it_failed_on() {
+    let tree = Tree::new("refusal", &[
+        // Text no grammar reads: the CST needs error nodes for most of it.
+        ("app/a.js", "const = = = ;\nclass { ][\nfunction ((( {\n"),
+        // A file the lexer can only read: an event the CST has no counterpart
+        // for is a loss, and the row must say which event on which line.
+        ("app/b.js", "function f(a) {\n  return a ?? (a || a);\n}\n"),
+    ]);
+    let (json, _) = tree.json(&["--stdout", "--no-cache"]);
+    let rows: Vec<&str> = json.lines().filter(|line| line.contains("\"path\":\"app/")).collect();
+    assert!(rows.len() == 2, "the fixture did not produce two rows: {json}");
+    let refused: Vec<&&str> = rows.iter().filter(|row| row.contains("\"deep_fallback\":")).collect();
+    assert_eq!(refused.len(), 1, "expected one refusal, got {}: {json}", refused.len());
+    let row = refused[0];
+    assert!(!row.contains("\"deep_fallback\":\"\""), "a refusal with no reason: {row}");
+    assert!(
+        row.contains("error nodes in") || (row.contains("the CST lost") && row.contains("line ")),
+        "a refusal that names no production: {row}"
+    );
 }
 
 #[test]
