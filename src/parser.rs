@@ -2328,6 +2328,16 @@ impl<'a> Parser<'a> {
             }
         }
         if let Some(equal) = self.top_level_assign(stmt) {
+            // `cond ? a = 1 : b`: the assignment sits in a branch, so the
+            // statement is a conditional expression, not an assignment of the
+            // branch's target. The CST writes one `x` with the condition and
+            // both branches, which the lexer never had.
+            if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                && stmt[..equal].iter().any(|token| self.is_op(token, b"?"))
+            {
+                self.expression_event("x", stmt);
+                return;
+            }
             let augmented = self.raw(&stmt[equal]) != b"=" && !matches!(self.raw(&stmt[equal]), b":=" | b"<-");
             self.note_class(&stmt[..equal], &stmt[equal + 1..]);
             self.assignment(&stmt[..equal], &stmt[equal + 1..], line, augmented);
