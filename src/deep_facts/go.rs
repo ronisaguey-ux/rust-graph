@@ -1771,7 +1771,7 @@ impl<'a> Walker<'a> {
                 }
                 self.merge_form(&items)
             }
-            "not_operator" | "unary_operator" | "unary_expression" | "await_expression" | "yield_expression"
+            "not_operator" | "unary_operator" | "unary_expression" | "await" | "await_expression" | "yield" | "yield_expression"
             | "typeof" | "void" | "non_null_expression" | "as_expression" | "type_assertion" | "delete_expression" => {
                 match self.expression_child(id) {
                     Some(child) => {
