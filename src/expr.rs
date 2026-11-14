@@ -837,6 +837,31 @@ impl Emit<'_> {
             out.push('0');
             return;
         }
+        // `pub(crate) meter: T`: the visibility is not part of the field. `pub`
+        // is already noise, but the parenthesised group survived it and its
+        // constant became a member of the merge - the CST writes neither.
+        if self.lang.tag == "RS" && word == "pub" && self.is_op(1, b"(") {
+            self.pos += 1;
+            let mut depth = 0usize;
+            loop {
+                let Some(token) = self.tok(0) else { break };
+                let (kind, start, end) = (token.kind, token.start as usize, token.end as usize);
+                self.pos += 1;
+                if kind == Kind::Op {
+                    match &self.src[start..end] {
+                        b"(" => depth += 1,
+                        b")" => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return;
+        }
         let go_word = matches!(word.as_str(), "go" | "defer") && self.lang.tag != "GO";        // `new` is a keyword in the JavaScript family and an ordinary name in
         // Rust: reading it as noise left `new.is_none()` calling nothing, and
         // the record differed by a constant that was never there.
