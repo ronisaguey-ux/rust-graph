@@ -616,6 +616,11 @@ impl<'a> Walker<'a> {
     pub(crate) fn rust_form(&mut self, id: u32) -> Option<String> {
         match self.kind(id) {
             "call_expression" => Some(self.rust_call(id)),
+            // `async { s }.boxed()` as a statement: after a block-like operand
+            // the grammar keeps the method call as one `field_expression` with
+            // its `arguments` inside, so no `call_expression` exists to read
+            // and the call left the record.
+            "field_expression" if self.rust_block_method(id) => Some(self.rust_call(id)),
             "macro_invocation" => Some(self.rust_macro(id)),
             // `Facts { tag, lines }`: the constructor and its fields.
             "struct_expression" => Some(self.rust_struct_expression(id)),
@@ -816,13 +821,27 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// A method call the grammar wrote as a `field_expression` carrying its own
+    /// `arguments`: the shape a `.name(…)` takes after a block-like operand in
+    /// statement position (`_block_like_chain`), where a `call_expression`
+    /// would let `if a {} (b)` read as one statement.
+    pub(crate) fn rust_block_method(&self, id: u32) -> bool {
+        self.kind(id) == "field_expression" && self.child_of_kind(id, "arguments").is_some()
+    }
+
     pub(crate) fn rust_call(&mut self, id: u32) -> String {
         let children = self.children(id);
-        let callee = children
-            .iter()
-            .copied()
-            .find(|&child| !matches!(self.kind(child), "arguments" | "type_arguments" | "(" | ")"))
-            .unwrap_or(id);
+        // The block-like form is its own callee: the receiver, the name and
+        // the argument list are all children of the one node.
+        let callee = if self.rust_block_method(id) {
+            id
+        } else {
+            children
+                .iter()
+                .copied()
+                .find(|&child| !matches!(self.kind(child), "arguments" | "type_arguments" | "(" | ")"))
+                .unwrap_or(id)
+        };
         let (path, receiver) = self.rust_callee(callee);
         let line = self.rust_call_line(callee, id);
         let index = self.push_call(path, line);
@@ -847,7 +866,7 @@ impl<'a> Walker<'a> {
                 let Some(&object) = children.first() else {
                     return (format!(".{name}"), "0".to_string());
                 };
-                if matches!(self.kind(object), "call_expression" | "macro_invocation") {
+                if matches!(self.kind(object), "call_expression" | "macro_invocation") || self.rust_block_method(object) {
                     let inner = self.form(object);
                     return (format!(".{name}"), inner);
                 }
@@ -1111,6 +1130,8 @@ impl<'a> Walker<'a> {
     /// (a plain identifier, a literal).
     pub(crate) fn rust_path(&self, id: u32) -> Option<String> {
         match self.kind(id) {
+            // A call has no name of its own, in either spelling of one.
+            "field_expression" if self.rust_block_method(id) => Some(String::new()),
             "field_expression" => {
                 let name = self.member_name(id);
                 let object = self.children(id).first().copied()?;
