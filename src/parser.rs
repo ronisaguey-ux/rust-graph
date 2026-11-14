@@ -283,7 +283,7 @@ impl<'a> Parser<'a> {
         while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r' | b'\n') {
             at += 1;
         }
-        matches!(self.src.get(at), Some(b'?') | Some(b':'))
+        matches!(self.src.get(at), Some(b'?') | Some(b':') | Some(b'>'))
     }
 
     /// Whether the next line begins with `{`, the body of a function expression
@@ -1722,6 +1722,8 @@ impl<'a> Parser<'a> {
 
     fn top_level_assign(&self, toks: &[Token]) -> Option<usize> {
         let mut depth = 0;
+        let mut angle = 0i32;
+        let mut found = None;
         for (index, token) in toks.iter().enumerate() {
             if token.kind != Kind::Op {
                 continue;
@@ -1729,16 +1731,36 @@ impl<'a> Parser<'a> {
             match self.raw(token) {
                 b"(" | b"[" | b"{" => depth += 1,
                 b")" | b"]" | b"}" => depth -= 1,
+                b"<" if depth == 0 => angle += 1,
+                b">" if depth == 0 => angle = (angle - 1).max(0),
+                b">>" if depth == 0 => angle = (angle - 2).max(0),
+                b">>>" if depth == 0 => angle = (angle - 3).max(0),
+                b"?" if depth == 0
+                    && found.is_none()
+                    && !toks.get(index + 1).is_some_and(|t| self.is_op(t, b":")) =>
+                {
+                    return None
+                }
+                b"," if depth == 0
+                    && angle == 0
+                    && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                    && found.is_some() =>
+                {
+                    return None
+                }
                 b"=" | b":=" | b"+=" | b"-=" | b".=" | b"|=" | b"||=" | b"&&=" | b"??=" | b"<-" | b"*=" | b"/=" | b"%="
                 | b"&=" | b"^=" | b"<<=" | b">>="
-                    if depth == 0 =>
+                    if depth == 0
+                        && found.is_none()
+                        && !(matches!(self.lang.tag, "TS" | "TSX") && angle > 0) =>
                 {
-                    return Some(index)
+                    found = Some(index);
+                    angle = 0;
                 }
                 _ => {}
             }
         }
-        None
+        found
     }
 
     fn class_head(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {

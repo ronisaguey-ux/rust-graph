@@ -650,6 +650,11 @@ impl<'a> Walker<'a> {
                         walk.push(first);
                     }
                 }
+                "subscript" | "subscript_expression" | "index_expression" => {
+                    if let Some(first) = self.children(node).into_iter().next() {
+                        walk.push(first);
+                    }
+                }
                 "member_expression" | "attribute" => {
                     let path = self.path_of(node);
                     if !path.is_empty() {
@@ -1107,15 +1112,19 @@ impl<'a> Walker<'a> {
                 let base = self.children(id).first().copied().unwrap_or(id);
                 self.assignment_targets(base)
             }
-            "pattern_list" | "tuple_pattern" | "array_pattern" | "list_pattern" | "tuple" | "list"
+            "array" | "array_pattern" | "object" | "object_pattern" => self.pattern_names(id),
+            "pattern_list" | "tuple_pattern" | "list_pattern" | "tuple" | "list"
             | "expression_list" => self.children(id).into_iter().filter_map(|child| self.unpacked_name(child)).collect(),
             // `(fd, path) = mkstemp()`: the Python grammar keeps a parenthesised
             // target list as a `parenthesized_expression` with one child per
             // name, so it fell to the path arm below and bound only the first.
-            "parenthesized_expression"
-                if self.children(id).into_iter().filter(|&child| !self.is_layout(child)).count() > 1 =>
-            {
-                self.children(id).into_iter().filter_map(|child| self.unpacked_name(child)).collect()
+            "parenthesized_expression" => {
+                let inner: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if inner.len() == 1 {
+                    self.assignment_targets(inner[0])
+                } else {
+                    inner.into_iter().filter_map(|child| self.unpacked_name(child)).collect()
+                }
             }
             // The left side of a Python multi-target assignment (`a, b = g(x),
             // 1`) is a `pattern_list` here, and this arm maps it, so the
