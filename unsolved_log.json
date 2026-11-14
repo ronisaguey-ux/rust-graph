@@ -47,7 +47,7 @@
       "reader": "cst",
       "evidence": "src/deep_facts/rust.rs: rust_block_method + rust_call/rust_callee. Measured by deepseek-v4.1-flash in /tmp/rg-fable-wt: rust 260/1816 (287) -> 255/1816 (282); js, ts, python untouched.",
       "status": "fixed",
-      "commit": "0e1b825"
+      "commit": "d117f4f"
     },
     {
       "at": "2026-11-14T12:20:00-05:00",
