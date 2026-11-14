@@ -584,7 +584,7 @@ impl<'a> Walker<'a> {
         // Python's `from` is a real keyword (`from x import y`) and must stay
         // layout: reading it as a name cost 15 python files.
         if matches!(self.language.name, "javascript" | "typescript" | "tsx")
-            && matches!(self.kind(id), "type" | "from" | "of")
+            && matches!(self.kind(id), "type" | "from" | "of" | "satisfies")
         {
             return false;
         }
@@ -738,10 +738,24 @@ impl<'a> Walker<'a> {
                     .next()
                     .unwrap_or("")
                     .to_string();
-                let mut text = format!("[\"x\",{line},[\"n\",");
-                push_string(&mut text, &word);
-                text.push_str("]]");
-                self.event(&text);
+                let label = self
+                    .children(id)
+                    .into_iter()
+                    .skip(1)
+                    .find_map(|child| self.leaf_name(child));
+                if let Some(label) = label {
+                    let mut text = format!("[\"x\",{line},[\"m\",[[\"n\",");
+                    push_string(&mut text, &word);
+                    text.push_str("],[\"n\",");
+                    push_string(&mut text, &label);
+                    text.push_str("]]]]");
+                    self.event(&text);
+                } else {
+                    let mut text = format!("[\"x\",{line},[\"n\",");
+                    push_string(&mut text, &word);
+                    text.push_str("]]");
+                    self.event(&text);
+                }
             }
             "if_statement" => {
                 self.condition_before(id);

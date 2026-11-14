@@ -1692,7 +1692,7 @@ impl<'a> Walker<'a> {
             // is a keyword in another position carries that keyword's kind, so
             // it read as a leaf and the property vanished from the value.
             "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" | "_" | "type" | "from"
-            | "of" => {
+            | "of" | "satisfies" => {
                 let text = self.text_string(id);
                 let text = if text == "this" { "self".to_string() } else { text };
                 if text.is_empty() {
@@ -1719,7 +1719,7 @@ impl<'a> Walker<'a> {
             // `field_expression` is Rust's spelling of the same path; without
             // this arm `self.skipped_groups == 0` read both sides as the
             // constant and the name left the record.
-            "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression"
+            "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression" | "meta_property"
             // `Ordering::Acquire` in an argument list is a path, not a constant.
             | "scoped_identifier" | "scoped_type_identifier" => {
                 let path = self.form_path(id);
@@ -2520,6 +2520,7 @@ impl<'a> Walker<'a> {
                     format!("{base}.{name}")
                 }
             }
+            "meta_property" => self.text_string(id).chars().filter(|ch| !ch.is_whitespace()).collect(),
             // A subscript is transparent in a path: `elements[i].innerHTML`
             // names `elements.innerHTML`, and `x[0].y` names `x.y`. Rust spells
             // it `index_expression`, and reading it as a leaf dropped the
