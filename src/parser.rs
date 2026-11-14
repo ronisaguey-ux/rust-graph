@@ -2735,8 +2735,19 @@ impl<'a> Parser<'a> {
 
     fn unpack_targets(&self, toks: &[Token]) -> Option<Vec<String>> {
         let mut inner = toks;
+        let class_field = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
         while let Some(word) = self.word_at(inner, 0) {
-            if !matches!(word.as_str(), "const" | "let" | "var" | "my" | "our" | "local" | "val" | "mut") {
+            let declaration =
+                matches!(word.as_str(), "const" | "let" | "var" | "my" | "our" | "local" | "val" | "mut");
+            // `static [entityKind] = "x"`: a class-field modifier is not the
+            // binding. Stripped, the computed key is the target, which is what
+            // the CST names; left in, the lexer named the field `static`.
+            let modifier = class_field
+                && matches!(
+                    word.as_str(),
+                    "static" | "public" | "private" | "protected" | "readonly" | "declare" | "abstract" | "override" | "accessor"
+                );
+            if !declaration && !modifier {
                 break;
             }
             inner = &inner[1..];
