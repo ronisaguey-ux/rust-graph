@@ -89,6 +89,10 @@ pub struct Parser<'a> {
     last_line: u32,
     /// Tokens read past the cursor to decide what a `{` opens, in stream order.
     ahead: VecDeque<Token>,
+    /// Inside a `var`/`let`/`const` declarator list: every later top-level
+    /// comma ends a declaration too, because the CST writes one event per
+    /// declarator even when the list is broken over lines.
+    declaring: bool,
 }
 
 pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
@@ -105,6 +109,7 @@ pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
         pending: None,
         last_line: 1,
         ahead: VecDeque::new(),
+        declaring: false,
     };
     parser.run()
 }
@@ -327,6 +332,10 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `var result,` newline `index = -1,`: a declarator list broken over
+            // lines is one declaration to the CST only up to each comma — it
+            // writes one event per declarator, so the lexer's single statement
+            // blamed the first line for the names of the next.
             // `this.x = function()` newline `{ ... }`: the body of a function
             // expression written with the brace on the next line belongs to the
             // assignment. Ending the statement here wrote `a self.x 0` and left
@@ -373,7 +382,10 @@ impl<'a> Parser<'a> {
             }
             b'{' => self.on_open_brace(token),
             b'}' => self.on_close_brace(token),
-            b';' if self.brackets.is_empty() => self.end_statement(),
+            b';' if self.brackets.is_empty() => {
+                self.declaring = false;
+                self.end_statement();
+            }
             // A match arm ends at its comma, not at the closing brace: without
             // this the whole match is one statement and every arm's value is
             // folded into one merge. An arm whose body was a block already
@@ -387,9 +399,13 @@ impl<'a> Parser<'a> {
             // reader write the same two.
             b',' if self.brackets.is_empty()
                 && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
-                && self.declarator_list()
+                && (self.declaring || self.declarator_list())
                 && !self.inside_type_arguments() =>
             {
+                // `var result,` newline `index = -1,` newline `length = a.length;`
+                // is three declarations on three lines: the CST writes one event
+                // per declarator, and the keyword is only on the first.
+                self.declaring = true;
                 self.end_statement();
             }
             b',' if self.brackets.is_empty() && self.stmt.iter().any(|token| self.is_op(token, b"=>")) => {
@@ -1873,7 +1889,12 @@ impl<'a> Parser<'a> {
     /// and its bases. `= class extends B {` is anonymous — the CST gives that
     /// class no name of its own, so neither does the lexer.
     fn assigned_class_head(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {
+        // The class must open the value: `const x = { class: 1 }` has the word
+        // inside an object literal and names no class.
         let at = toks.iter().position(|t| t.kind == Kind::Ident && self.raw(t) == b"class")?;
+        if at != 0 {
+            return None;
+        }
         let mut name = String::new();
         let mut bases = Vec::new();
         let mut next = at + 1;

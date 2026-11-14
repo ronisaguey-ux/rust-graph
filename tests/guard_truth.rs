@@ -386,28 +386,22 @@ fn a_member_access_that_starts_a_line_continues_the_statement() {
     assert!(!verdict.lost(), "{verdict:?}");
 }
 
-/// A miss is a miss: pairing never fuses two CST rows into one to satisfy a
-/// single lexer event. This is the shape that tempts it — the lexer reads the
-/// `var` chain's continuation lines as one statement whose value names five
-/// calls, while the CST writes each binding on its own row. Adding two rows
-/// together would let the event pass and would also hide the next real loss, so
-/// the test pins the opposite: the file falls back, and the reason names the row
-/// that could not be paired — the wanted line with its value and the one row the
-/// CST did write there — instead of just naming the file.
+/// A `var` chain broken over lines is one declaration per top-level comma, and
+/// the CST writes one row per binding. The lexer used to read the whole chain as
+/// one statement whose value named five calls, and the guard paired it with the
+/// first binding's row alone — a real loss this shape used to pin. The comma now
+/// ends a declaration in a `var`/`let`/`const` list, so the file agrees.
 #[test]
-fn a_miss_names_the_row_and_two_rows_are_never_fused() {
+fn a_multi_line_declarator_list_reads_one_binding_per_comma() {
     let source = "function _default(polygon, point) {\n  var lambda = longitude(point),\n    phi = point[1],\n    sinPhi = (0, _math.sin)(phi),\n    normal = [(0, _math.sin)(lambda), -(0, _math.cos)(lambda), 0],\n    angle = 0,\n    winding = 0;\n  return winding;\n}\n";
     let language = langs::by_content("js", source.as_bytes()).expect("a JavaScript row");
     let lexer = parser::parse(source.as_bytes(), language);
     let cst = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a deep parse");
     let deep = deep_facts::extract(source.as_bytes(), &cst, Lang::JavaScript);
 
+    assert_eq!(lexer.symbols.len(), deep.symbols.len(), "one symbol each");
     let verdict = pipeline::loses(&lexer, &deep);
-    let detail = format!("{verdict:?}");
-    assert!(verdict.lost(), "the chain is a real loss: {detail}");
-    assert!(detail.contains("wanted line"), "the reason names the wanted row: {detail}");
-    assert!(detail.contains("targets ["), "the reason names the wanted targets: {detail}");
-    assert_eq!(detail.matches("found line").count(), 1, "exactly one found row, never two fused: {detail}");
+    assert!(!verdict.lost(), "{verdict:?}");
 }
 
 /// Two CST rows that the record cannot tell apart are a counted tie, not a
