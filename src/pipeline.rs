@@ -2465,15 +2465,37 @@ fn is_method_declaration_line(src: &Lines<'_>, line: u32) -> bool {
         return false;
     };
     let head = text[..open].trim();
-    // `[Symbol.dispose](): void;` declares a method under a computed name; the
-    // bracket is part of the name, so it is not a call either.
-    let computed = head.starts_with('[') && head.ends_with(']');
+    // A modifier can stand in front of the name: `static [Symbol.hasInstance](x)`
+    // and `get [key]()` declare a method under a computed name, the same way
+    // `[Symbol.dispose](): void;` does. The bracket is part of the name, so none
+    // of them is a call — the lexer reads the modifier and the key's first
+    // identifier as a callee, and nothing was lost.
+    let name = match head.split_once(char::is_whitespace) {
+        Some((word, rest)) if matches!(word, "static" | "get" | "set" | "async") => rest.trim_start(),
+        _ => head,
+    };
+    let computed = name.starts_with('[') && head.ends_with(']');
+    // `static [(_parts = new WeakMap())](x) {` carries `=` inside the key
+    // expression; an assignment is part of the name here, not a declared value.
+    let outside_brackets = {
+        let mut depth = 0i32;
+        let mut out = String::new();
+        for ch in name.chars() {
+            match ch {
+                '[' | '(' => depth += 1,
+                ']' | ')' => depth -= 1,
+                _ if depth == 0 => out.push(ch),
+                _ => {}
+            }
+        }
+        out
+    };
     // A generic method writes its parameters after the type list: `g<T extends
     // B>(type: T): other is T;` ends with `>`, so the name test cannot see a
     // name at all. The type arguments are part of the name here.
     let generic = head.ends_with('>') && head.contains('<');
-    if head.is_empty()
-        || head.contains('=')
+    if name.is_empty()
+        || outside_brackets.contains('=')
         || !(computed || generic || head.chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || ch == '_'))
     {
         return false;
