@@ -121,6 +121,18 @@ const COVERAGE: &[(&str, &str)] = &[
         "function f(a) {\n  const c = a?.();\n  return c;\n}\n",
     ),
     (
+        "arrow functions: async, parenthesised body and object-literal return",
+        "const a = x => x + 1;\nconst b = async x => await f(x);\nconst c = (x, y) => (x + y);\nconst d = (x) => ({ a: x });\nconst e = async (x) => { return x; };\nconst f = () => {};\ncall(x => x, y => y);\nconst g = x => y => x + y;\n",
+    ),
+    (
+        "arrow functions: destructured and default parameters, chains, async bodies",
+        "const h = ({ a, b }) => a + b;\nconst i = (x = 1) => x;\nconst j = () => ({ ...rest });\nobj.map(v => ({ id: v }));\narr.filter((x) => x > 0).map((x) => x * 2);\nsetTimeout(() => { tick(); }, 100);\nconst k = async () => { await go(); return 1; };\npromise.then(res => res.json()).catch(err => null);\n",
+    ),
+    (
+        "arrow functions: multi-line bodies, nested arrows, function and class returns",
+        "const m = () => ({\n  a: 1,\n  b: (x) => x,\n});\nconst n = (a, b) =>\n  a\n    ? b\n    : 0;\nconst o = x => (y => y + x);\nconst p = async (x) => await (async () => x)();\nconst q = () => function () { return 1; };\nitems.reduce((acc, item) => ({ ...acc, [item.id]: item }), {});\n",
+    ),
+    (
         "object literal families: keyword keys, computed keys, shorthand, methods and spread",
         "const a = { delete: 1, default: 2, class: 3, new: 4, in: 5, of: 6, function: 7 };\nconst b = { [key]: 1, [a.b]: 2, ['str']: 3 };\nconst c = { x, y, z };\nconst d = { m() {}, get g() { return 1; }, set s(v) {}, async am() {}, *gen() {} };\nconst e = { ...rest, q: 1 };\nconst f = { type, value, size };\n",
     ),
@@ -156,6 +168,11 @@ const COVERAGE: &[(&str, &str)] = &[
 /// closed and the row moved up to `COVERAGE`, which is how a known gap stops
 /// being a comment and starts being a checklist.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[
+    (
+        "arrow returning a class expression",
+        "const r = x => class { m() {} };\n",
+        "the lexer writes the value as the one-item merge `m:[0]`; the CST writes the constant 0",
+    ),
     (
         "labelled statement",
         "function f(xs) {\n  outer: for (const x of xs) {\n    if (x) continue outer;\n  }\n}\n",
