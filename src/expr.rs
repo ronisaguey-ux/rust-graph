@@ -338,7 +338,53 @@ impl Emit<'_> {
                         break;
                     }
                     match byte {
-                        b'(' => self.group(out),
+                        b'(' => {
+                            // `(function (g, f) { … })(this, fn)`: a
+                            // parenthesised function expression followed by a
+                            // parameter list is a call of it, and the CST
+                            // writes the call. Left alone the two groups read as
+                            // a pair and the value the CST has was lost.
+                            let line = self.toks[self.pos].line;
+                            let prev_end = out.trim_end_matches(',').len();
+                            let prev_start = out[..prev_end].rfind(',').map_or(0, |at| at + 1);
+                            // Only a value that ended a block or a group is a
+                            // callee here: `…}(args)` and `…)(args)` are
+                            // calls, while `if (…)` and a TS cast followed by
+                            // `(` are not.
+                            // A function expression leaves an empty-span Lambda
+                            // token behind it; a block or a group ends with
+                            // `}` or `)`. Anything else in that position is
+                            // not a callee.
+                            let ends_block = self.pos.checked_sub(1).and_then(|at| self.toks.get(at)).is_some_and(|token| {
+                                token.kind == Kind::Lambda
+                                    || (token.kind == Kind::Op
+                                        && matches!(&self.src[token.start as usize..token.end as usize], b"}" | b")"))
+                            });
+                            let call_of_previous = count > 0 && ends_block && &out[prev_start..prev_end] == "0";
+                            if call_of_previous {
+                                // `(function (g) { … }(this, fn))`: the call is
+                                // written inside the parentheses, so the value
+                                // just read is the callee and this parenthesis
+                                // is its argument list.
+                                self.pos += 1;
+                                let mut args = String::new();
+                                self.list(&mut args, b')', false);
+                                let id = self.new_call(String::new(), line);
+                                out.truncate(prev_start);
+                                out.push_str(&format!("[\"c\",{id},0,[{args}]]"));
+                                continue;
+                            }
+                            let before = out.len();
+                            self.group(out);
+                            if self.op_byte(0) == b'(' && &out[before..] == "0" {
+                                self.pos += 1;
+                                let mut args = String::new();
+                                self.list(&mut args, b')', false);
+                                let id = self.new_call(String::new(), line);
+                                out.truncate(before);
+                                out.push_str(&format!("[\"c\",{id},0,[{args}]]"));
+                            }
+                        }
                         b'[' if close == b'}' && self.display_is_method() => {
                             let key_path = self.computed_key_path();
                             // `{ [Symbol.iterator]() { … } }`: a computed-key
