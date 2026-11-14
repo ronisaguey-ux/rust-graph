@@ -149,6 +149,18 @@
       "evidence": "/tmp/ts-b1/a.ts 1 loss; /tmp/ts-b2/{a,b,c}.ts 0 losses.",
       "status": "thinking",
       "commit": null
+    },
+    {
+      "at": "2026-11-14T14:45:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "rust: a turbofish inside a call argument breaks the whole argument list",
+      "thought": "loss_shapes on all four corpora this hour: rust 267 over 244 files (223 empty-scope, then t: m:, m: m:, m: n:assert_eq 7 each), ts 101 over 64 (t: m: 16, t: n:never 7), js 223 over 125 (empty 42, then 0 8, m: m: 7, c(0; m: 7), python 18 over 14 (empty 5, n:Exception 2). The rust assert_eq rows all carry `Vec::<T>::new()` as an argument.",
+      "finding": "`assert_eq!(no_fill.iterate(), Vec::<MatchAction>::new())` loses the row: the lexer writes `m:[n:assert_eq,m:[c(n:no_fill;[0]),n:Vec,m:[n:new,0]]]` where the CST has `t:[c(n:no_fill;[]),c(n:Vec;[])]`. The turbofish skip in `chain` consumes `::<...>` but the callee the CST keeps for `Vec::<T>::new()` is `Vec`, and the argument list collapses (both args of side_tab_page merged into one `m`), so the failure is in the call-argument split around the turbofish, not in the chain. Repro: /tmp/rgn-turbo/a.rs, 1 loss.",
+      "reader": "lexer",
+      "evidence": "/tmp/rgn-turbo/a.rs 1 loss; got vs want in the entry above; 7 rows in the rust corpus (001162/001316 matching_core.rs:245, 001548 integrity_tests.rs:138/142/150, 001607 static_flush.rs:37, 001626 side_accent_radius.rs:124).",
+      "status": "open",
+      "commit": null
     }
   ]
 }
