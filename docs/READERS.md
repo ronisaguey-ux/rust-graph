@@ -92,7 +92,7 @@ Known gaps (0):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (10):
+Covered (12):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
@@ -103,6 +103,8 @@ Covered (10):
 - use lists: nested braces with a glob and a self item
 - use lists: super, crate and self paths with an alias
 - use lists: pub(crate), pub(super) and pub(in path)
+- function types: dyn Fn in a parameter and a Box<dyn Fn>
+- function types: impl Fn as a parameter bound
 - let declarations: mut, annotated and tuple-pattern bindings
 
 Known gaps (0):
