@@ -327,6 +327,7 @@ impl Emit<'_> {
                     match byte {
                         b'(' => self.group(out),
                         b'[' if close == b'}' && self.display_is_method() => {
+                            let key_path = self.computed_key_path();
                             // `{ [Symbol.iterator]() { … } }`: a computed-key
                             // method is one constant to the CST. Read as a
                             // display it became a pair with the method's body
@@ -342,7 +343,17 @@ impl Emit<'_> {
                                 self.list(&mut params, b')', false);
                             }
                             self.skip_block();
-                            out.push('0');
+                            // `[Hash.symbol]() { … }` keeps its path: the CST
+                            // writes the name when the key is a member
+                            // expression, and the constant 0 when it is a
+                            // single word.
+                            if key_path.contains('.') {
+                                out.push_str("[\"n\",");
+                                push_string(out, &key_path);
+                                out.push(']');
+                            } else {
+                                out.push('0');
+                            }
                         }
                         b'[' => self.display(out, b']', "t"),
                         b'{' => self.display(out, b'}', "m"),
@@ -397,6 +408,48 @@ impl Emit<'_> {
             at += 1;
         }
         false
+    }
+
+    /// The path a computed key spells when it is a plain member chain
+    /// (`Hash.symbol`), or empty when the key is anything else.
+    fn computed_key_path(&self) -> String {
+        let mut path = String::new();
+        let mut depth = 0usize;
+        let mut at = self.pos;
+        let mut expect_dot = false;
+        while let Some(token) = self.toks.get(at) {
+            if token.kind == Kind::Op {
+                match self.op_byte_at(at) {
+                    b'[' => {
+                        depth += 1;
+                        if depth > 1 {
+                            return String::new();
+                        }
+                    }
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return path;
+                        }
+                    }
+                    b'.' => expect_dot = true,
+                    _ => return String::new(),
+                }
+            } else if token.kind == Kind::Ident {
+                if !path.is_empty() && !expect_dot {
+                    return String::new();
+                }
+                if expect_dot {
+                    path.push('.');
+                    expect_dot = false;
+                }
+                path.push_str(&lexeme(self.src, token, self.lang));
+            } else {
+                return String::new();
+            }
+            at += 1;
+        }
+        String::new()
     }
 
     fn op_byte_at(&self, at: usize) -> u8 {
