@@ -2321,6 +2321,12 @@ impl<'a> Walker<'a> {
     /// `["c",0,0,[]]`) with the index of the `A` call the walk recorded.
     pub(crate) fn call_target(&self, callee: u32, receiver_call: Option<String>) -> (String, String) {
         match self.kind(callee) {
+            "subscript" | "subscript_expression" | "index_expression" if !self.path_of(callee).is_empty() => {
+                match self.children(callee).first().copied() {
+                    Some(inner) => self.call_target(inner, receiver_call),
+                    None => (String::new(), "0".to_string()),
+                }
+            }
             "attribute" | "member_expression" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
