@@ -184,6 +184,18 @@
       "evidence": "RG_LOSSES=1 on /tmp/ts-decl2 after the fix: 1 loss, 'event x line 3 ... wanted line 3 value t:[m:[n:$$eval,...'",
       "status": "thinking",
       "commit": null
+    },
+    {
+      "at": "2026-11-14T23:05:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "ts multi-line type parameter list: on_newline guard attempt failed",
+      "thought": "Tried the guard the note called for: in TS/TSX, do not end a statement at a newline when the line ends in `<` preceded by a name. Reverted.",
+      "finding": "The repro /tmp/ts-decl2 still loses 1 with the guard in place, so the split is not happening at the newline after `<`. The member is still emitted at module level, which means either the statement is closed elsewhere (the comma rules already skip inside_type_arguments) or the class frame is not the frame being used. Not worth a second guess without a debug build; the next attempt should instrument the statement boundary rather than pattern-match.",
+      "reader": "lexer",
+      "evidence": "built with the guard (2m24s), /tmp/ts-decl2 losses=1 (unchanged), /tmp/ts-b1 and /tmp/ts-m still 0. Patch reverted with git checkout.",
+      "status": "reverted",
+      "commit": null
     }
   ]
 }
