@@ -796,6 +796,16 @@ impl Emit<'_> {
                     self.pos += 1;
                     continue;
                 }
+                // `a?.[1]`: the CST keeps the name and drops the optional
+                // subscript entirely (`a?.[i].x` is `a.x`, with no `i`), while
+                // the lexer read the bracket as a display and the name as a
+                // value the source never had.
+                if self.is_op(0, b"?.") && self.op_byte(1) == b'[' {
+                    self.pos += 2;
+                    let mut index = String::new();
+                    self.list(&mut index, b']', false);
+                    continue;
+                }
                 if let Some(name) = self.word(1) {
                     self.pos += 2;
                     path.push('.');
