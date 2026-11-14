@@ -337,6 +337,32 @@ fn a_cache_written_by_one_parser_is_never_served_to_the_other() {
     assert!(back.contains("3 parsed, 0 cached"), "a --lexer pack was reused by --deep: {back}");
 }
 
+/// P4-16: the export forms that carry no value (`export *`, `export {}`,
+/// `export type {}`) are decided by the CST, not by the lexer's early return.
+/// The early return exists so the lexer stops inventing a merge for a form that
+/// names no value; if it were ever the record that won, the row would say
+/// `lexer` and these forms would be a workaround copied forward instead of a
+/// reading. This pins the choice, form by form.
+#[test]
+fn export_forms_without_a_value_are_decided_by_the_cst() {
+    let tree = Tree::new("exports", &[
+        (
+            "app/a.js",
+            "export * from './one.js';\nexport * as ns from './two.js';\nexport { a, b as c } from './three.js';\nexport { d, e };\nexport {};\nexport default class Named { m() { return 1; } }\nexport let x = 1, y = 2;\n",
+        ),
+        (
+            "app/b.ts",
+            "export type { T } from './t';\nexport type U = string;\nexport as namespace NS;\n",
+        ),
+    ]);
+    let (json, _) = tree.json(&["--stdout", "--no-cache"]);
+    for path in ["app/a.js", "app/b.ts"] {
+        let row = source_row(&json, path);
+        assert!(row.contains("\"parsed_by\":\"deep\""), "{path} was not decided by the CST: {row}");
+        assert!(!row.contains("deep_fallback"), "{path} fell back: {row}");
+    }
+}
+
 /// P4-15: a file the reader will not hand to the CST says why in words. The
 /// reason names what it stumbled on — the production and its line, or the
 /// error-node count against the tree's size — so a fallback is something a
