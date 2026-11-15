@@ -79,6 +79,7 @@ rust_graph_deep::grammar! { RUST {
         KW_SUPER = "super",
         KW_TRAIT = "trait",
         KW_TRUE = "true",
+        KW_TRY = "try",
         KW_TYPE = "type",
         KW_UNSAFE = "unsafe",
         KW_USE = "use",
@@ -505,6 +506,7 @@ rust_graph_deep::grammar! { RUST {
         | for_expression
         | unsafe_block
         | async_block
+        | try_block
         | labeled_block,
 
     _expression_path: precedence _path_start {
@@ -536,6 +538,10 @@ rust_graph_deep::grammar! { RUST {
     labeled_block: LIFETIME ":" (block | loop_expression | while_expression | for_expression),
     unsafe_block: "unsafe" block,
     async_block: "async" ["move"] block,
+    /// `let r = try { step()? };` — a block expression, read like `async` and
+    /// `unsafe`: the body is statements, and without the rule every name inside
+    /// one was an error node (P5-11).
+    try_block: "try" block,
     const_block: "const" block,
     if_expression: "if" _condition block [else_clause],
     else_clause: "else" (block | if_expression),
@@ -751,6 +757,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"super" => KW_SUPER,
         b"trait" => KW_TRAIT,
         b"true" => KW_TRUE,
+        b"try" => KW_TRY,
         b"type" => KW_TYPE,
         b"unsafe" => KW_UNSAFE,
         b"use" => KW_USE,
