@@ -977,8 +977,14 @@ impl<'a> Walker<'a> {
             // A token tree is where nothing re-spells a contextual keyword, so
             // a path that stopped at `identifier` lost the call the macro will
             // evaluate: `matches!(self.raw(&t), …)` lexes `raw` as its own.
-            if matches!(kind, "identifier" | "scoped_identifier" | "type_identifier" | "self" | "this" | "super")
-                || self.kinds.soft.contains(&kind)
+            // `crate::a::b` and `Self::x` are paths too: the keyword is a node
+            // of its own kind, and dropping it made `crate::a::b` read as
+            // `a::b`, a name the lexer never wrote.
+            if matches!(
+                kind,
+                "identifier" | "scoped_identifier" | "type_identifier" | "self" | "this" | "super" | "crate"
+                    | "Self"
+            ) || self.kinds.soft.contains(&kind)
             {
                 if !path.is_empty() && !path.ends_with('.') {
                     break;
@@ -1026,11 +1032,15 @@ impl<'a> Walker<'a> {
                     continue;
                 }
             }
-            let path = self.rust_tt_path(&kids, &mut at);
+            let mut path = self.rust_tt_path(&kids, &mut at);
             // `size_of::<Node>()`: the turbofish sits between the path and the
             // argument list, so without stepping over it the walker never
             // reached the parentheses and the call was recorded as a name.
-            if !path.is_empty() && at + 1 < kids.len()
+            // `Vec::<T>::new()` keeps naming after the `>`: `new` belongs to
+            // `Vec`, and stopping at the turbofish read the call as a bare
+            // `new` with no receiver.
+            while !path.is_empty()
+                && at + 1 < kids.len()
                 && self.text_string(kids[at]) == "::"
                 && self.text_string(kids[at + 1]) == "<"
             {
@@ -1048,6 +1058,16 @@ impl<'a> Walker<'a> {
                     }
                     at += 1;
                 }
+                if at < kids.len() && self.text_string(kids[at]) == "::" {
+                    at += 1;
+                } else {
+                    break;
+                }
+                let rest = self.rust_tt_path(&kids, &mut at);
+                if rest.is_empty() {
+                    break;
+                }
+                path = format!("{path}.{rest}");
             }
             if !path.is_empty() {
                 if at + 1 < kids.len() && self.kind(kids[at]) == "!" && matches!(self.kind(kids[at + 1]), "token_tree" | "token_tree_bracket" | "token_tree_brace") {
