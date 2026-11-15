@@ -865,6 +865,14 @@ impl<'a> Walker<'a> {
                     let inner = self.form(object);
                     return (format!(".{name}"), inner);
                 }
+                // `CompleteWorkflowExecution { result: None }.into()`: the
+                // receiver is a struct value, not a path. Reading its path
+                // named the constructor and dropped every field, so the lexer's
+                // merge had no counterpart and the fields counted as lost.
+                if self.kind(object) == "struct_expression" {
+                    let inner = self.form(object);
+                    return (format!(".{name}"), inner);
+                }
                 // `w[i - 15].rotate_right(7)`: the receiver is an index into a
                 // named value, and the lexer names the call by that value. Read
                 // as a bare index the call has no name at all and the two
