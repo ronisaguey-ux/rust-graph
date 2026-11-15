@@ -3108,9 +3108,17 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str, tag: &str) -> Result<(),
         }
     }
     for (kind, miss) in [("call", Miss::Call), ("0", Miss::Call)] {
-        let wanted = wanted.iter().filter(|atom| *atom == kind).count();
-        let found = found.iter().filter(|atom| *atom == kind).count();
-        if found < wanted {
+        let want_count = wanted.iter().filter(|atom| *atom == kind).count();
+        let have_count = found.iter().filter(|atom| *atom == kind).count();
+        // A constant is the absence of a name, not a fact: where the lexer wrote
+        // `0` because a branch could not be named, any atom the CST did write
+        // covers it, as long as the CST's value is no shorter. `cond ? function
+        // a() {} : function b() {}` is the whole family — two anonymous
+        // branches to the lexer, one named function expression to the CST.
+        if kind == "0" && have_count < want_count && found.len() >= wanted.len() {
+            continue;
+        }
+        if have_count < want_count {
             return Err(miss);
         }
     }
