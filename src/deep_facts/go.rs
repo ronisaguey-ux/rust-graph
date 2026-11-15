@@ -1432,7 +1432,14 @@ impl<'a> Walker<'a> {
             }
             let value = self.form(child);
             if value != "0" {
-                let line = self.line(child);
+                let mut expr = child;
+                while self.kind(expr) == "parenthesized_expression" {
+                    match self.expression_child(expr) {
+                        Some(inner) => expr = inner,
+                        None => break,
+                    }
+                }
+                let line = self.line(expr);
                 self.event(&format!("[\"x\",{line},{value}]"));
             }
             return;
