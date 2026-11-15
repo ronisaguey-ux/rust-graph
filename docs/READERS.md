@@ -11,7 +11,7 @@ test claims is listed here, and every listed construct is claimed by a test.
 
 ## JavaScript — `tests/js_coverage.rs`
 
-Covered (35):
+Covered (36):
 
 - private field holding a function keeps its marker
 - require in a comparison is not an import
@@ -48,11 +48,11 @@ Covered (35):
 - null and undefined literals
 - for-of statement with an inline body
 - c-style for with an inline body
+- computed method key in a class body
 
-Known gaps (5):
+Known gaps (4):
 
 - arrow returning a class expression
-- computed method key in a class body
 - declare field without an initialiser
 - a JSX element's value
 - labelled statement
