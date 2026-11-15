@@ -1001,10 +1001,23 @@ impl<'a> Parser<'a> {
         self.loop_binding(stmt);
     }
 
+    /// Where the statement's head word sits: `async for row in xs` and
+    /// `async with … as x` bind exactly like their plain forms, and the
+    /// modifier is not a binder (it was read as one, so the target list was
+    /// `["async","row"]` and the file fell back).
+    fn binding_head(&self, stmt: &[Token]) -> usize {
+        let word = |index: usize| stmt.get(index).filter(|token| token.kind == Kind::Ident).map(|token| self.raw(token));
+        match word(0) {
+            Some(b"async") if matches!(word(1), Some(b"for") | Some(b"with")) => 1,
+            _ => 0,
+        }
+    }
+
     fn binding_index(&self, stmt: &[Token]) -> Option<usize> {
         // `if x in y` and `while x in y` test membership; only a loop, a
         // context manager or a handler binds a name across `in`/`of`/`as`.
-        if let Some(first) = stmt.first().filter(|token| token.kind == Kind::Ident) {
+        let head = self.binding_head(stmt);
+        if let Some(first) = stmt.get(head).filter(|token| token.kind == Kind::Ident) {
             if !matches!(self.raw(first), b"for" | b"foreach" | b"with" | b"except" | b"catch" | b"rescue") {
                 return None;
             }
@@ -1018,7 +1031,7 @@ impl<'a> Parser<'a> {
                     _ => {}
                 }
             }
-            if depth <= 1 && token.kind == Kind::Ident && index > 0 && matches!(self.raw(token), b"in" | b"of" | b"as") {
+            if depth <= 1 && token.kind == Kind::Ident && index > head && matches!(self.raw(token), b"in" | b"of" | b"as") {
                 return Some(index);
             }
         }
@@ -1110,7 +1123,8 @@ impl<'a> Parser<'a> {
     fn loop_binding(&mut self, stmt: &[Token]) {
         let Some(at) = self.binding_index(stmt) else { return };
         let is_with = self.raw(&stmt[at]) == b"as";
-        let (targets, value) = if is_with { (&stmt[at + 1..], &stmt[1..at]) } else { (&stmt[1..at], &stmt[at + 1..]) };
+        let head = self.binding_head(stmt);
+        let (targets, value) = if is_with { (&stmt[at + 1..], &stmt[head + 1..at]) } else { (&stmt[head + 1..at], &stmt[at + 1..]) };
         self.assignment(targets, value, stmt[0].line, false);
     }
 

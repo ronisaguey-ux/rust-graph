@@ -1492,13 +1492,16 @@ impl<'a> Walker<'a> {
         if self.kind(children[at]) == "as" {
             // `with open(p) as handle`: the value is before `as`, the binding
             // after it.
-            let value = *children[..at].iter().rev().find(|&&child| !self.is_layout(child))?;
+            let value = *children[..at]
+                .iter()
+                .rev()
+                .find(|&&child| !self.is_layout(child) && self.kind(child) != "async")?;
             let targets: Vec<String> = children.get(at + 1).map(|&child| self.pattern_names(child)).unwrap_or_default();
             return Some((targets, value));
         }
         let targets = children[..at]
             .iter()
-            .filter(|&&child| !matches!(self.kind(child), "for" | "(" | ")"))
+            .filter(|&&child| !matches!(self.kind(child), "for" | "async" | "(" | ")"))
             .flat_map(|&child| self.pattern_names(child))
             .collect();
         let value = *children.get(at + 1)?;
