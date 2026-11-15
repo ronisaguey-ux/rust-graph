@@ -96,11 +96,15 @@ Known gaps (0):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (25):
+Covered (29):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
 - match arms: block body, guard, call value and wildcard
+- match guard: `b'/' if c.peek_at(1) == b'/'` (000081_kotlin.rs:513)
+- or-pattern: `LPAREN | LBRACKET | LBRACE` (000081_kotlin.rs:804)
+- binding at: `Some(q @ ('"' | '\''))` (001544_before_edit.rs:476) and `x @ 1..=5`
+- range pattern: `0x00..=0x7f` and `0xc2..=0xdf` (000456_cursor.rs:134)
 - closures: annotated return type with a block, and an expression body
 - trait bounds on a parameter and a where clause
 - dynamic types: dyn in a reference and behind Box

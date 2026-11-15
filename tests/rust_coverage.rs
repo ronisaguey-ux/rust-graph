@@ -64,6 +64,24 @@ const COVERAGE: &[(&str, &str)] = &[
         "match arms: block body, guard, call value and wildcard",
         "fn g(v: i32) -> i32 { v }\nfn f(x: i32) -> i32 {\n    match x {\n        0 => { let z = 1; z }\n        1 if x > 0 => g(x),\n        _ => 2,\n    }\n}\n",
     ),
+    // P5-10. Each of the four is the shape of a real arm, quoted from the corpus
+    // file named in the label, reduced to the tokens that carry the pattern.
+    (
+        "match guard: `b'/' if c.peek_at(1) == b'/'` (000081_kotlin.rs:513)",
+        "fn slash(c: Cursor) -> u8 {\n    match c.peek() {\n        b'/' if c.peek_at(1) == b'/' => 1,\n        _ => 0,\n    }\n}\n",
+    ),
+    (
+        "or-pattern: `LPAREN | LBRACKET | LBRACE` (000081_kotlin.rs:804)",
+        "fn field(t: Tok) -> usize {\n    match t {\n        LPAREN | LBRACKET | LBRACE => 1,\n        RPAREN | RBRACKET => 2,\n        _ => 0,\n    }\n}\n",
+    ),
+    (
+        "binding at: `Some(q @ ('\"' | '\\''))` (001544_before_edit.rs:476) and `x @ 1..=5`",
+        "fn quote(q: Option<char>) -> bool {\n    match q {\n        Some(q @ ('\"' | '\\'')) => true,\n        _ => false,\n    }\n}\nfn small(n: u32) -> &'static str {\n    match n {\n        x @ 1..=5 => \"small\",\n        _ => \"other\",\n    }\n}\n",
+    ),
+    (
+        "range pattern: `0x00..=0x7f` and `0xc2..=0xdf` (000456_cursor.rs:134)",
+        "fn lead(b0: u8) -> usize {\n    match b0 {\n        0x00..=0x7f => 1,\n        0xc2..=0xdf => 2,\n        0xe0..=0xef => 3,\n        _ => 0,\n    }\n}\n",
+    ),
     (
         "closures: annotated return type with a block, and an expression body",
         "fn f() {\n    let add = |x: i32| -> i32 { x + 1 };\n    let twice = |v: i32| v * 2;\n}\n",
