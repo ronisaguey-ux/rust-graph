@@ -101,6 +101,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn h(f: impl Fn(i32) -> i32) -> i32 { f(1) }\n",
     ),
     (
+        "an if let pattern with tuple and enum constructors",
+        "fn f(def: u8, act: u8) {\n    if let (Some(d), Action::Reduce(p)) = (def, act) {\n        let q = d;\n        let r = p;\n        let s = q + r;\n    }\n}\n",
+    ),
+    (
         "a pub(crate) field: the restriction is not a value",
         "pub struct Counter {\n    pub(crate) meter: u64,\n    pub(super) scale: u8,\n}\n",
     ),

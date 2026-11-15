@@ -851,7 +851,18 @@ impl<'a> Parser<'a> {
             return;
         }
         if self.binding_index(stmt).is_none() && stmt.len() > 1 {
-            self.expression_event("x", &stmt[1..]);
+            let mut part = &stmt[1..];
+            // `if let (Some(d), Action::Reduce(p)) = (def, act)` binds a pattern
+            // and calls nothing: the pattern's constructors were read as calls
+            // the CST never writes (88 corpus files). The header's expression is
+            // the value to the right of `=`.
+            if self.lang.tag == "RS" && self.word_at(part, 0).as_deref() == Some("let") {
+                match self.top_level_assign(part) {
+                    Some(equal) => part = &part[equal + 1..],
+                    None => return,
+                }
+            }
+            self.expression_event("x", part);
         }
     }
 
