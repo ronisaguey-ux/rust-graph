@@ -1195,6 +1195,16 @@ impl Emit<'_> {
                     self.list(&mut args, b')', true);
                     continue;
                 }
+                // `Other(#[from] AnyhowError)`: a group whose first token is an
+                // attribute declares the fields of an enum variant, it does not
+                // call anything. Read as a call it invented a callee named after
+                // the variant (7 corpus files).
+                if self.lang.tag == "RS" && self.op_byte(1) == b'#' && self.op_byte(2) == b'[' {
+                    self.pos += 1;
+                    let mut args = String::new();
+                    self.list(&mut args, b')', true);
+                    continue;
+                }
                 let line = self.toks[self.pos].line;
                 self.pos += 1;
                 let (receiver, mut target) = self.split_receiver(&value, &path);
