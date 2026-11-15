@@ -723,6 +723,26 @@ impl<'a> Parser<'a> {
         index
     }
 
+    /// Advance past leading Rust attributes (`#[...]` / `#![...]`) before a declaration head.
+    fn skip_rs_attrs(&self, toks: &[Token]) -> usize {
+        let mut index = 0;
+        while self.lang.tag == "RS" && toks.get(index).is_some_and(|t| self.is_op(t, b"#")) {
+            let next = if toks.get(index + 1).is_some_and(|t| self.is_op(t, b"!")) {
+                index + 2
+            } else {
+                index + 1
+            };
+            if toks.get(next).is_some_and(|t| self.is_op(t, b"[")) {
+                if let Some((_, close)) = self.group_at(toks, next) {
+                    index = close + 1;
+                    continue;
+                }
+            }
+            break;
+        }
+        index
+    }
+
     fn has_def_word(&self, toks: &[Token]) -> bool {
         let index = self.skip_modifiers(toks);
         self.word_at(toks, index).is_some_and(|word| {
@@ -2786,7 +2806,8 @@ impl<'a> Parser<'a> {
     }
 
     fn function_head(&self, toks: &[Token], at_block: bool) -> Option<Head> {
-        let index = self.skip_modifiers(toks);
+        let start = self.skip_rs_attrs(toks);
+        let index = start + self.skip_modifiers(&toks[start..]);
         if let Some(word) = self.word_at(toks, index) {
             if self.lang.defs.contains(&word.as_str()) {
                 return self.keyword_head(toks, index);
