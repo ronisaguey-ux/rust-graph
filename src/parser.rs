@@ -1655,6 +1655,25 @@ impl<'a> Parser<'a> {
         };
         let word = self.word_at(stmt, 0);
         let from = stmt.iter().position(|token| token.kind == Kind::Ident && self.raw(token) == b"from");
+        // `import x = require("m")` is a TypeScript import-equals declaration,
+        // not a static import: the module sits inside `require`, not at the
+        // position after `import`. Read as a static import it found no string at
+        // position 1 and returned false, so the statement fell through to the
+        // assignment path and `require(...)` became a call the CST never writes
+        // (14 .d.ts files, the largest untouched ts cluster).
+        if word.as_deref() == Some("import") {
+            if let Some(equal) = self.top_level_assign(stmt) {
+                let tail = &stmt[equal + 1..];
+                if tail.first().is_some_and(|token| token.kind == Kind::Ident && self.raw(token) == b"require") {
+                    let module = tail.iter().find(|token| token.kind == Kind::Str).map(|token| self.string_value(token));
+                    let alias = stmt[..equal].iter().rev().find(|token| token.kind == Kind::Ident).map(|token| self.text(token));
+                    if let (Some(module), Some(alias)) = (module, alias) {
+                        self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+                        return true;
+                    }
+                }
+            }
+        }
         let is_static = matches!(word.as_deref(), Some("import" | "export")) && !stmt.get(1).is_some_and(|t| self.is_op(t, b"("));
         if is_static {
             let module_at = match from {

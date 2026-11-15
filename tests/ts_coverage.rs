@@ -54,6 +54,10 @@ fn deep_facts(source: &str) -> Facts {
 /// One row per construct that reads cleanly today.
 const COVERAGE: &[(&str, &str)] = &[
     (
+        "import-equals: a require declaration is an import, not a call",
+        "import fs = require('fs');\nimport _ = require(\"../index\");\n",
+    ),
+    (
         "type annotations: variables, parameters, returns and fields",
         "function f(a: number, b: string): boolean {\n  const c: number = a + 1;\n  return b.length > c;\n}\n",
     ),
