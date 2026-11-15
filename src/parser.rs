@@ -593,6 +593,9 @@ impl<'a> Parser<'a> {
         if self.has_def_word(&self.stmt) {
             return true;
         }
+        if matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt) {
+            return true;
+        }
         if last.kind == Kind::Ident && !BLOCK_WORDS.contains(&self.raw(&last)) && self.field_key_ahead() {
             return false;
         }

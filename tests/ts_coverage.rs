@@ -117,6 +117,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "conditional type on a declaration, object type opened on the next line",
         "declare var M: typeof globalThis extends\n    { onmessage: any; M: infer T } ? T : typeof undici.M;\n",
     ),
+    (
+        "conditional type on a declaration with comma-separated object type and object fallback",
+        "var Event: typeof globalThis extends { onmessage: any, Event: infer T }\n    ? T\n    : { prototype: __Event };\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
