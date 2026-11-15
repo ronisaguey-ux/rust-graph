@@ -2885,6 +2885,16 @@ impl<'a> Parser<'a> {
 
     fn statement(&mut self, stmt: &[Token]) {
         let Some(first) = stmt.first() else { return };
+        // `#![allow(unused)]` and a `#[derive(Debug)]` written on its own line
+        // are layout: the CST writes nothing for them. Read as a value, the inner
+        // attribute became the call `allow(unused)` on the module symbol. A
+        // statement that is only attributes therefore writes nothing (P5-13).
+        if self.lang.tag == "RS" {
+            let after = self.skip_rs_attrs(stmt);
+            if after > 0 && after >= stmt.len() {
+                return;
+            }
+        }
         // `export { a }` and `export * from …` name what leaves the module and
         // carry no value: the lexer read `export` as a name and the braces as a
         // merge. `export default X` is the value of X, not a merge with the
