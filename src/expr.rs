@@ -163,43 +163,60 @@ impl Emit<'_> {
         {
             open += 1;
         }
+        if matches!(self.lang.tag, "TS" | "TSX") && op_at(open, b"<") {
+            open = self.skip_balanced(open, b"<", b">")?;
+        }
         if !op_at(open, b"(") {
             return None;
         }
-        let mut depth = 0usize;
-        let mut index = open;
-        loop {
-            let token = self.toks.get(index)?;
-            if token.kind == Kind::Op {
-                match &self.src[token.start as usize..token.end as usize] {
-                    b"(" => depth += 1,
-                    b")" => {
-                        depth -= 1;
-                        if depth == 0 {
-                            index += 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            index += 1;
+        let mut index = self.skip_balanced(open, b"(", b")")?;
+        if matches!(self.lang.tag, "TS" | "TSX") && op_at(index, b":") {
+            index = self.skip_return_type(index + 1)?;
         }
         if !op_at(index, b"{") {
             return None;
         }
+        self.skip_balanced(index, b"{", b"}")
+    }
+
+    fn skip_balanced(&self, start: usize, open: &[u8], close: &[u8]) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut index = start;
+        loop {
+            let token = self.toks.get(index)?;
+            if token.kind == Kind::Op {
+                let raw = &self.src[token.start as usize..token.end as usize];
+                if raw == open {
+                    depth += 1;
+                } else if raw == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(index + 1);
+                    }
+                }
+            }
+            index += 1;
+        }
+    }
+
+    fn skip_return_type(&self, mut index: usize) -> Option<usize> {
         let mut depth = 0usize;
         loop {
             let token = self.toks.get(index)?;
             if token.kind == Kind::Op {
-                match &self.src[token.start as usize..token.end as usize] {
-                    b"{" => depth += 1,
-                    b"}" => {
-                        depth -= 1;
+                let raw = &self.src[token.start as usize..token.end as usize];
+                match raw {
+                    b"(" | b"[" | b"<" => depth += 1,
+                    b")" | b"]" | b">" => {
                         if depth == 0 {
-                            return Some(index + 1);
+                            return None;
                         }
+                        depth -= 1;
                     }
+                    b"{" if depth == 0 => return Some(index),
+                    b"{" => depth += 1,
+                    b"}" if depth > 0 => depth -= 1,
+                    b"," | b";" | b"=" | b"}" if depth == 0 => return None,
                     _ => {}
                 }
             }
@@ -530,10 +547,22 @@ impl Emit<'_> {
                             if count > 0 {
                                 out.push(',');
                             }
+                            if matches!(self.lang.tag, "TS" | "TSX")
+                                && self.toks.get(self.pos).is_some_and(|t| t.kind == Kind::Op && self.raw_is(t, b"<"))
+                            {
+                                if let Some(next) = self.skip_balanced(self.pos, b"<", b">") {
+                                    self.pos = next;
+                                }
+                            }
                             if self.op_byte(0) == b'(' {
                                 self.pos += 1;
                                 let mut params = String::new();
                                 self.list(&mut params, b')', false);
+                            }
+                            if matches!(self.lang.tag, "TS" | "TSX") && self.op_byte(0) == b':' {
+                                if let Some(next) = self.skip_return_type(self.pos + 1) {
+                                    self.pos = next;
+                                }
                             }
                             self.skip_block();
                             // `[Hash.symbol]() { … }` keeps its path: the CST
@@ -656,7 +685,16 @@ impl Emit<'_> {
                     b']' => {
                         depth -= 1;
                         if depth == 0 {
-                            return self.toks.get(at + 1).is_some_and(|next| next.kind == Kind::Op && self.raw_is(next, b"("));
+                            let mut next = at + 1;
+                            if matches!(self.lang.tag, "TS" | "TSX")
+                                && self.toks.get(next).is_some_and(|t| t.kind == Kind::Op && self.raw_is(t, b"<"))
+                            {
+                                let Some(after) = self.skip_balanced(next, b"<", b">") else {
+                                    return false;
+                                };
+                                next = after;
+                            }
+                            return self.toks.get(next).is_some_and(|tok| tok.kind == Kind::Op && self.raw_is(tok, b"("));
                         }
                     }
                     _ => {}
