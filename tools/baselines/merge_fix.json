@@ -1,0 +1,9 @@
+{
+  "commit": "aa4c019ccfe0a416af994403f9e9cdc8b50bfe18",
+  "subject": "fix(facts): a match arm's value is a statement of its own",
+  "files": [
+    "src/deep_facts/rust.rs"
+  ],
+  "max_lines": 40,
+  "measured_by": "8412e5a80fe83cf4519e9a21e9c593c1fbb2ebb9"
+}
