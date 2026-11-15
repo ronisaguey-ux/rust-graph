@@ -4,13 +4,13 @@
     "ts": 120
   },
   "recorded": {
-    "js": 105,
+    "js": 108,
     "ts": 66,
     "python": 14,
-    "rust": 158
+    "rust": 167
   },
   "pinned": {
     "python": 14,
-    "rust": 158
+    "rust": 167
   }
 }

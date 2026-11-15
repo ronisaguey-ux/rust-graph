@@ -59,7 +59,7 @@ Known gaps (5):
 
 ## TypeScript — `tests/ts_coverage.rs`
 
-Covered (16):
+Covered (17):
 
 - import-equals: a require declaration is an import, not a call
 - type annotations: variables, parameters, returns and fields
@@ -77,6 +77,7 @@ Covered (16):
 - JS node set: classes, optional chaining and exports
 - decorators on a class, a method and a property
 - conditional type on a declaration, object type opened on the next line
+- conditional type on a declaration with comma-separated object type and object fallback
 
 Known gaps (0):
 
@@ -95,7 +96,7 @@ Known gaps (0):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (23):
+Covered (24):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
@@ -120,6 +121,7 @@ Covered (23):
 - a match arm with a range and an alternation
 - a closure whose parameter is a reference pattern
 - a let-else whose else block diverges
+- a member chain across lines through the ? operator
 
 Known gaps (0):
 
