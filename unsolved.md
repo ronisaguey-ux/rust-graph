@@ -451,26 +451,3 @@ The tree carries no trace of the experiment (no `exact_value`/`exact-first`
 symbol in `src/`, `tools/` or `docs/`), so there is nothing dormant waiting to be
 revived by accident. If it is ever retried, the rust column is the gate: a variant
 that does not hold rust at 345 is rejected on the numbers, not on taste.
-
-## Open after the `if let` fix (2026-11-14) — the clusters nobody has solved yet
-
-The `if let` pattern cluster was solved and is recorded in `unsolved_log.json` and
-`perfection-queue.md`; only what is still unexplained lives here. Numbers below are the
-`sweep-local` corpora with the current binary: js 117 files / 211 losses, ts 80 / 89,
-python 14 / 18, rust 234 / 266.
-
-| corpus | unsolved cluster | files | what is not understood |
-|--------|------------------|------:|------------------------|
-| rust | `(empty) @ &&` | 15 | a `let` condition split across lines: the tokens after the binding `=` sit on the next line, so the condition emits nothing where the CST writes a value. The depth-0 `=` split only works within one statement slice. |
-| rust | `(empty) @ impl` | 14 | `impl Trait for Type` header still writes a block-header event the CST does not. Naming for-impls by the trait broke 255 files, so the CST's rule (name plain `impl Type` by the type) is still not replicated. |
-| rust | `(empty) @ (no line)` 13, `@ let` 7, `@ fn` 5 | 25 | never inspected individually; the line head is the only clue. |
-| ts | `(empty) @ import` | 14 | the largest untouched cluster in the whole sweep. An import the lexer turns into an event the CST does not write; not yet reduced to a fixture. |
-| js | `(empty) @ (no line)` | 11 | events with no source line: the loss line names a line the file does not have, so line-head clustering cannot be trusted for these. |
-| js | `n:length @ for`, `0 @ for` | 12 | a `for` header whose condition/update is dropped. |
-| js | `c(n:env.stack; m: @ env.stack.push({` | 7 | a call whose argument is an object literal: the lexer writes the merge inside the call, the CST keeps the call's own shape. |
-| python | `(empty) @ (no line)` | 4 | same no-line problem as js. |
-| all | sweep comparability | — | **not solvable in code.** Two binaries built from the same source give different rust totals (244/267 vs 242/274). Runs of one binary are identical, so the reader is deterministic; the drift is a stale artefact. Every A/B must build both sides from the tree into separate target dirs, and no baseline may be quoted from a target directory that was not built in that measurement. |
-
-Nothing in this table has a reproduction file yet, which is why none of them is finished: the
-rule for this loop is reproduce in the smallest file that fails under both `--lexer` and `--deep`
-before touching code. Reducing one of these to a fixture is the next step for each row.
