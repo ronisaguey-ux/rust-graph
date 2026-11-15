@@ -557,7 +557,9 @@ impl<'a> Parser<'a> {
             // `let Some(x) = g(1) else { ... };`: the else's brace opens the
             // divergence block. Read as part of the value, the whole let-else
             // became one merged expression the CST never writes.
-            if self.stmt.last().is_some_and(|token| self.raw(token) == b"else") {
+            if self.stmt.last().is_some_and(|token| self.raw(token) == b"else")
+                && self.stmt.first().is_some_and(|token| self.raw(token) == b"let")
+            {
                 return true;
             }
         }
