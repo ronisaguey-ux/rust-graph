@@ -11,8 +11,9 @@ test claims is listed here, and every listed construct is claimed by a test.
 
 ## JavaScript — `tests/js_coverage.rs`
 
-Covered (33):
+Covered (34):
 
+- require in a comparison is not an import
 - block statement
 - if / else if / else
 - for-in statement
@@ -93,7 +94,7 @@ Known gaps (0):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (20):
+Covered (21):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
@@ -115,6 +116,7 @@ Covered (20):
 - let declarations: mut, annotated and tuple-pattern bindings
 - an impl header with generics and a where clause
 - an impl whose type is a path
+- a match arm with a range and an alternation
 
 Known gaps (0):
 
