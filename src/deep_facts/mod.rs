@@ -303,7 +303,7 @@ const PY_SOFT: &[&str] = &["match", "case", "type", "_"];
 /// grammar unless a statement claims it, so a leaf whose kind is `from` is a
 /// name (`g(from)`, `let from = 1`) and not punctuation. Reading them as layout
 /// dropped every argument or binding spelled that way.
-const JS_SOFT: &[&str] = &["from", "of", "get", "set", "module", "global", "type"];
+const JS_SOFT: &[&str] = &["from", "of", "get", "set", "module", "global", "type", "unique", "accessor", "namespace", "readonly"];
 
 /// Rust's contextual keywords: each is a name everywhere but where it starts
 /// its own item, and the grammar's `_name` rule accepts every one of them. The

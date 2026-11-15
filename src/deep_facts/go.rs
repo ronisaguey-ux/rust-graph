@@ -1018,7 +1018,11 @@ impl<'a> Walker<'a> {
         // and reading it as the binder wrote `a dec` on the decorator's line
         // while the member's own event vanished.
         let Some(&name_node) = children.iter().find(|&&child| {
-            !self.is_layout(child) && !matches!(self.kind(child), "decorator" | "decorator_call_expression")
+            !self.is_layout(child)
+                && !matches!(
+                    self.kind(child),
+                    "decorator" | "decorator_call_expression" | "readonly" | "accessor"
+                )
         }) else {
             return
         };
