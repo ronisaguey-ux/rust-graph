@@ -55,7 +55,7 @@ pub use parser::Workspace;
 pub const PARSER_VERSION: u32 = 1;
 
 /// The language for a path, by extension: JSON, Python, Rust, JavaScript,
-/// TypeScript, TSX, Go and Java so far.
+/// TypeScript, TSX, Go, Java, C, C++, C#, Kotlin, Scala and Swift.
 pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
     let extension = path.rsplit_once('.').map(|(_, extension)| extension.to_ascii_lowercase())?;
     match extension.as_str() {
@@ -67,6 +67,8 @@ pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
         "tsx" => Some(&javascript::TSX),
         "go" => Some(&go::GO),
         "java" => Some(&java::JAVA),
+        "c" | "h" => Some(&batch_c::c::C),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => Some(&batch_c::cpp::CPP),
         "cs" => Some(&batch_a::csharp::CSHARP),
         "kt" | "kts" => Some(&batch_a::kotlin::KOTLIN),
         "scala" | "sc" => Some(&batch_b::scala::SCALA),
