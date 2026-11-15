@@ -5,12 +5,12 @@
   },
   "recorded": {
     "js": 70,
-    "ts": 63,
+    "ts": 55,
     "python": 8,
-    "rust": 103
+    "rust": 99
   },
   "pinned": {
     "python": 8,
-    "rust": 103
+    "rust": 99
   }
 }
