@@ -134,6 +134,29 @@ def main(argv: list[str]) -> int:
             print(f"    {problem}", file=sys.stderr)
     else:
         print("  attribution: every fallback names its construct and its code")
+    # P5-08: a construct two languages share is fixed in the code they share.
+    # The check reads the recorded measurement rather than sweeping again — the
+    # sweep above already measured Rust, so the record only has to agree with it
+    # on the count and own every code it lists.
+    construct = ROOT / "tools" / "construct_report.py"
+    record_path = ROOT / "tools" / "baselines" / "constructs.json"
+    if construct.is_file() and record_path.is_file():
+        recorded = json.loads(record_path.read_text()).get("corpora", {}).get("rust", {}).get("fallen")
+        check = subprocess.run(
+            [sys.executable, str(construct), "--check"], capture_output=True, text=True, cwd=ROOT
+        )
+        if check.returncode != 0:
+            failed = True
+            print(f"  constructs: {check.stderr.strip()[:500]}", file=sys.stderr)
+        elif recorded != counts["rust"]:
+            failed = True
+            print(
+                f"  constructs: the record says rust {recorded}, this sweep says {counts['rust']}"
+                "; run tools/construct_report.py --measure",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  constructs: every live code is owned, record matches rust {recorded}")
     print("PHASE4 GATE", "FAILED" if failed else "PASSED")
     return 1 if failed else 0
 

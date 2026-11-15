@@ -1,0 +1,211 @@
+{
+  "corpora": {
+    "js": {
+      "total": 1854,
+      "fallen": 74
+    },
+    "ts": {
+      "total": 2000,
+      "fallen": 64
+    },
+    "python": {
+      "total": 568,
+      "fallen": 9
+    },
+    "rust": {
+      "total": 1816,
+      "fallen": 109
+    }
+  },
+  "codes": {
+    "CST_MISSING_KIND:symbol": {
+      "rus": 0,
+      "js": 3,
+      "ts": 3,
+      "python": 0,
+      "samples": [
+        {
+          "path": "000006_popads.js",
+          "line": "27",
+          "reason": "the CST lost a symbol: symbol onerror kind 1 line 27"
+        },
+        {
+          "path": "000010_amazon-apstag.js",
+          "line": "32",
+          "reason": "the CST lost a symbol: symbol noopfn kind 1 line 32"
+        }
+      ],
+      "rust": 5
+    },
+    "PAIR_AMBIGUOUS:1": {
+      "rus": 0,
+      "js": 34,
+      "ts": 20,
+      "python": 1,
+      "samples": [
+        {
+          "path": "000011_subscribe.js",
+          "line": "1236",
+          "reason": "the CST lost an event: event x line 1236 targets  in exports (paired exports line 2190): no event on a line both readers can mean; wanted line 1236 targets  val"
+        },
+        {
+          "path": "000013_css-tokenizer.js",
+          "line": "169",
+          "reason": "the CST lost an event: event x line 169 targets  in isNonPrintableCodePoint (paired isNonPrintableCodePoint line 164): no event on a line both readers can mean;"
+        }
+      ],
+      "rust": 12
+    },
+    "CST_MISSING_KIND:call": {
+      "rus": 0,
+      "js": 20,
+      "ts": 7,
+      "python": 1,
+      "samples": [
+        {
+          "path": "000179_index.spec.js",
+          "line": "6",
+          "reason": "the CST lost a call: call describe line 6 in "
+        },
+        {
+          "path": "000288_test.js",
+          "line": "7",
+          "reason": "the CST lost a call: call describe line 7 in "
+        }
+      ],
+      "rust": 27
+    },
+    "LEX_OVER_EMIT:name": {
+      "rus": 0,
+      "js": 7,
+      "ts": 9,
+      "python": 4,
+      "samples": [
+        {
+          "path": "000283_reader.js",
+          "line": "27",
+          "reason": "the CST lost an event: event a line 27 targets [\"readable\"] in recordBatchReaderThroughDOMStream (paired recordBatchReaderThroughDOMStream line 24): a name the "
+        },
+        {
+          "path": "000494_index.js",
+          "line": "2362",
+          "reason": "the CST lost an event: event x line 2362 targets  in  (paired  line 1): a name the lexer read is not in the CST's value; wanted line 2362 targets  value t:[n:Sy"
+        }
+      ],
+      "rust": 35
+    },
+    "LEX_OVER_EMIT:call": {
+      "rus": 0,
+      "js": 1,
+      "ts": 3,
+      "python": 2,
+      "samples": [
+        {
+          "path": "000503_sign-stream.js",
+          "line": "49",
+          "reason": "the CST lost an event: event x line 49 targets  in SignStream (paired SignStream line 36): a call or constant the lexer read is not in the CST's value; wanted l"
+        },
+        {
+          "path": "000554_error-utils.test.ts",
+          "line": "329",
+          "reason": "the CST lost an event: event a line 329 targets [\"schema\"] in  (paired  line 1): a call or constant the lexer read is not in the CST's value; wanted line 329 ta"
+        }
+      ],
+      "rust": 14
+    },
+    "CST_MISSING_KIND:the": {
+      "rus": 0,
+      "js": 6,
+      "ts": 1,
+      "python": 0,
+      "samples": [
+        {
+          "path": "000654_browserBackend.js",
+          "line": "",
+          "reason": "the CST lost an import: import playwright-core/lib/coreBundle name  alias "
+        },
+        {
+          "path": "001196_browserBackend.js",
+          "line": "",
+          "reason": "the CST lost an import: import playwright-core/lib/coreBundle name  alias "
+        }
+      ]
+    },
+    "CST_SHAPE_MISMATCH:targets": {
+      "rus": 0,
+      "js": 3,
+      "ts": 3,
+      "python": 1,
+      "samples": [
+        {
+          "path": "000669_root.js",
+          "line": "6",
+          "reason": "the CST lost an event: event a line 6 targets [\"Root.prototype.Object.createNamespace.prototype.constructor.Root.className\"] in  (paired  line 1): the statement"
+        },
+        {
+          "path": "001228_service.js",
+          "line": "6",
+          "reason": "the CST lost an event: event a line 6 targets [\"Service.prototype.Object.createNamespace.prototype.constructor.Service.className\"] in  (paired  line 1): the sta"
+        }
+      ],
+      "rust": 2
+    },
+    "CST_DEGRADED:recovery": {
+      "rus": 0,
+      "js": 0,
+      "ts": 18,
+      "python": 0,
+      "samples": [
+        {
+          "path": "000176_be.d.ts",
+          "line": "",
+          "reason": "the CST needed 1 error nodes in 36: more than 1% is recovery noise"
+        },
+        {
+          "path": "000294_tg.d.ts",
+          "line": "",
+          "reason": "the CST needed 1 error nodes in 36: more than 1% is recovery noise"
+        }
+      ],
+      "rust": 2
+    },
+    "CST_MISSING_KIND:var": {
+      "rus": 0,
+      "js": 0,
+      "ts": 0,
+      "python": 0,
+      "samples": [
+        {
+          "path": "001121_proptests.rs",
+          "line": "",
+          "reason": "the CST lost a var: var report.price = Some"
+        },
+        {
+          "path": "001275_proptests.rs",
+          "line": "",
+          "reason": "the CST lost a var: var report.price = Some"
+        }
+      ],
+      "rust": 3
+    },
+    "CST_MISSING_KIND:constant": {
+      "rus": 0,
+      "js": 0,
+      "ts": 0,
+      "python": 0,
+      "samples": [
+        {
+          "path": "001129_ids_generator.rs",
+          "line": "297",
+          "reason": "the CST lost an event: event a line 297 targets [\"padding\"] in generate_trade_id (paired generate_trade_id line 264): the CST wrote the value as the constant 0;"
+        },
+        {
+          "path": "001256_dema.rs",
+          "line": "166",
+          "reason": "the CST lost an event: event a line 166 targets [\"self.value\"] in update_raw (paired update_raw line 150): the CST wrote the value as the constant 0; wanted lin"
+        }
+      ],
+      "rust": 9
+    }
+  }
+}
