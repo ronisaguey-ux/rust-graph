@@ -725,6 +725,23 @@ impl<'a> Walker<'a> {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 Some(if items.is_empty() { "0".to_string() } else { self.tuple_form(&items) })
             }
+            // `|mut v| ...`: a binding modifier wraps the parameter name; the
+            // one-pass reader sees the name, so `form` unwraps it too.
+            "mut_pattern" | "ref_pattern" | "reference_pattern" => {
+                let mut out = "0".to_string();
+                for child in self.children(id) {
+                    if !self.is_layout(child)
+                        && !matches!(self.kind(child), "mut" | "ref" | "&" | "mutable_specifier")
+                    {
+                        let value = self.form(child);
+                        if value != "0" {
+                            out = value;
+                            break;
+                        }
+                    }
+                }
+                Some(out)
+            }
             // `|x| self.string()`: the parameters and body form the closure value.
             "closure_expression" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child) && self.kind(child) != "move" && self.kind(child) != "async").collect();
