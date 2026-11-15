@@ -95,7 +95,7 @@ Known gaps (0):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (21):
+Covered (22):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
@@ -118,6 +118,7 @@ Covered (21):
 - an impl header with generics and a where clause
 - an impl whose type is a path
 - a match arm with a range and an alternation
+- a closure whose parameter is a reference pattern
 
 Known gaps (0):
 
