@@ -260,6 +260,14 @@
       "item": "js `for (; cond;)` with a bare try body",
       "thought": "Delta-reduced to 4 lines. The lexer writes the header condition, the CST drops it (the for_statement arm computes and discards every child after the second semicolon). With a block body the guard accepts the difference; with a bare try it reports four losses. I could not find why the tolerance differs, and making the lexer emit the condition broke two shapes that were clean. Not solved, written to unsolved.md for fable/argon.",
       "status": "unsolved"
+    },
+    {
+      "at": "2026-11-14T21:51:53",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "rust `impl Trait for Generic<T>`",
+      "thought": "The 14 `(empty) @ impl` losses were not a header event: the deep reader named the impl after the LAST identifier in the type, so `for JsonString<LogEntry>` became `LogEntry` while the lexer wrote `JsonString`. rust_type_name now takes the constructor for generic_type; scoped paths and references keep last_name. rust 204/233 -> 199/228.",
+      "status": "solved"
     }
   ]
 }
