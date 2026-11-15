@@ -2751,7 +2751,23 @@ impl<'a> Parser<'a> {
             }
         }
         if let Some(equal) = self.top_level_assign(stmt) {
-            // `cond ? a = 1 : b`: the assignment sits in a branch, so the
+            // `let x: u8 = 1;` binds one name: the annotation is a type, and read as
+        // part of the target list it put `u8` in the enclosing value where the
+        // CST writes the binding and its value only.
+        if self.lang.tag == "RS" && self.word_at(stmt, 0).as_deref() == Some("let") && stmt.len() > 2 {
+            if let Some(equal) = self.top_level_assign(stmt) {
+                let colon = stmt[1..equal].iter().position(|token| self.is_op(token, b":"));
+                let plain = !stmt[1..equal].iter().any(|token| self.is_op(token, b"<") || self.is_op(token, b"'"));
+                if let Some(colon) = colon.filter(|_| plain) {
+                    let mut typed: Vec<Token> = Vec::with_capacity(stmt.len() - colon);
+                    typed.extend_from_slice(&stmt[..1 + colon]);
+                    typed.extend_from_slice(&stmt[equal..]);
+                    self.statement(&typed);
+                    return;
+                }
+            }
+        }
+        // `cond ? a = 1 : b`: the assignment sits in a branch, so the
             // statement is a conditional expression, not an assignment of the
             // branch's target. The CST writes one `x` with the condition and
             // both branches, which the lexer never had.
