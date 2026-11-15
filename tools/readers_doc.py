@@ -20,12 +20,15 @@ checked by `tests/readers_doc.rs`, which reads both sides.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 DOC = ROOT / "docs" / "READERS.md"
+CONSTRUCTS = ROOT / "tools" / "baselines" / "constructs.json"
+FIXES = ROOT / "tools" / "construct_fixes.json"
 TABLES = (
     ("JavaScript", "tests/js_coverage.rs"),
     ("TypeScript", "tests/ts_coverage.rs"),
@@ -66,6 +69,35 @@ def constructs(path: Path, name: str) -> list[str]:
     return [unescape(match.group(1)) for match in TUPLE_START.finditer(body)]
 
 
+def rust_constructs() -> list[tuple[str, int, str, str]]:
+    """`(code, rust count, also lost in, fixed in)` for every code the sweep saw.
+
+    The list is the other direction from the coverage tables: those say what a
+    construct *is*, this says which disagreement is still costing Rust files and
+    which module owns it. A code with no entry in `construct_fixes.json` has no
+    owner, and `tools/construct_report.py --check` is the gate that refuses it —
+    the document must not present an unowned code as if somebody owned it, so the
+    row says so instead.
+    """
+    if not CONSTRUCTS.exists():
+        return []
+    record = json.loads(CONSTRUCTS.read_text())
+    fixes = json.loads(FIXES.read_text()) if FIXES.exists() else {}
+    rows = []
+    for code, row in record.get("codes", {}).items():
+        count = int(row.get("rust", row.get("rus", 0)) or 0)
+        if count <= 0:
+            continue
+        elsewhere = ", ".join(
+            f"{name} {row[key]}" for name, key in (("js", "js"), ("ts", "ts"), ("python", "python")) if row.get(key)
+        )
+        owner = fixes.get(code, {}) if isinstance(fixes, dict) else {}
+        module = owner.get("fixed_in") or owner.get("module") or "unowned"
+        rows.append((code, count, elsewhere or "—", module))
+    rows.sort(key=lambda row: (-row[1], row[0]))
+    return rows
+
+
 def render() -> str:
     lines = [
         "# Readers — what each one claims",
@@ -87,6 +119,21 @@ def render() -> str:
         lines += [f"- {name}" for name in covered] or ["- nothing claimed yet"]
         lines += ["", f"Known gaps ({len(gaps)}):", ""]
         lines += [f"- {name}" for name in gaps] or ["- none: every construct the table claims reads the same on both paths"]
+        lines.append("")
+    constructs_rows = rust_constructs()
+    if constructs_rows:
+        lines += [
+            "## Rust constructs still falling back, and where they are fixed",
+            "",
+            "Generated from `tools/baselines/constructs.json`, the same record",
+            "`docs/RUST_CONSTRUCTS.md` and `tools/construct_report.py --check` read. A code",
+            "two languages share is one disagreement, so its owner is a module both",
+            "readers go through, never a per-language guard.",
+            "",
+            "| construct code | rust files | also falling back in | fixed in |",
+            "| --- | ---: | --- | --- |",
+        ]
+        lines += [f"| `{code}` | {count} | {elsewhere} | `{module}` |" for code, count, elsewhere, module in constructs_rows]
         lines.append("")
     lines += ["## Languages claimed by named tests", ""]
     lines += [f"- **{language}** (`{path}`): {claim}." for language, path, claim in PROSE]

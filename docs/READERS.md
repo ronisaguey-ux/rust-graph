@@ -136,6 +136,22 @@ Known gaps (0):
 
 - none: every construct the table claims reads the same on both paths
 
+## Rust constructs still falling back, and where they are fixed
+
+Generated from `tools/baselines/constructs.json`, the same record
+`docs/RUST_CONSTRUCTS.md` and `tools/construct_report.py --check` read. A code
+two languages share is one disagreement, so its owner is a module both
+readers go through, never a per-language guard.
+
+| construct code | rust files | also falling back in | fixed in |
+| --- | ---: | --- | --- |
+| `LEX_OVER_EMIT:name` | 19 | js 2, ts 1, python 4 | `src/expr.rs` |
+| `LEX_OVER_EMIT:call` | 14 | js 1, python 2 | `src/expr.rs` |
+| `CST_MISSING_KIND:call` | 6 | js 3, ts 8, python 1 | `src/expr.rs` |
+| `PAIR_AMBIGUOUS:1` | 6 | js 19, ts 8 | `src/pipeline.rs` |
+| `CST_DEGRADED:recovery` | 2 | ts 18 | `src/deep_integration.rs` |
+| `CST_SHAPE_MISMATCH:targets` | 1 | ts 3, python 1 | `src/parser.rs` |
+
 ## Languages claimed by named tests
 
 - **Go and Java** (`tests/facts_go_java.rs`): the facts a Go or Java file must produce, asserted by named tests.
