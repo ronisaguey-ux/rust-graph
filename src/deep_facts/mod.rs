@@ -891,6 +891,15 @@ impl<'a> Walker<'a> {
                 } else if let Some(header) = self.child_of_kind(id, "for_header") {
                     let inner = self.children(header);
                     if let Some(semi) = inner.iter().position(|&c| self.kind(c) == ";") {
+                        // `for (i = length; …)`: an init that is not a
+                        // declaration is an assignment, and the lexer files it
+                        // as one. Only looking after the first `;` dropped the
+                        // target and its value. The grammar wraps the init in
+                        // an `expressions` node, so the assignment is one level
+                        // down.
+                        for &child in &inner[..semi] {
+                            self.for_init(child);
+                        }
                         for &child in &inner[semi + 1..] {
                             if !self.is_layout(child) {
                                 let _ = self.form(child);

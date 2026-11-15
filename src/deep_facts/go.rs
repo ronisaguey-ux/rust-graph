@@ -1044,6 +1044,30 @@ impl<'a> Walker<'a> {
         self.assignment_parts(targets, value, self.line(id), false);
     }
 
+    /// A `for` header's initializer. The grammar wraps a non-declaration init in
+    /// an `expressions` node, so `for (i = length; …)` files its assignment one
+    /// level down where a statement reader never looks.
+    pub(crate) fn for_init(&mut self, id: u32) {
+        if self.is_layout(id) {
+            return;
+        }
+        match self.kind(id) {
+            "assignment" | "assignment_expression" => self.assignment(id, false),
+            "augmented_assignment" | "augmented_assignment_expression" | "compound_assignment_expr" => {
+                self.assignment(id, true)
+            }
+            // `for (a = 1, b = 2; …)`: one node holds both assignments.
+            "expressions" | "sequence_expression" | "expression_list" => {
+                for item in self.children(id) {
+                    self.for_init(item);
+                }
+            }
+            _ => {
+                let _ = self.form(id);
+            }
+        }
+    }
+
     pub(crate) fn assignment(&mut self, id: u32, augmented: bool) {
         let children = self.children(id);
         let Some(&first) = children.first() else { return };
