@@ -1774,7 +1774,23 @@ return verdict(Some("var"), detail, accepted);
                 .cloned()
                 .collect()
         };
-        let extra: &[crate::facts::Symbol] = if symbol.kind == KIND_MODULE { &deep.symbols } else { &nested };
+        // A file may hold the same definition twice (the corpus copies whole
+        // modules), and the pairing can only pick one of the twins. The rows of
+        // the other are still the file's record: `001201_vr.rs` writes
+        // `test_longer_period_requires_more_seed_inputs` at 320 and again at
+        // 363, and the events of 320 were reported as absent because the twin
+        // at 363 was the partner. Adding the twins to the pool costs nothing
+        // when the names are unique.
+        let mut pool: Vec<crate::facts::Symbol> = nested;
+        if symbol.kind != KIND_MODULE {
+            let leaf_of = |row: &crate::facts::Symbol| paired_name(row).rsplit('.').next().unwrap_or("").to_string();
+            for row in &deep.symbols {
+                if row.kind == paired.kind && row.key != paired.key && leaf_of(row) == leaf_of(paired) {
+                    pool.push(row.clone());
+                }
+            }
+        }
+        let extra: &[crate::facts::Symbol] = if symbol.kind == KIND_MODULE { &deep.symbols } else { &pool };
         phase!(4);
         let details = uncovered(lexer, symbol, paired, &mut accepted, &lines, &macro_lines, extra, &mut shapes);
         if let Some(first) = details.first() {
