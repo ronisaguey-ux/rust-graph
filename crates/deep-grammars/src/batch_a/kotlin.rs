@@ -932,7 +932,7 @@ fn operator(c: &mut Cursor) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_a::fixtures;
+    use super::super::fixtures;
 
     const VALID: &[(&str, &str)] = &[
         ("Cache.kt", "package_header import_header import_header import_header class_declaration"),
