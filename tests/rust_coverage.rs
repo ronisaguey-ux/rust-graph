@@ -101,6 +101,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn h(f: impl Fn(i32) -> i32) -> i32 { f(1) }\n",
     ),
     (
+        "let-chain: a && let pattern binds and calls nothing",
+        "fn f(w: &mut W) -> bool {\n    if w.len() == 3\n        && let Some(old) = w.pop_front()\n    {\n        let _ = old;\n    }\n    true\n}\n",
+    ),
+    (
         "an if let pattern with tuple and enum constructors",
         "fn f(def: u8, act: u8) {\n    if let (Some(d), Action::Reduce(p)) = (def, act) {\n        let q = d;\n        let r = p;\n        let s = q + r;\n    }\n}\n",
     ),
