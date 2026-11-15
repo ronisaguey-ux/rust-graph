@@ -611,6 +611,16 @@ impl<'a> Lexer<'a> {
                     return self.token(Kind::Str, start, line, col);
                 }
             }
+            // `r#type: 1` is one raw identifier, not `r` followed by `#type`:
+            // read as two names the field was a merge of `r` and `type` while
+            // the CST writes the one name it is (000993 `r#type: ""`).
+            if self.lang.tag == "RS" && word == b"r" && next == b'#' && is_ident_start(self.peek(1)) {
+                self.pos += 1;
+                while self.is_ident(self.peek(0)) {
+                    self.pos += 1;
+                }
+                return self.token(Kind::Ident, start, line, col);
+            }
             return self.token(Kind::Ident, start, line, col);
         }
         if byte.is_ascii_digit() {
@@ -703,6 +713,14 @@ mod tests {
         assert_eq!(words("py", "a # b\n'c'\n\"\"\"d\ne\"\"\"\nf\n"), ["a", "f"]);
         assert_eq!(words("js", "a // b\n/* c */ 'd' e\n"), ["a", "e"]);
         assert_eq!(words("rb", "a\n=begin\nb\n=end\nc\n"), ["a", "c"]);
+    }
+
+    #[test]
+    fn a_raw_identifier_is_one_name() {
+        assert_eq!(
+            words("rs", "let afi = Foo { r#type: 1 };\nlet r#fn = 2;\ng(r#type, x);\n"),
+            ["let", "afi", "Foo", "r#type", "let", "r#fn", "g", "r#type", "x"]
+        );
     }
 
     #[test]
