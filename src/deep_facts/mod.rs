@@ -13,14 +13,21 @@
 //! What is a definition, a call or an import is per language and written down as
 //! data (`PY_DEFS`, `JS_DEFS`, `RS_DEFS`, `GO_DEFS`, `JAVA_DEFS`, ...), selected
 //! by [`kinds`]; the walk itself is language neutral. Python, JavaScript,
-//! TypeScript, TSX, Rust, Go, Java, C and C++ have tables, and Rust's and the
-//! C family's walk arms live in their own regions below. JSON has empty tables
+//! TypeScript, TSX, Rust, Go, Java, C, C++, C#, Kotlin, Scala and Swift have
+//! tables, and Rust's and the C family's walk arms live in their own regions
+//! below. The C-family languages share one walk and one reader: what differs
+//! between C, C++, Java, C#, Go, Kotlin, Scala and Swift is the node table
+//! (`C_DEFS`, `CPP_DEFS`, `JAVA_DEFS`, `CS_DEFS`, `GO_DEFS`, `KT_DEFS`,
+//! `SC_DEFS`, `SW_DEFS` and its call/import list), never a copy of the reader.
+//! JSON has empty tables
 //! on purpose: a data file's only fact is the module symbol, so [`lang_for`]
 //! answers `None` for it and the lexer path is kept. C and C++ also answer
 //! `None` from `lang_for`: their tables feed `tests/facts_c_cpp.rs` and the
 //! `--compare` audit, but the differential gate does not yet prefer the CST
-//! record for enough real files. The other grammars fall back to the module
-//! symbol until their table is written.
+//! record for enough real files. C#, Kotlin, Scala and Swift are force-only for
+//! the same reason, and they answer `--deep` so the C-family claim is testable;
+//! the other grammars fall back to the module symbol until their table is
+//! written.
 //!
 //! Requires the `deep` and `parser` features: the Cst comes from
 //! `deep_integration`, which names the runtime's kind table, and the runtime
@@ -203,6 +210,52 @@ const PY_CALLS: &[&str] = &["call"];
 const JS_CALLS: &[&str] = &["call_expression", "new_expression"];
 const PY_IMPORTS: &[&str] = &["import_statement", "import_from_statement"];
 const JS_IMPORTS: &[&str] = &["import_statement", "export_statement"];
+/// C#, Kotlin, Scala and Swift: one reader (this walk), one table each. The
+/// declarations differ only in the node kinds and where the name sits.
+const CS_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "struct_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "interface_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "record_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "method_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: true, receiver: false, container: false },
+    Def { kind: "constructor_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "delegate_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "local_function_statement", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const CS_CALLS: &[&str] = &["invocation_expression"];
+const CS_IMPORTS: &[&str] = &["using_directive"];
+
+const KT_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "interface_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "object_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_declaration", name: &["function_head"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const KT_CALLS: &[&str] = &["call_expression"];
+const KT_IMPORTS: &[&str] = &["import_header"];
+
+const SC_DEFS: &[Def] = &[
+    Def { kind: "class_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "trait_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "object_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "def_definition", name: &["identifier"], params: Some("parameter_clause"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const SC_CALLS: &[&str] = &["call", "call_expression"];
+const SC_IMPORTS: &[&str] = &["import_declaration"];
+
+const SW_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "struct_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "protocol_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "extension_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_declaration", name: &["identifier"], params: Some("parameter_clause"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const SW_CALLS: &[&str] = &["call_expression"];
+const SW_IMPORTS: &[&str] = &["import_declaration"];
+
 const GO_IMPORTS: &[&str] = &["import_declaration"];
 const JAVA_IMPORTS: &[&str] = &["import_declaration"];
 
@@ -340,11 +393,21 @@ fn kinds(lang: Lang) -> Kinds {
         // `form`, so the generic arms below are not reached.
         Lang::Go => Kinds { definitions: GO_DEFS, calls: &[], imports: GO_IMPORTS, soft: &[], family: Family::Go },
         Lang::Java => Kinds { definitions: JAVA_DEFS, calls: &[], imports: JAVA_IMPORTS, soft: &[], family: Family::Java },
+        Lang::CSharp => Kinds { definitions: CS_DEFS, calls: CS_CALLS, imports: CS_IMPORTS, soft: &[], family: Family::Plain },
+        Lang::Kotlin => Kinds { definitions: KT_DEFS, calls: KT_CALLS, imports: KT_IMPORTS, soft: &[], family: Family::Plain },
+        Lang::Scala => Kinds { definitions: SC_DEFS, calls: SC_CALLS, imports: SC_IMPORTS, soft: &[], family: Family::Plain },
+        Lang::Swift => Kinds { definitions: SW_DEFS, calls: SW_CALLS, imports: SW_IMPORTS, soft: &[], family: Family::Plain },
         // The other grammars have no definition table here yet; the walk still
         // returns a record with the module symbol, which is what the caller
         // falls back on. Named so a caller can tell "no facts" from "empty file".
         _ => Kinds { definitions: &[], calls: &[], imports: &[], soft: &[], family: Family::Plain },
     }
+}
+
+/// How many declaration kinds this language's table names. Zero means the walk
+/// has nothing to read for it, which is a missing table, not an empty file.
+pub fn definition_kinds(lang: Lang) -> usize {
+    kinds(lang).definitions.len()
 }
 
 /// The lexer's tag for a language, so both paths write the same `tag`.
@@ -359,6 +422,10 @@ fn tag(lang: Lang) -> &'static str {
         Lang::Java => "JAVA",
         Lang::C => "C",
         Lang::Cpp => "CPP",
+        Lang::CSharp => "CS",
+        Lang::Kotlin => "KT",
+        Lang::Scala => "SCALA",
+        Lang::Swift => "SWIFT",
     }
 }
 
@@ -430,6 +497,12 @@ pub fn lang_for_forced(tag: &str) -> Option<Lang> {
         "RS" => Some(Lang::Rust),
         "GO" => Some(Lang::Go),
         "JAVA" => Some(Lang::Java),
+        "C" => Some(Lang::C),
+        "CPP" => Some(Lang::Cpp),
+        "CS" => Some(Lang::CSharp),
+        "KT" => Some(Lang::Kotlin),
+        "SCALA" => Some(Lang::Scala),
+        "SWIFT" => Some(Lang::Swift),
         // JSON stays out: a data file has no symbols, calls or imports to
         // read, so the CST would add the module symbol the lexer already
         // writes and nothing else. See `tests/facts_rust_json.rs`.
@@ -756,6 +829,10 @@ impl<'a> Walker<'a> {
         }
         match kind {
             "expression_statement" => self.expression_statement(id),
+            // Scala's `def f(): T = expr` writes the body as a `def_body` whose
+            // child is the expression itself. Nothing read that node, so a call
+            // in an expression-bodied def never reached the record.
+            "def_body" => self.expression_statement(id),
             "return_statement" => self.return_statement(id),
             "variable_declarator" if self.is_js() => self.declarator(id),
             "assignment_expression" if self.is_js() => self.assignment_definition(id),
