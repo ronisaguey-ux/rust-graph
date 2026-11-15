@@ -1,0 +1,38 @@
+{
+  "CST_DEGRADED:recovery": {
+    "module": "src/deep_integration.rs",
+    "why": "the CST wrote too many error nodes: a grammar recovery problem, not a reader disagreement"
+  },
+  "CST_MISSING_KIND:call": {
+    "module": "src/expr.rs",
+    "why": "the lexer recorded a call the CST has no node for: the value reader and its call emission"
+  },
+  "CST_MISSING_KIND:constant": {
+    "module": "src/parser.rs",
+    "why": "a Rust item read as a value (a const or static) writes no event in the CST"
+  },
+  "CST_MISSING_KIND:symbol": {
+    "module": "src/parser.rs",
+    "why": "the block head did not open the symbol the CST names: class_head and function_head"
+  },
+  "CST_MISSING_KIND:var": {
+    "module": "src/parser.rs",
+    "why": "a binding the CST records and the lexer did not: assignment target detection"
+  },
+  "CST_SHAPE_MISMATCH:targets": {
+    "module": "src/parser.rs",
+    "why": "the two readers agree on the line but not on the shape of the targets"
+  },
+  "LEX_OVER_EMIT:call": {
+    "module": "src/expr.rs",
+    "why": "the lexer invented a callee: call detection in the value reader"
+  },
+  "LEX_OVER_EMIT:name": {
+    "module": "src/expr.rs",
+    "why": "the lexer invented a name the CST never writes: the value reader's merges"
+  },
+  "PAIR_AMBIGUOUS:1": {
+    "module": "src/pipeline.rs",
+    "why": "both readers wrote an event on the line and they cannot be paired: the classifier decides, the readers must agree"
+  }
+}
