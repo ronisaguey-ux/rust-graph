@@ -324,10 +324,10 @@ impl<'a> Walker<'a> {
     pub(crate) fn rust_type_name(&self, id: u32) -> String {
         match self.kind(id) {
             "type_identifier" | "identifier" => self.text_string(id),
-            // A generic type is named by its constructor, not by the last name
-            // inside it: `JsonString<LogEntry>` is `JsonString`, and reading the
-            // rightmost identifier named the impl after its type argument.
-            "generic_type" => self.first_name(id).unwrap_or_default(),
+            // A generic or trait-object type is named by its head constructor/trait,
+            // not by a trailing argument or bound: `JsonString<LogEntry>` is `JsonString`,
+            // `dyn Indicator + Send + Sync` is `Indicator`.
+            "generic_type" | "dynamic_type" => self.first_name(id).unwrap_or_default(),
             "reference_type" | "scoped_type_identifier" | "tuple_type" => {
                 self.last_name(id).unwrap_or_default()
             }

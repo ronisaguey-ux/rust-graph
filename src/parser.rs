@@ -2161,6 +2161,9 @@ impl<'a> Parser<'a> {
             } else if toks.get(at).is_some_and(|t| self.is_op(t, b"<")) {
                 at = toks.iter().position(|t| self.is_op(t, b">"))? + 1;
             }
+            if self.lang.tag == "RS" && self.word_at(toks, at).as_deref() == Some("dyn") {
+                at += 1;
+            }
         }
         let mut name = self.word_at(toks, at)?;
         // `impl tonic::client::X {`: a path names its type by its last segment.
