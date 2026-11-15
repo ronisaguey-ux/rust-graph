@@ -109,7 +109,6 @@ literal-receiver call in four corpora and needs its own measurement.
 
 ## 4. The lexer names an attributed item after its attribute (latent, ~58 files)
 
-
     /tmp/rt7:  #[rstest] #[case(1)] fn t() { … }   ->  lexer symbol `m.case`
     /tmp/rt8:  #[cfg(test)] mod tests { … }        ->  no owner; flows are `feed`, not `tests.feed`
 
@@ -185,57 +184,28 @@ therefore costs two to six rows, and fixing one pays two to six times. The
 the file's`) exist for the same reason.
 
 ---
-## P2-02 — exact-value-first pairing stays reverted
 
-The idea was to claim a line for an exact value before anything else could. It was
-measured and reverted on 2026-11: python 146→114 and js 725→721 against a rust
-cost of 345→445. Nothing else on the scale moved enough to pay for that, and rust
-going backwards on a hundred files is not a trade, it is a regression with a
-side-benefit.
+# Dead ends (kept so they are not re-tried)
 
-Current numbers, measured today on the same corpora:
+All four were measured against the same corpora; the numbers are the before →
+after of that corpus.
 
-| language | files | falling back |
-| --- | ---: | ---: |
-| js | 1995 | 646 |
-| ts | 2000 | 397 |
-| python | 568 | 145 |
-| rust | 1816 | 345 |
+1. **Pair by the nearest line instead of the first name match** (`src/pipeline.rs`,
+   symbol pairing). Fixes the twin case but re-pairs other twins wrongly: js 142 →
+   155 losses, rust files 114 → 117. Reverted. What works is additive: keep the
+   pairing and add every same-leaf-name CPS symbol to the comparison pool
+   (`a68d479`) — every corpus improved (js 142 → 136, ts 73 → 71, python 11 → 8,
+   rust 141 → 126).
+2. **Pair an owner-less lexer symbol with an owner-qualified CST symbol**
+   (`tests.feed` against `feed`). Same failure shape: js 155, rust files 117.
+   Reverted.
+3. **Strip a leading `#[…]` in `open_block` / `c_style_head`.** Correct, and it
+   *raises* the count: 141 → 199 and 141 → 207. See §4: the guard skips unpaired
+   symbols.
+4. **Fold a leading-dot call shape only over a call receiver, or only when the
+   receiver is not the constant `0`.** js 128 → 510 / 260, rust 112 → 140. See §3.
 
-The tree carries no trace of the experiment (no `exact_value`/`exact-first`
-symbol in `src/`, `tools/` or `docs/`), so there is nothing dormant waiting to be
-revived by accident. If it is ever retried, the rust column is the gate: a variant
-that does not hold rust at 345 is rejected on the numbers, not on taste.
-
-## The `for (; cond;)` header condition — 14 js files, not solved (2026-11-14)
-
-Minimal reproduction after delta reduction of `000713_dispose.js`:
-
-    function next() {
-      for (; r.length > 0;) try {
-      }
-    }
-
-Both readers were measured separately (`--lexer` and `--deep` on the same file):
-
-    lexer: x line 2 n:r.length | b | x line 2 c(f) | j
-    deep : b | b | x line 2 c(f) | j | j
-
-The lexer writes the header condition; the CST does not, because every `for`-header
-child after the second `;` is computed and thrown away in the `for_statement` arm of
-`deep_facts` (`let _ = self.form(child)`). With a block body the guard tolerates the
-difference; with a bare `try` statement as the body it does not — the symbol pairing
-degrades to `paired next line 1` and all four events on the header line are reported
-lost, so one file loses four times over.
-
-What is NOT understood:
-
-- Why the same missing event is accepted for `for (; c;) { … }` and rejected for
-  `for (; c;) try { … }`. The pairing ("no event on a line both readers can mean")
-  is what changes, not the reader.
-- Whether the CST should write the header condition at all. Writing it changes the
-  event list of every loop in the corpus, and the attempt to do the same in the
-  lexer (`expression_event` on the condition when the init is empty) made two
-  previously clean shapes fail — reverted, and not because of the numbers.
-
-Everything here was measured, nothing here was landed.
+The earlier dead ends are still accurate and are not repeated here: `P2-02`
+(exact-value-first pairing) stays reverted, the struct-literal-vs-block question
+is settled by `deep_facts`' `rust_form` arms, and the arrow-function symbol
+disagreement is closed by `nested` in the guard.
