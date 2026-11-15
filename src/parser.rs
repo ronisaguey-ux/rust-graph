@@ -1990,6 +1990,7 @@ impl<'a> Parser<'a> {
             self.js_bindings(&stmt[1..module_at.saturating_sub(1).max(1)], &module, line);
             return true;
         }
+        let stmt = self.strip_outer_parens(stmt);
         let Some(at) = stmt.iter().position(|token| token.kind == Kind::Ident && self.raw(token) == b"require") else {
             return false;
         };
@@ -2006,8 +2007,20 @@ impl<'a> Parser<'a> {
         let Some(module) = module else {
             return false;
         };
-        let stmt = self.strip_outer_parens(stmt);
-        let Some(equal) = self.top_level_assign(stmt) else {
+        let equal = self.top_level_assign(stmt);
+        let rhs_start = equal.map_or(0, |index| index + 1);
+        // Do not cross into nested scopes (`=>`, `function`, `class`) on the
+        // RHS: `const getX = memoize(() => require("m"))` binds `getX` to
+        // `memoize(...)`, not to module `"m"`.
+        if at >= rhs_start
+            && stmt[rhs_start..at].iter().any(|token| {
+                self.is_op(token, b"=>")
+                    || (token.kind == Kind::Ident && matches!(self.raw(token), b"function" | b"class"))
+            })
+        {
+            return false;
+        }
+        let Some(equal) = equal else {
             self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
             return true;
         };
