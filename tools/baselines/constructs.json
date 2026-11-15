@@ -14,7 +14,7 @@
     },
     "rust": {
       "total": 1816,
-      "fallen": 53
+      "fallen": 48
     }
   },
   "codes": {
@@ -72,7 +72,7 @@
           "reason": "the CST lost an event: event a line 99 targets [\"ctx\"] in applyDec (paired applyDec line 38): a name the lexer read is not in the CST's value; wanted line 99 ta"
         }
       ],
-      "rust": 18
+      "rust": 19
     },
     "CST_MISSING_KIND:the": {
       "rus": 0,
@@ -128,7 +128,7 @@
           "reason": "the CST lost an event: event r line 1962 targets  in newlines (paired newlines line 1961): a call or constant the lexer read is not in the CST's value; wanted l"
         }
       ],
-      "rust": 18
+      "rust": 14
     },
     "CST_DEGRADED:recovery": {
       "rus": 0,
@@ -166,7 +166,7 @@
           "reason": "the CST lost an event: event a line 40 targets [\"any\",\"any\",\"any\",\"any\"] in  (paired  line 1): the statement's target list differs (names or order); wanted line"
         }
       ],
-      "rust": 3
+      "rust": 1
     }
   }
 }
