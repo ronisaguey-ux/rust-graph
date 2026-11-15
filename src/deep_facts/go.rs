@@ -973,9 +973,17 @@ impl<'a> Walker<'a> {
         }
         if self.kind(value) == "call_expression" {
             if let Some(callee) = self.children(value).into_iter().next() {
-                if self.kind(callee) == "function_expression" {
+                // `const f = function() {}()` and `const f = function() {}.bind()`:
+                // the function expression is the callee or its receiver, so it
+                // takes the binding's name rather than `<anonymous>`.
+                let func = if self.kind(callee) == "member_expression" {
+                    self.children(callee).into_iter().next()
+                } else {
+                    Some(callee)
+                };
+                if let Some(func) = func.filter(|&node| self.kind(node) == "function_expression") {
                     if let Some(name) = self.pattern_names(name_node).into_iter().next() {
-                        self.bound.push((callee, name));
+                        self.bound.push((func, name));
                     }
                 }
             }
