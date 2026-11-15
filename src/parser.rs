@@ -555,7 +555,12 @@ impl<'a> Parser<'a> {
         if self.lang.tag == "TCL" && last.kind == Kind::Ident && self.has_def_word(&self.stmt) {
             return false;
         }
-        if self.is_op(&last, b"=>") || (self.is_op(&last, b"->") && !self.brackets.is_empty()) {
+        // In Rust, `=> {` inside an expression (e.g. `let x = match y { Pat => { ... } }`)
+        // is a match arm, not a lambda; opening a block here turns it into an anonymous
+        // function and replaces the arm's body with `0` in the enclosing assignment.
+        if (self.is_op(&last, b"=>") && !(self.lang.tag == "RS" && !self.brackets.is_empty()))
+            || (self.is_op(&last, b"->") && !self.brackets.is_empty())
+        {
             return true;
         }
         // `case 1: { ... }` and `default: { ... }`: the brace after a case label
