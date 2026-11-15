@@ -220,6 +220,22 @@
       "result": "loss count unchanged, 1 before and 1 after. The value never reaches path_of, so some other function renders it and falls through to the 0 constant.",
       "next": "trace the object-literal value child: candidate is form()/decl_value() hitting an unhandled kind, not a name lookup. Grep the 0-fallback in the value renderer next.",
       "reverted": true
+    },
+    {
+      "at": "2026-11-14T20:16:28",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "rust if let condition",
+      "thought": "The lexer read the whole `if let` condition as an expression, so the pattern's `Some(` became a call the CST never records. Everything left of the binding `=` is a pattern, not a value.",
+      "status": "solved"
+    },
+    {
+      "at": "2026-11-14T20:16:28",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "sweep comparability",
+      "thought": "Two binaries built from the same source give rust 244/267 vs 242/274; one binary run twice is identical. Every A/B must build both sides from the tree.",
+      "status": "diagnosed"
     }
   ]
 }
