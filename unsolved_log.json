@@ -424,6 +424,18 @@
       "evidence": "Final sweep: js 58/103, ts 55/43, python 8/8, rust 93/107. Note tools/loss_count.py exits non-zero on this tree with 'fewer losses than files' for ts (55 files, 43 losses): deep_losses can be 0 on a file that still falls back, so both columns are floors.",
       "status": "fixed",
       "commit": "c0b107e"
+    },
+    {
+      "at": "2026-11-15T06:50:00-05:00",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "the grunt list is worked out; unsolved.md rewritten against the rebased tree",
+      "thought": null,
+      "finding": "Twelve clusters were closed this run (for_header init, struct-literal receiver, macro turbofish, tuple assignment targets, twin pool, .d.ts member calls, raw strings, multi-line constructor patterns, plus the sibling lane's seven js/ts fixes merged by rebase). Every remaining loss is now attributed by clause: event 177, call 36, symbol 8, var 3, import 11 (237 rows, 193 files).",
+      "reader": "both",
+      "evidence": "RG_BIN=/tmp/rg-grunt-target/x86_64-unknown-linux-musl/release/rust-graph python3 tools/loss_count.py -> js 39/1854 (83), ts 53/2000 (39), python 8/568 (8), rust 93/1816 (107); phase4_gate PASSED and re-pinned at js 39 / ts 53.",
+      "status": "fixed",
+      "commit": "b54c30b"
     }
   ]
 }
