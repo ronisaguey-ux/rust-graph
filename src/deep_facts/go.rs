@@ -1982,6 +1982,31 @@ impl<'a> Walker<'a> {
                     return format!("[\"m\",[[\"t\",[{key}]],{value}]]");
                 }
                 match items.len() {
+                    // `{ async: async }`: key and value are the same keyword, so
+                    // both children are layout and the pair held nothing at all —
+                    // the one-pass reader writes the name once and the CST wrote
+                    // the constant 0, dropping the property. A key and value that
+                    // spell the same word are one name.
+                    0 => {
+                        let words: Vec<String> = self
+                            .children(id)
+                            .into_iter()
+                            .map(|child| self.text_string(child))
+                            .filter(|text| {
+                                !text.is_empty()
+                                    && text != ":"
+                                    && (text.as_bytes()[0].is_ascii_alphabetic() || text.as_bytes()[0] == b'_')
+                            })
+                            .collect();
+                        if let Some(first) = words.first().filter(|_| words.iter().all(|word| word == &words[0])) {
+                            let mut out = "[\"m\",[[\"n\",".to_string();
+                            push_string(&mut out, first);
+                            out.push_str("]]]");
+                            out
+                        } else {
+                            "0".to_string()
+                        }
+                    }
                     // `{ type: "boolean" }`: a key spelled like a keyword (`type`,
                     // `class`, `default`) has that keyword as its kind, so
                     // is_layout() drops it and the pair is left holding its value
@@ -2009,7 +2034,6 @@ impl<'a> Walker<'a> {
                             None => self.form(items[0]),
                         }
                     }
-                    0 => "0".to_string(),
                     _ => {
                         let key = self.form(items[0]);
                         let value = self.form(items[items.len() - 1]);
