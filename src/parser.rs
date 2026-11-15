@@ -315,6 +315,16 @@ impl<'a> Parser<'a> {
         self.src.get(at) == Some(&b'{')
     }
 
+    /// Whether the next line begins with `word` as a standalone identifier.
+    fn next_starts_with_word(&self, end: usize, word: &[u8]) -> bool {
+        let Some(at) = self.next_line_start(end) else { return false };
+        self.src.get(at..at + word.len()) == Some(word)
+            && !self
+                .src
+                .get(at + word.len())
+                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    }
+
     fn on_newline(&mut self) {
         if !self.brackets.is_empty() || self.stmt.is_empty() {
             return;
@@ -370,6 +380,17 @@ impl<'a> Parser<'a> {
                     token.kind == Kind::Ident && self.raw(token) == b"function"
                 })
                 && self.next_starts_with_brace(last.end as usize)
+            {
+                return;
+            }
+            // `interface A extends B` newline `{` or `interface A<T>` newline
+            // `extends B`: the header of a type declaration spans the line
+            // break; ending here leaves `{` in `<module>` and turns its type
+            // members into statements the CST never writes.
+            if matches!(self.lang.tag, "TS" | "TSX")
+                && self.type_declaration(&self.stmt)
+                && (self.next_starts_with_brace(last.end as usize)
+                    || self.next_starts_with_word(last.end as usize, b"extends"))
             {
                 return;
             }
