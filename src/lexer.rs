@@ -259,7 +259,7 @@ impl<'a> Lexer<'a> {
                 b'\\' => {
                     if interp == Interp::Swift && self.peek(1) == b'(' {
                         self.pos += 2;
-                        parts.push(self.balanced(b'(', b')'));
+                        parts.push(self.balanced_expr(b'(', b')'));
                         continue;
                     }
                     self.pos += 1;
@@ -286,16 +286,16 @@ impl<'a> Lexer<'a> {
                 }
                 b'$' if interp == Interp::Template && self.peek(1) == b'{' => {
                     self.pos += 2;
-                    parts.push(self.balanced(b'{', b'}'));
+                    parts.push(self.balanced_expr(b'{', b'}'));
                 }
                 b'#' if interp == Interp::Hash && self.peek(1) == b'{' => {
                     self.pos += 2;
-                    parts.push(self.balanced(b'{', b'}'));
+                    parts.push(self.balanced_expr(b'{', b'}'));
                 }
                 b'$' if interp == Interp::Dollar => {
                     if self.peek(1) == b'{' {
                         self.pos += 2;
-                        parts.push(self.balanced(b'{', b'}'));
+                        parts.push(self.balanced_expr(b'{', b'}'));
                     } else if is_ident_start(self.peek(1)) || self.peek(1).is_ascii_digit() {
                         self.pos += 1;
                         let start = self.pos;
@@ -311,6 +311,37 @@ impl<'a> Lexer<'a> {
             }
         }
         parts
+    }
+
+    /// Past an opener in an interpolated expression: advance with `next()` so
+    /// strings, regexes, and comments do not unbalance the delimiter search.
+    fn balanced_expr(&mut self, open: u8, close: u8) -> (u32, u32) {
+        let start = self.pos;
+        let saved_after = self.after_value;
+        self.after_value = false;
+        let mut depth = 1usize;
+        loop {
+            let tok = self.next();
+            match tok.kind {
+                Kind::Eof => {
+                    self.after_value = saved_after;
+                    return (start as u32, self.pos as u32);
+                }
+                Kind::Op if tok.end - tok.start == 1 => {
+                    let ch = self.src[tok.start as usize];
+                    if ch == open {
+                        depth += 1;
+                    } else if ch == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            self.after_value = saved_after;
+                            return (start as u32, tok.start);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Past an opener: the range up to its partner, and pos after the partner.
@@ -702,5 +733,24 @@ mod tests {
         let token = Lexer::new(body, lang).next();
         let parts = token.interp.unwrap();
         assert_eq!(&body[parts[0].0 as usize..parts[0].1 as usize], b"x");
+    }
+
+    #[test]
+    fn template_interpolation_skips_strings_and_regexes() {
+        let body = b"`${b(\"{\")}`; `importScripts(${c});`";
+        let lang = by_content("js", body).unwrap();
+        let mut lexer = Lexer::new(body, lang);
+        let first = lexer.next();
+        let parts = first.interp.unwrap();
+        assert_eq!(&body[parts[0].0 as usize..parts[0].1 as usize], b"b(\"{\")");
+        assert_eq!(lexer.next().kind, Kind::Op);
+        let second = lexer.next();
+        assert_eq!(second.kind, Kind::Str);
+        assert_eq!(&body[second.start as usize..second.end as usize], b"`importScripts(${c});`");
+
+        let regex_body = b"`${s.replace(/\"/g, '')}`";
+        let regex_tok = Lexer::new(regex_body, lang).next();
+        let regex_parts = regex_tok.interp.unwrap();
+        assert_eq!(&regex_body[regex_parts[0].0 as usize..regex_parts[0].1 as usize], b"s.replace(/\"/g, '')");
     }
 }
