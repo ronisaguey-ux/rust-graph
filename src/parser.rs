@@ -2219,6 +2219,21 @@ impl<'a> Parser<'a> {
             }
         }
         let mut bases = Vec::new();
+        if self.lang.tag == "RS" {
+            // Rust states bounds in a header, not inheritance: `struct S<'a, T: Clone>`
+            // declares a parameter and its bound, and `where T: Send` states another.
+            // Reading every identifier after `<` or `:` as a base made `T`, `Clone`
+            // and `Send` bases of the class — three symbols the CST never writes. An
+            // `impl` is the one place a name really is inherited: `impl Trait for X`.
+            if keyword == "impl" {
+                if let Some(for_at) = toks.iter().position(|t| t.kind == Kind::Ident && self.raw(t) == b"for") {
+                    if let Some(trait_name) = self.type_before(toks, for_at) {
+                        bases.push(trait_name);
+                    }
+                }
+            }
+            return Some((name, bases));
+        }
         let mut inherits = false;
         for (offset, token) in toks[at + 1..].iter().enumerate() {
             if token.kind == Kind::Op && matches!(self.raw(token), b"(" | b":" | b"<") {
@@ -2233,6 +2248,39 @@ impl<'a> Parser<'a> {
             }
         }
         Some((name, bases))
+    }
+
+    /// The type spelled just before `at`, skipping a `<...>` argument list: the
+    /// trait in `impl<T: Bound> Trait<U> for Type`. `None` when the tokens before
+    /// `at` hold no type — `impl for` is not source any lexer should invent.
+    fn type_before(&self, toks: &[Token], at: usize) -> Option<String> {
+        let mut scan = at;
+        while scan > 0 {
+            scan -= 1;
+            let token = &toks[scan];
+            if self.is_op(token, b">") {
+                let mut depth = 1i32;
+                while scan > 0 {
+                    scan -= 1;
+                    if self.is_op(&toks[scan], b">") {
+                        depth += 1;
+                    } else if self.is_op(&toks[scan], b"<") {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            if token.kind == Kind::Ident {
+                let word = self.text(token);
+                if !matches!(word.as_str(), "unsafe" | "const" | "default" | "dyn" | "impl") {
+                    return Some(word);
+                }
+            }
+        }
+        None
     }
 
     /// The parameter list between two brackets.
