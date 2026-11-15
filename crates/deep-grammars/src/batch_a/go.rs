@@ -552,7 +552,7 @@ fn operator(c: &mut Cursor) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_a::fixtures;
+    use super::super::fixtures;
 
     const VALID: &[(&str, &str)] = &[
         ("cache.go", "package_clause import_declaration type_declaration type_declaration function_declaration method_declaration method_declaration method_declaration"),

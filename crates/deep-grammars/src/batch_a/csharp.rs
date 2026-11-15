@@ -921,7 +921,7 @@ fn operator(c: &mut Cursor) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_a::fixtures;
+    use super::super::fixtures;
 
     const VALID: &[(&str, &str)] = &[
         ("Cache.cs", "using_directive using_directive namespace_declaration"),
