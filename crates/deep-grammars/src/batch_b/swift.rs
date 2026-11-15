@@ -1007,7 +1007,12 @@ mod tests {
     }
 
     fn corpus() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/swift_corpus")
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        if root.is_dir() {
+            return root.join("swift_corpus");
+        }
+        // Compiled by `rust-graph` through `#[path]` too; see `batch_a`.
+        Path::new(file!()).parent().map(|dir| dir.join("../../fixtures/swift_corpus")).unwrap_or(root.join("swift_corpus"))
     }
 
     fn corpus_files() -> Vec<PathBuf> {

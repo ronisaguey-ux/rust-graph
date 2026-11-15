@@ -921,7 +921,14 @@ mod tests {
     }
 
     fn corpus() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("scala_corpus")
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let root = if root.is_dir() {
+            root
+        } else {
+            // Compiled by `rust-graph` through `#[path]` too; see `batch_a`.
+            Path::new(file!()).parent().map(|dir| dir.join("../../fixtures")).unwrap_or(root)
+        };
+        root.join("scala_corpus")
     }
 
     /// Malformed and truncated input must give a tree with the error inside it,
