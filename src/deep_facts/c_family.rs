@@ -19,6 +19,60 @@ impl<'a> Walker<'a> {
         matches!(self.language.name, "c" | "cpp")
     }
 
+    /// The C-family walk arm: the nodes whose name is not a child of a `Def`
+    /// table (a declarator holds it) and the containers a member's owner comes
+    /// from. `false` hands the node to the shared walk below.
+    pub(crate) fn enter_c(&mut self, id: u32) -> bool {
+        match self.kind(id) {
+            // Every shape the C and C++ grammars give a function whose return
+            // type is a typedef name or a scoped path: `list *listCreate(void)`
+            // is `bare_user_function_definition`, not `function_definition`,
+            // and reading only the latter left every redis function unnamed.
+            "function_definition"
+            | "user_function_definition"
+            | "bare_user_function_definition"
+            | "plain_user_function"
+            | "specified_user_function"
+            | "scoped_user_function"
+            | "specified_scoped_function" => self.c_function(id),
+            "class_specifier" => self.c_class(id),
+            "namespace_definition" => self.c_namespace(id),
+            // `char buf[BUF];` / `int x = 0;`: the lexer reads the declaration
+            // as the run of names on its line (plus the initializer's value when
+            // there is one), so the CST writes the same event instead of
+            // dropping the statement as layout.
+            "declaration_statement" | "declaration" => {
+                let form = self.c_words_form_skipping(
+                    id,
+                    &["class_body", "struct_body", "compound_statement", "function_definition"],
+                );
+                if form != "0" {
+                    let line = self.line(id);
+                    self.event(&format!("[\"x\",{line},{form}]"));
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// `#include "settings.h"` and `#include <stdio.h>`: the grammar drops the
+    /// directive line as trivia — which is what keeps include guards and
+    /// conditional blocks from costing a statement — so the module is read off
+    /// the source, on the line it sits on, exactly as the lexer reads it.
+    pub(crate) fn c_includes(&mut self) {
+        let text = String::from_utf8_lossy(self.src);
+        for (index, line) in text.lines().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("#include") else { continue };
+            let rest = rest.trim_start();
+            // A quoted include names a file of this project and is the import
+            // the lexer files (a star import: `<stdio.h>` is the system's).
+            let Some(inner) = rest.strip_prefix('"') else { continue };
+            let Some(module) = inner.split('"').next().filter(|module| !module.is_empty()) else { continue };
+            self.facts.imports.push(Import { line: index as u32 + 1, module: module.to_string(), kind: IMPORT_STAR, ..Import::default() });
+        }
+    }
+
     /// Nodes C and C++ own. `false` hands the node to the shared walk.
     pub(crate) fn c_function(&mut self, id: u32) {
         let children = self.children(id);

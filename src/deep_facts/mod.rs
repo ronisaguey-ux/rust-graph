@@ -309,7 +309,7 @@ const C_CALLS: &[&str] = &["call_expression"];
 
 /// C imports: the preprocessor is trivia, so the only import node that could
 /// exist never does. The table names the token the grammar calls it, and
-/// [`Walker::c_imports`] reads the directive lines from the source.
+/// [`Walker::c_includes`] reads the directive lines from the source.
 const C_IMPORTS: &[&str] = &["preprocessor"];
 
 /// C++ definitions: C's, plus the class, namespace, constructor, destructor and
@@ -535,6 +535,9 @@ impl<'a> Walker<'a> {
     }
 
     pub(crate) fn run(&mut self) {
+        if self.is_c() {
+            self.c_includes();
+        }
         if self.nodes.is_empty() {
             return;
         }
@@ -803,6 +806,12 @@ impl<'a> Walker<'a> {
     pub(crate) fn enter(&mut self, id: u32) {
         let kind = self.kind(id);
         if self.is_rust() && self.enter_rust(id) {
+            return;
+        }
+        // C, C++: the declared name lives inside a declarator, so the node
+        // cannot be read off a `Def` table. `enter_c` only claims the nodes it
+        // actually reads, and the generic walk keeps everything else.
+        if self.is_c() && self.enter_c(id) {
             return;
         }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
