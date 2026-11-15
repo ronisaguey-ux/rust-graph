@@ -475,8 +475,12 @@ impl<'a> Parser<'a> {
             // `greet(who: string): string` is a signature, not a call, and the
             // CST writes nothing for any of it.
             let conditional = matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt);
-            let type_body = matches!(self.lang.tag, "TS" | "TSX")
-                && (self.type_declaration(&self.stmt) || conditional);
+            let type_body = (matches!(self.lang.tag, "TS" | "TSX")
+                && (self.type_declaration(&self.stmt) || conditional))
+                || (self.lang.tag == "RS" && {
+                    let index = self.skip_modifiers(&self.stmt);
+                    self.word_at(&self.stmt, index).is_some_and(|w| matches!(w.as_str(), "struct" | "enum" | "union"))
+                });
             // The header is a declaration and a type: `declare var M: typeof
             // globalThis extends`. Only the declarator is a name the CST writes;
             // `globalThis` and `extends` are type text here, and writing them
@@ -666,16 +670,35 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn has_def_word(&self, toks: &[Token]) -> bool {
+    /// Advance past leading modifiers, including Rust visibility groups such as
+    /// `pub(crate)` or `pub(super)`.
+    fn skip_modifiers(&self, toks: &[Token]) -> usize {
         let mut index = 0;
-        while index < toks.len().min(8) {
-            match self.word_at(toks, index) {
-                Some(word) if self.lang.defs.contains(&word.as_str()) => return true,
-                Some(word) if MODIFIERS.contains(&word.as_str()) => index += 1,
-                _ => return false,
+        while let Some(word) = self.word_at(toks, index) {
+            if self.lang.defs.contains(&word.as_str()) || self.lang.classes.contains(&word.as_str()) {
+                break;
+            }
+            if !MODIFIERS.contains(&word.as_str()) {
+                break;
+            }
+            index += 1;
+            if self.lang.tag == "RS" && word == "pub" && toks.get(index).is_some_and(|t| self.is_op(t, b"(")) {
+                if let Some((_, close)) = self.group_at(toks, index) {
+                    index = close + 1;
+                } else {
+                    break;
+                }
             }
         }
-        false
+        index
+    }
+
+    fn has_def_word(&self, toks: &[Token]) -> bool {
+        let index = self.skip_modifiers(toks);
+        self.word_at(toks, index).is_some_and(|word| {
+            self.lang.defs.contains(&word.as_str())
+                || (self.lang.tag == "RS" && self.lang.classes.contains(&word.as_str()))
+        })
     }
 
     fn open_block(&mut self) {
@@ -2139,16 +2162,7 @@ impl<'a> Parser<'a> {
     }
 
     fn class_head(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {
-        let mut index = 0;
-        while let Some(word) = self.word_at(toks, index) {
-            if self.lang.classes.contains(&word.as_str()) {
-                break;
-            }
-            if !MODIFIERS.contains(&word.as_str()) {
-                return None;
-            }
-            index += 1;
-        }
+        let index = self.skip_modifiers(toks);
         let keyword = self.word_at(toks, index)?;
         if !self.lang.classes.contains(&keyword.as_str()) {
             return None;
@@ -2592,15 +2606,11 @@ impl<'a> Parser<'a> {
     }
 
     fn function_head(&self, toks: &[Token], at_block: bool) -> Option<Head> {
-        let mut index = 0;
-        while let Some(word) = self.word_at(toks, index) {
+        let index = self.skip_modifiers(toks);
+        if let Some(word) = self.word_at(toks, index) {
             if self.lang.defs.contains(&word.as_str()) {
                 return self.keyword_head(toks, index);
             }
-            if !MODIFIERS.contains(&word.as_str()) {
-                break;
-            }
-            index += 1;
         }
         if let Some(head) = self.assigned_head(toks) {
             return Some(head);
@@ -2704,7 +2714,8 @@ impl<'a> Parser<'a> {
         // reader), so the header was read as an expression and invented an event
         // the CST never writes.
         if self.lang.tag == "RS" {
-            if let Some(word) = self.head_word(stmt) {
+            let index = self.skip_modifiers(stmt);
+            if let Some(word) = self.word_at(stmt, index) {
                 if matches!(word.as_str(), "struct" | "enum" | "impl" | "trait" | "mod" | "union" | "use" | "extern") {
                     return;
                 }
