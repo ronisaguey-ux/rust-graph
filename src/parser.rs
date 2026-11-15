@@ -2592,12 +2592,14 @@ impl<'a> Parser<'a> {
         }
         let (_, owner, _) = self.name_chain(toks, chain_start);
         let (inner, close) = self.group_at(toks, open)?;
-        if matches!(self.lang.tag, "JS" | "JSX") && close + 1 != toks.len() {
-            return None;
-        }
-        if matches!(self.lang.tag, "TS" | "TSX")
+        // After the parameter list a method head can only be followed by its
+        // body `{` or a TS return-type `:` — the latter also appears in a `.js`
+        // file, where a type annotation is not a declaration but is still the
+        // text after the head. Anything else is a call, not a definition.
+        if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
             && close + 1 < toks.len()
             && !self.is_op(&toks[close + 1], b":")
+            && !self.is_op(&toks[close + 1], b"{")
         {
             return None;
         }
