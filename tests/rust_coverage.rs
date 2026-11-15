@@ -140,6 +140,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "a closure whose parameter is a reference pattern",
         "fn f(all: &mut Vec<u8>) {\n    all.sort_by_key(|&id| all[id as usize]);\n}\n",
     ),
+    (
+        "a let-else whose else block diverges",
+        "fn f() {\n    let Some(x) = g(1)\n    else {\n        return;\n    };\n    let y = x;\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.

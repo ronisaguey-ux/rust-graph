@@ -542,6 +542,12 @@ impl<'a> Parser<'a> {
                     return true;
                 }
             }
+            // `let Some(x) = g(1) else { ... };`: the else's brace opens the
+            // divergence block. Read as part of the value, the whole let-else
+            // became one merged expression the CST never writes.
+            if self.stmt.last().is_some_and(|token| self.raw(token) == b"else") {
+                return true;
+            }
         }
         // Cloned, not borrowed: deciding what the brace opens reads past the
         // cursor, and that needs the parser itself.
@@ -736,6 +742,19 @@ impl<'a> Parser<'a> {
             // `extern "C" {`: a block header, and the CST writes no event for it.
             // The lexer's `m:[n:extern,0]` was a fact the CST never had, and
             // every extern block lost its file (8 corpus files).
+            let symbol = self.top().symbol;
+            let class = self.top().class.clone();
+            let receiver = self.top().receiver.clone();
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+        } else if self.lang.tag == "RS"
+            && stmt.len() > 2
+            && stmt.last().is_some_and(|token| self.raw(token) == b"else")
+            && stmt.first().is_some_and(|token| self.raw(token) == b"let")
+        {
+            // The let half writes its assignment; the else's body is statements
+            // of the enclosing symbol, and the header itself names nothing.
+            let head: Vec<Token> = stmt[..stmt.len() - 1].to_vec();
+            self.statement(&head);
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
