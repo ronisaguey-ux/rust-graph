@@ -101,6 +101,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn h(f: impl Fn(i32) -> i32) -> i32 { f(1) }\n",
     ),
     (
+        "an extern block with C declarations",
+        "extern \"C\" {\n    fn ioctl(fd: i32, request: u64, ...) -> i32;\n    fn close(fd: i32) -> i32;\n}\n",
+    ),
+    (
         "let declarations: mut, annotated and tuple-pattern bindings",
         "fn f() {\n    let mut c = 3;\n    let d: i32 = 4;\n    let (a, b) = (1, 2);\n    let e = c + d + a + b;\n}\n",
     ),

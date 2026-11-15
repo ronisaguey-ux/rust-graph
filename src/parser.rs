@@ -732,6 +732,14 @@ impl<'a> Parser<'a> {
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
             self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+        } else if self.lang.tag == "RS" && self.head_word(&stmt).is_some_and(|word| word == "extern") {
+            // `extern "C" {`: a block header, and the CST writes no event for it.
+            // The lexer's `m:[n:extern,0]` was a fact the CST never had, and
+            // every extern block lost its file (8 corpus files).
+            let symbol = self.top().symbol;
+            let class = self.top().class.clone();
+            let receiver = self.top().receiver.clone();
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
         } else if let Some((name, bases)) = self.class_head(&stmt) {
             self.push_class(name, bases, start_col);
         } else if let Some(head) = self.function_head(&stmt, true) {
