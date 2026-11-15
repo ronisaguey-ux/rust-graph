@@ -1725,16 +1725,13 @@ return verdict(Some("var"), detail, accepted);
             deep.symbols
                 .iter()
                 .find(|row| {
-                    row.name == symbol.name
+                    paired_name(row) == paired_name(symbol)
                         && row.kind == symbol.kind
-                        && (symbol.owner.is_empty() || row.owner.is_empty() || row.owner == symbol.owner)
                         && (row.line as i64 - symbol.line as i64).abs() <= 2
                 })
                 .or_else(|| {
                     deep.symbols.iter().find(|row| {
-                        row.name == symbol.name
-                            && row.kind == symbol.kind
-                            && (symbol.owner.is_empty() || row.owner.is_empty() || row.owner == symbol.owner)
+                        paired_name(row) == paired_name(symbol) && row.kind == symbol.kind
                     })
                 })
         };
@@ -2719,6 +2716,24 @@ fn macro_body_lines(src: &str) -> Vec<bool> {
     out
 }
 
+/// The name a symbol is paired under. The two readers spell a member's name
+/// differently: the lexer keeps the receiver in `owner` and says `this`, the
+/// CST writes one dotted name and says `self`. Compared raw, `this.loadFile`
+/// in a class paired with the free function `loadFile` twelve lines up, and
+/// every event of the method was reported as lost when both records held it.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn paired_name(symbol: &crate::facts::Symbol) -> String {
+    let joined = if symbol.owner.is_empty() {
+        symbol.name.clone()
+    } else {
+        format!("{}.{}", symbol.owner, symbol.name)
+    };
+    match joined.strip_prefix("this.") {
+        Some(rest) => format!("self.{rest}"),
+        None => joined,
+    }
+}
+
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn is_pattern_call(src: &Lines<'_>, name: &str, line: u32) -> bool {
     if name.is_empty() {
@@ -2765,8 +2780,53 @@ fn is_pattern_call(src: &Lines<'_>, name: &str, line: u32) -> bool {
             if nested.starts_with('=') && !nested.starts_with("==") && text[..start].contains("let") {
                 return true;
             }
+        } else {
+            // The pattern's own bracket closes on a later line, so the words
+            // that follow it are not on this line either.
+            if wide_pattern(src, line, name) {
+                return true;
+            }
         }
         from = start;
+    }
+    wide_pattern(src, line, name)
+}
+
+/// The same question for a pattern whose tail is not on the call's own line: a
+/// multi-line `Some(A::B(` … `)) = value`, or a match arm whose guard runs past
+/// the line. Only unambiguous tails count — the arm's arrow, the binding `=`,
+/// or a guard that reaches its arrow before any `;` — because a window this
+/// wide makes a looser rule guess. Called only after the call was not found in
+/// the CST's record, so the cost does not touch a clean file.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn wide_pattern(src: &Lines<'_>, line: u32, name: &str) -> bool {
+    let window = src.around(line, 0, 24);
+    let Some(at) = window.find(&format!("{name}(")) else { return false };
+    let body = &window[at + name.len()..];
+    let mut depth = 0i32;
+    for (index, ch) in body.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth != 0 {
+                    continue;
+                }
+                let tail = body[index + 1..].trim_start();
+                let tail = tail.trim_start_matches(|ch: char| matches!(ch, ')' | ']') || ch.is_whitespace());
+                if tail.starts_with("=>") || (tail.starts_with('=') && !tail.starts_with("==")) {
+                    return true;
+                }
+                // `Some(v) if v.is_ok()` newline `=>`: the guard is not a value
+                // and the arm still ends at the arrow.
+                if tail.starts_with("if ") || tail.starts_with("if(") {
+                    let guarded = &tail[..tail.find(';').unwrap_or(tail.len())];
+                    return guarded.contains("=>");
+                }
+                return false;
+            }
+            _ => {}
+        }
     }
     false
 }
