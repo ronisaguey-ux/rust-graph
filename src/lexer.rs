@@ -554,6 +554,15 @@ impl<'a> Lexer<'a> {
             if self.lang.tag == "PL" && self.try_perl_quote(word) {
                 return self.token(Kind::Str, start, line, col);
             }
+            // `r"…"` is a raw string: a backslash is a literal byte, so reading
+            // it as an escape never found the closing quote and the rest of the
+            // file became code — a `linear-gradient(` inside a stylesheet
+            // string was recorded as a call.
+            if self.lang.tag == "RS" && matches!(word, b"r" | b"br" | b"cr") && next == b'"' {
+                self.pos += 1;
+                self.skip_until(b"\"");
+                return self.token(Kind::Str, start, line, col);
+            }
             if self.lang.quotes.contains(&next) && word.len() <= 2 && word.iter().all(|b| b"rRbBuUfF".contains(b)) {
                 let formatted = word.iter().any(|b| matches!(b, b'f' | b'F'));
                 return self.string(start, line, col, formatted);
