@@ -2979,7 +2979,7 @@ impl<'a> Parser<'a> {
                             && (toks[index - 1].kind == Kind::Ident
                                 || self.is_op(&toks[index - 1], b")")
                                 || self.is_op(&toks[index - 1], b"]"));
-                        if is_call {
+                        if is_call || !self.is_receiver_group(&toks[index + 1..start - 1]) {
                             break;
                         }
                         start = index;
@@ -3077,6 +3077,42 @@ impl<'a> Parser<'a> {
 
     fn is_join(&self, token: &Token) -> bool {
         token.kind == Kind::Op && matches!(self.raw(token), b"." | b"->" | b"::")
+    }
+
+    /// True when a parenthesised group's top-level tokens form a path/call chain
+    /// rather than an assignment or compound expression like `(a = b).c = d`.
+    fn is_receiver_group(&self, inner: &[Token]) -> bool {
+        if inner.is_empty() {
+            return false;
+        }
+        let mut i = 0;
+        while i < inner.len() {
+            let token = &inner[i];
+            if token.kind == Kind::Ident || self.is_join(token) {
+                i += 1;
+            } else if self.is_op(token, b"(") || self.is_op(token, b"[") {
+                let (open, close) = if self.is_op(token, b"(") { (b"(", b")") } else { (b"[", b"]") };
+                let mut depth = 0usize;
+                while i < inner.len() {
+                    if self.is_op(&inner[i], open) {
+                        depth += 1;
+                    } else if self.is_op(&inner[i], close) {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                if depth != 0 {
+                    return false;
+                }
+                i += 1;
+            } else {
+                return false;
+            }
+        }
+        true
     }
 
     fn unpack_targets(&self, toks: &[Token]) -> Option<Vec<String>> {
