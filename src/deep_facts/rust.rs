@@ -344,7 +344,16 @@ impl<'a> Walker<'a> {
             // A generic or trait-object type is named by its head constructor/trait,
             // not by a trailing argument or bound: `JsonString<LogEntry>` is `JsonString`,
             // `dyn Indicator + Send + Sync` is `Indicator`.
-            "generic_type" | "dynamic_type" => self.first_name(id).unwrap_or_default(),
+            // `impl<T> RequestExt for tonic::Request<T>`: the head constructor is
+            // the last path segment, not the crate it came from. Reading the
+            // first name made the owner `tonic` where the lexer wrote `Request`.
+            "generic_type" => match self.children(id).first() {
+                Some(&head) if self.kind(head) == "scoped_type_identifier" => {
+                    self.last_name(head).unwrap_or_default()
+                }
+                _ => self.first_name(id).unwrap_or_default(),
+            },
+            "dynamic_type" => self.first_name(id).unwrap_or_default(),
             "reference_type" | "scoped_type_identifier" | "tuple_type" => {
                 self.last_name(id).unwrap_or_default()
             }

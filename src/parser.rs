@@ -2344,6 +2344,24 @@ impl<'a> Parser<'a> {
             if self.lang.tag == "RS" && self.word_at(toks, at).as_deref() == Some("dyn") {
                 at += 1;
             }
+            // `impl<'a> Reader for &'a Buffer {`: a borrow is not a name. Skip the
+            // `&`, its lifetime and `mut` so the block opens the type it
+            // implements — the CST names it `Buffer`, and without this the
+            // methods inside had no owner at all.
+            while self.lang.tag == "RS" {
+                let Some(token) = toks.get(at) else { break };
+                if self.is_op(token, b"&") {
+                    at += 1;
+                } else if self.is_op(token, b"'") {
+                    at += 2;
+                } else if token.kind == Kind::Ident && self.text(token).starts_with('\'') {
+                    at += 1;
+                } else if token.kind == Kind::Ident && matches!(self.text(token).as_str(), "mut" | "const") {
+                    at += 1;
+                } else {
+                    break;
+                }
+            }
         }
         let mut name = self.word_at(toks, at)?;
         // `impl tonic::client::X {`: a path names its type by its last segment.
