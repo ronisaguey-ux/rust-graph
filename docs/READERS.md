@@ -11,8 +11,9 @@ test claims is listed here, and every listed construct is claimed by a test.
 
 ## JavaScript — `tests/js_coverage.rs`
 
-Covered (34):
+Covered (35):
 
+- private field holding a function keeps its marker
 - require in a comparison is not an import
 - block statement
 - if / else if / else
