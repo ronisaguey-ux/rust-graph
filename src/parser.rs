@@ -1904,6 +1904,7 @@ impl<'a> Parser<'a> {
         let Some(module) = module else {
             return false;
         };
+        let stmt = self.strip_outer_parens(stmt);
         let Some(equal) = self.top_level_assign(stmt) else {
             self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
             return true;
@@ -2139,6 +2140,34 @@ impl<'a> Parser<'a> {
             alias,
             kind: IMPORT_MODULE,
         });
+    }
+
+    fn strip_outer_parens<'b>(&self, mut toks: &'b [Token]) -> &'b [Token] {
+        while toks.len() >= 2
+            && toks.first().is_some_and(|t| self.is_op(t, b"("))
+            && toks.last().is_some_and(|t| self.is_op(t, b")"))
+        {
+            let mut depth = 0i32;
+            let mut wraps_all = true;
+            for (i, token) in toks.iter().enumerate() {
+                if token.kind == Kind::Op {
+                    match self.raw(token) {
+                        b"(" | b"[" | b"{" => depth += 1,
+                        b")" | b"]" | b"}" => depth -= 1,
+                        _ => {}
+                    }
+                }
+                if depth == 0 && i + 1 < toks.len() {
+                    wraps_all = false;
+                    break;
+                }
+            }
+            if !wraps_all || depth != 0 {
+                break;
+            }
+            toks = &toks[1..toks.len() - 1];
+        }
+        toks
     }
 
     fn top_level_assign(&self, toks: &[Token]) -> Option<usize> {
