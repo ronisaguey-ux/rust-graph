@@ -706,11 +706,26 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Advance past leading modifiers, including Rust visibility groups such as
-    /// `pub(crate)` or `pub(super)`.
+    /// Advance past leading modifiers, including Rust attributes (`#[...]`,
+    /// `#![...]`) and visibility groups such as `pub(crate)` or `pub(super)`.
     fn skip_modifiers(&self, toks: &[Token]) -> usize {
         let mut index = 0;
-        while let Some(word) = self.word_at(toks, index) {
+        loop {
+            if self.lang.tag == "RS" && toks.get(index).is_some_and(|t| self.is_op(t, b"#")) {
+                let open = if toks.get(index + 1).is_some_and(|t| self.is_op(t, b"!")) {
+                    index + 2
+                } else {
+                    index + 1
+                };
+                if toks.get(open).is_some_and(|t| self.is_op(t, b"[")) {
+                    if let Some((_, close)) = self.group_at(toks, open) {
+                        index = close + 1;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            let Some(word) = self.word_at(toks, index) else { break };
             if self.lang.defs.contains(&word.as_str()) || self.lang.classes.contains(&word.as_str()) {
                 break;
             }
