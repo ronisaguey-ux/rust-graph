@@ -272,11 +272,15 @@ impl Emit<'_> {
         // pattern wrote — those before the guard's `if`.
         let mut calls_after_pattern = calls_at_start;
         let mut guard_seen = false;
+        let mut in_let = false;
         while let Some(token) = self.tok(0) {
             let kind = token.kind;
             if self.lang.tag == "RS" && kind == Kind::Ident && self.word(0).as_deref() == Some("if") {
                 calls_after_pattern = self.calls.len();
                 guard_seen = true;
+            }
+            if self.lang.tag == "RS" && kind == Kind::Ident && self.word(0).as_deref() == Some("let") {
+                in_let = true;
             }
             // `pub(crate) meter: u64` — a visibility restriction is not a value:
             // the CST writes the field's name and type only, and `crate` in the
@@ -670,6 +674,20 @@ impl Emit<'_> {
                             self.pos += 2;
                             self.chain(out, String::new(), format!("self.{name}"), line);
                         }
+                        // `let resets: Vec<String> = …`: inside an expression
+                        // block (e.g. a match arm), the type annotation on a
+                        // `let` binding is not a value; the CST skips it.
+                        b':' if in_let && self.is_op(0, b":") => {
+                            out.truncate(at);
+                            in_let = false;
+                            self.pos += 1;
+                            self.skip_type();
+                            continue;
+                        }
+                        b'=' | b';' if in_let => {
+                            in_let = false;
+                            self.pos += 1;
+                        }
                         _ => self.pos += 1,
                     }
                 }
@@ -920,6 +938,13 @@ impl Emit<'_> {
                             return;
                         }
                         depth -= 1;
+                    }
+                    b">>" => {
+                        if depth >= 2 {
+                            depth -= 2;
+                        } else {
+                            return;
+                        }
                     }
                     b";" | b"," | b"=" if depth == 0 => return,
                     _ => {}
