@@ -57,8 +57,9 @@ Known gaps (5):
 
 ## TypeScript — `tests/ts_coverage.rs`
 
-Covered (15):
+Covered (16):
 
+- import-equals: a require declaration is an import, not a call
 - type annotations: variables, parameters, returns and fields
 - interface: properties, optional members, methods and extends
 - generics on functions, classes and interfaces with a constraint
@@ -92,7 +93,7 @@ Known gaps (0):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (17):
+Covered (19):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
@@ -106,11 +107,13 @@ Covered (17):
 - a method in an impl with a return type and a doc comment
 - function types: dyn Fn in a parameter and a Box<dyn Fn>
 - function types: impl Fn as a parameter bound
-- an enum variant whose field carries an attribute
+- impl for a generic type is named by its constructor
+- let-chain: a && let pattern binds and calls nothing
 - an if let pattern with tuple and enum constructors
 - a pub(crate) field: the restriction is not a value
 - an extern block with C declarations
 - let declarations: mut, annotated and tuple-pattern bindings
+- an impl header with generics and a where clause
 
 Known gaps (0):
 
