@@ -85,6 +85,11 @@ pub enum Lang {
     C,
     /// C++, whose `Lang::tag` spelling is the lexer's `CPP`.
     Cpp,
+    /// C#, whose `Lang::tag` spelling is the lexer's `CS`.
+    CSharp,
+    Kotlin,
+    Scala,
+    Swift,
 }
 
 impl Lang {
@@ -102,6 +107,10 @@ impl Lang {
             Lang::Java => &deep::java::JAVA,
             Lang::C => &deep::batch_c::c::C,
             Lang::Cpp => &deep::batch_c::cpp::CPP,
+            Lang::CSharp => &deep::batch_a::csharp::CSHARP,
+            Lang::Kotlin => &deep::batch_a::kotlin::KOTLIN,
+            Lang::Scala => &deep::batch_b::scala::SCALA,
+            Lang::Swift => &deep::batch_b::swift::SWIFT,
         }
     }
 }

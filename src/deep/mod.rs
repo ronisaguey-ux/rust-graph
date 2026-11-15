@@ -15,6 +15,10 @@
 // Python and JavaScript: `deep-grammars` compiles the one copy, and a second
 // copy here would be a fork. Their `batch_c` helpers are reached through
 // `super`, so the files keep working in either crate.
+#[path = "../../crates/deep-grammars/src/batch_a/mod.rs"]
+pub mod batch_a;
+#[path = "../../crates/deep-grammars/src/batch_b/mod.rs"]
+pub mod batch_b;
 #[path = "../../crates/deep-grammars/src/batch_c/mod.rs"]
 pub mod batch_c;
 pub mod budget;
@@ -63,6 +67,10 @@ pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
         "tsx" => Some(&javascript::TSX),
         "go" => Some(&go::GO),
         "java" => Some(&java::JAVA),
+        "cs" => Some(&batch_a::csharp::CSHARP),
+        "kt" | "kts" => Some(&batch_a::kotlin::KOTLIN),
+        "scala" | "sc" => Some(&batch_b::scala::SCALA),
+        "swift" => Some(&batch_b::swift::SWIFT),
         _ => None,
     }
 }
