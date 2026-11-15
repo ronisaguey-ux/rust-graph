@@ -1170,7 +1170,12 @@ impl<'a> Walker<'a> {
             }
             "array" | "array_pattern" | "object" | "object_pattern" => self.pattern_names(id),
             "pattern_list" | "tuple_pattern" | "list_pattern" | "tuple" | "list"
-            | "expression_list" => self.children(id).into_iter().filter_map(|child| self.unpacked_name(child)).collect(),
+            // `(a, b) = compute()` in Rust: the left side is a plain
+            // `tuple_expression`, the same node a value uses, so a tuple
+            // target bound only when the grammar called it a pattern. Without
+            // it the event lost its targets and the lexer's `a ["a","b"]` had
+            // no counterpart.
+            | "tuple_expression" | "expression_list" => self.children(id).into_iter().filter_map(|child| self.unpacked_name(child)).collect(),
             // `(fd, path) = mkstemp()`: the Python grammar keeps a parenthesised
             // target list as a `parenthesized_expression` with one child per
             // name, so it fell to the path arm below and bound only the first.

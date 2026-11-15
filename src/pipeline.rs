@@ -1861,6 +1861,9 @@ fn uncovered(
             // `Bound(Bound),` in an enum body: the variants are declarations,
             // and the lexer reads the bare ones as a tuple value of its own.
             || is_variant_declaration(lines, event.line)
+            // `let (mut a, mut b);` binds names and writes no value; the
+            // lexer files the tuple as a value event and the CST writes none.
+            || is_bare_let_line(lines, event.line)
             || is_pattern_line(lines, event.line)
             // The lexer files the merged header as a bare statement, or as an
             // assignment when it reads the pattern's binder, and the CST
@@ -2278,6 +2281,24 @@ fn is_declaration_line(src: &Lines<'_>, line: u32) -> bool {
     };
     let header = text.split(['(', '{', '=']).next().unwrap_or(text);
     header.split_whitespace().any(|word| INTRODUCERS.contains(&word))
+}
+
+/// `let (mut a, mut b);` binds names and writes no value. The one-pass lexer
+/// files the tuple as a value event; the CST records the binding and no event,
+/// so the value had nothing to pair with.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_bare_let_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
+        return false;
+    };
+    let text = text.trim_start();
+    let Some(rest) = text.strip_prefix("let ") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+    let end = rest.find([';', '\n']).unwrap_or(rest.len());
+    !rest[..end].contains('=')
 }
 
 /// A type property: `filename?: string | undefined;` and `id: string;` in a
