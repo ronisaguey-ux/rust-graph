@@ -431,11 +431,11 @@
       "kind": "finding",
       "item": "the grunt list is worked out; unsolved.md rewritten against the rebased tree",
       "thought": null,
-      "finding": "Twelve clusters were closed this run (for_header init, struct-literal receiver, macro turbofish, tuple assignment targets, twin pool, .d.ts member calls, raw strings, multi-line constructor patterns, plus the sibling lane's seven js/ts fixes merged by rebase). Every remaining loss is now attributed by clause: event 177, call 36, symbol 8, var 3, import 11 (237 rows, 193 files).",
+      "finding": "Twelve clusters were closed this run (for_header init, struct-literal receiver, macro turbofish, tuple assignment targets, twin pool, .d.ts member calls, raw strings, multi-line constructor patterns, plus the sibling lane's js/ts/rust fixes merged by rebase). Every remaining loss is now attributed by clause: event 186, call 25, symbol 10, var 3, import 11 (235 rows over 187 files).",
       "reader": "both",
-      "evidence": "RG_BIN=/tmp/rg-grunt-target/x86_64-unknown-linux-musl/release/rust-graph python3 tools/loss_count.py -> js 39/1854 (83), ts 53/2000 (39), python 8/568 (8), rust 93/1816 (107); phase4_gate PASSED and re-pinned at js 39 / ts 53.",
+      "evidence": "RG_BIN=/tmp/rg-grunt-target/x86_64-unknown-linux-musl/release/rust-graph python3 tools/loss_count.py -> js 39/1854 (83), ts 53/2000 (39), python 8/568 (8), rust 87/1816 (105); tools/phase4_gate.py PASSED with rust 87 pinned.",
       "status": "fixed",
-      "commit": "b54c30b"
+      "commit": "cc6ac8a"
     }
   ]
 }
