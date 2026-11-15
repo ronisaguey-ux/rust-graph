@@ -2802,6 +2802,24 @@ impl<'a> Parser<'a> {
             }
             return;
         }
+        // Parentheses are typing, not construction: `let d = (Value::Object(m))`
+        // holds the variant exactly like the unparenthesised form, and the Rust
+        // CST reads both the same way. The other grammars keep the parentheses
+        // in the tree, so unwrapping there would invent a binding the CST does
+        // not have (measured: `var x = (GetIntrinsic(n))` in JS).
+        let mut value = value;
+        if matches!(self.lang.tag, "Rust") {
+            loop {
+                if !value.first().is_some_and(|token| self.is_op(token, b"(")) {
+                    break;
+                }
+                let Some((inner, close)) = self.group_at(value, 0) else { break };
+                if close + 1 != value.len() || inner == close || self.top_commas(value).len() > 1 {
+                    break;
+                }
+                value = &value[inner..close];
+            }
+        }
         let mut at = 0;
         let explicit = self.word_at(value, 0).as_deref() == Some("new");
         if explicit {
@@ -2810,6 +2828,18 @@ impl<'a> Parser<'a> {
         let Some(class) = self.word_at(value, at) else { return };
         let (_, owner, next) = self.name_chain(value, at);
         let called = value.get(next).is_some_and(|token| self.is_op(token, b"("));
+        // A call that the value then continues past does not leave the variant
+        // in the binding: `Value::Object(m).to_string()` holds a String and
+        // `Value::Object(m)?` unwraps it, so neither names the variant.
+        if called {
+            if let Some((_, close)) = self.group_at(value, next) {
+                if value.get(close + 1).is_some_and(|token| {
+                    self.is_op(token, b".") || self.is_op(token, b"?") || self.is_op(token, b"[")
+                }) {
+                    return;
+                }
+            }
+        }
         let capital = class.starts_with(|ch: char| ch.is_uppercase());
         let name = if owner.is_empty() { class } else { self.name_chain(value, at).0 };
         if called && (explicit || capital) && name.starts_with(|ch: char| ch.is_uppercase()) {

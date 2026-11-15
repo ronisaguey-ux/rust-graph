@@ -148,6 +148,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "a member chain across lines through the ? operator",
         "fn f(client: H) {\n    client\n        .borrow()?\n        .core\n        .set(1);\n}\n",
     ),
+    (
+        "a class binding: the variant itself, a call chain, try and parentheses",
+        "fn f(m: Msg) {\n    let v = Value::Object(m);\n    let text = Value::Object(m).to_string();\n    let u = Value::Object(m)?;\n    let w = (Value::Object(m));\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.
