@@ -37,6 +37,11 @@ TABLES = (
 )
 PROSE = (
     (
+        "The C family",
+        "tests/c_family_reader.rs",
+        "C, C++, Java, C#, Go, Kotlin, Scala and Swift read through one walk and one",
+    ),
+    (
         "Go and Java",
         "tests/facts_go_java.rs",
         "the facts a Go or Java file must produce, asserted by named tests",
@@ -141,7 +146,7 @@ def render() -> str:
         "",
         "## What neither reader claims",
         "",
-        "The other languages in the 45-language corpus have a one-pass reader only; their",
+        "Every other language in the 45-language corpus has a one-pass reader only; its",
         "files carry no CST facts and cannot fall back, because nothing is compared. See",
         "`docs/corpus45-table.md`, which is generated from the corpus by",
         "`tools/corpus_table.py`.",

@@ -1427,7 +1427,14 @@ mod fixtures {
     use crate::deep::{Budget, Workspace};
 
     fn read(name: &str) -> String {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(name);
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let root = if root.is_dir() {
+            root
+        } else {
+            // Compiled by `rust-graph` through `#[path]` too; see `batch_a`.
+            std::path::Path::new(file!()).parent().map(|dir| dir.join("../../fixtures")).unwrap_or(root)
+        };
+        let path = root.join(name);
         fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path:?}: {error}"))
     }
 
