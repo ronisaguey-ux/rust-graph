@@ -1,6 +1,6 @@
 # Unsolved — what still falls back, with the evidence
 
-Measured 2026-11-15 on the committed tree (`b54c30b`) with the release/musl binary:
+Measured 2026-11-15 on the committed tree (`cc6ac8a`) with the release/musl binary:
 
     cd /tmp/rg-grunt
     CARGO_TARGET_DIR=/tmp/rg-grunt-target cargo build --release --features "deep parser"
@@ -13,9 +13,9 @@ Measured 2026-11-15 on the committed tree (`b54c30b`) with the release/musl bina
 | js     | 39 / 1854  |     83 |     2.13 |
 | ts     | 53 / 2000  |     39 |     0.74 |
 | python |  8 / 568   |      8 |     1.00 |
-| rust   | 93 / 1816  |    107 |     1.15 |
+| rust   | 87 / 1816  |    105 |     1.21 |
 
-`tools/phase4_gate.py` PASSES (js 39 ≤ 150, ts 53 ≤ 120, python 8 and rust 93
+`tools/phase4_gate.py` PASSES (js 39 ≤ 150, ts 53 ≤ 120, python 8 and rust 87
 pinned, every fallback attributed, the construct record matches the sweep).
 
 Both columns are floors. A file is charged one loss per **kind** — the import,
@@ -32,13 +32,13 @@ still falls back, so `tools/loss_count.py` exits non-zero with
 | js     | 67 | 3 | 3 | 0 | 10 |
 | ts     | 28 | 2 | 8 | 0 | 1 |
 | python |  7 | 0 | 1 | 0 | 0 |
-| rust   | 75 | 5 | 24 | 3 | 0 |
+| rust   | 84 | 5 | 13 | 3 | 0 |
 
 ---
 
 ## 1. A multi-line expression is one event to the CST and another line to the lexer
 
-67 js, 28 ts, 75 rust, 7 python — 177 of the 237 rows left (three quarters).
+67 js, 28 ts, 84 rust, 7 python — 186 of the 235 rows left (four fifths).
 This is the largest remaining class and most of it is one mechanism.
 
     /tmp/opencode/sweep-local/js/000013_css-tokenizer.js:167
@@ -63,7 +63,7 @@ files under a different symbol, and `001165_lib.rs:176` is a `let` inside a
 `#[pyfunction]` whose CST body carries no event at all. Those are counted here
 because the guard reports them with the same sentence.
 
-## 2. Rust: the symbol clause is only an attribute name now — 5 of 107
+## 2. Rust: the symbol clause is only an attribute name now — 5 of 105
 
 `000976_log_export.rs:233` `symbol instrument kind 1`, and `symbol case` on
 `001119_oculus_sot.rs:93`, `001263_hma.rs:384`, `001273_oculus_sot.rs:93`,
@@ -77,33 +77,28 @@ block, a turbofish inside a struct literal, an `if let` struct pattern, the
 literal receiver — were closed by `f1a9112`, `65436fb` and `d446c97`, and the
 clause went 36 → 5 on the same corpora.
 
-## 3. Rust: a call whose name the CST cannot place — 24 of 107
+## 3. Rust: a call whose name the CST cannot place — 13 of 105
 
-Three shapes, all "the CST wrote no call where the lexer read one":
+Two shapes, all "the CST wrote no call where the lexer read one":
 
-* **An enum variant is a call to the lexer.** `TradingCommand.SubmitOrderList`
-  (`001136_mod.rs:2429`), `StopOrderAny.MarketIfTouched`
-  (`001117_matching_core.rs:691` and its copy `001271`),
-  `ChildWorkflowCommand.StartCancel` (`001026`), `WFCommandVariant.QueryResponse`
-  (`001010`), `PendingStart` (`001040`), `Custom` (`001002`), `Bezier`
-  (`001457`), `UntilResolved` (`000995`), `FnMut` (`000947`). The lexer sees
-  `Path(args)` after `::`; the CST sees a tuple/struct expression inside an
-  `impl` body, so no `call_expression` exists to read. The `in derive` owner on
-  four of them says the same `#[derive(..)]` head is also swallowing the scope.
-* **A field chain folds to a different receiver.** `self.max_deque.clear`
-  (`001183_stochastics.rs:188`), `self.update` (`001214_rsi.rs:66`),
-  `order.is_closed` (`001131_mod.rs:3062`), and the long member paths
-  `history_event.Attributes.SignalExternalWorkflowExecutionFailedEventAttributes`
-  (`001022`), `…NexusOperationCancelRequestCompletedEventAttributes` (`001018`),
-  `…WorkflowExecutionUpdateAcceptedEventAttributes` (`001016`). The guard folds
-  any leading-dot path to its receiver (that is how `Path(x).resolve()` is spelled
-  on both sides) and the fold lands on a different name than the CST's.
-* **`Some(..)` in a match arm or closure tail** — `000965_mod.rs:272`,
-  `000999_local_activities.rs:93`, `001629_accept_css.rs:333`,
-  `001644_live_generate.rs:669`.
+* **An associated path called like a function.** `FnMut` (`000947_raw.rs:218`),
+  `Helper` (`000965_mod.rs:438`), `UntilResolved` (`000995:135`), `Custom`
+  (`001002:145`), `PendingStart` (`001040:182`), `Bezier` (`001457:1464`), and
+  `Some` twice (`001629:333`, `001644:669`). The lexer reads `Path(args)` — after
+  a `::`, or the `Some` of a match arm — while the CST writes a tuple or struct
+  expression with no `call_expression` to read.
+* **A field chain whose fold lands elsewhere.** `self.max_deque.clear`
+  (`001183_stochastics.rs:188`), `self.update` (`001214_rsi.rs:66`), and
+  `history_event.Attributes.WorkflowExecutionUpdateAcceptedEventAttributes`
+  (`001016:796`). The guard folds a leading-dot path to its receiver — that is
+  how `Path(x).resolve()` is spelled on both sides — and that receiver is not the
+  name the CST kept.
+
+Five of the thirteen also carry the owner `derive`, which is §4: the
+`#[derive(..)]` head is taking the scope as well as the name.
 
 Two var rows survive next to these: `var report.price = Some`
-(`001121_proptests.rs`) and `var NODE_LIMIT = Limit` (`001815_sample.rs`).
+(`001121_proptests.rs`, twice) and `var NODE_LIMIT = Limit` (`001815_sample.rs`).
 
 Tried and reverted, twice, on the fold itself: fold only when the receiver is
 itself a call (`receiver.starts_with('c')`) — js 128 → **510** losses / 291 files
