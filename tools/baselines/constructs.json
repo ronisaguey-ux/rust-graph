@@ -72,7 +72,7 @@
           "reason": "the CST lost an event: event a line 99 targets [\"ctx\"] in applyDec (paired applyDec line 38): a name the lexer read is not in the CST's value; wanted line 99 ta"
         }
       ],
-      "rust": 20
+      "rust": 18
     },
     "CST_MISSING_KIND:the": {
       "rus": 0,
