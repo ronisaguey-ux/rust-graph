@@ -1,5 +1,5 @@
 {
-  "purpose": "Every important thought from the unsolved.md work, written the moment it is thought, so an agent that runs out of usage mid-task loses nothing. Append-only, newest last. Read THIS FILE FIRST on resume.",
+  "purpose": "Every important thought from the unsolved.md work, written the moment it is thought, so an agent that runs out of usage mid-task loses nothing. RULE (owner, 2026-11-14): every agent working the loop \u2014 fable, argon, the deepseek lanes \u2014 appends a thought entry HERE the moment the thought occurs, BEFORE proving anything, not in a batch at the end. One entry per realisation: what you noticed, what you suspect, what you are about to try. Append-only, newest last. Read THIS FILE FIRST on resume.",
   "schema": {
     "at": "ISO 8601 local time the entry was written",
     "by": "agent that wrote it (fable-5.2, deepseek-v4.1-flash, argon, human)",
@@ -236,6 +236,30 @@
       "item": "sweep comparability",
       "thought": "Two binaries built from the same source give rust 244/267 vs 242/274; one binary run twice is identical. Every A/B must build both sides from the tree.",
       "status": "diagnosed"
+    },
+    {
+      "at": "2026-11-14T20:55:45",
+      "by": "deepseek-v4.1-flash",
+      "kind": "thought",
+      "item": "rust let-chain `&& let`",
+      "thought": "The 15 `(empty) @ &&` losses are let-chains: the continuation line arrives as its own statement starting with `&&`, so the assignment path read the pattern and emitted a call. Stripping every `let \u2026 =` segment after `&&`/`||` fixes that, but the compare then shows deep=1 lexer=2: the CST renders the let_condition operand of a binary expression as the constant 0, so the call inside `&& let Some(x) = g()` is genuinely missing from the deep record. The CST is the wrong reader here, not the lexer.",
+      "status": "in-progress"
+    },
+    {
+      "at": "2026-11-14T21:24:49",
+      "by": "deepseek-v4.1-flash",
+      "kind": "finding",
+      "item": "js `{ async: async }`",
+      "thought": "Narrowed to a pair whose key and value are the same keyword: both children are layout, so the pair held nothing and rendered 0 while the lexer wrote the name once. Fixed in the pair arm of deep_facts (empty items -> one name when every word child is the same). js 117 files/211 losses -> 111/208; 6 clean, 0 new, 1 worse (000608_decorators.js 1->4, pairing shift).",
+      "status": "solved"
+    },
+    {
+      "at": "2026-11-14T21:24:49",
+      "by": "deepseek-v4.1-flash",
+      "kind": "thought",
+      "item": "js `for (; cond;)` with a bare try body",
+      "thought": "Delta-reduced to 4 lines. The lexer writes the header condition, the CST drops it (the for_statement arm computes and discards every child after the second semicolon). With a block body the guard accepts the difference; with a bare try it reports four losses. I could not find why the tolerance differs, and making the lexer emit the condition broke two shapes that were clean. Not solved, written to unsolved.md for fable/argon.",
+      "status": "unsolved"
     }
   ]
 }
