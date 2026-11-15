@@ -842,7 +842,11 @@ impl<'a> Walker<'a> {
                 .find(|&child| !matches!(self.kind(child), "arguments" | "type_arguments" | "(" | ")"))
                 .unwrap_or(id)
         };
-        let (path, receiver) = self.rust_callee(callee);
+        let (path, receiver) = if !self.rust_block_method(id) && callee == id {
+            (String::new(), "0".to_string())
+        } else {
+            self.rust_callee(callee)
+        };
         let line = self.rust_call_line(callee, id);
         let index = self.push_call(path, line);
         let mut out = format!("[\"c\",{index},{receiver},");
@@ -927,6 +931,10 @@ impl<'a> Walker<'a> {
                     Some(inner) => self.rust_callee(inner),
                     None => (String::new(), "0".to_string()),
                 }
+            }
+            "call_expression" | "macro_invocation" => {
+                let formed = self.form(callee);
+                (".call".to_string(), formed)
             }
             "tuple_expression" | "parenthesized_expression" => {
                 let items: Vec<u32> = self.children(callee).into_iter().filter(|&child| !self.is_layout(child)).collect();
