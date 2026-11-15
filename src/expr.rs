@@ -1174,8 +1174,55 @@ impl Emit<'_> {
         matches!(lexeme(self.src, token, self.lang).as_str(), "dyn" | "impl")
     }
 
+    /// If `start` opens a TypeScript type-argument list (`<T, U>`) followed by
+    /// `(`, return the token index of that `(`.
+    fn skip_ts_type_args(&self, start: usize) -> Option<usize> {
+        if !self.toks.get(start).is_some_and(|t| t.kind == Kind::Op && self.raw_is(t, b"<")) {
+            return None;
+        }
+        let mut angle = 1usize;
+        let mut paren = 0usize;
+        let mut bracket = 0usize;
+        let mut brace = 0usize;
+        let mut index = start + 1;
+        while let Some(token) = self.toks.get(index) {
+            if token.kind == Kind::Op {
+                let raw = &self.src[token.start as usize..token.end as usize];
+                match raw {
+                    b"(" => paren += 1,
+                    b")" => paren = paren.checked_sub(1)?,
+                    b"[" => bracket += 1,
+                    b"]" => bracket = bracket.checked_sub(1)?,
+                    b"{" => brace += 1,
+                    b"}" => brace = brace.checked_sub(1)?,
+                    b"<" if paren == 0 && bracket == 0 && brace == 0 => angle += 1,
+                    b">" | b">>" | b">>>" if paren == 0 && bracket == 0 && brace == 0 => {
+                        angle = angle.checked_sub(raw.len())?;
+                        if angle == 0 {
+                            return self
+                                .toks
+                                .get(index + 1)
+                                .is_some_and(|t| t.kind == Kind::Op && self.raw_is(t, b"("))
+                                .then_some(index + 1);
+                        }
+                    }
+                    b";" | b"&&" | b"||" | b"??" | b"==" | b"===" | b"!=" | b"!=="
+                    | b"<=" | b">=" | b"+=" | b"-=" | b"*=" | b"/=" | b"%=" | b"="
+                        if paren == 0 && bracket == 0 && brace == 0 =>
+                    {
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
     fn chain(&mut self, out: &mut String, mut value: String, mut path: String, line: u32) {
         let mut constructed = None;
+        let mut type_arg_line = None;
         loop {
             // `.collect::<Vec<_>>()`: a turbofish names a type, not a value.
             // Reading its words as names put `Vec` and `_` in the record where
@@ -1203,6 +1250,15 @@ impl Emit<'_> {
             if matches!(self.lang.tag, "TS" | "TSX") && self.is_op(0, b"!") {
                 self.pos += 1;
                 continue;
+            }
+            // `z.string().brand<"username">()`: TypeScript type arguments before
+            // `(` are types, not `< ... >` comparisons or runtime constants.
+            if matches!(self.lang.tag, "TS" | "TSX") && self.is_op(0, b"<") {
+                if let Some(after) = self.skip_ts_type_args(self.pos) {
+                    type_arg_line = Some(self.toks[self.pos].line);
+                    self.pos = after;
+                    continue;
+                }
             }
             // `client.borrow()?` newline `.core_client`: in Rust `?` is a
             // postfix operator between the call and its member, and the CST
@@ -1298,7 +1354,7 @@ impl Emit<'_> {
                     self.list(&mut args, b')', true);
                     continue;
                 }
-                let line = self.toks[self.pos].line;
+                let line = type_arg_line.take().unwrap_or(self.toks[self.pos].line);
                 self.pos += 1;
                 let (receiver, mut target) = self.split_receiver(&value, &path);
                 if target.starts_with('.') {
@@ -1500,5 +1556,18 @@ mod tests {
         assert_eq!(calls, ["system"]);
         assert_eq!(out, r#"["c",0,0,[["n","a"]]]"#);
         assert_eq!(form("hs", "f x y").1, ["f"]);
+    }
+
+    #[test]
+    fn ts_call_type_arguments_are_skipped() {
+        let (out, calls) = form("ts", r#"z.string().brand<"username">()"#);
+        assert_eq!(calls, ["z.string", ".brand"]);
+        assert_eq!(out, r#"["c",1,["c",0,["n","z"],[]],[]]"#);
+        let (out, calls) = form("ts", "foo<Array<number>>(x)");
+        assert_eq!(calls, ["foo"]);
+        assert_eq!(out, r#"["c",0,0,[["n","x"]]]"#);
+        let (out, calls) = form("ts", "a < b && c > (d)");
+        assert!(calls.is_empty());
+        assert_eq!(out, r#"["m",[["n","a"],["n","b"],["n","c"],["n","d"]]]"#);
     }
 }
