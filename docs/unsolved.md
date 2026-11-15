@@ -42,6 +42,14 @@ fold is load-bearing there and dropping it cost seven rust files, so it stays an
 the disagreement is documented where it can be read: `docs/PAIRING.md`, "Match
 arms: one expression, and the fold that is load-bearing".
 
+**Landed alone, on purpose.** The change is one commit touching one file
+(`aa4c019`, `src/deep_facts/rust.rs`, 8 lines added and 2 removed), so a
+regression after it is attributable to it and not to a bundle it travelled in.
+That is checked rather than promised: `python3 tools/commit_audit.py --check`
+reads the history and refuses a pinned merge fix that touched a test, a baseline
+or a document, that grew past 40 lines, or that was measured by a commit without
+it in history (`tools/baselines/merge_fix.json` holds the pin).
+
 **Closed by** the statement-finalisation change and five coverage rows in
 `tests/rust_coverage.rs` ("match arms: block body, guard, call value and
 wildcard", plus the guard, or-pattern, binding-at and range-pattern rows from
