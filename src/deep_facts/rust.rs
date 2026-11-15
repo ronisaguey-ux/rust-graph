@@ -780,7 +780,12 @@ impl<'a> Walker<'a> {
             // A token tree is the macro's argument list; its names and nested
             // calls are values, its punctuation is not.
             "token_tree" | "token_tree_bracket" | "token_tree_brace" => Some(self.rust_tt_value(id)),
-            "if_expression" | "else_clause" | "block" => {
+            "if_expression"
+            | "else_clause"
+            | "block"
+            | "for_expression"
+            | "while_expression"
+            | "loop_expression" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 Some(match items.as_slice() {
                     [] => "0".to_string(),

@@ -36,9 +36,9 @@ const NOISE: [&str; 38] = [
 /// Python and Perl operators, and only a handful of them are Rust keywords;
 /// skipping the rest lost real names (`self.line(lambda)` read as a call with
 /// the constant 0, because `lambda` was treated as Python's lambda keyword).
-const RS_NOISE: [&str; 16] = [
-    "await", "yield", "async", "in", "as", "if", "else", "for", "return", "let", "const", "mut", "ref", "unsafe",
-    "pub", "move",
+const RS_NOISE: [&str; 18] = [
+    "await", "yield", "async", "in", "as", "if", "else", "for", "while", "loop", "return", "let", "const", "mut",
+    "ref", "unsafe", "pub", "move",
 ];
 const NAMED_ARGS_WITH_COLON: [&str; 5] = ["RB", "CR", "SWIFT", "DART", "EX"];
 
