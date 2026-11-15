@@ -35,7 +35,11 @@ const BIN: &str = env!("CARGO_BIN_EXE_rust-graph");
 
 const FIXTURE: &[(&str, &str)] = &[
     // The CST reads the call behind the type arguments; the lexer stops there.
-    ("deep_more.ts", "import { a, b } from \"./m\";\n\nconst x: number = f(1);\nexport const y = g<number>(x);\n"),
+    // A type alias is a symbol the CST opens and the one-pass lexer does not,
+    // and the file loses nothing on either side, so the CST is strictly ahead.
+    // It used to be a generic call (`g<number>(x)`); the lexer reads that as a
+    // call now, so that shape is a tie and could not pin the strict win.
+    ("deep_more.ts", "type A = { x: number };\nconst v: A = { x: 1 };\n"),
     // A type alias is a symbol the CST opens and the lexer does not, and the
     // file loses nothing on either side, so the CST is strictly ahead.
     ("deep_win.ts", "type A = { x: number };\nconst v: A = { x: 1 };\n"),
