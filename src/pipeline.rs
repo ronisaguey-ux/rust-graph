@@ -1650,7 +1650,15 @@ return verdict(Some("symbol"), detail, accepted);
                 // `function atob(data: string): string;` are read by the
                 // lexer as calls on the declared name. The line carries the
                 // introducer, so nothing was lost.
-                if !lines.is_empty() && (is_declaration_line(&lines, call.line) || is_method_declaration_line(&lines, call.line)) {
+                if !lines.is_empty()
+                    && (is_declaration_line(&lines, call.line)
+                        || is_method_declaration_line(&lines, call.line)
+                        // `error?: (e: any) => void`, `readonly x: T`,
+                        // `constructor(...): Base`: a `.d.ts` member declares
+                        // a type, and the lexer reads the property word as a
+                        // callee. The event side already excuses the line.
+                        || is_type_property_line(&lines, call.line))
+                {
                     continue;
                 }
                 // `match self.tok(i) { Some(t) => ... }`: the lexer reads the
