@@ -484,7 +484,7 @@ impl<'a> Parser<'a> {
             // CST writes nothing for any of it.
             let conditional = matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt);
             let type_body = (matches!(self.lang.tag, "TS" | "TSX")
-                && (self.type_declaration(&self.stmt) || conditional))
+                && (self.type_declaration(&self.stmt) || conditional || self.is_declare_function(&self.stmt)))
                 || (self.lang.tag == "RS" && {
                     let index = self.skip_modifiers(&self.stmt);
                     self.word_at(&self.stmt, index).is_some_and(|w| matches!(w.as_str(), "struct" | "enum" | "union"))
@@ -3009,6 +3009,29 @@ impl<'a> Parser<'a> {
             self.word_at(stmt, at).as_deref(),
             Some("type") | Some("interface") | Some("namespace") | Some("module") | Some("enum")
         ) && self.word_at(stmt, at + 1).is_some()
+    }
+
+    /// `declare function f(...): { ... }`: an ambient function declaration has
+    /// no body; its braced return type is a type body, not runtime statements.
+    fn is_declare_function(&self, stmt: &[Token]) -> bool {
+        if !stmt.last().is_some_and(|token| self.is_op(token, b":")) {
+            return false;
+        }
+        let mut has_declare = false;
+        let mut at = 0;
+        while let Some(word) = self.word_at(stmt, at) {
+            if self.lang.defs.contains(&word.as_str()) {
+                return has_declare;
+            }
+            if !MODIFIERS.contains(&word.as_str()) {
+                break;
+            }
+            if word == "declare" {
+                has_declare = true;
+            }
+            at += 1;
+        }
+        false
     }
 
     /// `declare var M: typeof globalThis extends { onmessage: any; M: infer T }
