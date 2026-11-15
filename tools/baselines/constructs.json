@@ -6,7 +6,7 @@
     },
     "ts": {
       "total": 2000,
-      "fallen": 63
+      "fallen": 55
     },
     "python": {
       "total": 568,
@@ -14,7 +14,7 @@
     },
     "rust": {
       "total": 1816,
-      "fallen": 103
+      "fallen": 99
     }
   },
   "codes": {
@@ -40,7 +40,7 @@
     "PAIR_AMBIGUOUS:1": {
       "rus": 0,
       "js": 30,
-      "ts": 19,
+      "ts": 10,
       "python": 0,
       "samples": [
         {
@@ -54,7 +54,7 @@
           "reason": "the CST lost an event: event x line 169 targets  in isNonPrintableCodePoint (paired isNonPrintableCodePoint line 164): no event on a line both readers can mean;"
         }
       ],
-      "rust": 7
+      "rust": 5
     },
     "CST_MISSING_KIND:call": {
       "rus": 0,
@@ -78,7 +78,7 @@
     "LEX_OVER_EMIT:name": {
       "rus": 0,
       "js": 7,
-      "ts": 9,
+      "ts": 10,
       "python": 4,
       "samples": [
         {
@@ -92,7 +92,7 @@
           "reason": "the CST lost an event: event x line 2362 targets  in  (paired  line 1): a name the lexer read is not in the CST's value; wanted line 2362 targets  value t:[n:Sy"
         }
       ],
-      "rust": 35
+      "rust": 33
     },
     "LEX_OVER_EMIT:call": {
       "rus": 0,
