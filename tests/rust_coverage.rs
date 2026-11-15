@@ -144,6 +144,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "a let-else whose else block diverges",
         "fn f() {\n    let Some(x) = g(1)\n    else {\n        return;\n    };\n    let y = x;\n}\n",
     ),
+    (
+        "a member chain across lines through the ? operator",
+        "fn f(client: H) {\n    client\n        .borrow()?\n        .core\n        .set(1);\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.

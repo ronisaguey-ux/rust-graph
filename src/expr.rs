@@ -1144,6 +1144,14 @@ impl Emit<'_> {
                 self.pos += 1;
                 continue;
             }
+            // `client.borrow()?` newline `.core_client`: in Rust `?` is a
+            // postfix operator between the call and its member, and the CST
+            // keeps the chain whole. Ending the value there split one chain into
+            // two merged items (46 files).
+            if self.lang.tag == "RS" && self.is_op(0, b"?") {
+                self.pos += 1;
+                continue;
+            }
             let separator = self.is_op(0, b".")
                 || self.is_op(0, b"->")
                 || self.is_op(0, b"::")
