@@ -451,3 +451,36 @@ The tree carries no trace of the experiment (no `exact_value`/`exact-first`
 symbol in `src/`, `tools/` or `docs/`), so there is nothing dormant waiting to be
 revived by accident. If it is ever retried, the rust column is the gate: a variant
 that does not hold rust at 345 is rejected on the numbers, not on taste.
+
+## The `for (; cond;)` header condition — 14 js files, not solved (2026-11-14)
+
+Minimal reproduction after delta reduction of `000713_dispose.js`:
+
+    function next() {
+      for (; r.length > 0;) try {
+      }
+    }
+
+Both readers were measured separately (`--lexer` and `--deep` on the same file):
+
+    lexer: x line 2 n:r.length | b | x line 2 c(f) | j
+    deep : b | b | x line 2 c(f) | j | j
+
+The lexer writes the header condition; the CST does not, because every `for`-header
+child after the second `;` is computed and thrown away in the `for_statement` arm of
+`deep_facts` (`let _ = self.form(child)`). With a block body the guard tolerates the
+difference; with a bare `try` statement as the body it does not — the symbol pairing
+degrades to `paired next line 1` and all four events on the header line are reported
+lost, so one file loses four times over.
+
+What is NOT understood:
+
+- Why the same missing event is accepted for `for (; c;) { … }` and rejected for
+  `for (; c;) try { … }`. The pairing ("no event on a line both readers can mean")
+  is what changes, not the reader.
+- Whether the CST should write the header condition at all. Writing it changes the
+  event list of every loop in the corpus, and the attempt to do the same in the
+  lexer (`expression_event` on the condition when the init is empty) made two
+  previously clean shapes fail — reverted, and not because of the numbers.
+
+Everything here was measured, nothing here was landed.
