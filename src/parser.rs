@@ -2767,23 +2767,7 @@ impl<'a> Parser<'a> {
             }
         }
         if let Some(equal) = self.top_level_assign(stmt) {
-            // `let x: u8 = 1;` binds one name: the annotation is a type, and read as
-        // part of the target list it put `u8` in the enclosing value where the
-        // CST writes the binding and its value only.
-        if self.lang.tag == "RS" && self.word_at(stmt, 0).as_deref() == Some("let") && stmt.len() > 2 {
-            if let Some(equal) = self.top_level_assign(stmt) {
-                let colon = stmt[1..equal].iter().position(|token| self.is_op(token, b":"));
-                let plain = !stmt[1..equal].iter().any(|token| self.is_op(token, b"<") || self.is_op(token, b"'"));
-                if let Some(colon) = colon.filter(|_| plain) {
-                    let mut typed: Vec<Token> = Vec::with_capacity(stmt.len() - colon);
-                    typed.extend_from_slice(&stmt[..1 + colon]);
-                    typed.extend_from_slice(&stmt[equal..]);
-                    self.statement(&typed);
-                    return;
-                }
-            }
-        }
-        // `cond ? a = 1 : b`: the assignment sits in a branch, so the
+            // `cond ? a = 1 : b`: the assignment sits in a branch, so the
             // statement is a conditional expression, not an assignment of the
             // branch's target. The CST writes one `x` with the condition and
             // both branches, which the lexer never had.
@@ -3161,6 +3145,17 @@ impl<'a> Parser<'a> {
     }
 
     fn assignment(&mut self, targets: &[Token], value: &[Token], line: u32, augmented: bool) {
+        // `let this: Handle<'a, JsValue> = ..`: the annotation is a type, not a
+        // target. Left in, its generic argument was a comma at depth 0 and the
+        // binding split into three names the CST never writes.
+        let trimmed: Vec<Token>;
+        let mut targets = targets;
+        if self.lang.tag == "RS" {
+            if let Some(colon) = targets.iter().position(|token| self.is_op(token, b":")) {
+                trimmed = targets[..colon].to_vec();
+                targets = &trimmed;
+            }
+        }
         let unpacked = self.unpack_targets(targets);
         let weak = augmented || targets.last().is_some_and(|token| self.is_op(token, b"]"));
         let names = match unpacked {
