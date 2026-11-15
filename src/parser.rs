@@ -988,7 +988,10 @@ impl<'a> Parser<'a> {
             let after_operator = out
                 .last()
                 .is_some_and(|last| last.kind == Kind::Op && matches!(self.raw(last), b"&&" | b"||"));
-            let boundary = after_operator || (leading && index == 0);
+            let after_keyword = out
+                .last()
+                .is_some_and(|last| last.kind == Kind::Ident && matches!(self.raw(last), b"if" | b"while"));
+            let boundary = after_operator || after_keyword || (leading && index == 0);
             if boundary && token.kind == Kind::Ident && self.raw(token) == b"let" {
                 let mut depth = 0i32;
                 let mut at = index + 1;
@@ -1186,6 +1189,15 @@ impl<'a> Parser<'a> {
 
     /// A whole expression; several top-level values become one tuple.
     fn values(&mut self, toks: &[Token]) -> String {
+        if self.lang.tag == "RS"
+            && toks.len() > 2
+            && toks.iter().any(|t| t.kind == Kind::Ident && self.raw(t) == b"let")
+        {
+            let kept = self.strip_let_patterns(toks, false);
+            if kept.len() != toks.len() {
+                return self.values(&kept);
+            }
+        }
         let (items, count) = {
             let mut count = 0;
             let items = self.with_emit(toks, |emit, out| count = emit.list(out, 0, false));
@@ -2890,7 +2902,11 @@ impl<'a> Parser<'a> {
         // A let-chain whose condition continues on the next line arrives as a
         // statement of its own: `&& let Some(old) = w.pop_front()`. Read as an
         // assignment, the callee became a call the CST never writes (15 files).
-        if self.lang.tag == "RS" && stmt.len() > 2 {
+        if self.lang.tag == "RS"
+            && stmt.len() > 2
+            && stmt[0].kind == Kind::Op
+            && matches!(self.raw(&stmt[0]), b"&&" | b"||")
+        {
             let kept = self.strip_let_patterns(stmt, false);
             if kept.len() != stmt.len() {
                 self.expression_event("x", &kept);
