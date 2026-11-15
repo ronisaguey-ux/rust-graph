@@ -2,11 +2,11 @@
   "corpora": {
     "js": {
       "total": 1854,
-      "fallen": 39
+      "fallen": 36
     },
     "ts": {
       "total": 2000,
-      "fallen": 53
+      "fallen": 41
     },
     "python": {
       "total": 568,
@@ -14,7 +14,7 @@
     },
     "rust": {
       "total": 1816,
-      "fallen": 87
+      "fallen": 55
     }
   },
   "codes": {
@@ -34,13 +34,12 @@
           "line": "32",
           "reason": "the CST lost a symbol: symbol noopfn kind 1 line 32"
         }
-      ],
-      "rust": 5
+      ]
     },
     "PAIR_AMBIGUOUS:1": {
       "rus": 0,
       "js": 19,
-      "ts": 11,
+      "ts": 8,
       "python": 0,
       "samples": [
         {
@@ -54,12 +53,12 @@
           "reason": "the CST lost an event: event x line 169 targets  in isNonPrintableCodePoint (paired isNonPrintableCodePoint line 164): no event on a line both readers can mean;"
         }
       ],
-      "rust": 8
+      "rust": 6
     },
     "LEX_OVER_EMIT:name": {
       "rus": 0,
-      "js": 3,
-      "ts": 7,
+      "js": 2,
+      "ts": 1,
       "python": 4,
       "samples": [
         {
@@ -68,16 +67,16 @@
           "reason": "the CST lost an event: event a line 27 targets [\"readable\"] in recordBatchReaderThroughDOMStream (paired recordBatchReaderThroughDOMStream line 24): a name the "
         },
         {
-          "path": "000874_expressions.js",
-          "line": "8",
-          "reason": "the CST lost an event: event a line 8 targets [\"chunks\"] in substring (paired substring line 7): a name the lexer read is not in the CST's value; wanted line 8 "
+          "path": "001046_applyDecs2311.js",
+          "line": "99",
+          "reason": "the CST lost an event: event a line 99 targets [\"ctx\"] in applyDec (paired applyDec line 38): a name the lexer read is not in the CST's value; wanted line 99 ta"
         }
       ],
-      "rust": 29
+      "rust": 20
     },
     "CST_MISSING_KIND:the": {
       "rus": 0,
-      "js": 10,
+      "js": 8,
       "ts": 1,
       "python": 0,
       "samples": [
@@ -110,12 +109,12 @@
           "reason": "the CST lost a call: call guarded line 1450 in <anonymous>@161"
         }
       ],
-      "rust": 13
+      "rust": 6
     },
     "LEX_OVER_EMIT:call": {
       "rus": 0,
       "js": 1,
-      "ts": 3,
+      "ts": 0,
       "python": 2,
       "samples": [
         {
@@ -124,12 +123,12 @@
           "reason": "the CST lost an event: event x line 49 targets  in SignStream (paired SignStream line 36): a call or constant the lexer read is not in the CST's value; wanted l"
         },
         {
-          "path": "000554_error-utils.test.ts",
-          "line": "329",
-          "reason": "the CST lost an event: event a line 329 targets [\"schema\"] in  (paired  line 1): a call or constant the lexer read is not in the CST's value; wanted line 329 ta"
+          "path": "000117__pyio.py",
+          "line": "1962",
+          "reason": "the CST lost an event: event r line 1962 targets  in newlines (paired newlines line 1961): a call or constant the lexer read is not in the CST's value; wanted l"
         }
       ],
-      "rust": 14
+      "rust": 18
     },
     "CST_DEGRADED:recovery": {
       "rus": 0,
@@ -167,45 +166,7 @@
           "reason": "the CST lost an event: event a line 40 targets [\"any\",\"any\",\"any\",\"any\"] in  (paired  line 1): the statement's target list differs (names or order); wanted line"
         }
       ],
-      "rust": 2
-    },
-    "CST_MISSING_KIND:var": {
-      "rus": 0,
-      "js": 0,
-      "ts": 0,
-      "python": 0,
-      "samples": [
-        {
-          "path": "001121_proptests.rs",
-          "line": "",
-          "reason": "the CST lost a var: var report.price = Some"
-        },
-        {
-          "path": "001275_proptests.rs",
-          "line": "",
-          "reason": "the CST lost a var: var report.price = Some"
-        }
-      ],
       "rust": 3
-    },
-    "CST_MISSING_KIND:constant": {
-      "rus": 0,
-      "js": 0,
-      "ts": 0,
-      "python": 0,
-      "samples": [
-        {
-          "path": "001129_ids_generator.rs",
-          "line": "297",
-          "reason": "the CST lost an event: event a line 297 targets [\"padding\"] in generate_trade_id (paired generate_trade_id line 264): the CST wrote the value as the constant 0;"
-        },
-        {
-          "path": "001131_mod.rs",
-          "line": "2967",
-          "reason": "the CST lost an event: event a line 2967 targets [\"reject_reason\"] in process_order (paired process_order line 2939): the CST wrote the value as the constant 0;"
-        }
-      ],
-      "rust": 11
     }
   }
 }
