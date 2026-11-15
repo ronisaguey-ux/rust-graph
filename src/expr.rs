@@ -483,6 +483,13 @@ impl Emit<'_> {
                         self.pos += 1;
                     }
                 }
+                // `3_usize.saturating_sub(n)`: a numeric literal followed by
+                // `.method` starts a receiver chain, just like a string literal.
+                Kind::Num if self.op_byte(1) == b'.' && self.word(2).is_some() => {
+                    let line = self.toks[self.pos].line;
+                    self.pos += 1;
+                    self.chain(out, "0".to_string(), String::new(), line);
+                }
                 Kind::Op => {
                     let byte = self.op_byte(0);
                     if byte == b',' || (close != 0 && byte == close) {
