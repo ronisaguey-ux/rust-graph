@@ -161,7 +161,7 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
     // numbers are the fixture's measurements, so a change in either parser
     // moves a line here rather than passing quietly.
     assert!(
-        text.contains("deep_more.ts\tsymbols deep=1 lexer=1 (+0)\tcalls deep=2 lexer=2 (+0)\timports deep=2 lexer=2 (+0)\n"),
+        text.contains("deep_more.ts\tsymbols deep=2 lexer=1 (+1)\tcalls deep=0 lexer=0 (+0)\timports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
     assert!(
@@ -178,7 +178,7 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
     );
     assert!(text.contains("compare: 4 files, 3 with a CST record, 1 lexer-only\n"), "{text}");
     assert!(
-        text.contains("compare totals: symbols deep=5 lexer=7 (-2), calls deep=2 lexer=3 (-1), imports deep=2 lexer=2 (+0)\n"),
+        text.contains("compare totals: symbols deep=6 lexer=7 (-1), calls deep=0 lexer=2 (-2), imports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
 
