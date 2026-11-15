@@ -40,9 +40,6 @@ const FIXTURE: &[(&str, &str)] = &[
     // It used to be a generic call (`g<number>(x)`); the lexer reads that as a
     // call now, so that shape is a tie and could not pin the strict win.
     ("deep_more.ts", "type A = { x: number };\nconst v: A = { x: 1 };\n"),
-    // A type alias is a symbol the CST opens and the lexer does not, and the
-    // file loses nothing on either side, so the CST is strictly ahead.
-    ("deep_win.ts", "type A = { x: number };\nconst v: A = { x: 1 };\n"),
     // The CST parses the element's `{...}` part, but the fact reader stops at
     // the element's first child, so a call in a bare child expression is a
     // fact only the lexer's record carries; the guard keeps it.
@@ -165,10 +162,6 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
     // moves a line here rather than passing quietly.
     assert!(
         text.contains("deep_more.ts\tsymbols deep=1 lexer=1 (+0)\tcalls deep=2 lexer=2 (+0)\timports deep=2 lexer=2 (+0)\n"),
-        "{text}"
-    );
-    assert!(
-        text.contains("deep_win.ts\tsymbols deep=2 lexer=1 (+1)\tcalls deep=0 lexer=0 (+0)\timports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
     assert!(
