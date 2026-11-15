@@ -266,21 +266,16 @@ impl<'a> Parser<'a> {
 
     fn next_line_start(&self, end: usize) -> Option<usize> {
         let mut at = end;
-        while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r') {
-            at += 1;
-        }
-        if self.src.get(at..at + 2) == Some(b"//") {
-            while at < self.src.len() && self.src[at] != b'\n' {
+        let mut saw_newline = false;
+        let has_block = self.lang.block_comments.iter().any(|&(open, _)| open == "/*");
+        loop {
+            while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r') {
                 at += 1;
             }
-        }
-        if self.src.get(at) != Some(&b'\n') {
-            return None;
-        }
-        at += 1;
-        loop {
-            while at < self.src.len() && matches!(self.src[at], b' ' | b'\t' | b'\r' | b'\n') {
+            if self.src.get(at) == Some(&b'\n') {
+                saw_newline = true;
                 at += 1;
+                continue;
             }
             if self.src.get(at..at + 2) == Some(b"//") {
                 while at < self.src.len() && self.src[at] != b'\n' {
@@ -288,9 +283,22 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
+            if has_block && self.src.get(at..at + 2) == Some(b"/*") {
+                at += 2;
+                while at < self.src.len() && self.src.get(at..at + 2) != Some(b"*/") {
+                    if self.src[at] == b'\n' {
+                        saw_newline = true;
+                    }
+                    at += 1;
+                }
+                if self.src.get(at..at + 2) == Some(b"*/") {
+                    at += 2;
+                }
+                continue;
+            }
             break;
         }
-        Some(at)
+        saw_newline.then_some(at)
     }
 
     /// Whether the next bytes after `end` are a member access that begins a
