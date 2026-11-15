@@ -3344,7 +3344,17 @@ impl<'a> Parser<'a> {
                     word
                 };
                 let receiver = self.top().receiver.as_str();
-                if word == "this" || (!receiver.is_empty() && word == receiver) {
+                // `this.inner` and `this[key]` are receivers: the CST names them
+                // `self.inner` / `self[...]`. A bare `this` is a binding of its
+                // own - Rust's `let this = self.project();` binds `this` - and
+                // the CST writes `this` there, so mapping it named the target
+                // after the receiver instead (000999 line 881).
+                let this_is_a_receiver = word == "this"
+                    && (self.lang.tag != "RS"
+                        || toks
+                            .get(at_token)
+                            .is_some_and(|next| self.is_op(next, b".") || self.is_op(next, b"[")));
+                if this_is_a_receiver || (!receiver.is_empty() && word == receiver) {
                     path.push_str("self");
                 } else {
                     path.push_str(&word);
