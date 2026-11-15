@@ -1970,7 +1970,7 @@ fn uncovered(
             if cfg!(feature = "strict-pair") {
                 return None;
             }
-            pick(found.as_slice(), &used, bucket.iter(), |row| covers(&row.1, &want.1, lines).is_ok())
+            pick(found.as_slice(), &used, bucket.iter(), |row| covers(&row.1, &want.1, lines, &lexer.tag).is_ok())
         });
         match paired_at {
             Some(at) => {
@@ -2002,13 +2002,13 @@ fn uncovered(
                     .flat_map(|line| by_line.get(&(b'a', *line)).map(|rows| rows.as_slice()).unwrap_or(&[]))
                     .copied()
                     .collect();
-                pick(found.as_slice(), &used, targets.iter(), |row| a_row_covers(&row.1, &want.1, lines))
+                pick(found.as_slice(), &used, targets.iter(), |row| a_row_covers(&row.1, &want.1, lines, &lexer.tag))
             })
             .flatten()
-            .or_else(|| pick(found.as_slice(), &used, near.iter(), |row| covers(&row.1, &want.1, lines).is_ok()))
+            .or_else(|| pick(found.as_slice(), &used, near.iter(), |row| covers(&row.1, &want.1, lines, &lexer.tag).is_ok()))
             .or_else(|| {
                 let same_tag = by_tag.get(&want.0).map(|rows| rows.as_slice()).unwrap_or(&[]);
-                pick(found.as_slice(), &used, same_tag.iter(), |row| covers(&row.1, &want.1, lines).is_ok())
+                pick(found.as_slice(), &used, same_tag.iter(), |row| covers(&row.1, &want.1, lines, &lexer.tag).is_ok())
             });
         match exact {
             Some(at) => used[at] = true,
@@ -2033,13 +2033,13 @@ fn uncovered(
         // statement is still in the CST's record, with the real name and the
         // same value, so the fact is there and only the invented binder is set
         // aside.
-        if annotation_targets(lexer, &want, &found, lines) || type_as_target(lines, &want, &found) {
+        if annotation_targets(lexer, &want, &found, lines) || type_as_target(lines, &want, &found, &lexer.tag) {
             accepted.annotation_targets += 1;
             // Both checks require a covering row before they say yes, so the
             // statement is in the record either way; the row is retired when it
             // is still there so a second invented binder cannot claim it.
             if let Some(at) = found.iter().position(|row| {
-                row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 && covers_value(&row.1, &want.1, lines).is_ok()
+                row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1 && covers_value(&row.1, &want.1, lines, &lexer.tag).is_ok()
             }) {
                 found.swap_remove(at);
             }
@@ -2054,7 +2054,7 @@ fn uncovered(
             .or_else(|| found.iter().find(|row| row.0 == want.0 && (row.1.line as i64 - want.1.line as i64).abs() <= 1));
         let (other, why) = match near {
             Some(row) => {
-                let miss = match covers(&row.1, &want.1, lines) {
+                let miss = match covers(&row.1, &want.1, lines, &lexer.tag) {
                     Ok(()) => Miss::Line,
                     Err(miss) => miss,
                 };
@@ -2841,7 +2841,7 @@ fn wide_pattern(src: &Lines<'_>, line: u32, name: &str) -> bool {
 /// invented, and it is set aside here rather than forcing a fallback on every
 /// Go file that declares a typed variable.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn type_as_target(src: &Lines<'_>, want: &(u8, Shape), found: &[(u8, Shape)]) -> bool {
+fn type_as_target(src: &Lines<'_>, want: &(u8, Shape), found: &[(u8, Shape)], tag: &str) -> bool {
     if want.0 != b'a' || src.is_empty() {
         return false;
     }
@@ -2856,7 +2856,7 @@ fn type_as_target(src: &Lines<'_>, want: &(u8, Shape), found: &[(u8, Shape)]) ->
         if row.0 != b'a' || (row.1.line as i64 - want.1.line as i64).abs() > 1 {
             return false;
         }
-        if row.1.targets == want.1.targets || covers_value(&row.1, &want.1, src).is_err() {
+        if row.1.targets == want.1.targets || covers_value(&row.1, &want.1, src, tag).is_err() {
             return false;
         }
         let deep_names = name_list(&row.1.targets);
@@ -2912,7 +2912,7 @@ fn annotation_targets(lexer: &Facts, want: &(u8, Shape), found: &[(u8, Shape)], 
         row.0 == b'a'
             && (row.1.line as i64 - want.1.line as i64).abs() <= 1
             && row.1.targets != want.1.targets
-            && (covers_value(&row.1, &want.1, src).is_ok() || row.1.value == want.1.value)
+            && (covers_value(&row.1, &want.1, src, &lexer.tag).is_ok() || row.1.value == want.1.value)
     })
 }
 
@@ -2999,7 +2999,7 @@ fn same_targets(deep: &str, lexer: &str) -> bool {
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn covers(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
+fn covers(deep: &Shape, lexer: &Shape, src: &str, tag: &str) -> Result<(), Miss> {
     // A lexer statement and the CST node it sits on can disagree by a line (a
     // signature stamped where it ends against where it starts), so an event is
     // paired near its line, never across the file: a duplicate target on
@@ -3010,11 +3010,11 @@ fn covers(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
     if !same_targets(&deep.targets, &lexer.targets) {
         return Err(Miss::Targets);
     }
-    covers_value(deep, lexer, src)
+    covers_value(deep, lexer, src, tag)
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
+fn covers_value(deep: &Shape, lexer: &Shape, src: &str, tag: &str) -> Result<(), Miss> {
     if lexer.value == "0" {
         return Ok(());
     }
@@ -3057,6 +3057,16 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
             // RG_GUARD_DEBUG=1 prints the pair, not a summary: reading a length
             // and guessing cost more than reading the values.
             eprintln!("MISS line {} deep=[{}] lex=[{}] missing={:?}", lexer.line, deep.value, lexer.value, missing);
+        }
+        if !missing.is_empty() {
+            // A reserved word is not a name. The one-pass reader has no keyword
+            // table in value position, so `let x = loop { … }` carries `n:loop`
+            // and `let y = match v { … }` carries `n:match`; the CST names
+            // neither, and a word no variable may take is not a fact lost.
+            missing.retain(|name| {
+                let bare = name.strip_prefix("n:").unwrap_or(name);
+                !is_keyword_callee(tag, bare)
+            });
         }
         // The statement, not the line: `raise TypeError(\n  'bad' %\n  (x,)\n)
         // from None` puts the keyword three lines below the event, and a
@@ -3111,8 +3121,8 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str) -> Result<(), Miss> {
 /// iterable in its value, while the lexer writes both as one merge; the row
 /// still carries every name the lexer read, only in two fields.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn a_row_covers(row: &Shape, want: &Shape, src: &str) -> bool {
-    if covers_value(row, want, src).is_ok() {
+fn a_row_covers(row: &Shape, want: &Shape, src: &str, tag: &str) -> bool {
+    if covers_value(row, want, src, tag).is_ok() {
         return true;
     }
     let mut pool = Vec::new();
