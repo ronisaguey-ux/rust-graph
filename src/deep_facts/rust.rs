@@ -168,15 +168,6 @@ impl<'a> Walker<'a> {
                 self.rust_import(id);
                 true
             }
-            // `extern "C" { … }` / `unsafe extern "C" { … }`: the lexer files
-            // the ABI block header as `m:[n:extern,0]`; the item was never
-            // read here, so the header line carried no event at all. The
-            // declarations inside are separate items and are still walked.
-            "foreign_mod_item" => {
-                let line = self.line(id);
-                self.event(&format!("[\"x\",{line},[\"m\",[[\"n\",\"extern\"],0]]]"));
-                true
-            }
             // `extern crate core;` / `extern crate self::macro_defs;`: the
             // lexer writes the whole declaration as one merge; the CST read
             // it as a bare import and kept only the last path segment.
