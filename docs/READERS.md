@@ -92,7 +92,7 @@ Known gaps (0):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (14):
+Covered (15):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
@@ -106,6 +106,7 @@ Covered (14):
 - a method in an impl with a return type and a doc comment
 - function types: dyn Fn in a parameter and a Box<dyn Fn>
 - function types: impl Fn as a parameter bound
+- a pub(crate) field: the restriction is not a value
 - an extern block with C declarations
 - let declarations: mut, annotated and tuple-pattern bindings
 
