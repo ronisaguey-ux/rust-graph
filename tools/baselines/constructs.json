@@ -2,11 +2,11 @@
   "corpora": {
     "js": {
       "total": 1854,
-      "fallen": 66
+      "fallen": 39
     },
     "ts": {
       "total": 2000,
-      "fallen": 55
+      "fallen": 53
     },
     "python": {
       "total": 568,
@@ -14,7 +14,7 @@
     },
     "rust": {
       "total": 1816,
-      "fallen": 91
+      "fallen": 87
     }
   },
   "codes": {
@@ -39,8 +39,8 @@
     },
     "PAIR_AMBIGUOUS:1": {
       "rus": 0,
-      "js": 29,
-      "ts": 10,
+      "js": 19,
+      "ts": 11,
       "python": 0,
       "samples": [
         {
@@ -56,29 +56,10 @@
       ],
       "rust": 8
     },
-    "CST_MISSING_KIND:call": {
-      "rus": 0,
-      "js": 20,
-      "ts": 8,
-      "python": 1,
-      "samples": [
-        {
-          "path": "000179_index.spec.js",
-          "line": "6",
-          "reason": "the CST lost a call: call describe line 6 in "
-        },
-        {
-          "path": "000288_test.js",
-          "line": "7",
-          "reason": "the CST lost a call: call describe line 7 in "
-        }
-      ],
-      "rust": 13
-    },
     "LEX_OVER_EMIT:name": {
       "rus": 0,
-      "js": 7,
-      "ts": 10,
+      "js": 3,
+      "ts": 7,
       "python": 4,
       "samples": [
         {
@@ -87,12 +68,49 @@
           "reason": "the CST lost an event: event a line 27 targets [\"readable\"] in recordBatchReaderThroughDOMStream (paired recordBatchReaderThroughDOMStream line 24): a name the "
         },
         {
-          "path": "000494_index.js",
-          "line": "2362",
-          "reason": "the CST lost an event: event x line 2362 targets  in  (paired  line 1): a name the lexer read is not in the CST's value; wanted line 2362 targets  value t:[n:Sy"
+          "path": "000874_expressions.js",
+          "line": "8",
+          "reason": "the CST lost an event: event a line 8 targets [\"chunks\"] in substring (paired substring line 7): a name the lexer read is not in the CST's value; wanted line 8 "
         }
       ],
-      "rust": 33
+      "rust": 29
+    },
+    "CST_MISSING_KIND:the": {
+      "rus": 0,
+      "js": 10,
+      "ts": 1,
+      "python": 0,
+      "samples": [
+        {
+          "path": "000386_argparse.js",
+          "line": "",
+          "reason": "the CST lost an import: import ./lib/textwrap name  alias HelpFormatter"
+        },
+        {
+          "path": "000876_index.js",
+          "line": "",
+          "reason": "the CST lost an import: import ./CachedInputFileSystem name  alias getCachedFileSystem"
+        }
+      ]
+    },
+    "CST_MISSING_KIND:call": {
+      "rus": 0,
+      "js": 3,
+      "ts": 8,
+      "python": 1,
+      "samples": [
+        {
+          "path": "000429_UserPrompt.js",
+          "line": "119",
+          "reason": "the CST lost a call: call throwIfDisposed line 119 in <anonymous>@46"
+        },
+        {
+          "path": "000605_Page.js",
+          "line": "1450",
+          "reason": "the CST lost a call: call guarded line 1450 in <anonymous>@161"
+        }
+      ],
+      "rust": 13
     },
     "LEX_OVER_EMIT:call": {
       "rus": 0,
@@ -112,24 +130,6 @@
         }
       ],
       "rust": 14
-    },
-    "CST_MISSING_KIND:the": {
-      "rus": 0,
-      "js": 6,
-      "ts": 1,
-      "python": 0,
-      "samples": [
-        {
-          "path": "000654_browserBackend.js",
-          "line": "",
-          "reason": "the CST lost an import: import playwright-core/lib/coreBundle name  alias "
-        },
-        {
-          "path": "001196_browserBackend.js",
-          "line": "",
-          "reason": "the CST lost an import: import playwright-core/lib/coreBundle name  alias "
-        }
-      ]
     },
     "CST_DEGRADED:recovery": {
       "rus": 0,
@@ -163,8 +163,8 @@
         },
         {
           "path": "001670_matcher.ts",
-          "line": "12",
-          "reason": "the CST lost an event: event a line 12 targets [\"any\",\"any\",\"any\"] in  (paired  line 1): the statement's target list differs (names or order); wanted line 12 ta"
+          "line": "40",
+          "reason": "the CST lost an event: event a line 40 targets [\"any\",\"any\",\"any\",\"any\"] in  (paired  line 1): the statement's target list differs (names or order); wanted line"
         }
       ],
       "rust": 2
