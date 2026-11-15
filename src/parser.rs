@@ -2540,6 +2540,15 @@ impl<'a> Parser<'a> {
         if self.head_word(toks).is_some_and(|word| CONTROL.contains(&word.as_str())) {
             return None;
         }
+        // In JS/TS, a keyword-less function header before `{` is only a method
+        // definition: never a dotted call (`t.advance(2)`), and nothing other
+        // than a TS `: ReturnType` can sit between `)` and `{`.
+        if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
+            && name_at > 0
+            && self.is_op(&toks[name_at - 1], b".")
+        {
+            return None;
+        }
         let mut chain_start = name_at;
         while chain_start >= 2
             && toks[chain_start - 1].kind == Kind::Op
@@ -2550,6 +2559,15 @@ impl<'a> Parser<'a> {
         }
         let (_, owner, _) = self.name_chain(toks, chain_start);
         let (inner, close) = self.group_at(toks, open)?;
+        if matches!(self.lang.tag, "JS" | "JSX") && close + 1 != toks.len() {
+            return None;
+        }
+        if matches!(self.lang.tag, "TS" | "TSX")
+            && close + 1 < toks.len()
+            && !self.is_op(&toks[close + 1], b":")
+        {
+            return None;
+        }
         let params = self.params(&toks[inner..close]);
         Some(Head { name, owner, params, ..Head::default() })
     }
