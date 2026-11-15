@@ -643,7 +643,12 @@ impl<'a> Parser<'a> {
         }
         if last.kind == Kind::Op {
             let raw = self.raw(&last);
-            if raw != b")" && raw != b">" && raw != b"]" && raw != b"}" {
+            if raw != b")"
+                && raw != b">"
+                && !(self.lang.tag == "RS" && raw == b">>")
+                && raw != b"]"
+                && raw != b"}"
+            {
                 return false;
             }
         }
