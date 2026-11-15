@@ -1287,6 +1287,32 @@ impl<'a> Parser<'a> {
         None
     }
 
+    /// The slices between the top-level commas of a token run: `a, f(b, c)`
+    /// is two parts, `[a, b]` and `f(x, y)` are one each.
+    fn top_commas<'t>(&self, toks: &'t [Token]) -> Vec<&'t [Token]> {
+        let mut parts = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0;
+        for (index, token) in toks.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" | b"{" | b"<" => depth += 1,
+                b")" | b"]" | b"}" | b">" => depth -= 1,
+                b"," if depth == 0 => {
+                    parts.push(&toks[start..index]);
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        if start < toks.len() {
+            parts.push(&toks[start..]);
+        }
+        parts
+    }
+
     /// A definition whose body is the rest of its statement.
     fn inline_function(&mut self, head: Head, stmt: &[Token]) {
         let body = head.body.unwrap_or(stmt.len());
@@ -2696,6 +2722,21 @@ impl<'a> Parser<'a> {
 
     /// `repo = new Repo()` and `repo = Repo()` say what `repo.find` means.
     fn note_class(&mut self, targets: &[Token], value: &[Token]) {
+        // `recv, send = RecvChannel(cid), SendChannel(cid)`: the class belongs
+        // to the value in the same position. Read as one tuple, the last
+        // target took the first value's class — `send = RecvChannel` — which
+        // is a fact the source does not state. A target list longer than the
+        // value list states no per-name class at all, so it names none.
+        let target_parts = self.top_commas(targets);
+        if target_parts.len() > 1 {
+            let value_parts = self.top_commas(value);
+            if target_parts.len() == value_parts.len() {
+                for (name, expr) in target_parts.iter().zip(value_parts.iter()) {
+                    self.note_class(name, expr);
+                }
+            }
+            return;
+        }
         let mut at = 0;
         let explicit = self.word_at(value, 0).as_deref() == Some("new");
         if explicit {

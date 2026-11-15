@@ -747,7 +747,10 @@ impl<'a> Walker<'a> {
                             continue;
                         }
                         let value = self.form(part);
-                        if value != "0" {
+                        // `some_b: 'B'`: a string annotation is a constant, and
+                        // the lexer writes the slot the value reader gives it.
+                        // Dropping it left the merge one item short.
+                        if value != "0" || self.kind(part) == "string" {
                             parts.push(value);
                         }
                     }
@@ -1276,8 +1279,26 @@ impl<'a> Walker<'a> {
         text.push_str(&format!("],{expr},{}]", u8::from(weak)));
         self.event(&text);
         if let Some(class) = self.constructed(value) {
-            for target in targets {
-                self.facts.vars.push((target, class.clone()));
+            for target in &targets {
+                self.facts.vars.push((target.clone(), class.clone()));
+            }
+        } else {
+            // `s, t = Counter(a), Counter(b)`: one value per target, so the
+            // class a target holds is its own value's. Read as a tuple the
+            // whole value constructs nothing and every binding was dropped,
+            // while the lexer names the last one.
+            let items: Vec<u32> = match self.kind(value) {
+                "expression_list" | "tuple" | "tuple_expression" | "pattern_list" => {
+                    self.children(value).into_iter().filter(|&child| !self.is_layout(child)).collect()
+                }
+                _ => Vec::new(),
+            };
+            if items.len() == targets.len() {
+                for (target, item) in targets.iter().zip(items) {
+                    if let Some(class) = self.constructed(item) {
+                        self.facts.vars.push((target.clone(), class));
+                    }
+                }
             }
         }
     }
