@@ -91,11 +91,13 @@ const COVERAGE: &[(&str, &str)] = &[
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[(
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[
+    (
     "f-string: an escaped brace pair reads the literal text as a name",
     "def f(count):\n    joined = f\"{'{'}literal{'}':>{count}}\"\n    return joined\n",
     "the CST writes the whole f-string as one constant; the lexer reads the escaped braces as a nested literal and `literal` as a name (wanted m:[0,n:literal,m:[m:[0,m:[n:count]]]] against m:[0,0,n:count])",
-)];
+    ),
+];
 
 #[test]
 fn every_claimed_python_construct_reads_the_same_on_both_paths() {

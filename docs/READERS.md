@@ -98,9 +98,9 @@ Covered (9):
 - match statement: subject and literal, sequence and mapping arms
 - match arm with a guard and a class pattern
 
-Known gaps (0):
+Known gaps (1):
 
-- none: every construct the table claims reads the same on both paths
+- f-string: an escaped brace pair reads the literal text as a name
 
 ## Rust — `tests/rust_coverage.rs`
 
