@@ -834,8 +834,8 @@ impl<'a> Walker<'a> {
     /// `require('x')` is an import, not a call: the lexer path agrees, and a
     /// resolver treats the module string, not a callee named `require`.
     pub(crate) fn require_module(&self, root: u32) -> Option<String> {
-        let mut stack = vec![(root, false)];
-        while let Some((node, in_args)) = stack.pop() {
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
             let kind = self.kind(node);
             // A `require` nested in an argument list still counts: the one-pass
             // lexer records `_interopRequireWildcard(require("react"))` as an
@@ -843,16 +843,17 @@ impl<'a> Walker<'a> {
             if let Some(module) = self.direct_require_module(node) {
                 return Some(module);
             }
-            let next_in_args = in_args || kind == "arguments";
+            // Do not cross into nested scopes even inside an argument list:
+            // `memoize(() => { const fs = require("graceful-fs"); })` is a
+            // call to `memoize`, not a top-level import of `graceful-fs`.
             for child in self.children(node).into_iter().rev() {
                 let ck = self.kind(child);
-                if !next_in_args
-                    && (matches!(ck, "statement_block" | "block" | "class_body")
-                        || self.kinds.definitions.iter().any(|def| def.kind == ck))
+                if matches!(ck, "statement_block" | "block" | "class_body")
+                    || self.kinds.definitions.iter().any(|def| def.kind == ck)
                 {
                     continue;
                 }
-                stack.push((child, next_in_args));
+                stack.push(child);
             }
         }
         None
@@ -2288,6 +2289,13 @@ impl<'a> Walker<'a> {
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment"
             | "arrow_function" | "function_expression" | "generator_function" => "0".to_string(),
+            // `class Action extends _AttributeHolder(Function) {}`: the body is
+            // deferred, but the `extends` heritage expression is evaluated when
+            // the class expression is evaluated.
+            "class" => match self.children(id).into_iter().find(|&child| self.kind(child) == "class_heritage") {
+                Some(heritage) => self.form(heritage),
+                None => "0".to_string(),
+            },
             // A region the grammar could not name. The tokens are still there —
             // recovery keeps every byte — so the values inside it are read like
             // any other: `("prefix " f"{call(x)}")` is an ERROR today because
