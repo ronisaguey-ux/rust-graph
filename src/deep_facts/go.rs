@@ -715,7 +715,9 @@ impl<'a> Walker<'a> {
         if let Some(module) = self.require_module(child) {
             let line = self.line(id);
             self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
-            return;
+            if self.direct_require_module(child).is_some() {
+                return;
+            }
         }
         match self.kind(child) {
             "assignment" | "assignment_expression" => self.assignment(child, false),
@@ -808,6 +810,25 @@ impl<'a> Walker<'a> {
         self.event(&format!("[\"r\",{line},{value}]"));
     }
 
+    /// Extracts the module string if `node` itself is a `require('...')` call.
+    pub(crate) fn direct_require_module(&self, node: u32) -> Option<String> {
+        let kind = self.kind(node);
+        if matches!(kind, "call_expression" | "call" | "import_require_clause") {
+            let children = self.children(node);
+            if let Some(&callee) = children.first() {
+                if self.kind(callee) == "identifier" && self.text_string(callee) == "require" {
+                    if let Some(&args) = children.iter().find(|&&c| self.kind(c) == "arguments") {
+                        let inner: Vec<u32> = self.children(args).into_iter().filter(|&c| !self.is_layout(c)).collect();
+                        if inner.len() == 1 && self.kind(inner[0]) == "string" {
+                            return Some(self.string_value(inner[0]));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// `const x = ...;` without an initializer is an expression, as the lexer
     /// has it; with one it is an assignment.
     /// `require('x')` is an import, not a call: the lexer path agrees, and a
@@ -819,18 +840,8 @@ impl<'a> Walker<'a> {
             // A `require` nested in an argument list still counts: the one-pass
             // lexer records `_interopRequireWildcard(require("react"))` as an
             // import of `react`, so refusing the nested form cost 276 JS files.
-            if matches!(kind, "call_expression" | "call" | "import_require_clause") {
-                let children = self.children(node);
-                if let Some(&callee) = children.first() {
-                    if self.kind(callee) == "identifier" && self.text_string(callee) == "require" {
-                        if let Some(&args) = children.iter().find(|&&c| self.kind(c) == "arguments") {
-                            let inner: Vec<u32> = self.children(args).into_iter().filter(|&c| !self.is_layout(c)).collect();
-                            if inner.len() == 1 && self.kind(inner[0]) == "string" {
-                                return Some(self.string_value(inner[0]));
-                            }
-                        }
-                    }
-                }
+            if let Some(module) = self.direct_require_module(node) {
+                return Some(module);
             }
             let next_in_args = in_args || kind == "arguments";
             for child in self.children(node).into_iter().rev() {
