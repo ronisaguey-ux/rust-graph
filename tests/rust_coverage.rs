@@ -101,6 +101,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn h(f: impl Fn(i32) -> i32) -> i32 { f(1) }\n",
     ),
     (
+        "a pub(crate) field: the restriction is not a value",
+        "pub struct Counter {\n    pub(crate) meter: u64,\n    pub(super) scale: u8,\n}\n",
+    ),
+    (
         "an extern block with C declarations",
         "extern \"C\" {\n    fn ioctl(fd: i32, request: u64, ...) -> i32;\n    fn close(fd: i32) -> i32;\n}\n",
     ),

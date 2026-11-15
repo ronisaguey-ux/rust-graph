@@ -243,6 +243,20 @@ impl Emit<'_> {
         let mut item_start = start;
         while let Some(token) = self.tok(0) {
             let kind = token.kind;
+            // `pub(crate) meter: u64` — a visibility restriction is not a value:
+            // the CST writes the field's name and type only, and `crate` in the
+            // value lost every pub(crate) field line.
+            if self.lang.tag == "RS" && kind == Kind::Ident && self.word(0).as_deref() == Some("pub") && self.op_byte(1) == b'(' {
+                let mut at = 2;
+                while let Some(next) = self.tok(at) {
+                    if self.raw_is(next, b")") {
+                        break;
+                    }
+                    at += 1;
+                }
+                self.pos += at + 1;
+                continue;
+            }
             // `"abc" "def"`: Python and friends concatenate adjacent string
             // literals into one value. Counting two constants against the CST's
             // one node is a difference in how the text is spelled, not a fact.
