@@ -1745,7 +1745,17 @@ impl<'a> Parser<'a> {
         let Some(at) = stmt.iter().position(|token| token.kind == Kind::Ident && self.raw(token) == b"require") else {
             return false;
         };
-        let Some(module) = stmt[at..].iter().take(3).find(|token| token.kind == Kind::Str).map(|token| self.string_value(token)) else {
+        // `require('../moment')` is a call with one string argument. Taking the
+        // first string in the next three tokens read `require === 'function'`
+        // as an import of the module "function" — the module must be the
+        // argument, not a comparison operand.
+        let module = match (stmt.get(at + 1), stmt.get(at + 2)) {
+            (Some(open), Some(argument)) if self.is_op(open, b"(") && argument.kind == Kind::Str => {
+                Some(self.string_value(argument))
+            }
+            _ => None,
+        };
+        let Some(module) = module else {
             return false;
         };
         let Some(equal) = self.top_level_assign(stmt) else {

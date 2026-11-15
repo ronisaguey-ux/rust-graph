@@ -53,6 +53,10 @@ fn deep_facts(source: &str) -> Facts {
 /// One row per claimed construct.
 const COVERAGE: &[(&str, &str)] = &[
     (
+        "require in a comparison is not an import",
+        "var a = typeof require === 'function';\n",
+    ),
+    (
         "block statement",
         "function f(x) {\n  let y = x;\n  return y;\n}\n",
     ),
