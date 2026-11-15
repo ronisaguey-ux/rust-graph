@@ -492,6 +492,33 @@ impl Emit<'_> {
                 }
                 Kind::Op => {
                     let byte = self.op_byte(0);
+                    // `drain(..label)` / `[..n]`: a prefix range with no start is
+                    // one constant to the CST, and its bound names a place rather
+                    // than a value the call carries. Only a range that opens an
+                    // item is rewritten — `0..n` keeps its shape, where the CST
+                    // writes the start and the bound as separate items.
+                    let opens_item = self.pos == 0
+                        || matches!(self.op_byte_at(self.pos - 1), b'(' | b'[' | b'{' | b',');
+                    // A brace group is a struct literal, where `..base` is an
+                    // update that names a value the CST keeps; only a call's or a
+                    // subscript's prefix range is the constant.
+                    if close != b'}' && opens_item && count == 0 && byte == b'.' && self.is_op(1, b".") {
+                        out.truncate(at);
+                        out.push('0');
+                        count += 1;
+                        self.pos += 2;
+                        if self.is_op(0, b"=") {
+                            self.pos += 1;
+                        }
+                        while let Some(next) = self.tok(0) {
+                            if matches!(next.kind, Kind::Ident | Kind::Num) {
+                                self.pos += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
                     if byte == b',' || (close != 0 && byte == close) {
                         out.truncate(at);
                         break;
@@ -1327,6 +1354,21 @@ impl Emit<'_> {
                     self.pos += 2;
                     let mut index = String::new();
                     self.list(&mut index, b']', false);
+                    continue;
+                }
+                // `want.1.targets`: a tuple field's name is a number, and the
+                // chain keeps it — the CST writes `want.1.targets` while the
+                // lexer ended the name at `want` and left `1` as a constant of
+                // its own (ten corpus files and this repository's own guard).
+                if self.is_op(0, b".")
+                    && self.tok(1).is_some_and(|token| token.kind == Kind::Num)
+                    && (self.is_op(2, b".") || self.is_op(2, b"::"))
+                {
+                    let token = &self.toks[self.pos + 1];
+                    let number = &self.src[token.start as usize..token.end as usize];
+                    self.pos += 2;
+                    path.push('.');
+                    path.push_str(std::str::from_utf8(number).unwrap_or("0"));
                     continue;
                 }
                 if let Some(name) = self.word(1) {
