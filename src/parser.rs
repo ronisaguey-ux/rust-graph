@@ -843,6 +843,59 @@ impl<'a> Parser<'a> {
         None
     }
 
+    /// Rust `let` patterns inside a condition: `if let Some(v) = x` and the
+    /// let-chain `if a && let Some(v) = f() { … }`. Everything between a `let`
+    /// and its binding `=` is a pattern, and a pattern is not a value, so the
+    /// constructors inside it (`Some(`, `Tok::Open(`) were read as calls the CST
+    /// never writes. `leading` allows the strip to start at the first token,
+    /// which is right for a condition slice and wrong for a statement (where a
+    /// leading `let` is a declaration that has its own path).
+    fn strip_let_patterns(&self, toks: &[Token], leading: bool) -> Vec<Token> {
+        let mut out: Vec<Token> = Vec::with_capacity(toks.len());
+        let mut index = 0;
+        while index < toks.len() {
+            let token = &toks[index];
+            let after_operator = out
+                .last()
+                .is_some_and(|last| last.kind == Kind::Op && matches!(self.raw(last), b"&&" | b"||"));
+            let boundary = after_operator || (leading && index == 0);
+            if boundary && token.kind == Kind::Ident && self.raw(token) == b"let" {
+                let mut depth = 0i32;
+                let mut at = index + 1;
+                let mut equal = None;
+                while at < toks.len() {
+                    let next = &toks[at];
+                    if next.kind == Kind::Op {
+                        match self.raw(next) {
+                            b"(" | b"[" | b"{" => depth += 1,
+                            b")" | b"]" | b"}" => depth -= 1,
+                            b"=" if depth == 0 => {
+                                equal = Some(at);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    at += 1;
+                }
+                match equal {
+                    Some(at) => {
+                        index = at + 1;
+                        continue;
+                    }
+                    None => {
+                        out.push(token.clone());
+                        index += 1;
+                        continue;
+                    }
+                }
+            }
+            out.push(token.clone());
+            index += 1;
+        }
+        out
+    }
+
     fn control_condition_before(&mut self, stmt: &[Token]) {
         // Python's `match subject:` is a switch and `case pattern:` is a label:
         // neither writes a value the CST records, and the guard read both
@@ -851,18 +904,20 @@ impl<'a> Parser<'a> {
             return;
         }
         if self.binding_index(stmt).is_none() && stmt.len() > 1 {
-            let mut part = &stmt[1..];
             // `if let (Some(d), Action::Reduce(p)) = (def, act)` binds a pattern
-            // and calls nothing: the pattern's constructors were read as calls
-            // the CST never writes (88 corpus files). The header's expression is
-            // the value to the right of `=`.
-            if self.lang.tag == "RS" && self.word_at(part, 0).as_deref() == Some("let") {
-                match self.top_level_assign(part) {
-                    Some(equal) => part = &part[equal + 1..],
-                    None => return,
+            // and calls nothing, and so does a let-chain: `if a && let Some(v) =
+            // f() { … }`. Everything between a `let` and its binding `=` is a
+            // pattern — read whole, its constructors became calls the CST never
+            // writes (the largest rust cluster in the shape table, and the 15
+            // files whose condition continues on a `&&` line).
+            if self.lang.tag == "RS" {
+                let kept = self.strip_let_patterns(&stmt[1..], true);
+                if kept.len() != stmt.len() - 1 {
+                    self.expression_event("x", &kept);
+                    return;
                 }
             }
-            self.expression_event("x", part);
+            self.expression_event("x", &stmt[1..]);
         }
     }
 
@@ -2487,6 +2542,16 @@ impl<'a> Parser<'a> {
             return;
         }
         let line = first.line;
+        // A let-chain whose condition continues on the next line arrives as a
+        // statement of its own: `&& let Some(old) = w.pop_front()`. Read as an
+        // assignment, the callee became a call the CST never writes (15 files).
+        if self.lang.tag == "RS" && stmt.len() > 2 {
+            let kept = self.strip_let_patterns(stmt, false);
+            if kept.len() != stmt.len() {
+                self.expression_event("x", &kept);
+                return;
+            }
+        }
         // `for (var t = arguments.length, o = new Array(t), i = 1; i < t; i++) …`:
         // a loop header declares its binding even when the body is a bare
         // statement on the same line. Read as an assignment the whole header

@@ -1815,6 +1815,15 @@ impl<'a> Walker<'a> {
                 }
                 self.merge_form(&items)
             }
+            // `f() && let Some(x) = g()`: a let-chain operand of a binary
+            // expression. The pattern is a binding, not a value, so the node
+            // renders as the expression to the right of `=` — reading the node
+            // as an unmapped child rendered the whole operand as the constant 0
+            // and lost the call inside it.
+            "let_condition" | "let_chain" => match self.rust_let_value(id) {
+                Some(value) => self.form(value),
+                None => "0".to_string(),
+            },
             "not_operator" | "unary_operator" | "unary_expression" | "await" | "await_expression" | "yield" | "yield_expression"
             | "typeof" | "void" | "non_null_expression" | "as_expression" | "type_assertion" | "delete_expression" => {
                 match self.expression_child(id) {
