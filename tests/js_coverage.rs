@@ -192,6 +192,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "c-style for with an inline body",
         "function f(xs) {\n  for (var i = 0; i < 2; i++) console.log(i);\n}\n",
     ),
+    (
+        "computed method key in a class body",
+        "class C {\n  [Symbol.iterator]() { return this; }\n}\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
@@ -204,11 +208,6 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
         "arrow returning a class expression",
         "const r = x => class { m() {} };\n",
         "the lexer writes the value as the one-item merge `m:[0]`; the CST writes the constant 0",
-    ),
-    (
-        "computed method key in a class body",
-        "class C {\n  [Symbol.iterator]() { return this; }\n}\n",
-        "the lexer writes the computed key as an event value `t:[n:Symbol.iterator]`; the CST writes no event for it",
     ),
     (
         "declare field without an initialiser",

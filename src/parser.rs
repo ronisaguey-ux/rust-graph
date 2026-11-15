@@ -2656,6 +2656,7 @@ impl<'a> Parser<'a> {
             }
             return Some(Head { name, params, ..Head::default() });
         }
+        let js_class = matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX") && self.top().kind == FrameKind::Class;
         let mut depth = 0;
         let mut groups: Vec<usize> = Vec::new();
         for (index, token) in toks.iter().enumerate() {
@@ -2670,6 +2671,8 @@ impl<'a> Parser<'a> {
                     depth += 1;
                 }
                 b")" => depth -= 1,
+                b"[" if js_class => depth += 1,
+                b"]" if js_class => depth -= 1,
                 b":" if depth == 0 && !groups.is_empty() => break,
                 _ => {}
             }
@@ -2678,38 +2681,51 @@ impl<'a> Parser<'a> {
         // at depth zero, and taking it as the parameter list named the function
         // `pub` — or, once `pub` was refused, nothing at all. The head's group
         // is the first one that has a usable name in front of it.
+        // In a JS/TS class body, `*[Symbol.iterator]()` has `]` before `(`.
         let open = *groups.iter().find(|&&open| {
             open > 0
-                && self
+                && (self
                     .word_at(toks, open - 1)
                     .is_some_and(|name| !CONTROL.contains(&name.as_str()) && !NOT_A_NAME.contains(&name.as_str()))
+                    || (js_class && self.is_op(&toks[open - 1], b"]")))
         })?;
         let name_at = open - 1;
-        let name = self.word_at(toks, name_at)?;
-        if CONTROL.contains(&name.as_str()) || NOT_A_NAME.contains(&name.as_str()) {
-            return None;
-        }
+        let computed = js_class && self.is_op(&toks[name_at], b"]");
+        let name = if computed {
+            String::new()
+        } else {
+            let name = self.word_at(toks, name_at)?;
+            if CONTROL.contains(&name.as_str()) || NOT_A_NAME.contains(&name.as_str()) {
+                return None;
+            }
+            name
+        };
         if self.head_word(toks).is_some_and(|word| CONTROL.contains(&word.as_str())) {
             return None;
         }
         // In JS/TS, a keyword-less function header before `{` is only a method
         // definition: never a dotted call (`t.advance(2)`), and nothing other
         // than a TS `: ReturnType` can sit between `)` and `{`.
-        if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
+        if !computed
+            && matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
             && name_at > 0
             && self.is_op(&toks[name_at - 1], b".")
         {
             return None;
         }
-        let mut chain_start = name_at;
-        while chain_start >= 2
-            && toks[chain_start - 1].kind == Kind::Op
-            && matches!(self.raw(&toks[chain_start - 1]), b"::" | b".")
-            && toks[chain_start - 2].kind == Kind::Ident
-        {
-            chain_start -= 2;
-        }
-        let (_, owner, _) = self.name_chain(toks, chain_start);
+        let owner = if computed {
+            String::new()
+        } else {
+            let mut chain_start = name_at;
+            while chain_start >= 2
+                && toks[chain_start - 1].kind == Kind::Op
+                && matches!(self.raw(&toks[chain_start - 1]), b"::" | b".")
+                && toks[chain_start - 2].kind == Kind::Ident
+            {
+                chain_start -= 2;
+            }
+            self.name_chain(toks, chain_start).1
+        };
         let (inner, close) = self.group_at(toks, open)?;
         // After the parameter list a method head can only be followed by its
         // body `{` or a TS return-type `:` — the latter also appears in a `.js`
