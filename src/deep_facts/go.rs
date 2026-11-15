@@ -678,7 +678,7 @@ impl<'a> Walker<'a> {
                 // picked up `catch` in `try {…} catch (e)`, so the list stays
                 // explicit.
                 "is" | "as" | "satisfies" | "get" | "set" | "static" | "async" | "readonly" | "declare" | "type"
-                | "from" | "of" => {
+                | "from" | "of" | "module" => {
                     out.push(self.text_string(node))
                 }
                 _ => {
