@@ -1776,7 +1776,21 @@ impl<'a> Parser<'a> {
             return false;
         };
         let word = self.word_at(stmt, 0);
-        let from = stmt.iter().position(|token| token.kind == Kind::Ident && self.raw(token) == b"from");
+        // `from` is a contextual keyword and can be imported (`import {from} from 'm'`
+        // or `import from from 'm'`); the clause keyword sits at brace depth 0
+        // immediately before the module string.
+        let mut depth = 0i32;
+        let from = stmt.iter().enumerate().position(|(i, token)| {
+            match self.raw(token) {
+                b"(" | b"[" | b"{" if token.kind == Kind::Op => depth += 1,
+                b")" | b"]" | b"}" if token.kind == Kind::Op => depth -= 1,
+                b"from" if depth == 0 && token.kind == Kind::Ident => {
+                    return stmt.get(i + 1).is_some_and(|next| next.kind == Kind::Str);
+                }
+                _ => {}
+            }
+            false
+        });
         // `import x = require("m")` is a TypeScript import-equals declaration,
         // not a static import: the module sits inside `require`, not at the
         // position after `import`. Read as a static import it found no string at
