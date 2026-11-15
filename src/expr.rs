@@ -156,7 +156,11 @@ impl Emit<'_> {
             return None;
         }
         let mut open = at + 1;
-        if self.toks.get(open).is_some_and(|token| token.kind == Kind::Ident) {
+        if self
+            .toks
+            .get(open)
+            .is_some_and(|token| matches!(token.kind, Kind::Ident | Kind::Str | Kind::Num))
+        {
             open += 1;
         }
         if !op_at(open, b"(") {
@@ -416,7 +420,26 @@ impl Emit<'_> {
                         self.ident(out, close);
                     }
                 }
-                Kind::Str => self.string(out),
+                Kind::Str => {
+                    if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") && close == b'}' {
+                        if let Some(end) = self.method_end(self.pos) {
+                            self.pos = end;
+                            out.push('0');
+                        } else {
+                            self.string(out);
+                        }
+                    } else {
+                        self.string(out);
+                    }
+                }
+                Kind::Num if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") && close == b'}' => {
+                    if let Some(end) = self.method_end(self.pos) {
+                        self.pos = end;
+                        out.push('0');
+                    } else {
+                        self.pos += 1;
+                    }
+                }
                 Kind::Op => {
                     let byte = self.op_byte(0);
                     if byte == b',' || (close != 0 && byte == close) {
@@ -485,7 +508,9 @@ impl Emit<'_> {
                         // source never made.
                         b'*' if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
                             && close == b'}'
-                            && self.toks.get(self.pos + 1).is_some_and(|token| token.kind == Kind::Ident)
+                            && self.toks.get(self.pos + 1).is_some_and(|token| {
+                                matches!(token.kind, Kind::Ident | Kind::Str | Kind::Num)
+                            })
                             && self.op_byte(2) == b'(' =>
                         {
                             self.pos += 2;
@@ -1356,6 +1381,10 @@ mod tests {
         // lexer read the body into the object's merge.
         assert_eq!(form("js", "{ set(v) { v; } }").0, r#"["m",[0]]"#);
         assert_eq!(form("js", "{ get name() { return a; } }").0, r#"["m",[0]]"#);
+        assert_eq!(form("js", r#"{ "a"() { return a; } }"#).0, r#"["m",[0]]"#);
+        assert_eq!(form("js", r#"{ get "a"() { return a; } }"#).0, r#"["m",[0]]"#);
+        assert_eq!(form("js", r#"{ *"a"() { return a; } }"#).0, r#"["m",[0]]"#);
+        assert_eq!(form("js", "{ 1() { return a; } }").0, r#"["m",[0]]"#);
     }
 
     #[test]
