@@ -1694,6 +1694,11 @@ return verdict(Some("call"), detail, accepted);
         };
         let found = deep_var_counts.get(&key).copied().unwrap_or(0);
         if found < wanted {
+            if macro_lines.iter().any(|&m| m)
+                && found >= non_macro_var_count(lexer, &macro_lines, &pair.0, &pair.1)
+            {
+                continue;
+            }
             let detail = format!("var {} = {}", pair.0, pair.1);
                         if std::env::var_os("RG_LOSSES").is_some() {
                 eprintln!("loss\t{}\tvar\t{}", deep_run::current(), detail);
@@ -2714,6 +2719,37 @@ fn is_declaration_call(src: &Lines<'_>, name: &str, line: u32) -> bool {
         from = start + name.len();
     }
     false
+}
+
+/// How many `(target, class)` bindings the lexer read outside `macro_lines`,
+/// so a `var` binding emitted only from inside a macro's token tree does not
+/// count as a CST loss.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn non_macro_var_count(lexer: &Facts, macro_lines: &[bool], target: &str, class: &str) -> usize {
+    let mut quoted = String::with_capacity(target.len() + 2);
+    quoted.push('"');
+    quoted.push_str(target);
+    quoted.push('"');
+    let mut count = 0;
+    for symbol in &lexer.symbols {
+        for event in raw_events(&symbol.events) {
+            if event.tag != b'a' {
+                continue;
+            }
+            if macro_lines.get(event.line.saturating_sub(1) as usize).copied().unwrap_or(false) {
+                continue;
+            }
+            let targets_end = element_end(event.payload.as_bytes(), 0);
+            let targets = &event.payload[..targets_end];
+            if !targets.contains(&quoted) {
+                continue;
+            }
+            if symbol.calls.iter().any(|call| call.line == event.line && call.path == class) {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 /// One flag per line: is the line inside the brace body of a macro invocation

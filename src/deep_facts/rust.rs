@@ -40,7 +40,8 @@ impl<'a> Walker<'a> {
         // one-pass reader sees one flat value over the whole block, so the names
         // a block carries are read here too — the const's own event is the only
         // one on that line, and those names have no other place to be recorded.
-        let value = if matches!(self.kind(value), "block_expression" | "block" | "compound_statement") {
+        let is_block = matches!(self.kind(value), "block_expression" | "block" | "compound_statement");
+        let expr = if is_block {
             let mut parts = Vec::new();
             for child in self.children(value) {
                 if self.is_layout(child) || matches!(self.kind(child), "{" | "}") {
@@ -117,7 +118,12 @@ impl<'a> Walker<'a> {
         let mut targets = "[\"".to_string();
         targets.push_str(&name);
         targets.push_str("\"]");
-        self.event(&format!("[\"a\",{line},{targets},{value},0]"));
+        self.event(&format!("[\"a\",{line},{targets},{expr},0]"));
+        if !is_block {
+            if let Some(class) = self.constructed(value) {
+                self.facts.vars.push((name, class));
+            }
+        }
     }
 
 
