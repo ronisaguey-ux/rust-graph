@@ -46,6 +46,13 @@ enum FrameKind {
     Plain,
 }
 
+enum SavedStmt {
+    Expr(Vec<Token>, Vec<u8>),
+    /// `window.onerror = function(...) { ... }.bind()`: an assigned function
+    /// expression whose enclosing statement may continue past `}`.
+    Assigned(Vec<Token>, Vec<u8>),
+}
+
 struct Frame {
     kind: FrameKind,
     symbol: usize,
@@ -54,7 +61,7 @@ struct Frame {
     /// Column of the statement that opened the frame (indent blocks).
     col: u32,
     /// A statement interrupted by this block: `app.get('/x', (req) => {`.
-    saved: Option<(Vec<Token>, Vec<u8>)>,
+    saved: Option<SavedStmt>,
     /// The symbol this frame defines, whose end line it sets on closing.
     defines: Option<usize>,
     /// The body of a type declaration: `interface { ... }`, `enum { ... }`.
@@ -70,6 +77,9 @@ struct Head {
     receiver: String,
     /// Tokens after this index are the body (`def f(x) = x + 1`).
     body: Option<usize>,
+    /// Whether `name`/`owner` came from an assignment target rather than the
+    /// function's own identifier.
+    assigned_name: bool,
 }
 
 pub struct Parser<'a> {
@@ -925,7 +935,13 @@ impl<'a> Parser<'a> {
         } else if let Some((name, bases)) = self.class_head(&stmt) {
             self.push_class(name, bases, start_col);
         } else if let Some(head) = self.function_head(&stmt, true) {
+            let assigned = head.assigned_name && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
             self.push_function(head, start_col, None);
+            if assigned {
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.saved = Some(SavedStmt::Assigned(std::mem::take(&mut stmt), std::mem::take(&mut self.brackets)));
+                }
+            }
         } else if self.head_word(&stmt).is_some_and(|word| CONTROL.contains(&word.as_str())) {
             self.open_control(&stmt, start_col);
         } else {
@@ -1166,7 +1182,7 @@ impl<'a> Parser<'a> {
             class,
             receiver: head.receiver,
             col,
-            saved,
+            saved: saved.map(|(stmt, brackets)| SavedStmt::Expr(stmt, brackets)),
             defines: Some(index),
         type_only: false,
         });
@@ -1192,6 +1208,11 @@ impl<'a> Parser<'a> {
         frame
     }
 
+    fn continues_after_brace(&mut self) -> bool {
+        let next = self.peek_word(0);
+        next.kind == Kind::Op && matches!(self.raw(&next), b"." | b"?." | b"(" | b"[")
+    }
+
     fn close_block(&mut self) {
         if self.frames.len() <= 1 {
             return;
@@ -1201,10 +1222,27 @@ impl<'a> Parser<'a> {
             return;
         }
         let frame = self.pop_frame();
-        if let Some((mut stmt, brackets)) = frame.saved {
-            self.stmt = stmt;
-            self.brackets = brackets;
-            self.stmt.push(Token { kind: Kind::Lambda, start: 0, end: 0, line: self.last_line, col: 0, interp: None });
+        match frame.saved {
+            Some(SavedStmt::Expr(stmt, brackets)) => {
+                self.stmt = stmt;
+                self.brackets = brackets;
+                self.stmt.push(Token { kind: Kind::Lambda, start: 0, end: 0, line: self.last_line, col: 0, interp: None });
+            }
+            Some(SavedStmt::Assigned(stmt, brackets)) if self.continues_after_brace() => {
+                // The function expression is the receiver/callee of `.bind()` / `()`,
+                // not the value assigned to the LHS, so it stays anonymous.
+                if let Some(index) = frame.defines {
+                    let symbol = &mut self.facts.symbols[index];
+                    let anon = format!("<anonymous>@{}", symbol.line);
+                    symbol.key = anon.clone();
+                    symbol.name = anon;
+                    symbol.owner.clear();
+                }
+                self.stmt = stmt;
+                self.brackets = brackets;
+                self.stmt.push(Token { kind: Kind::Lambda, start: 0, end: 0, line: self.last_line, col: 0, interp: None });
+            }
+            Some(SavedStmt::Assigned(..)) | None => {}
         }
     }
 
@@ -2697,6 +2735,7 @@ impl<'a> Parser<'a> {
             if head.name.is_empty() {
                 head.name = name;
                 head.owner = owner;
+                head.assigned_name = true;
             }
             return Some(head);
         }
@@ -2719,7 +2758,7 @@ impl<'a> Parser<'a> {
         let arrow = arrow?;
         let params = self.arrow_params(&rhs[skip..arrow]);
         let body = equal + 1 + arrow + 1;
-        Some(Head { name, owner, params, body: Some(body), ..Head::default() })
+        Some(Head { name, owner, params, body: Some(body), assigned_name: true, ..Head::default() })
     }
 
     fn arrow_params(&self, toks: &[Token]) -> Vec<String> {
