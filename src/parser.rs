@@ -626,6 +626,12 @@ impl<'a> Parser<'a> {
         if !self.brackets.is_empty() {
             return self.is_op(&last, b")") && self.function_word_in_tail();
         }
+        // `'label: { ... }`: a labeled block is a block of statements, not a
+        // struct literal or expression value.
+        let label = self.rust_label_prefix(&self.stmt);
+        if label > 0 && self.stmt.len() == label {
+            return true;
+        }
         if self.has_def_word(&self.stmt) {
             return true;
         }
@@ -782,32 +788,38 @@ impl<'a> Parser<'a> {
         false
     }
 
+    fn rust_label_prefix(&self, stmt: &[Token]) -> usize {
+        if self.lang.tag != "RS" {
+            return 0;
+        }
+        match (stmt.first(), stmt.get(1), stmt.get(2)) {
+            (Some(first), Some(colon), _)
+                if first.kind == Kind::Ident && self.raw(first).starts_with(b"'") && self.is_op(colon, b":") =>
+            {
+                2
+            }
+            (Some(quote), Some(name), Some(colon))
+                if self.is_op(quote, b"'") && name.kind == Kind::Ident && self.is_op(colon, b":") =>
+            {
+                3
+            }
+            _ => 0,
+        }
+    }
+
     fn open_block(&mut self) {
         let mut stmt = std::mem::take(&mut self.stmt);
-        // `'descend: loop { … }`: the label names the loop for `continue
-        // 'descend` and is not the loop's value. The CST writes the loop's
-        // block event and no label, so the label and its colon are dropped and
-        // the bare `loop` reads exactly as an unlabelled one.
-        if self.lang.tag == "RS" {
-            let label = match (stmt.first(), stmt.get(1), stmt.get(2)) {
-                (Some(first), Some(colon), _)
-                    if first.kind == Kind::Ident && self.raw(first).starts_with(b"'") && self.is_op(colon, b":") =>
-                {
-                    2
-                }
-                (Some(quote), Some(name), Some(colon))
-                    if self.is_op(quote, b"'") && name.kind == Kind::Ident && self.is_op(colon, b":") =>
-                {
-                    3
-                }
-                _ => 0,
-            };
+        // `'descend: loop { … }` and `'label: { … }`: the label names the loop
+        // or block for `continue`/`break` and is not its value. The CST writes
+        // no event for the label, so the label and its colon are dropped.
+        let label = self.rust_label_prefix(&stmt);
+        if label > 0 {
             let control = stmt
                 .get(label)
                 .filter(|token| token.kind == Kind::Ident)
                 .map(|token| self.raw(token))
                 .is_some_and(|word| matches!(word, b"loop" | b"while" | b"for"));
-            if label > 0 && control && stmt.len() > label {
+            if stmt.len() == label || (control && stmt.len() > label) {
                 stmt.drain(..label);
             }
         }
