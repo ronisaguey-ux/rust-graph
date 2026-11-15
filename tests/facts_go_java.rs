@@ -70,9 +70,13 @@ fn the_tags_that_reach_the_cst_path_include_go_and_java() {
     // The tags auto does pick.
     assert_eq!(lang_for("RS"), Some(Lang::Rust));
     assert_eq!(lang_for("PY"), Some(Lang::Python));
-    // A language with no table answers neither.
+    // A language with a table is force-only; `auto` still does not pay for it.
+    // C and C++ were force-less until P6-03 made the C-family claim testable:
+    // their tables are the same reader as these and `--deep` must reach them.
     assert_eq!(lang_for("C"), None);
-    assert_eq!(lang_for_forced("C"), None);
+    assert_eq!(lang_for_forced("C"), Some(Lang::C));
+    assert_eq!(lang_for("CS"), None);
+    assert_eq!(lang_for_forced("CS"), Some(Lang::CSharp));
 }
 
 #[test]
