@@ -2918,6 +2918,12 @@ impl<'a> Parser<'a> {
         let mut at = toks.len();
         if toks.last().is_some_and(|token| self.is_op(token, b"]")) {
             at = toks.iter().position(|token| self.is_op(token, b"["))?;
+            if at > 0
+                && (at == 1 || !self.is_join(&toks[at - 2]))
+                && matches!(self.raw(&toks[at - 1]), b"const" | b"let" | b"var" | b"mut")
+            {
+                return None;
+            }
         }
         let mut start = at;
         while start > 0 {
