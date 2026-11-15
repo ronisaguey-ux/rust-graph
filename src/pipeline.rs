@@ -1652,7 +1652,7 @@ return verdict(Some("symbol"), detail, accepted);
                 // introducer, so nothing was lost.
                 if !lines.is_empty()
                     && (is_declaration_line(&lines, call.line)
-                        || is_method_declaration_line(&lines, call.line)
+                        || is_method_declaration_line(&lexer.tag, &lines, call.line)
                         // `error?: (e: any) => void`, `readonly x: T`,
                         // `constructor(...): Base`: a `.d.ts` member declares
                         // a type, and the lexer reads the property word as a
@@ -1859,7 +1859,7 @@ fn uncovered(
         if macro_lines.get(event.line.saturating_sub(1) as usize).copied().unwrap_or(false)
             || is_attribute_call(lines, event.line)
             || is_declaration_line(lines, event.line)
-            || is_method_declaration_line(lines, event.line)
+            || is_method_declaration_line(&lexer.tag, lines, event.line)
             || is_type_property_line(lines, event.line)
             || is_export_statement_line(lines, event.line)
             || is_import_alias_line(lines, event.line)
@@ -2496,8 +2496,9 @@ fn is_export_statement_line(src: &Lines<'_>, line: u32) -> bool {
 /// return type starting with `:`, and neither side of it holds `=` — which is
 /// what keeps `const f = (a: string): string => a;` an expression.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_method_declaration_line(src: &Lines<'_>, line: u32) -> bool {
-    let lines: Vec<&str> = src.lines().skip(line.saturating_sub(1) as usize).take(16).collect();
+fn is_method_declaration_line(tag: &str, src: &Lines<'_>, line: u32) -> bool {
+    let limit = if matches!(tag, "JS" | "JSX" | "TS" | "TSX") { 64 } else { 16 };
+    let lines: Vec<&str> = src.lines().skip(line.saturating_sub(1) as usize).take(limit).collect();
     let Some(first) = lines.first() else {
         return false;
     };
