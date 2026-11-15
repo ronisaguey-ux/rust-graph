@@ -2536,6 +2536,17 @@ impl<'a> Parser<'a> {
                 return;
             }
         }
+        // `impl<CT, RT> Handle<CT, RT> where ... {`: an item head writes no
+        // value. The brace did not open a body (the header is not a block to this
+        // reader), so the header was read as an expression and invented an event
+        // the CST never writes.
+        if self.lang.tag == "RS" {
+            if let Some(word) = self.head_word(stmt) {
+                if matches!(word.as_str(), "struct" | "enum" | "impl" | "trait" | "mod" | "union" | "use" | "extern") {
+                    return;
+                }
+            }
+        }
         let word = self.word_at(stmt, 0);
         if matches!(word.as_deref(), Some("return")) {
             self.expression_event("r", &stmt[1..]);

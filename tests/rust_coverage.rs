@@ -124,6 +124,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "let declarations: mut, annotated and tuple-pattern bindings",
         "fn f() {\n    let mut c = 3;\n    let d: i32 = 4;\n    let (a, b) = (1, 2);\n    let e = c + d + a + b;\n}\n",
     ),
+    (
+        "an impl header with generics and a where clause",
+        "impl<CT, RT> Handle<CT, RT>\nwhere\n    CT: Clone,\n{\n    fn get(&self) -> u8 {\n        0\n    }\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.
