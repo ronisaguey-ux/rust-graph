@@ -86,8 +86,15 @@ Known gaps (0):
 
 ## Python — `tests/python_coverage.rs`
 
-Covered (2):
+Covered (9):
 
+- indentation suites: if, for, with and try/except/else/finally
+- decorators: a plain one and a stacked one with arguments
+- comprehensions: list, dict, set and generator
+- f-strings: interpolation, format spec, conversion and a call
+- lambda: a plain lambda and one with a default argument
+- walrus: a binding in a while condition and in an if
+- async forms: async def, async with, async for and await
 - match statement: subject and literal, sequence and mapping arms
 - match arm with a guard and a class pattern
 

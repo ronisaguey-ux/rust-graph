@@ -53,6 +53,34 @@ fn deep_facts(source: &str) -> Facts {
 /// One row per construct that reads cleanly today.
 const COVERAGE: &[(&str, &str)] = &[
     (
+        "indentation suites: if, for, with and try/except/else/finally",
+        "def outer(n):\n    if n > 0:\n        total = n\n        for i in range(n):\n            total += i\n        with open(\"x\") as fh:\n            data = fh.read()\n        try:\n            risky()\n        except ValueError as err:\n            handle(err)\n        else:\n            ok()\n        finally:\n            done()\n    return total\n",
+    ),
+    (
+        "decorators: a plain one and a stacked one with arguments",
+        "@cache\ndef load(path):\n    return read(path)\n\n@app.route(\"/x\", methods=[\"GET\"])\n@login_required\ndef view(request):\n    return respond(request)\n",
+    ),
+    (
+        "comprehensions: list, dict, set and generator",
+        "def f(rows):\n    squares = [r * r for r in rows if r > 0]\n    table = {k: v for k, v in pairs(rows)}\n    seen = {r.name for r in rows}\n    gen = (r for r in rows if r)\n    return squares, table, seen, gen\n",
+    ),
+    (
+        "f-strings: interpolation, format spec, conversion and a call",
+        "def greet(name, count, mapping):\n    plain = f\"hello {name}\"\n    nested = f\"total {count + 1:>4} for {name!r}\"\n    deep = f\"{mapping['k']}\"\n    called = f\"{load(name)} ready\"\n    return plain, nested, deep, called\n",
+    ),
+    (
+        "lambda: a plain lambda and one with a default argument",
+        "def f(xs):\n    double = lambda v: v * 2\n    key = lambda row, i=0: (row[i], -row[1])\n    return sorted(xs, key=key), list(map(double, xs))\n",
+    ),
+    (
+        "walrus: a binding in a while condition and in an if",
+        "def f(chunks):\n    out = []\n    while (line := chunks.pop()) is not None:\n        if (n := len(line)) > 10:\n            out.append((n, line))\n    return out\n",
+    ),
+    (
+        "async forms: async def, async with, async for and await",
+        "async def fetch(client, url):\n    async with client.session() as session:\n        async for row in session.stream(url):\n            await handle(row)\n    return await collect()\n\nasync def main():\n    result = await fetch(Client(), \"http://x\")\n    return result\n",
+    ),
+    (
         "match statement: subject and literal, sequence and mapping arms",
         "def f(x):\n    match x:\n        case 1:\n            return 'one'\n        case [a, b]:\n            return a\n        case {'k': v}:\n            return v\n    return None\n",
     ),
@@ -63,7 +91,11 @@ const COVERAGE: &[(&str, &str)] = &[
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[];
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[(
+    "f-string: an escaped brace pair reads the literal text as a name",
+    "def f(count):\n    joined = f\"{'{'}literal{'}':>{count}}\"\n    return joined\n",
+    "the CST writes the whole f-string as one constant; the lexer reads the escaped braces as a nested literal and `literal` as a name (wanted m:[0,n:literal,m:[m:[0,m:[n:count]]]] against m:[0,0,n:count])",
+)];
 
 #[test]
 fn every_claimed_python_construct_reads_the_same_on_both_paths() {
