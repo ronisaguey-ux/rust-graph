@@ -246,6 +246,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        self.declaring = false;
         self.end_statement();
         self.settle_branch(None);
         while self.frames.len() > 1 {
@@ -391,6 +392,7 @@ impl<'a> Parser<'a> {
                 return;
             }
         }
+        self.declaring = false;
         self.end_statement();
     }
 
@@ -529,6 +531,7 @@ impl<'a> Parser<'a> {
             self.stmt.push(token);
             return;
         }
+        self.declaring = false;
         self.end_statement();
         self.settle_branch(None);
         let conditional = std::mem::take(&mut self.conditional_type_open);
@@ -572,7 +575,7 @@ impl<'a> Parser<'a> {
         }
         // Cloned, not borrowed: deciding what the brace opens reads past the
         // cursor, and that needs the parser itself.
-        let Some(last) = self.stmt.last().cloned() else { return true };
+        let Some(last) = self.stmt.last().cloned() else { return !self.declaring };
         if self.lang.tag == "TCL" && last.kind == Kind::Ident && self.has_def_word(&self.stmt) {
             return false;
         }
