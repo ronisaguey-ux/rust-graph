@@ -248,6 +248,11 @@ impl Emit<'_> {
     /// Everything up to a comma or closer, combined.
     pub fn mix(&mut self, out: &mut String, close: u8) {
         let start = out.len();
+        // Calls written by the pattern: in Rust `Pat => value` drops everything
+        // before the arrow, so a call the pattern spelled — `Some(q @ ..)` in
+        // `Some(q @ (A | B)) => true` — has to leave the call table with its
+        // text. The text was truncated and the record kept a call no CST writes.
+        let calls_at_start = self.calls.len();
         let mut count = 0;
         // Where the first value of this item ends. An object property whose
         // value is an arrow keeps its key: `{ identify: v => … }` is one pair,
@@ -262,8 +267,17 @@ impl Emit<'_> {
         // out of the list, and the condition's own text holds commas, so the
         // boundary has to be remembered rather than searched for.
         let mut item_start = start;
+        // Where the pattern ends. In `Pat if guard => value` the guard is a
+        // value and its calls are real, so the arrow drops only the calls the
+        // pattern wrote — those before the guard's `if`.
+        let mut calls_after_pattern = calls_at_start;
+        let mut guard_seen = false;
         while let Some(token) = self.tok(0) {
             let kind = token.kind;
+            if self.lang.tag == "RS" && kind == Kind::Ident && self.word(0).as_deref() == Some("if") {
+                calls_after_pattern = self.calls.len();
+                guard_seen = true;
+            }
             // `pub(crate) meter: u64` — a visibility restriction is not a value:
             // the CST writes the field's name and type only, and `crate` in the
             // value lost every pub(crate) field line.
@@ -335,6 +349,14 @@ impl Emit<'_> {
                 // constant form below cost rust 100 files there).
                 if !matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") {
                     out.truncate(start);
+                    if guard_seen {
+                        // The pattern's calls sit between the item's start and the
+                        // guard's `if`; the guard's own calls follow it and are real.
+                        let end = calls_after_pattern.min(self.calls.len());
+                        self.calls.drain(calls_at_start.min(end)..end);
+                    } else {
+                        self.calls.truncate(calls_at_start);
+                    }
                     count = 0;
                     self.pos += 1;
                     continue;

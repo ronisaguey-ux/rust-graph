@@ -250,6 +250,17 @@ impl<'a> Walker<'a> {
                 // and where the calls written after `=>` live. The value is a
                 // statement of the match, so it is recorded as one: without
                 // this event an arm's value is invisible to the record.
+                // `pat if guard => value`: the guard is an expression of its own
+                // and its calls are real — `b'/' if c.peek_at(1) == b'/'` calls
+                // `peek_at` for every matching byte. The value walk below starts
+                // at `=>`, so the guard's calls were never recorded and the
+                // lexer's record of them read as invented (P5-10).
+                let arm = self.children(id);
+                if let Some(at) = arm.iter().position(|&child| self.kind(child) == "if") {
+                    if let Some(&guard) = arm.get(at + 1) {
+                        let _ = self.form(guard);
+                    }
+                }
                 let line = self.line(id);
                 if let Some(value) = self.rust_after_arrow(id) {
                     // `"--out" => options.out = Some(..)`: an arm that assigns is
