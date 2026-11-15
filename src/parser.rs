@@ -456,6 +456,17 @@ impl<'a> Parser<'a> {
         self.src.get(token.end as usize).is_none_or(u8::is_ascii_whitespace)
     }
 
+    /// `macro_rules! name { \u2026 }`: the body is a matcher and a transcriber,
+    /// not statements. The CST reader gets one opaque token tree here and writes
+    /// no fact, so the token reader must not invent the bindings and calls inside
+    /// it either — `line_first = Some(symbol);` in a macro body is not an
+    /// assignment the source contains.
+    fn macro_rules_head(&self) -> bool {
+        self.lang.tag == "RS"
+            && self.stmt.first().is_some_and(|token| self.text(token) == "macro_rules")
+            && self.stmt.get(1).is_some_and(|token| self.is_op(token, b"!"))
+    }
+
     fn on_open_brace(&mut self, token: Token) {
         let opens_block = self.uses_braces() && self.is_block();
         if opens_block {
@@ -486,9 +497,10 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            let macro_body = self.macro_rules_head();
             let before = self.frames.len();
             self.open_block();
-            if type_body && self.frames.len() > before {
+            if (type_body || macro_body) && self.frames.len() > before {
                 self.frames[before].type_only = true;
             }
             if conditional {
