@@ -593,12 +593,9 @@ fn deep_facts_a_tagged_template_from_the_corpus_names_the_tag() {
     let (lexer, deep) = facts_from_source(
         "function f(table, id) {\n  sql`INSERT IGNORE INTO ${table} VALUES (${id})`;\n}\n",
     );
-    // The CST names the tag as the value the expression produces. The one-pass
-    // lexer does not read a template tag as a call at all — a gap in the lexer,
-    // not a disagreement the guard can see (it only asks whether the lexer's
-    // facts are in the CST's record), asserted here so it cannot change quietly.
+    // Both the CST and the one-pass lexer read the template tag as a call.
     assert_eq!(call_paths(&deep, "f"), vec!["sql"]);
-    assert!(call_paths(&lexer, "f").is_empty(), "the lexer now reads template tags as calls");
+    assert_eq!(call_paths(&lexer, "f"), vec!["sql"]);
 }
 
 #[test]

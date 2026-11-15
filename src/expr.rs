@@ -842,7 +842,7 @@ impl Emit<'_> {
         self.chain(out, value, String::new(), line);
     }
 
-    fn string(&mut self, out: &mut String) {
+    fn string_value(&mut self) -> (u32, String) {
         let token = &self.toks[self.pos];
         let line = token.line;
         let mut parts = String::new();
@@ -887,6 +887,11 @@ impl Emit<'_> {
             1 => parts,
             _ => format!("[\"m\",[{parts}]]"),
         };
+        (line, value)
+    }
+
+    fn string(&mut self, out: &mut String) {
+        let (line, value) = self.string_value();
         self.chain(out, value, String::new(), line);
     }
 
@@ -1366,6 +1371,25 @@ impl Emit<'_> {
                 let id = self.new_call(target, line);
                 let mut args = String::new();
                 self.list(&mut args, b')', true);
+                value = format!("[\"c\",{id},{receiver},[{args}]]");
+                path.clear();
+                continue;
+            }
+            // `tag`...``: a tagged template literal in the JS/TS family is a
+            // call to the tag with the template's interpolations as arguments.
+            if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                && self.tok(0).is_some_and(|t| t.kind == Kind::Str && self.src[t.start as usize] == b'`')
+            {
+                let (t_line, inner) = self.string_value();
+                let (receiver, mut target) = self.split_receiver(&value, &path);
+                if target.starts_with('.') {
+                    if let Some(class) = constructed.take() {
+                        target = format!("{class}(){target}");
+                    }
+                }
+                constructed = capitalised(&target);
+                let id = self.new_call(target, t_line);
+                let args = if inner == "0" { String::new() } else { inner };
                 value = format!("[\"c\",{id},{receiver},[{args}]]");
                 path.clear();
                 continue;
