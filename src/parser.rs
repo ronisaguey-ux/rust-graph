@@ -635,6 +635,13 @@ impl<'a> Parser<'a> {
         if self.has_def_word(&self.stmt) {
             return true;
         }
+        if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
+            && self
+                .top_level_assign(&self.stmt)
+                .is_some_and(|equal| self.assigned_class_head(&self.stmt[equal + 1..]).is_some())
+        {
+            return true;
+        }
         if matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt) {
             return true;
         }
@@ -922,7 +929,14 @@ impl<'a> Parser<'a> {
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
             self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
-        } else if let Some((name, bases)) = self.class_head(&stmt) {
+        } else if let Some((name, bases)) = self.class_head(&stmt).or_else(|| {
+            matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
+                .then(|| {
+                    self.top_level_assign(&stmt)
+                        .and_then(|equal| self.assigned_class_head(&stmt[equal + 1..]))
+                })
+                .flatten()
+        }) {
             self.push_class(name, bases, start_col);
         } else if let Some(head) = self.function_head(&stmt, true) {
             self.push_function(head, start_col, None);
@@ -3027,20 +3041,6 @@ impl<'a> Parser<'a> {
                     self.simple_statement(&stmt[end + 1..]);
                 }
                 return;
-            }
-        }
-        // `X = class Y { … }` and `module.exports = class …`: a class
-        // expression is the definition an assigned function is — the walk
-        // opens the class body as its own symbol and the CST writes no event.
-        // Read as a value, `class`, the class name and `extends B` became
-        // three names the CST never wrote.
-        if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX") {
-            if let Some(equal) = self.top_level_assign(stmt) {
-                if let Some((name, bases)) = self.assigned_class_head(&stmt[equal + 1..]) {
-                    self.last_line = stmt[stmt.len() - 1].line;
-                    self.push_class(name, bases, first.col);
-                    return;
-                }
             }
         }
         if let Some(equal) = self.top_level_assign(stmt) {
