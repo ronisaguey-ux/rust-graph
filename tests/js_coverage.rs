@@ -53,6 +53,10 @@ fn deep_facts(source: &str) -> Facts {
 /// One row per claimed construct.
 const COVERAGE: &[(&str, &str)] = &[
     (
+        "private field holding a function keeps its marker",
+        "class A {\n  #m = () => 1;\n}\n",
+    ),
+    (
         "require in a comparison is not an import",
         "var a = typeof require === 'function';\n",
     ),

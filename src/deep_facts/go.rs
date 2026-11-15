@@ -1024,7 +1024,18 @@ impl<'a> Walker<'a> {
         let targets = self.pattern_names(name_node);
         if self.kinds.definitions.iter().any(|def| def.kind == self.kind(value)) {
             if let Some(name) = targets.first() {
-                self.bound.push((value, name.clone()));
+                // A private field holding a function keeps its `#`: the CST's
+                // `private_property_identifier` node carries the bare name and
+                // pattern_names strips the marker, so `class A { #m = () => 1 }`
+                // opened the symbol `A.m` while the one-pass reader opened
+                // `A.#m`. Only the definition's name is marked: a plain private
+                // field writes its bare name on both sides.
+                let name = if self.kind(name_node) == "private_property_identifier" {
+                    format!("#{}", name)
+                } else {
+                    name.clone()
+                };
+                self.bound.push((value, name));
             }
         }
         self.assignment_parts(targets, value, self.line(id), false);
