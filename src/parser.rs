@@ -161,6 +161,9 @@ impl<'a> Parser<'a> {
     /// depth zero - `<` is not a bracket - but it is a type, not a declarator
     /// separator, so the declarator rule must not split there.
     fn inside_type_arguments(&self) -> bool {
+        if !matches!(self.lang.tag, "TS" | "TSX") {
+            return false;
+        }
         let mut depth = 0i32;
         for token in &self.stmt {
             if token.kind != Kind::Op {
