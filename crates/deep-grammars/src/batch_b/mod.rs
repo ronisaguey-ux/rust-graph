@@ -25,10 +25,10 @@ mod tests {
     use crate::deep::tree::{HAS_ERROR, TOKEN};
     use crate::deep::{Budget, Workspace};
 
-    use crate::batch_b::php::PHP;
-    use crate::batch_b::ruby::RUBY;
-    use crate::batch_b::scala::SCALA;
-    use crate::batch_b::swift::SWIFT;
+    use super::php::PHP;
+    use super::ruby::RUBY;
+    use super::scala::SCALA;
+    use super::swift::SWIFT;
 
     /// `(file, top-level node kinds)` for every valid fixture, in order.
     const RUBY_VALID: &[(&str, &str)] = &[
@@ -176,7 +176,12 @@ mod tests {
     }
 
     fn fixtures() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        if root.is_dir() {
+            return root;
+        }
+        // Compiled by `rust-graph` through `#[path]` too; see `batch_a`.
+        Path::new(file!()).parent().map(|dir| dir.join("../../fixtures")).unwrap_or(root)
     }
 
     fn files_in(folder: &str) -> Vec<String> {
