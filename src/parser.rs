@@ -660,6 +660,9 @@ impl<'a> Parser<'a> {
         {
             return true;
         }
+        if self.assigned_class_statement(&self.stmt).is_some() {
+            return true;
+        }
         if matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt) {
             return true;
         }
@@ -957,6 +960,8 @@ impl<'a> Parser<'a> {
         }) {
             self.push_class(name, bases, start_col);
         } else if let Some((name, bases)) = self.assigned_class(&stmt) {
+            self.push_class(name, bases, start_col);
+        } else if let Some((name, bases)) = self.assigned_class_statement(&stmt) {
             self.push_class(name, bases, start_col);
         } else if let Some(head) = self.function_head(&stmt, true) {
             let assigned = head.assigned_name && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
@@ -2712,6 +2717,14 @@ impl<'a> Parser<'a> {
     /// `class` as the value of an assignment: the name it spells, if any,
     /// and its bases. `= class extends B {` is anonymous — the CST gives that
     /// class no name of its own, so neither does the lexer.
+    fn assigned_class_statement(&self, stmt: &[Token]) -> Option<(String, Vec<String>)> {
+        if !matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX") {
+            return None;
+        }
+        let equal = self.top_level_assign(stmt)?;
+        self.assigned_class_head(&stmt[equal + 1..])
+    }
+
     fn assigned_class_head(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {
         // The class must open the value: `const x = { class: 1 }` has the word
         // inside an object literal and names no class.
