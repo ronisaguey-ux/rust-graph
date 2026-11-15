@@ -132,6 +132,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "an impl whose type is a path",
         "impl tonic::client::X {\n    fn a(&self) -> u8 {\n        0\n    }\n}\n",
     ),
+    (
+        "a match arm with a range and an alternation",
+        "fn f(c: u8) -> u8 {\n    match c {\n        b'a'..=b'z' | b'[' => 3,\n        _ => 0,\n    }\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.

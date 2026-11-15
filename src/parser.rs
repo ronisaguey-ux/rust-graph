@@ -2023,6 +2023,25 @@ impl<'a> Parser<'a> {
                 {
                     return None
                 }
+                // `..=` is read as `.` then `.=`, so the range's `=` arrives as
+                // an augmented assignment of a dot. It assigns nothing.
+                b".=" if depth == 0
+                    && toks.get(index.wrapping_sub(1)).is_some_and(|prev| {
+                        prev.kind == Kind::Op && self.raw(prev) == b"." && prev.end == token.start
+                    }) =>
+                {
+                    continue
+                }
+                // `b'a'..=b'z' | b'[' => 3`: the `=` of a range is not an
+                // assignment. Read as one, the arm's pattern became an
+                // assignment whose target was the range's dot (8 corpus files).
+                b"=" if depth == 0
+                    && toks.get(index.wrapping_sub(1)).is_some_and(|prev| {
+                        prev.kind == Kind::Op && self.raw(prev).ends_with(b".") && prev.end == token.start
+                    }) =>
+                {
+                    continue
+                }
                 b"=" | b":=" | b"+=" | b"-=" | b".=" | b"|=" | b"||=" | b"&&=" | b"??=" | b"<-" | b"*=" | b"/=" | b"%="
                 | b"&=" | b"^=" | b"<<=" | b">>="
                     if depth == 0
