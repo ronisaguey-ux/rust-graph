@@ -96,7 +96,7 @@ Known gaps (0):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (24):
+Covered (25):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
@@ -122,6 +122,7 @@ Covered (24):
 - a closure whose parameter is a reference pattern
 - a let-else whose else block diverges
 - a member chain across lines through the ? operator
+- a class binding: the variant itself, a call chain, try and parentheses
 
 Known gaps (0):
 
