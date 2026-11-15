@@ -3846,7 +3846,6 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
     let keywords: &[&str] = match tag {
         "PY" => &["assert", "del", "raise", "with", "lambda", "return", "yield", "await", "not"],
         "JS" | "TS" => &["function", "if", "for", "while", "return", "typeof", "delete", "await", "yield", "switch", "catch"],
-        "RS" => &["fn", "if", "for", "while", "return", "match", "loop", "let", "unsafe"],
         "GO" => &["func", "go", "defer", "range", "select", "switch", "if", "for", "type", "var", "const", "return"],
         "JAVA" => &[
             "new", "if", "while", "for", "switch", "return", "throw", "synchronized", "assert", "try", "catch", "instanceof",
