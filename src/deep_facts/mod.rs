@@ -394,6 +394,13 @@ struct Walker<'a> {
     /// the binding gives it. A function expression has no name of its own; the
     /// binding is the name, exactly as the lexer reads it.
     bound: Vec<(u32, String)>,
+    /// The form text a call node already produced, by node id. A block value is
+    /// read twice — once for the value the assignment carries, once when the
+    /// walk reaches the statements inside it — and the second read pushed a
+    /// second `Call` for the same source call. Returning the first text keeps
+    /// one call and one index, which is what the text in the event refers to
+    /// (P5-11).
+    call_texts: std::collections::HashMap<u32, String>,
 }
 
 /// The deep language for a lexer tag (`langs::Language::tag`), or `None` when
@@ -450,6 +457,7 @@ impl<'a> Walker<'a> {
             facts,
             stack: vec![Frame { node: tree.root, symbol: 0, class: String::new(), receiver: String::new(), container: false, defines: None }],
             bound: Vec::new(),
+            call_texts: std::collections::HashMap::new(),
         }
     }
 

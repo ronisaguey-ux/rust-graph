@@ -865,6 +865,9 @@ impl<'a> Walker<'a> {
     }
 
     pub(crate) fn rust_call(&mut self, id: u32) -> String {
+        if let Some(text) = self.call_texts.get(&id) {
+            return text.clone();
+        }
         let children = self.children(id);
         // The block-like form is its own callee: the receiver, the name and
         // the argument list are all children of the one node.
@@ -890,6 +893,7 @@ impl<'a> Walker<'a> {
             None => out.push_str("[]"),
         }
         out.push(']');
+        self.call_texts.insert(id, out.clone());
         out
     }
 
