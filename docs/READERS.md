@@ -11,7 +11,7 @@ test claims is listed here, and every listed construct is claimed by a test.
 
 ## JavaScript — `tests/js_coverage.rs`
 
-Covered (36):
+Covered (37):
 
 - private field holding a function keeps its marker
 - require in a comparison is not an import
@@ -28,6 +28,7 @@ Covered (36):
 - expressions: ternary, comma, comma assignment and logical assignment
 - calls: member, optional, constructor and chain
 - exports and imports
+- a require written as an assignment target imports the module and binds nothing
 - re-exports and CommonJS require shapes
 - generators and yield
 - regex and numeric literals
