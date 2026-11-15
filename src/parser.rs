@@ -707,6 +707,37 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// A `function` expression in a statement that continues past its closing
+    /// brace (`return r = a, n = function() { ... }, n()`), where no open bracket
+    /// marks expression position.
+    fn expr_function(&self, stmt: &[Token]) -> bool {
+        if !stmt.last().is_some_and(|token| self.is_op(token, b")")) {
+            return false;
+        }
+        if self.head_word(stmt).is_some_and(|word| CONTROL.contains(&word.as_str())) {
+            return false;
+        }
+        if self.function_head(stmt, true).is_some() {
+            return false;
+        }
+        let mut depth = 0i32;
+        for token in stmt {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    _ => {}
+                }
+            } else if depth == 0
+                && token.kind == Kind::Ident
+                && self.lang.defs.iter().any(|word| word.as_bytes() == self.raw(token))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     fn open_block(&mut self) {
         let mut stmt = std::mem::take(&mut self.stmt);
         // `'descend: loop { … }`: the label names the loop for `continue
@@ -763,7 +794,12 @@ impl<'a> Parser<'a> {
                 stmt[..equal].iter().any(|token| self.is_op(token, b".") || self.is_op(token, b"["))
                     || stmt[equal + 1..].iter().any(|token| self.is_op(token, b"?"))
             });
-        if in_expression || arrow {
+        let expr_function = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && !type_declaration
+            && !in_expression
+            && !arrow
+            && self.expr_function(&stmt);
+        if in_expression || arrow || expr_function {
             let head = self.lambda_head(&stmt);
             let brackets = std::mem::take(&mut self.brackets);
             self.push_function(head, start_col, Some((stmt, brackets)));
