@@ -128,6 +128,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "an impl header with generics and a where clause",
         "impl<CT, RT> Handle<CT, RT>\nwhere\n    CT: Clone,\n{\n    fn get(&self) -> u8 {\n        0\n    }\n}\n",
     ),
+    (
+        "an impl whose type is a path",
+        "impl tonic::client::X {\n    fn a(&self) -> u8 {\n        0\n    }\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.

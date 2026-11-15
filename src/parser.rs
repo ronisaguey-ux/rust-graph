@@ -2062,7 +2062,39 @@ impl<'a> Parser<'a> {
                 at = toks.iter().position(|t| self.is_op(t, b">"))? + 1;
             }
         }
-        let name = self.word_at(toks, at)?;
+        let mut name = self.word_at(toks, at)?;
+        // `impl tonic::client::X {`: a path names its type by its last segment.
+        // Taking the first one opened a class called `tonic`, a symbol the CST
+        // never writes (5 corpus files).
+        if self.lang.tag == "RS" {
+            let mut scan = at + 1;
+            while scan < toks.len() {
+                if self.is_op(&toks[scan], b"::") {
+                    if let Some(segment) = self.word_at(toks, scan + 1) {
+                        name = segment;
+                        scan += 2;
+                        continue;
+                    }
+                }
+                if self.is_op(&toks[scan], b"<") {
+                    let mut depth = 0i32;
+                    while scan < toks.len() {
+                        if self.is_op(&toks[scan], b"<") {
+                            depth += 1;
+                        } else if self.is_op(&toks[scan], b">") {
+                            depth -= 1;
+                            if depth == 0 {
+                                scan += 1;
+                                break;
+                            }
+                        }
+                        scan += 1;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
         let mut bases = Vec::new();
         let mut inherits = false;
         for (offset, token) in toks[at + 1..].iter().enumerate() {
