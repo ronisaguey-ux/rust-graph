@@ -63,110 +63,51 @@ files under a different symbol, and `001165_lib.rs:176` is a `let` inside a
 `#[pyfunction]` whose CST body carries no event at all. Those are counted here
 because the guard reports them with the same sentence.
 
-### TS — 81 fallbacks
+## 2. Rust: "a name the lexer read is not in the CST's value" — 36 of 107
 
-| files | construct | example |
-|------:|-----------|---------|
-| 21 | call whose path the readers spell differently | `000261_number.d.ts:1` |
-| 17 | declarator | `000196_fetch.d.ts:50` |
-| 9 | class member carrying a modifier (computed key or annotation) | `000404_invalid-stream-part-error.ts:9` |
-| 6 | module-level var fact the CST never records | `000345_PreflightResponseCache.ts:1` |
-| 5 | continuation line beginning with `}` | `000640_PersistedQueue.d.ts:240` |
-| 4 | arrow function | `000291_Utils.d.ts:150` |
-| 3 | definition the lexer opens and the CST does not | `000114_Schema.ts:5020` |
-| 2 | parenthesised expression statement | `000074_dom.d.ts:97` |
-| 2 | control-flow header | `000594_config.ts:67` |
+Three distinct shapes sit in the same clause because the guard reports the first
+name it could not match.
 
-Remaining 12 files, each named by its own line (no catch-all bucket):
+* **A `match` arm's block is folded by the lexer, nested by the CST.**
+  `000034_emit.rs:99`, `let layout = match self.checked.layout { … }` — the lexer
+  writes `m:[n:match, …, m:[c(n:String;[]), m:[…]]]`, the CST nests one merge per
+  arm (`m:[m:[n:None,c(n:String;[])],m:[0,…]]`). 4 of the 36 are this file, which
+  the corpus holds four times.
+* **A turbofish inside a struct literal.** `000946_mod.rs:101`,
+  `Self { client, info, _res_type: PhantomData::<RT> }` — the lexer writes
+  `m:[n:_res_type,n:PhantomData]`, the CST writes `m:[n:_res_type,0]`: a path
+  with `::<…>` forms as the constant in `rust_form`'s field-initializer arm.
+* **An `if let` struct pattern** (`000973_internal_flags.rs:82`):
+  `if let Self::Enabled { core, .. }` — the lexer writes the path
+  `n:Self.Enabled`, the CST's let-condition arm forms the value and no name.
+* **The constant-receiver call of §3, one level out**
+  (`001757_metrics.rs:143`, `let ax = 0i64.max(-dx) as usize;`): the call folds to
+  `0`, so the cast's `usize` is the name that goes missing.
 
-- `000038_parseJson.ts:31` — `parseJson.position = 0 as number` — a name the lexer reads is missing from the CST value
-- `000117_types.d.ts:2441` — `$$eval<` — no shared line for the event
-- `000365_memoizer.ts:169` — `kind satisfies never;` — no shared line for the event
-- `000636_RpcClient.ts:239` — `never,` — no shared line for the event
-- `000867_keyword.ts:85` — `gen.assign(` — a name the lexer reads is missing from the CST value
-- `000940_index.ts:1307` — `getRandomValues<` — no shared line for the event
-- `001019_custom-provider.ts:71` — `return {` — a name the lexer reads is missing from the CST value
-- `001284_Sink.ts:803` — `fold<readonly [S, number], In, E, R>(` — no shared line for the event
-- `001414_ElementHandle.d.ts:170` — `evaluate<Params extends unknown[], Func extends EvaluateFuncWith<ElementType, Params> = EvaluateFunc` — no shared line for the event
-- `001587_JSHandle.d.ts:53` — `evaluate<Params extends unknown[], Func extends EvaluateFuncWith<T, Params> = EvaluateFuncWith<T, Pa` — no shared line for the event
-- `001681_schemas.d.ts:256` — `-readonly [k in keyof T["shape"]]: ZodMiniOptional<T["shape"][k]>;` — no shared line for the event
-- `001933_index.ts:1` — `/**` — other
+Enum bodies (`enum E { Start { kind: Kind }, Finish }` read as one tuple by the
+lexer) were in this clause until `c3f0355`/`f1a9112`; `/tmp/rta/a.rs` is clean on
+this tree, so the entry is gone rather than kept for sentiment.
 
-### PYTHON — 14 fallbacks
+## 3. Rust: "the CST wrote the value as the constant 0" — 12 of 107
 
-| files | construct | example |
-|------:|-----------|---------|
-| 4 | module-level var fact the CST never records | `000084_util.py:1` |
-| 2 | return statement | `000117__pyio.py:1962` |
+`0i64.max(-ox)`, `0f64.max(iw.min(round(x)))` (`001559_displacement.rs:63`,
+`001754_raster.rs:51`). The CST names the call `.max` with receiver `0`; the
+guard's shape folds any leading-dot path to its receiver, because that is how a
+`Path(x).resolve()` chain is spelled on the two sides. Folded, the CST's whole
+value becomes the constant `0`.
 
-Remaining 8 files, each named by its own line (no catch-all bucket):
+Tried and reverted, twice:
 
-- `000124_pydoc.py:2539` — `time.sleep(.01)` — a name the lexer reads is missing from the CST value
-- `000170_calendar.py:97` — `_months.insert(0, lambda x: "")` — a call/constant the lexer reads is missing from the CST value
-- `000219__parser.py:196` — `self.dict: dict[str, Any] = {}` — target list differs
-- `000231___init__.py:175` — `raise Exception` — no shared line for the event
-- `000242_imaplib.py:1510` — `gmtoff = -(time.timezone, time.altzone)[dst]` — a name the lexer reads is missing from the CST value
-- `000310_mod_generics_cache.py:12` — `some_b: 'B'` — a call/constant the lexer reads is missing from the CST value
-- `000358___init__.py:504` — `memmove = CFUNCTYPE(c_void_p, c_void_p, c_void_p, c_size_t)(_memmove_addr)` — other
-- `000499_request.py:798` — `setattr(self, '%s_open' % type,` — a name the lexer reads is missing from the CST value
+* fold only when the receiver is itself a call (`receiver.starts_with('c')`):
+  js 128 → **510** losses / 291 files, ts 45 → 48, and `loss_count` then reports
+  "more files than losses", so the guard itself breaks;
+* fold unless the receiver is literally `"0"`: js 128 → **260**, rust 112 → 140.
 
-### RUST — 306 fallbacks
+The right fix is CST-side (name the call `max` instead of `.max` when the
+receiver is a literal, matching the lexer's spelling), but it moves every
+literal-receiver call in four corpora and needs its own measurement.
 
-| files | construct | example |
-|------:|-----------|---------|
-| 95 | call whose path the readers spell differently | `000158_compress.rs:231` |
-| 79 | declarator | `000033_lib.rs:177` |
-| 29 | definition the lexer opens and the CST does not | `000031_check.rs:44` |
-| 13 | module-level var fact the CST never records | `000138_incremental.rs:1` |
-| 12 | `extern` block header | `000662_main.rs:23` |
-| 8 | labelled loop header | `000122_incremental.rs:578` |
-| 8 | async/await | `001081_worker_versioning_tests.rs:164` |
-| 7 | Rust item head inside a block | `000922_metrics.rs:57` |
-| 6 | call whose argument is a match or closure | `001012_complete_workflow_state_machine.rs:63` |
-| 5 | macro/assertion call statement | `001162_matching_core.rs:245` |
-| 4 | arrow function | `000071_visual_basic.rs:323` |
-| 4 | control-flow header | `001480_reviewed_entry.rs:51` |
-
-Remaining 36 files, each named by its own line (no catch-all bucket):
-
-- `000040_mutate.rs:227` — `bytes[at + 1] = b'A';` — CST value is the constant 0
-- `000134_cst.rs:193` — `all.sort_by_key(|&id| self.nodes[id as usize].start);` — a name the lexer reads is missing from the CST value
-- `000254_mutate.rs:227` — `bytes[at + 1] = b'A';` — CST value is the constant 0
-- `000348_cst.rs:193` — `all.sort_by_key(|&id| self.nodes[id as usize].start);` — a name the lexer reads is missing from the CST value
-- `000483_mutate.rs:227` — `bytes[at + 1] = b'A';` — CST value is the constant 0
-- `000577_cst.rs:193` — `all.sort_by_key(|&id| self.nodes[id as usize].start);` — a name the lexer reads is missing from the CST value
-- `000707_mutate.rs:227` — `bytes[at + 1] = b'A';` — CST value is the constant 0
-- `000801_cst.rs:193` — `all.sort_by_key(|&id| self.nodes[id as usize].start);` — a name the lexer reads is missing from the CST value
-- `000918_future.rs:9` — `future: Pin<Box<dyn Future<Output = Result<R, BridgeError>> + Send + 'static>>,` — no shared line for the event
-- `000928_runtime.rs:62` — `Trace = 0,` — no shared line for the event
-- `000941_options.rs:81` — `WorkflowCommand {` — a name the lexer reads is missing from the CST value
-- `000959_test_utils.rs:26` — `StartTimer {` — a call/constant the lexer reads is missing from the CST value
-- `000984_queries.rs:504` — `core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(` — a name the lexer reads is missing from the CST value
-- `000986_updates.rs:67` — `core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(` — a name the lexer reads is missing from the CST value
-- `001023_timer_state_machine.rs:83` — `Self::from_parts(` — a call/constant the lexer reads is missing from the CST value
-- `001073_heartbeat_tests.rs:111` — `core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(` — a name the lexer reads is missing from the CST value
-- `001091_timers.rs:168` — `mock_cfg.expect_fail_wft_matcher = Box::new(move |_, cause, f| {` — a name the lexer reads is missing from the CST value
-- `001096_child_workflows.rs:114` — `worker.register_wf(` — a name the lexer reads is missing from the CST value
-- `001098_appdata_propagation.rs:36` — `worker.register_activity(` — a name the lexer reads is missing from the CST value
-- `001100_activities.rs:755` — `core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(` — a name the lexer reads is missing from the CST value
-- `001129_ids_generator.rs:282` — `value[18] = b'-';` — CST value is the constant 0
-- `001256_dema.rs:166` — `self.value = 2.0f64.mul_add(self.ema1.value(), -self.ema2.value());` — CST value is the constant 0
-- `001257_lr.rs:568` — `lr.update_raw(3.0f64.mul_add(x as f64, noise));` — a name the lexer reads is missing from the CST value
-- `001283_ids_generator.rs:282` — `value[18] = b'-';` — CST value is the constant 0
-- `001410_dema.rs:166` — `self.value = 2.0f64.mul_add(self.ema1.value(), -self.ema2.value());` — CST value is the constant 0
-- `001411_lr.rs:568` — `lr.update_raw(3.0f64.mul_add(x as f64, noise));` — a name the lexer reads is missing from the CST value
-- `001494_providers.rs:443` — `Resolved { root: String, scope: Option<Scope>, agent_scope: Option<Scope>, providers: Vec<&'static s` — a name the lexer reads is missing from the CST value
-- `001499_bundle.rs:296` — `return copy_or_extract_local_bundle(sys, local);` — a call/constant the lexer reads is missing from the CST value
-- `001513_js.rs:118` — `up[i] = b'0';` — CST value is the constant 0
-- `001541_stop_baseline.rs:43` — `sessions(cache)?` — a call/constant the lexer reads is missing from the CST value
-- `001664_live_accept.rs:76` — `Carbonized {` — a name the lexer reads is missing from the CST value
-- `001679_dev_url.rs:78` — `(host, port)` — a name the lexer reads is missing from the CST value
-- `001712_manifest.rs:103` — `packet` — a call/constant the lexer reads is missing from the CST value
-- `001728_context_cli.rs:182` — `parts.push([` — a name the lexer reads is missing from the CST value
-- `001744_ignores.rs:232` — `[` — a call/constant the lexer reads is missing from the CST value
-- `001758_jsnum.rs:54` — `buf[i] = b'0';` — CST value is the constant 0
-
----
+## 4. The lexer names an attributed item after its attribute (latent, ~58 files)
 
 # Historical bounce log (kept for the failed attempts)
 
