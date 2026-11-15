@@ -1,6 +1,6 @@
 # Unsolved — what still falls back, with the evidence
 
-Measured 2026-11-15 on the committed tree (`c0b107e`) with the release/musl binary:
+Measured 2026-11-15 on the committed tree (`b54c30b`) with the release/musl binary:
 
     cd /tmp/rg-grunt
     CARGO_TARGET_DIR=/tmp/rg-grunt-target cargo build --release --features "deep parser"
@@ -10,36 +10,36 @@ Measured 2026-11-15 on the committed tree (`c0b107e`) with the release/musl bina
 
 | corpus | files      | losses | per file |
 |--------|-----------:|-------:|---------:|
-| js     | 58 / 1854  |    103 |     1.78 |
-| ts     | 55 / 2000  |     43 |     0.78 |
+| js     | 39 / 1854  |     83 |     2.13 |
+| ts     | 53 / 2000  |     39 |     0.74 |
 | python |  8 / 568   |      8 |     1.00 |
 | rust   | 93 / 1816  |    107 |     1.15 |
 
-`tools/phase4_gate.py` PASSES (js 58 ≤ 150, ts 55 ≤ 120, python 8 and rust 93
+`tools/phase4_gate.py` PASSES (js 39 ≤ 150, ts 53 ≤ 120, python 8 and rust 93
 pinned, every fallback attributed, the construct record matches the sweep).
 
 Both columns are floors. A file is charged one loss per **kind** — the import,
 symbol, call and variable checks stop at their first miss — and one per unpaired
-event. One corpus reports fewer ts losses than ts files (55 files, 43 losses),
+event. One corpus reports fewer ts losses than ts files (53 files, 39 losses),
 which is the same fact from the other side: `deep_losses` can be 0 on a file that
 still falls back, so `tools/loss_count.py` exits non-zero with
 "fewer losses than files" on this tree.
 
 ## Clause totals (what the guard actually said)
 
-| corpus | no event on a line both readers can mean | a name the lexer read is not in the CST's value | a call or constant | the CST wrote the value as the constant 0 | target list differs |
+| corpus | no event on a line both readers can mean | a name the lexer read is not in the CST's value | a call | a var binding | an import |
 |--------|-----:|-----:|-----:|-----:|-----:|
-| js     | 61 | 11 | 2 | – | 0 |
-| ts     | 14 | 11 | 3 | – | 4 |
-| python |  0 |  4 | 2 | – | 1 |
-| rust   | 12 | 36 | 14 | 12 | 1 |
+| js     | 67 | 3 | 3 | 0 | 10 |
+| ts     | 28 | 2 | 8 | 0 | 1 |
+| python |  7 | 0 | 1 | 0 | 0 |
+| rust   | 75 | 5 | 24 | 3 | 0 |
 
 ---
 
 ## 1. A multi-line expression is one event to the CST and another line to the lexer
 
-61 js, 14 ts, 12 rust, 0 python. This is the largest remaining class and most of
-it is one mechanism.
+67 js, 28 ts, 75 rust, 7 python — 177 of the 237 rows left (three quarters).
+This is the largest remaining class and most of it is one mechanism.
 
     /tmp/opencode/sweep-local/js/000013_css-tokenizer.js:167
         return isBetween(code, 0 /* CodePoint.Null */, 8 /* CodePoint.Backspace */)
@@ -63,49 +63,54 @@ files under a different symbol, and `001165_lib.rs:176` is a `let` inside a
 `#[pyfunction]` whose CST body carries no event at all. Those are counted here
 because the guard reports them with the same sentence.
 
-## 2. Rust: "a name the lexer read is not in the CST's value" — 36 of 107
+## 2. Rust: the symbol clause is only an attribute name now — 5 of 107
 
-Three distinct shapes sit in the same clause because the guard reports the first
-name it could not match.
+`000976_log_export.rs:233` `symbol instrument kind 1`, and `symbol case` on
+`001119_oculus_sot.rs:93`, `001263_hma.rs:384`, `001273_oculus_sot.rs:93`,
+`001417_hma.rs:384` (two files, each held twice by the corpus).
 
-* **A `match` arm's block is folded by the lexer, nested by the CST.**
-  `000034_emit.rs:99`, `let layout = match self.checked.layout { … }` — the lexer
-  writes `m:[n:match, …, m:[c(n:String;[]), m:[…]]]`, the CST nests one merge per
-  arm (`m:[m:[n:None,c(n:String;[])],m:[0,…]]`). 4 of the 36 are this file, which
-  the corpus holds four times.
-* **A turbofish inside a struct literal.** `000946_mod.rs:101`,
-  `Self { client, info, _res_type: PhantomData::<RT> }` — the lexer writes
-  `m:[n:_res_type,n:PhantomData]`, the CST writes `m:[n:_res_type,0]`: a path
-  with `::<…>` forms as the constant in `rust_form`'s field-initializer arm.
-* **An `if let` struct pattern** (`000973_internal_flags.rs:82`):
-  `if let Self::Enabled { core, .. }` — the lexer writes the path
-  `n:Self.Enabled`, the CST's let-condition arm forms the value and no name.
-* **The constant-receiver call of §3, one level out**
-  (`001757_metrics.rs:143`, `let ax = 0i64.max(-dx) as usize;`): the call folds to
-  `0`, so the cast's `usize` is the name that goes missing.
+Both are §4: `#[instrument(...)]` and `#[case(1)]` open a symbol named after the
+attribute, because `c_style_head` reads the attribute's `(` as a parameter list.
+The clause is counted here only because the symbol check fires before the event
+check. The value-mismatch shapes that used to hold it — a match arm's folded
+block, a turbofish inside a struct literal, an `if let` struct pattern, the
+literal receiver — were closed by `f1a9112`, `65436fb` and `d446c97`, and the
+clause went 36 → 5 on the same corpora.
 
-Enum bodies (`enum E { Start { kind: Kind }, Finish }` read as one tuple by the
-lexer) were in this clause until `c3f0355`/`f1a9112`; `/tmp/rta/a.rs` is clean on
-this tree, so the entry is gone rather than kept for sentiment.
+## 3. Rust: a call whose name the CST cannot place — 24 of 107
 
-## 3. Rust: "the CST wrote the value as the constant 0" — 12 of 107
+Three shapes, all "the CST wrote no call where the lexer read one":
 
-`0i64.max(-ox)`, `0f64.max(iw.min(round(x)))` (`001559_displacement.rs:63`,
-`001754_raster.rs:51`). The CST names the call `.max` with receiver `0`; the
-guard's shape folds any leading-dot path to its receiver, because that is how a
-`Path(x).resolve()` chain is spelled on the two sides. Folded, the CST's whole
-value becomes the constant `0`.
+* **An enum variant is a call to the lexer.** `TradingCommand.SubmitOrderList`
+  (`001136_mod.rs:2429`), `StopOrderAny.MarketIfTouched`
+  (`001117_matching_core.rs:691` and its copy `001271`),
+  `ChildWorkflowCommand.StartCancel` (`001026`), `WFCommandVariant.QueryResponse`
+  (`001010`), `PendingStart` (`001040`), `Custom` (`001002`), `Bezier`
+  (`001457`), `UntilResolved` (`000995`), `FnMut` (`000947`). The lexer sees
+  `Path(args)` after `::`; the CST sees a tuple/struct expression inside an
+  `impl` body, so no `call_expression` exists to read. The `in derive` owner on
+  four of them says the same `#[derive(..)]` head is also swallowing the scope.
+* **A field chain folds to a different receiver.** `self.max_deque.clear`
+  (`001183_stochastics.rs:188`), `self.update` (`001214_rsi.rs:66`),
+  `order.is_closed` (`001131_mod.rs:3062`), and the long member paths
+  `history_event.Attributes.SignalExternalWorkflowExecutionFailedEventAttributes`
+  (`001022`), `…NexusOperationCancelRequestCompletedEventAttributes` (`001018`),
+  `…WorkflowExecutionUpdateAcceptedEventAttributes` (`001016`). The guard folds
+  any leading-dot path to its receiver (that is how `Path(x).resolve()` is spelled
+  on both sides) and the fold lands on a different name than the CST's.
+* **`Some(..)` in a match arm or closure tail** — `000965_mod.rs:272`,
+  `000999_local_activities.rs:93`, `001629_accept_css.rs:333`,
+  `001644_live_generate.rs:669`.
 
-Tried and reverted, twice:
+Two var rows survive next to these: `var report.price = Some`
+(`001121_proptests.rs`) and `var NODE_LIMIT = Limit` (`001815_sample.rs`).
 
-* fold only when the receiver is itself a call (`receiver.starts_with('c')`):
-  js 128 → **510** losses / 291 files, ts 45 → 48, and `loss_count` then reports
-  "more files than losses", so the guard itself breaks;
-* fold unless the receiver is literally `"0"`: js 128 → **260**, rust 112 → 140.
-
-The right fix is CST-side (name the call `max` instead of `.max` when the
-receiver is a literal, matching the lexer's spelling), but it moves every
-literal-receiver call in four corpora and needs its own measurement.
+Tried and reverted, twice, on the fold itself: fold only when the receiver is
+itself a call (`receiver.starts_with('c')`) — js 128 → **510** losses / 291 files
+and `loss_count` then reports more files than losses, breaking the metric; fold
+unless the receiver is literally `"0"` — js 128 → **260**, rust 112 → 140. The
+repair has to be CST-side (write the member name the lexer writes), which moves
+every literal-receiver call in four corpora and needs its own measurement.
 
 ## 4. The lexer names an attributed item after its attribute (latent, ~58 files)
 
@@ -129,7 +134,7 @@ The next fix is therefore the guard — compare an unpaired lexer symbol's event
 against the file's rows instead of skipping the symbol — and only then the
 lexer. Both edits were reverted with `git checkout -- src/parser.rs`.
 
-## 5. TypeScript: a `.d.ts` declaration is not a runtime call — 4 of 43
+## 5. TypeScript: a `.d.ts` declaration is not a runtime call — 4 rows
 
 `is_type_property_line` now excuses a *call* on a `.d.ts` member line the same
 way it already excused an event (js 128 → 122, ts 45 → 43, rust 112 → 111 in the
@@ -167,7 +172,7 @@ here so the next agent does not re-derive them:
 | `000499_request.py:798` | `setattr(self, '%s_open' % type, proxy=url, …)` — keyword arguments are a merge to the CST, `k:` atoms to the lexer |
 | `000505_traceback.py:300` | `return (self.filename, …)[pos]` — a subscript of a tuple expression; the CST keeps the first element |
 
-## 7. Rust: `this` is a binding, not `self` (1–2 rows)
+## 7. Rust: `this` is a binding, not `self` (2 rows, counted as events)
 
 `001008_history_update.rs:403`, `let mut this = self.project();` — the lexer's
 target is `self`, the CST's is `this`. Both readers map `this` → `self` in
