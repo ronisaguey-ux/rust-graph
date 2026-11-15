@@ -440,7 +440,10 @@ impl<'a> Parser<'a> {
                 self.declaring = true;
                 self.end_statement();
             }
-            b',' if self.brackets.is_empty() && self.stmt.iter().any(|token| self.is_op(token, b"=>")) => {
+            b',' if self.lang.tag == "RS"
+                && self.brackets.is_empty()
+                && self.stmt.iter().any(|token| self.is_op(token, b"=>")) =>
+            {
                 self.stmt.push(token);
                 self.end_statement();
             }
