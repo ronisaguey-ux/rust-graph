@@ -2193,8 +2193,7 @@ impl<'a> Parser<'a> {
                 }
                 b"," if depth == 0
                     && angle == 0
-                    && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
-                    && found.is_some() =>
+                    && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") =>
                 {
                     return None
                 }
