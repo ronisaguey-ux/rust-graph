@@ -635,6 +635,9 @@ impl<'a> Parser<'a> {
         if self.has_def_word(&self.stmt) {
             return true;
         }
+        if self.assigned_class(&self.stmt).is_some() {
+            return true;
+        }
         if matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt) {
             return true;
         }
@@ -923,6 +926,8 @@ impl<'a> Parser<'a> {
             let receiver = self.top().receiver.clone();
             self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
         } else if let Some((name, bases)) = self.class_head(&stmt) {
+            self.push_class(name, bases, start_col);
+        } else if let Some((name, bases)) = self.assigned_class(&stmt) {
             self.push_class(name, bases, start_col);
         } else if let Some(head) = self.function_head(&stmt, true) {
             self.push_function(head, start_col, None);
@@ -2624,6 +2629,16 @@ impl<'a> Parser<'a> {
         Some(head)
     }
 
+    /// `X = class Y { … }` and `module.exports = class …`: an assigned class
+    /// expression opens a class block on `{` just like a class declaration.
+    fn assigned_class(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {
+        if !matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX") {
+            return None;
+        }
+        let equal = self.top_level_assign(toks)?;
+        self.assigned_class_head(&toks[equal + 1..])
+    }
+
     /// `class` as the value of an assignment: the name it spells, if any,
     /// and its bases. `= class extends B {` is anonymous — the CST gives that
     /// class no name of its own, so neither does the lexer.
@@ -3027,20 +3042,6 @@ impl<'a> Parser<'a> {
                     self.simple_statement(&stmt[end + 1..]);
                 }
                 return;
-            }
-        }
-        // `X = class Y { … }` and `module.exports = class …`: a class
-        // expression is the definition an assigned function is — the walk
-        // opens the class body as its own symbol and the CST writes no event.
-        // Read as a value, `class`, the class name and `extends B` became
-        // three names the CST never wrote.
-        if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX") {
-            if let Some(equal) = self.top_level_assign(stmt) {
-                if let Some((name, bases)) = self.assigned_class_head(&stmt[equal + 1..]) {
-                    self.last_line = stmt[stmt.len() - 1].line;
-                    self.push_class(name, bases, first.col);
-                    return;
-                }
             }
         }
         if let Some(equal) = self.top_level_assign(stmt) {
