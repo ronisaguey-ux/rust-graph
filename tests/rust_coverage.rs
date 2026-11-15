@@ -82,6 +82,20 @@ const COVERAGE: &[(&str, &str)] = &[
         "range pattern: `0x00..=0x7f` and `0xc2..=0xdf` (000456_cursor.rs:134)",
         "fn lead(b0: u8) -> usize {\n    match b0 {\n        0x00..=0x7f => 1,\n        0xc2..=0xdf => 2,\n        0xe0..=0xef => 3,\n        _ => 0,\n    }\n}\n",
     ),
+    // P5-11: a block keyword is one rule, so the statements inside are read
+    // instead of merged into a single value that drops them.
+    (
+        "async block in value position",
+        "fn d() -> u32 {\n    let b = async {\n        let x = 1;\n        work(x);\n        x + 1\n    };\n    0\n}\n",
+    ),
+    (
+        "unsafe block in value position",
+        "fn d(m: &Mutex<u32>) -> u32 {\n    let v = unsafe {\n        let p = m.get();\n        *p\n    };\n    v\n}\n",
+    ),
+    (
+        "try block in value position",
+        "fn d() -> Result<u32, E> {\n    let r = try {\n        let a = step(1)?;\n        finalize(a)?\n    };\n    r\n}\n",
+    ),
     (
         "closures: annotated return type with a block, and an expression body",
         "fn f() {\n    let add = |x: i32| -> i32 { x + 1 };\n    let twice = |v: i32| v * 2;\n}\n",
@@ -221,6 +235,37 @@ fn use_lists_parse_to_the_import_shape_both_readers_agree_on() {
     ] {
         assert!(deep.contains(&expected), "missing import {expected:?} in {deep:?}");
     }
+}
+
+/// P5-11: every block keyword routes through the same block handling, so a
+/// statement inside a block is read as a statement — a new keyword cannot
+/// silently merge the body into one value and drop what is in it.
+#[test]
+fn every_block_keyword_reads_the_statements_inside_it() {
+    // The call inside each body is the canary: merged into one value it
+    // disappears from the record, and nothing in the guard would say so.
+    let rows: &[(&str, &str)] = &[
+        ("async", "fn d() -> u32 {\n    let b = async {\n        inner(1);\n        2\n    };\n    0\n}\n"),
+        ("unsafe", "fn d() -> u32 {\n    let b = unsafe {\n        inner(1);\n        2\n    };\n    0\n}\n"),
+        ("try", "fn d() -> u32 {\n    let b = try {\n        inner(1)?;\n        2\n    };\n    0\n}\n"),
+        ("const", "fn d() -> u32 {\n    let b = const { inner(1); 2 };\n    0\n}\n"),
+        ("bare", "fn d() -> u32 {\n    let b = {\n        inner(1);\n        2\n    };\n    0\n}\n"),
+    ];
+    let mut problems = Vec::new();
+    for (label, source) in rows {
+        for (reader, facts) in [("lexer", lexer_facts(source)), ("cst", deep_facts(source))] {
+            let calls: Vec<&str> = facts
+                .symbols
+                .iter()
+                .flat_map(|symbol| symbol.calls.iter().map(|call| call.path.as_str()))
+                .collect();
+            let count = calls.iter().filter(|path| **path == "inner").count();
+            if count != 1 {
+                problems.push(format!("{label} [{reader}]: `inner` recorded {count} time(s), want 1: {calls:?}"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "a block keyword dropped a statement:\n{}", problems.join("\n"));
 }
 
 /// A recorded gap is asserted to disagree, so closing one without moving the row
