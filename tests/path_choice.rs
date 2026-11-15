@@ -6,7 +6,7 @@
 //! then imports) and an exact tie goes to the CST and says so. `--compare` is
 //! the audit that shows both sides per file without choosing.
 //!
-//! The fixture is measured, not assumed: `deep_win.ts` is a win the CST finds
+//! The fixture is measured, not assumed: `deep_more.ts` is a win the CST finds
 //! on a type alias (`type A = { x: number }`, a declaration the one-pass lexer
 //! does not open a symbol for), `deep_more.ts` holds a generic call
 //! (`g<number>(x)`) that the lexer records too since it learned to skip a type
@@ -110,7 +110,7 @@ fn a_strict_win_goes_to_the_cst_and_says_which_count_won() {
     let tree = Tree::new("strict");
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
-    for path in ["deep_win.ts"] {
+    for path in ["deep_more.ts"] {
         let row = source_row(&json, path);
         assert!(row.contains("\"path_choice\":\"deep:more\""), "{path}: {row}");
         assert!(row.contains("\"parsed_by\":\"deep\""), "{path}: {row}");
