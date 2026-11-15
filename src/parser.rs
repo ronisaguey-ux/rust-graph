@@ -650,7 +650,7 @@ impl<'a> Parser<'a> {
         if label > 0 && self.stmt.len() == label {
             return true;
         }
-        if self.has_def_word(&self.stmt) {
+        if self.has_def_word(&self.stmt) || self.assigned_class(&self.stmt).is_some() {
             return true;
         }
         if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
@@ -955,6 +955,8 @@ impl<'a> Parser<'a> {
                 })
                 .flatten()
         }) {
+            self.push_class(name, bases, start_col);
+        } else if let Some((name, bases)) = self.assigned_class(&stmt) {
             self.push_class(name, bases, start_col);
         } else if let Some(head) = self.function_head(&stmt, true) {
             let assigned = head.assigned_name && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
@@ -2695,6 +2697,16 @@ impl<'a> Parser<'a> {
             head.body = Some(at + equal + 1);
         }
         Some(head)
+    }
+
+    /// `X = class Y { … }` and `module.exports = class …`: a class expression
+    /// assigned to a name opens its own class frame on `{`, not a plain block.
+    fn assigned_class(&self, stmt: &[Token]) -> Option<(String, Vec<String>)> {
+        if !matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX") {
+            return None;
+        }
+        let equal = self.top_level_assign(stmt)?;
+        self.assigned_class_head(&stmt[equal + 1..])
     }
 
     /// `class` as the value of an assignment: the name it spells, if any,
