@@ -902,7 +902,11 @@ impl<'a> Walker<'a> {
                         }
                         for &child in &inner[semi + 1..] {
                             if !self.is_layout(child) {
-                                let _ = self.form(child);
+                                let value = self.form(child);
+                                if value != "0" {
+                                    let line = self.line(child);
+                                    self.event(&format!("[\"x\",{line},{value}]"));
+                                }
                             }
                         }
                     }
