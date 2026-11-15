@@ -1,64 +1,67 @@
-# Unsolved — every remaining fallback, attributed
+# Unsolved — what still falls back, with the evidence
 
-Baseline (HEAD `fc1fc07`, 2026-11-14), full sweep over the four local corpora:
+Measured 2026-11-15 on the committed tree (`c0b107e`) with the release/musl binary:
 
-| corpus | fallbacks | files |
-|--------|----------:|------:|
-| js | 111 / 1995 | 109 with a first loss |
-| ts | 99 / 2000 | 81 |
-| python | 14 / 568 | 14 |
-| rust | 308 / 1816 | 306 |
+    cd /tmp/rg-grunt
+    CARGO_TARGET_DIR=/tmp/rg-grunt-target cargo build --release --features "deep parser"
+    RG_BIN=/tmp/rg-grunt-target/x86_64-unknown-linux-musl/release/rust-graph \
+      python3 tools/loss_count.py          # the only accepted metric
+    RG_BIN=... python3 tools/loss_shapes.py --corpus rust   # cluster a corpus
 
-Method: `RG_LOSSES=1 rust-graph build <corpus> --no-cache --stdout 2>loss_<lang>.txt`, one line per
-disagreement, then the *first* loss of each file is attributed to a construct. Nothing here is left as
-a general "the CST lost an event": a construct with two or more files is a table row, and every file
-that does not share a row is listed individually by file:line, its source line, and the reader
-disagreement it hit.
+| corpus | files      | losses | per file |
+|--------|-----------:|-------:|---------:|
+| js     | 58 / 1854  |    103 |     1.78 |
+| ts     | 55 / 2000  |     43 |     0.78 |
+| python |  8 / 568   |      8 |     1.00 |
+| rust   | 93 / 1816  |    107 |     1.15 |
 
-Two reader-side facts that explain many rows:
-- a *definition symbol* the lexer opens and the CST does not is a callable shape the CST does not name
-  (arrow chosen by a ternary, minified UMD `!function(e,t){…}`);
-- a *module-level var/import fact* the CST never records is a fact the deep reader drops, not one the
-  lexer invents — those rows are fixed in `src/deep_facts`, not in the lexer.
+`tools/phase4_gate.py` PASSES (js 58 ≤ 150, ts 55 ≤ 120, python 8 and rust 93
+pinned, every fallback attributed, the construct record matches the sweep).
 
-### JS — 109 fallbacks
+Both columns are floors. A file is charged one loss per **kind** — the import,
+symbol, call and variable checks stop at their first miss — and one per unpaired
+event. One corpus reports fewer ts losses than ts files (55 files, 43 losses),
+which is the same fact from the other side: `deep_losses` can be 0 on a file that
+still falls back, so `tools/loss_count.py` exits non-zero with
+"fewer losses than files" on this tree.
 
-| files | construct | example |
-|------:|-----------|---------|
-| 14 | call whose path the readers spell differently | `000011_ImportScriptsChunkLoadingRuntimeModule.js:196` |
-| 14 | definition the lexer opens and the CST does not | `000039_7517.b4d8b77497bdb47f.js:1` |
-| 12 | module-level var fact the CST never records | `000041_snapshot.B_Jk1wbt.js:1` |
-| 10 | declarator | `000092_conversion.js:528` |
-| 9 | parenthesised expression statement | `000222_74fad3407b748f3e.js:1` |
-| 6 | control-flow header | `000031_source-map.js:2` |
-| 6 | import fact the CST never records | `000122_express.js:1` |
-| 6 | return statement | `000251_d3-array.js:506` |
-| 5 | continuation line beginning with `}` | `000086_ReferenceLine.js:188` |
-| 3 | arrow function | `000893_1028.812a1281fd9f7ba1.js:1` |
-| 2 | method call on `this` | `000091_Compilation.js:1638` |
-| 2 | prefix increment of a member | `000488_index.js:3371` |
-| 2 | array literal or computed-key statement | `000721_errors.js:79` |
+## Clause totals (what the guard actually said)
 
-Remaining 18 files, each named by its own line (no catch-all bucket):
+| corpus | no event on a line both readers can mean | a name the lexer read is not in the CST's value | a call or constant | the CST wrote the value as the constant 0 | target list differs |
+|--------|-----:|-----:|-----:|-----:|-----:|
+| js     | 61 | 11 | 2 | – | 0 |
+| ts     | 14 | 11 | 3 | – | 4 |
+| python |  0 |  4 | 2 | – | 1 |
+| rust   | 12 | 36 | 14 | 12 | 1 |
 
-- `000022_mode.js:26` — `options.uid : process.getuid && process.getuid()` — no shared line for the event
-- `000270_Request.js:167` — `Object.assign(this, args);` — no shared line for the event
-- `000275_use-pagination.js:61` — `pageSize - spaceUnderActive` — no shared line for the event
-- `000344_prepared-router.js:162` — `0 && (module.exports = {` — no shared line for the event
-- `000358_options.js:33` — `placeholderPattern,` — no shared line for the event
-- `000569_middleware.js:26` — `c.header(X_HONO_DISABLE_SSG_HEADER_KEY, "true");` — no shared line for the event
-- `000606_offscreen_compiled.js:9` — `$jscomp.setPrototypeOf=$jscomp.ASSUME_ES6||$jscomp.TRUST_ES6_POLYFILLS&&typeof Object.setPrototypeOf` — a name the lexer reads is missing from the CST value
-- `000777_VariantSchema.js:78` — `static [TypeId] = fields;` — target list differs
-- `000908_matrix.js:302` — `a = 1;` — no shared line for the event
-- `001028_react-jsx-dev-runtime.react-server.development.js:236` — `for (` — no shared line for the event
-- `001090_fullscreen-user-rules.js:3147` — `target[protoStoreKey] || (target[protoStoreKey] = []) : // functions are added to the instance store` — no shared line for the event
-- `001120_google-analytics.js:70` — `handleCallback(data, "eventCallback");` — no shared line for the event
-- `001227_metrika-yandex-watch.js:37` — `asyncCallbackFromOptions(options);` — no shared line for the event
-- `001399_import.js:52` — `exports.importJWK = importJWK;` — no shared line for the event
-- `001494_circle.js:147` — `polar = abs(delta - pi) < epsilon,` — a name the lexer reads is missing from the CST value
-- `001669_regeneratorRuntime.js:4` — `module.exports = _regeneratorRuntime = function _regeneratorRuntime() {` — no shared line for the event
-- `001735_source-node.js:74` — `remainingLines[remainingLinesIndex++] : undefined;` — no shared line for the event
-- `001737_ComponentLogger.js:99` — `args.unshift(namespace);` — a name the lexer reads is missing from the CST value
+---
+
+## 1. A multi-line expression is one event to the CST and another line to the lexer
+
+61 js, 14 ts, 12 rust, 0 python. This is the largest remaining class and most of
+it is one mechanism.
+
+    /tmp/opencode/sweep-local/js/000013_css-tokenizer.js:167
+        return isBetween(code, 0 /* CodePoint.Null */, 8 /* CodePoint.Backspace */)
+            || code === 11 /* CodePoint.LineTabulation */
+            || isBetween(code, 14, 31)
+            || code === 127 /* CodePoint.Delete */;
+    loss: event x line 169 ... no event on a line both readers can mean
+
+The lexer stamps the chain on the line each `||` operand starts; the CST writes
+one binary expression and stamps it where its own node starts. The guard pairs
+an event only within one line (`covers`, `lines_near` in `src/pipeline.rs`), and
+that window is load-bearing: it is what stops a duplicate target on another line
+standing in for the event that lost its value (`covers`'s `Miss::Line` comment).
+
+Widening the window is the only mechanical fix and it trades a false negative
+for a false positive in both directions. **Not attempted.**
+
+Not every row in this clause is that mechanism. `000032_index.js:783-786`
+(`exports.Browser = capabilities.Browser`) is inside a function body the CST
+files under a different symbol, and `001165_lib.rs:176` is a `let` inside a
+`#[pyfunction]` whose CST body carries no event at all. Those are counted here
+because the guard reports them with the same sentence.
 
 ### TS — 81 fallbacks
 
