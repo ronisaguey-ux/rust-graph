@@ -1216,6 +1216,29 @@ impl<'a> Walker<'a> {
         out
     }
 
+    /// The leftmost identifier under a node: for a generic type that is the
+    /// constructor, which is the name the type goes by — `JsonString<LogEntry>`
+    /// is `JsonString`, not the argument inside the angle brackets.
+    pub(crate) fn first_name(&self, id: u32) -> Option<String> {
+        let mut walk = vec![id];
+        while let Some(node) = walk.pop() {
+            let kind = self.kind(node);
+            if matches!(kind, "identifier" | "property_identifier" | "type_identifier") {
+                return Some(self.text_string(node));
+            }
+            let mut kids = Vec::new();
+            let mut child = self.node(node).first_child;
+            while child != NONE {
+                kids.push(child);
+                child = self.node(child).next_sibling;
+            }
+            for &child in kids.iter().rev() {
+                walk.push(child);
+            }
+        }
+        None
+    }
+
     pub(crate) fn last_name(&self, id: u32) -> Option<String> {
         let mut last = None;
         let mut walk = vec![id];
