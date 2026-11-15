@@ -817,6 +817,7 @@ impl<'a> Walker<'a> {
             "if_expression"
             | "else_clause"
             | "block"
+            | "labeled_block"
             | "for_expression"
             | "while_expression"
             | "loop_expression" => {
