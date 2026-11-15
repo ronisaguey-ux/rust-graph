@@ -136,6 +136,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "a match arm with a range and an alternation",
         "fn f(c: u8) -> u8 {\n    match c {\n        b'a'..=b'z' | b'[' => 3,\n        _ => 0,\n    }\n}\n",
     ),
+    (
+        "a closure whose parameter is a reference pattern",
+        "fn f(all: &mut Vec<u8>) {\n    all.sort_by_key(|&id| all[id as usize]);\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.

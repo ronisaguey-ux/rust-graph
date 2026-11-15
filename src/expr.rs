@@ -257,6 +257,40 @@ impl Emit<'_> {
                 self.pos += at + 1;
                 continue;
             }
+            // `|&id| self.nodes[id as usize].start`: a closure's parameter list
+            // is not a value. Read as a bit-or, the parameter merged with the
+            // body and the CST, which writes the body alone, lost the line
+            // (50 corpus files).
+            if self.lang.tag == "RS"
+                && self.op_byte(0) == b'|'
+                && self.op_byte(1) == b'&'
+                && out.len() == start
+            {
+                let opening = self.toks[self.pos].line;
+                let mut at = 1;
+                let mut close_bar = None;
+                while let Some(next) = self.tok(at) {
+                    // A parameter list sits on one line: `a | b` with another
+                    // `|` further down the block is a bit-or, not a closure.
+                    if next.line != opening {
+                        break;
+                    }
+                    if self.raw_is(next, b"|") {
+                        close_bar = Some(at);
+                        break;
+                    }
+                    let shape_ok = matches!(next.kind, Kind::Ident)
+                        || ["&", ",", ":", "<", ">", "'", "(", ")", "[", "]"].iter().any(|op| self.raw_is(next, op.as_bytes()));
+                    if !shape_ok {
+                        break;
+                    }
+                    at += 1;
+                }
+                if let Some(close_bar) = close_bar {
+                    self.pos += close_bar + 1;
+                    continue;
+                }
+            }
             // `"abc" "def"`: Python and friends concatenate adjacent string
             // literals into one value. Counting two constants against the CST's
             // one node is a difference in how the text is spelled, not a fact.
