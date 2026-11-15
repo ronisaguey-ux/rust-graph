@@ -113,6 +113,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "import def, { a as b } from './m';\nimport * as ns from './n';\nexport { b };\nexport * from './o';\nexport default function f() {\n  return ns.x + def;\n}\n",
     ),
     (
+        "a require written as an assignment target imports the module and binds nothing",
+        "require('npmlog').level = 'warn';\n",
+    ),
+    (
         "re-exports and CommonJS require shapes",
         "export { a as b } from './m';\nexport * as api from './n';\nconst is = require('./is');\nconst { x, y: z } = require('./xy');\nconst get = require('./get');\n",
     ),

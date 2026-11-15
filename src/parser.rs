@@ -1946,6 +1946,14 @@ impl<'a> Parser<'a> {
             return true;
         };
         let targets = &stmt[..equal];
+        // `require('npmlog').level = 'warn'` writes a property of the module:
+        // the target IS the require call, so `level` is not a binding and the
+        // import has no alias. The CST reads it that way; taking the last name
+        // of the target invented an alias the source never states.
+        if targets.iter().any(|token| token.kind == Kind::Ident && self.raw(token) == b"require") {
+            self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
+            return true;
+        }
         if let Some(open) = targets.iter().position(|token| self.is_op(token, b"{")) {
             self.js_named(&targets[open + 1..], &module, line, b":");
         } else if let Some(name) = targets.iter().rev().find(|token| token.kind == Kind::Ident) {
