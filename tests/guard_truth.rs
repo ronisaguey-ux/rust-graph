@@ -152,31 +152,31 @@ fn both_phantoms_are_accepted_and_counted_by_kind() {
     assert_eq!(accepted.total(), 3);
 }
 
-/// Defect 3: the class binding. `Facts::vars` is what turns `repo.find()` into a
-/// `Repo.find` edge, so a binding the CST misses must keep the lexer's record.
+/// A positional tuple target: `repo, other = Repo(), 1` binds `repo` to the
+/// constructed class and `other` to `1`. Both readers read the position
+/// instead of the last name, so the class the lexer records is the one the CST
+/// records — the divergence this fixture used to pin is closed and the row is
+/// an equality, not an accepted difference.
 #[test]
-fn a_missing_class_binding_falls_back() {
+fn a_tuple_target_class_binding_agrees_across_readers() {
     let source = "def f():\n    repo, other = Repo(), 1\n    return repo.find(other)\n";
     let lexer = lexer_facts(source);
     let deep = deep_facts(source);
-    // The lexer reads the last name of `repo, other` as the target and binds it
-    // to the constructed class; the CST reads both targets but only binds a
-    // class when the value *starts* with the constructor, and here it starts
-    // with a call in a tuple.
-    assert!(
-        lexer.vars.iter().any(|(name, class)| name == "other" && class == "Repo"),
-        "the lexer binds the target: {:?}",
-        lexer.vars
-    );
-    assert!(
-        !deep.vars.iter().any(|(name, class)| name == "other" && class == "Repo"),
-        "the CST misses the binding this fixture needs: {:?}",
-        deep.vars
-    );
+    for (side, facts) in [("lexer", &lexer), ("CST", &deep)] {
+        assert!(
+            facts.vars.iter().any(|(name, class)| name == "repo" && class == "Repo"),
+            "the {side} binds the first target: {:?}",
+            facts.vars
+        );
+        assert!(
+            !facts.vars.iter().any(|(name, class)| name == "other" && class == "Repo"),
+            "the {side} gives a tuple target its neighbour's class: {:?}",
+            facts.vars
+        );
+    }
 
     let verdict = pipeline::loses(&lexer, &deep);
-    assert!(verdict.lost(), "a lost typed variable is a lost fact: {verdict:?}");
-    assert_eq!(verdict.why(), Some("var"));
+    assert!(!verdict.lost(), "the readers agree on the binding: {verdict:?}");
 }
 
 /// A lexer assignment event whose target is an imported type, not a binder:
