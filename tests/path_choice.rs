@@ -6,8 +6,11 @@
 //! then imports) and an exact tie goes to the CST and says so. `--compare` is
 //! the audit that shows both sides per file without choosing.
 //!
-//! The fixture is measured, not assumed: `deep_more.ts` is a win the CST finds
-//! on a generic call (`g<number>(x)`, which the one-pass lexer does not record),
+//! The fixture is measured, not assumed: `deep_win.ts` is a win the CST finds
+//! on a type alias (`type A = { x: number }`, a declaration the one-pass lexer
+//! does not open a symbol for), `deep_more.ts` holds a generic call
+//! (`g<number>(x)`) that the lexer records too since it learned to skip a type
+//! argument on a callee, so that file is now a tie rather than a win,
 //! `opaque.js` holds a call inside a JSX element's child expression, which the
 //! fact reader does not descend into, `tie.py` is one function with nothing to
 //! differ on, and `plain.c` has no CST at all. The expected counters in the
@@ -33,6 +36,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_rust-graph");
 const FIXTURE: &[(&str, &str)] = &[
     // The CST reads the call behind the type arguments; the lexer stops there.
     ("deep_more.ts", "import { a, b } from \"./m\";\n\nconst x: number = f(1);\nexport const y = g<number>(x);\n"),
+    // A type alias is a symbol the CST opens and the lexer does not, and the
+    // file loses nothing on either side, so the CST is strictly ahead.
+    ("deep_win.ts", "type A = { x: number };\nconst v: A = { x: 1 };\n"),
     // The CST parses the element's `{...}` part, but the fact reader stops at
     // the element's first child, so a call in a bare child expression is a
     // fact only the lexer's record carries; the guard keeps it.
@@ -103,7 +109,7 @@ fn a_strict_win_goes_to_the_cst_and_says_which_count_won() {
     let tree = Tree::new("strict");
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
-    for path in ["deep_more.ts"] {
+    for path in ["deep_win.ts"] {
         let row = source_row(&json, path);
         assert!(row.contains("\"path_choice\":\"deep:more\""), "{path}: {row}");
         assert!(row.contains("\"parsed_by\":\"deep\""), "{path}: {row}");
@@ -154,7 +160,11 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
     // numbers are the fixture's measurements, so a change in either parser
     // moves a line here rather than passing quietly.
     assert!(
-        text.contains("deep_more.ts\tsymbols deep=1 lexer=1 (+0)\tcalls deep=2 lexer=1 (+1)\timports deep=2 lexer=2 (+0)\n"),
+        text.contains("deep_more.ts\tsymbols deep=1 lexer=1 (+0)\tcalls deep=2 lexer=2 (+0)\timports deep=2 lexer=2 (+0)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("deep_win.ts\tsymbols deep=2 lexer=1 (+1)\tcalls deep=0 lexer=0 (+0)\timports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
     assert!(
