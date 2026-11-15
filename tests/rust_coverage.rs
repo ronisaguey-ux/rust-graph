@@ -101,6 +101,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn h(f: impl Fn(i32) -> i32) -> i32 { f(1) }\n",
     ),
     (
+        "impl for a generic type is named by its constructor",
+        "impl TryFrom<CoreLog> for JsonString<LogEntry> {\n    fn try_from(v: CoreLog) -> Result<()> {\n        todo!()\n    }\n}\n",
+    ),
+    (
         "let-chain: a && let pattern binds and calls nothing",
         "fn f(w: &mut W) -> bool {\n    if w.len() == 3\n        && let Some(old) = w.pop_front()\n    {\n        let _ = old;\n    }\n    true\n}\n",
     ),
