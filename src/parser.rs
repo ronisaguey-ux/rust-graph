@@ -613,6 +613,14 @@ impl<'a> Parser<'a> {
             }
             if let Some(first) = self.stmt.iter().find(|token| token.kind == Kind::Ident) {
                 if matches!(self.raw(first), b"if" | b"for" | b"while" | b"match" | b"loop" | b"else") {
+                    // `if let Self::Enabled {` newline `core,` newline `..` newline
+                    // `} = self`: the brace lists the fields of a pattern, and the
+                    // body opens at the brace after the binding `=`. Opened as the
+                    // body here, the fields became statements and the condition
+                    // lost its value to the line below them.
+                    if matches!(self.raw(first), b"if" | b"while" | b"else") && self.rust_let_pattern_open() {
+                        return false;
+                    }
                     return true;
                 }
             }
@@ -704,6 +712,36 @@ impl<'a> Parser<'a> {
             return false;
         }
         !(self.top_level_assign(&self.stmt).is_some() && !self.is_op(&last, b")"))
+    }
+
+    /// Whether the statement so far ends inside the pattern of a `let`
+    /// condition: `if let Self::Enabled`, `while let Some(Node::Branch`, and the
+    /// later links of a let-chain. Everything between a condition's `let` and
+    /// its binding `=` is a pattern, so a brace there names fields.
+    fn rust_let_pattern_open(&self) -> bool {
+        let Some(at) = self.stmt.iter().rposition(|token| token.kind == Kind::Ident && self.raw(token) == b"let") else {
+            return false;
+        };
+        let opens_condition = at > 0 && {
+            let before = &self.stmt[at - 1];
+            (before.kind == Kind::Ident && matches!(self.raw(before), b"if" | b"while"))
+                || (before.kind == Kind::Op && matches!(self.raw(before), b"&&" | b"||"))
+        };
+        if !opens_condition {
+            return false;
+        }
+        let mut depth = 0i32;
+        for token in &self.stmt[at + 1..] {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    b"=" if depth == 0 => return false,
+                    _ => {}
+                }
+            }
+        }
+        true
     }
 
     /// Whether the brace just read opens a struct literal's field list rather
