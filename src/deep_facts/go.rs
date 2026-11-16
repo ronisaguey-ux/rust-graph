@@ -1889,6 +1889,13 @@ impl<'a> Walker<'a> {
     /// `import a.b.C` and `import a.b.C as D`: one module, and the alias the
     /// lexer files — the name after `as`, or the last segment when none is
     /// spelled.
+/// One segment of a dotted name: letters, digits, `_`, and anything non-ASCII
+/// (an identifier in the source's own language). A node whose text fails this is
+/// not a segment — an argument list, a star, an `as` clause.
+fn dotted_piece(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || c == '_' || !c.is_ascii())
+}
+
     pub(crate) fn kt_import(&mut self, id: u32) {
         let line = self.line(id);
         let mut parts: Vec<String> = Vec::new();
@@ -1900,14 +1907,23 @@ impl<'a> Walker<'a> {
                 after_as = true;
                 continue;
             }
-            if !matches!(kind, "identifier") && !self.kinds.soft.contains(&kind) {
+            // A path segment can be a contextual keyword: Kotlin's grammar names
+            // 39 of them (`annotation`, `field`, `value`, …), and
+            // `import java.lang.annotation.Inherited` is a real import whose middle
+            // segment is one. Filtering on `identifier` dropped it, so the record
+            // said `java.lang.Inherited` — 3,882 rows of the kotlin corpus, the
+            // single largest loss class in the language.
+            let text = self.text_string(child);
+            let piece = text.trim();
+            // The directive's own keyword is a child of the header and is not a
+            // segment; every other word here is one.
+            if piece == "import" || !Self::dotted_piece(piece) {
                 continue;
             }
-            let text = self.text_string(child);
             if after_as {
-                alias = Some(text);
+                alias = Some(piece.to_string());
             } else {
-                parts.push(text);
+                parts.push(piece.to_string());
             }
         }
         if parts.is_empty() {
