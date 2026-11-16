@@ -482,11 +482,12 @@ impl<'a> Walker<'a> {
                         }
                     }
                 }
-                // `CURLcode Curl_altsvc_load(struct altsvcinfo *asi);`: a return
-                // type the grammar does not know becomes a `bare_user_declaration`
-                // wrapping the declarator and its parameters, so the prototype
-                // arm above saw no parameter list of its own and every such
-                // prototype in a C++ header lost the call the lexer reads.
+                // `CURLcode Curl_altsvc_load(struct altsvcinfo *asi);` and the
+                // multi-line form: a return type the grammar does not know
+                // becomes a `bare_user_declaration` wrapping the declarator and
+                // its parameters, so the prototype arm above saw no parameter
+                // list of its own and every such prototype lost both the call
+                // and the line's event.
                 if !self.c_has_kind(id, "compound_statement") {
                     for child in self.children(id) {
                         if self.kind(child) != "bare_user_declaration"
@@ -494,18 +495,51 @@ impl<'a> Walker<'a> {
                         {
                             continue;
                         }
-                        // The declarator here is a bare identifier before the
-                        // parameter list - there is no `direct_declarator` node
-                        // for `declarator_name` to follow.
-                        let name = self
-                            .children(child)
-                            .into_iter()
-                            .take_while(|&node| self.kind(node) != "parameter_list")
-                            .find(|&node| self.kind(node) == "identifier")
-                            .map(|node| self.text_string(node));
-                        if let Some(name) = name {
-                            let line = self.line(id);
-                            self.push_call(name, line);
+                        let inner = self.children(child);
+                        let Some(name_at) = inner.iter().position(|&node| self.kind(node) == "identifier")
+                        else {
+                            continue;
+                        };
+                        let name = self.text_string(inner[name_at]);
+                        if name.is_empty() {
+                            continue;
+                        }
+                        let line = self.line(id);
+                        let index = self.push_call(name.clone(), line);
+                        let name_form = |text: &str| {
+                            let mut form = String::from("[\"n\",");
+                            push_string(&mut form, text);
+                            form.push(']');
+                            form
+                        };
+                        let mut parts: Vec<String> = Vec::new();
+                        for &node in &inner[..name_at] {
+                            for word in self.c_words_of(node) {
+                                if matches!(word.as_str(), "const" | "static" | "extern" | "inline") {
+                                    continue;
+                                }
+                                parts.push(name_form(&word));
+                            }
+                        }
+                        if let Some(list) = inner.iter().copied().find(|&node| self.kind(node) == "parameter_list") {
+                            let mut args: Vec<String> = Vec::new();
+                            for parameter in self.children(list) {
+                                let words: Vec<String> = self
+                                    .c_words_of(parameter)
+                                    .into_iter()
+                                    .filter(|word| !matches!(word.as_str(), "const" | "static" | "extern" | "inline"))
+                                    .collect();
+                                if words.is_empty() || (words.len() == 1 && words[0] == "void") {
+                                    args.push("0".to_string());
+                                    continue;
+                                }
+                                let forms: Vec<String> = words.iter().map(|word| name_form(word)).collect();
+                                args.push(format!("[\"m\",[{}]]", forms.join(",")));
+                            }
+                            parts.push(format!("[\"c\",{index},0,[{}]]", args.join(",")));
+                            let value = format!("[\"m\",[{}]]", parts.join(","));
+                            self.lexer_event(b'x', line, &[], &value, false);
+                            wrote_prototype = true;
                         }
                     }
                 }
