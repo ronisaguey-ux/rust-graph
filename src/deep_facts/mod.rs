@@ -848,8 +848,12 @@ impl<'a> Walker<'a> {
             // declares left an event the tree never wrote. Go has the same arm
             // in its own statement model.
             "field_declaration" | "event_field_declaration" => {
-                self.decl_statement(id);
-                self.field_initializer_calls(id);
+                // A field initialised with a call is an assignment to the
+                // lexer; anything else is the header event.
+                if !self.cs_field_assignment(id) {
+                    self.decl_statement(id);
+                    self.field_initializer_calls(id);
+                }
                 self.cs_declared_vars(id);
             }
             // `var o = JObject.Parse(text);`: a C# local initialised with a call
@@ -857,7 +861,9 @@ impl<'a> Walker<'a> {
             // method. Only C# spells its call kinds this way, so the arm is
             // gated on them rather than on the family.
             "local_variable_declaration" if self.kinds.calls.contains(&"object_creation_expression") => {
-                self.field_initializer_calls(id);
+                if !self.cs_field_assignment(id) {
+                    self.field_initializer_calls(id);
+                }
                 self.cs_declared_vars(id);
             }
             // `size_t n = strlen(s);`: a declaration with an initializer is one
@@ -871,7 +877,20 @@ impl<'a> Walker<'a> {
             // Swift spells it the same way (`let x = 1`), with the name as a
             // plain identifier instead of a `property_head`, so the arm reads
             // both.
-            "property_declaration" => self.kt_property(id),
+            // C# spells a property `public int? Index { get; set; }`, which the
+            // lexer reads as a declaration header and its accessors as their
+            // own statements - not as the Kotlin/Swift assignment the property
+            // arm writes. Dispatched by the grammar's own call kinds.
+            // `public IJEnumerable<int> this[object key] { get; }`: an indexer
+            // is a header statement to the lexer, with `this` spelled `self`.
+            "indexer_declaration" => self.java_header_event(id),
+            "property_declaration" => {
+                if self.kinds.calls.contains(&"object_creation_expression") {
+                    self.java_header_event(id);
+                } else {
+                    self.kt_property(id);
+                }
+            }
             // `rootProject.name = "demo"` in a .kts script: the grammar keeps
             // the line as one flat node, nothing read it, and every Gradle
             // script in the corpus lost its assignments (rootProject.name,

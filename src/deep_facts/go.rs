@@ -119,6 +119,56 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// `public static readonly C Instance = new C();`: a C# field or local with
+    /// a call initialiser is an assignment to the lexer - `a Instance = c(0;[])`
+    /// - and the declaration header event it wrote instead had no counterpart.
+    /// Returns whether it wrote one.
+    pub(crate) fn cs_field_assignment(&mut self, id: u32) -> bool {
+        let children = self.children(id);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "=") else {
+            return false;
+        };
+        let Some(&value) = children.get(at + 1) else { return false };
+        if !matches!(
+            self.kind(value),
+            "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression"
+                | "nameof_expression"
+        ) {
+            return false;
+        }
+        let Some(target) = children[..at]
+            .iter()
+            .rev()
+            .find(|&&child| self.kind(child) == "identifier")
+            .map(|&child| self.text_string(child))
+        else {
+            return false;
+        };
+        let line = self.line(id);
+        // `const string S = nameof(M);`: the lexer's value is the call itself,
+        // with the name it names as its argument.
+        if self.kind(value) == "nameof_expression" {
+            let index = self.push_call("nameof".to_string(), line);
+            let mut args = String::new();
+            for child in self.children(value) {
+                for name in self.c_words_of(child) {
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, &name);
+                    form.push(']');
+                    if !args.is_empty() {
+                        args.push(',');
+                    }
+                    args.push_str(&form);
+                }
+            }
+            let form = format!("[\"c\",{index},0,[{args}]]");
+            self.lexer_event(b'a', line, &[target], &form, false);
+            return true;
+        }
+        self.assignment_parts(vec![target], value, line, false);
+        true
+    }
+
     /// `var Constructor = CreateParameterizedConstructor(t);`: the lexer files
     /// a binding whose value is a capitalised call as an instance of that name,
     /// so a `var` initialised from a factory lost its record (233 rows of one
