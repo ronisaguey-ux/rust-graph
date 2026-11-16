@@ -193,6 +193,51 @@ release/musl binary):
 one file: the `fn`-typed parameter is rare in the corpus, and the six closures
 whose parameter is a `dyn Fn(..)` were cleared by the `function_trait` arm above.
 
+## A name has one spelling inside a macro too — **closed 2026-11-15**
+
+**The question.** A closure parameter named `this` — legal Rust, since `this` is
+not a keyword — is spelled `self` by the record: the one-pass reader renames any
+`this` to `self`, and so does the CST's `path_of`. Inside a macro's argument list
+the CST kept the source's spelling instead, so `this.accent(…)` reached the
+record as `this` while the same closure's parameter reached it as `self`.
+
+**The reproduction.** `/tmp/rgrepro1/a.rs`:
+
+```rust
+fn f() {
+    let render = |this: &Prompt| {
+        let a = format!("{} {}", this.accent("x"), this.bold(m));
+        a
+    };
+}
+```
+
+The lexer wrote `m:[n:format,t:[0,c(n:self;[0]),c(n:self;[n:m])]]`, the CST
+`m:[n:format,m:[0,c(n:this;[0]),c(n:this;[n:m])]]`.
+
+**The reading that lost, with its number.** The token-tree path builder as the one
+place that keeps the source's spelling: rust **27** files and 30 losses of 1,816,
+three of them in the one file that names a closure parameter `this`.
+
+**The reading that won.** A token-tree path is spelled like every other path in
+the same reader: `rust_tt_path` writes `self` for the word `this`, the way
+`path_of` and the shared form arm already do. One branch in
+`src/deep_facts/rust.rs`.
+
+**Measured, on the four corpora, before and after** (`tools/loss_count.py`,
+release/musl binary):
+
+| corpus | before | after |
+| --- | ---: | ---: |
+| js | 5 / 1854 (7 losses) | 5 / 1854 (7) |
+| ts | 36 / 2000 (19) | 36 / 2000 (19) |
+| python | 8 / 568 (8) | 8 / 568 (8) |
+| rust | 27 / 1816 (30) | **26 / 1816 (27)** |
+
+**Closed by** the `rust_tt_path` spelling, in the commit that carries this
+section. Two spellings of one name cannot be told apart from two names, so the
+rename belongs in the reader that renames, not in the guard.
+
 ## Still open
 
 The codes, counts and owning modules are regenerated into

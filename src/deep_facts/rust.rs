@@ -1055,7 +1055,16 @@ impl<'a> Walker<'a> {
                 if !path.is_empty() && !path.ends_with('.') {
                     break;
                 }
-                path.push_str(&text);
+                // `this.accent(…)` inside a macro: every other path in this
+                // reader spells a receiver `self` (`path_of`, the shared form
+                // arm) and the one-pass reader does the same, so the token tree
+                // was the one place that kept the source's spelling and the same
+                // name reached the record under two spellings.
+                if text == "this" {
+                    path.push_str("self");
+                } else {
+                    path.push_str(&text);
+                }
                 *at += 1;
             } else if text == "." || text == "::" {
                 if path.is_empty() || path.ends_with('.') {
