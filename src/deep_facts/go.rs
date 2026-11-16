@@ -1108,6 +1108,10 @@ impl<'a> Walker<'a> {
             let dump: Vec<String> = children.iter().map(|&c| format!("{}:{:?}", self.kind(c), self.text_string(c).chars().take(8).collect::<String>())).collect();
             eprintln!("assign: {:?}", dump);
         }
+        // The left-hand side can itself carry calls (e.g. `c[f() ? 0 : 1] = v`);
+        // `assignment_targets` only extracts the target name, so walk `first`
+        // as an expression to record those calls in source order.
+        let _ = self.form(first);
         let targets = self.assignment_targets(first);
         let weak = augmented || matches!(self.kind(first), "subscript" | "subscript_expression" | "index_expression");
         // `a = b = value` arrives flat: two `=` and the middle binder is an
