@@ -1497,9 +1497,16 @@ impl Emit<'_> {
                 }
                 let line = type_arg_line.take().unwrap_or(self.toks[self.pos].line);
                 self.pos += 1;
+                // `CFUNCTYPE(c_void_p, c_size_t)(addr)`: the value a
+                // constructor built is applied, and an application has no
+                // name, exactly like `f(x)(y)`. Glued to the class it was
+                // `CFUNCTYPE().call` - a method no source spells, which the
+                // CST never writes and the resolver would tie to any method
+                // that happens to be named `call`.
+                let applied = path.is_empty();
                 let (receiver, mut target) = self.split_receiver(&value, &path);
                 if target.starts_with('.') {
-                    if let Some(class) = constructed.take() {
+                    if let Some(class) = constructed.take().filter(|_| !applied) {
                         target = format!("{class}(){target}");
                     }
                 }
@@ -1517,9 +1524,10 @@ impl Emit<'_> {
                 && self.tok(0).is_some_and(|t| t.kind == Kind::Str && self.src[t.start as usize] == b'`')
             {
                 let (t_line, inner) = self.string_value();
+                let applied = path.is_empty();
                 let (receiver, mut target) = self.split_receiver(&value, &path);
                 if target.starts_with('.') {
-                    if let Some(class) = constructed.take() {
+                    if let Some(class) = constructed.take().filter(|_| !applied) {
                         target = format!("{class}(){target}");
                     }
                 }
@@ -1758,5 +1766,19 @@ mod tests {
         let (out, calls) = form("js", "(operations[node.type])(node, initialScope)");
         assert_eq!(calls, ["operations"]);
         assert_eq!(out, r#"["c",0,0,[["n","node"],["n","initialScope"]]]"#);
+    }
+
+    #[test]
+    fn applying_a_constructed_value_is_an_anonymous_call() {
+        // `CFUNCTYPE(c_void_p)(addr)` applies the value the constructor built.
+        // No method is named, so the call is `.call` like `f(x)(y)`; a member
+        // called on the same value still carries the class that built it.
+        let (out, calls) = form("py", "CFUNCTYPE(c_void_p, c_size_t)(addr)");
+        assert_eq!(calls, ["CFUNCTYPE", ".call"]);
+        assert_eq!(out, r#"["c",1,["c",0,0,[["n","c_void_p"],["n","c_size_t"]]],[["n","addr"]]]"#);
+        assert_eq!(form("py", "f(x)(y)").1, ["f", ".call"]);
+        assert_eq!(form("py", "Repo(db).find(key)").1, ["Repo", "Repo().find"]);
+        assert_eq!(form("py", "Repo(db).call(key)").1, ["Repo", "Repo().call"]);
+        assert_eq!(form("py", "Repo(db)(key).find(x)").1, ["Repo", ".call", ".find"]);
     }
 }
