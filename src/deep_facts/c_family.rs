@@ -178,16 +178,39 @@ impl<'a> Walker<'a> {
                 let mut attributes: Vec<String> = Vec::new();
                 let mut rest: Vec<String> = Vec::new();
                 for child in self.children(id) {
-                    let bucket = if self.kind(child) == "property_attributes" {
-                        &mut attributes
+                    if self.kind(child) == "property_attributes" {
+                        // `(nonatomic, readonly, getter=isWindow)`: an
+                        // assignment attribute is a keyword argument to the
+                        // call, not two names in a row.
+                        let text = self.text_string(child);
+                        let inside = text.trim().trim_start_matches('(').trim_end_matches(')').to_string();
+                        for item in inside.split(',') {
+                            let item = item.trim();
+                            if item.is_empty() {
+                                continue;
+                            }
+                            match item.find('=') {
+                                Some(at) => {
+                                    let mut form = String::from("[\"k\",");
+                                    push_string(&mut form, item[..at].trim());
+                                    form.push_str("]:[\"n\",");
+                                    push_string(&mut form, item[at + 1..].trim());
+                                    form.push(']');
+                                    attributes.push(form);
+                                }
+                                None => {
+                                    let mut form = String::from("[\"n\",");
+                                    push_string(&mut form, item);
+                                    form.push(']');
+                                    attributes.push(form);
+                                }
+                            }
+                        }
                     } else {
-                        &mut rest
-                    };
-                    for name in self.c_words_of(child) {
-                        bucket.push(name);
+                        rest.extend(self.c_words_of(child));
                     }
                 }
-                let args: Vec<String> = attributes.iter().map(|name| name_form(name)).collect();
+                let args: Vec<String> = attributes.clone();
                 let call = format!("[\"c\",{index},0,[{}]]", args.join(","));
                 let mut parts = vec![call];
                 parts.extend(rest.iter().map(|name| name_form(name)));

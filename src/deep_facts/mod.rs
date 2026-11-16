@@ -1518,6 +1518,20 @@ impl<'a> Walker<'a> {
     /// with `-` or `+` and is a declaration (no body) is read as `x` with its
     /// words, and only where no other reader wrote an event.
     fn objc_method_lines(&mut self) {
+        // A tree with an unbalanced end can leave the walk with no frame, and
+        // an event needs one to belong to: the module's own frame is restored
+        // for the pass and dropped again after it.
+        let restored = self.stack.is_empty();
+        if restored {
+            self.stack.push(Frame {
+                node: 0,
+                symbol: 0,
+                class: String::new(),
+                receiver: String::new(),
+                container: false,
+                defines: None,
+            });
+        }
         let mut taken: Vec<u32> = Vec::new();
         for symbol in &self.facts.symbols {
             let text = &symbol.events;
@@ -1543,6 +1557,86 @@ impl<'a> Walker<'a> {
             }
             let text = String::from_utf8_lossy(&self.src[start..end]);
             let trimmed = text.trim();
+            // `@import Foundation;`: a module import is one statement to the
+            // lexer - the keyword and the module - and the grammar gives it no
+            // node at all, so every one in every header was a loss.
+            if let Some(rest) = trimmed.strip_prefix("@import") {
+                let module = rest.trim().trim_end_matches(';').trim();
+                if !module.is_empty() {
+                    let mut value = String::from("[\"m\",[[\"n\",\"import\"],[\"n\",");
+                    push_string(&mut value, module);
+                    value.push_str("]]]");
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                continue;
+            }
+            // `@property (nonatomic, readonly, getter=isWindow) BOOL isWindow;`:
+            // the grammar hands many of these back as macro calls, so the arm
+            // never fires and the line lost the call the lexer writes. Read from
+            // the line: the attribute list is the call's arguments (an
+            // assignment attribute is a keyword argument) and the type and name
+            // follow it.
+            if let Some(rest) = trimmed.strip_prefix("@property") {
+                let rest = rest.trim();
+                let mut attributes: Vec<String> = Vec::new();
+                let mut after = rest;
+                if let Some(open) = rest.find('(') {
+                    if let Some(close) = rest[open..].find(')') {
+                        let inside = &rest[open + 1..open + close];
+                        for item in inside.split(',') {
+                            let item = item.trim();
+                            if item.is_empty() {
+                                continue;
+                            }
+                            match item.find('=') {
+                                Some(at) => {
+                                    let key = item[..at].trim();
+                                    let value = item[at + 1..].trim();
+                                    let mut form = String::from("[\"k\",");
+                                    push_string(&mut form, key);
+                                    form.push_str("]:[\"n\",");
+                                    push_string(&mut form, value);
+                                    form.push(']');
+                                    attributes.push(form);
+                                }
+                                None => {
+                                    let mut form = String::from("[\"n\",");
+                                    push_string(&mut form, item);
+                                    form.push(']');
+                                    attributes.push(form);
+                                }
+                            }
+                        }
+                        after = &rest[open + close + 1..];
+                    }
+                }
+                let mut words: Vec<String> = Vec::new();
+                let mut word = String::new();
+                for ch in after.chars() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        word.push(ch);
+                    } else if !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                if !word.is_empty() {
+                    words.push(word);
+                }
+                if !words.is_empty() {
+                    let index = self.push_call("property".to_string(), line);
+                    let call = format!("[\"c\",{index},0,[{}]]", attributes.join(","));
+                    let mut parts = vec![call];
+                    for word in &words {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, word);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                    let value = format!("[\"m\",[{}]]", parts.join(","));
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                continue;
+            }
             let mut chars = trimmed.chars();
             let sign = match chars.next() {
                 Some(ch @ ('-' | '+')) => ch,
@@ -1590,6 +1684,9 @@ impl<'a> Walker<'a> {
             }
             let value = format!("[\"m\",[{}]]", parts.join(","));
             self.lexer_event(b'x', line, &[], &value, false);
+        }
+        if restored {
+            self.stack.pop();
         }
     }
 
