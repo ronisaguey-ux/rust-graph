@@ -148,6 +148,51 @@ The argument list of the trait (`Fn(ElId, ElId)`) still forms as the constant, s
 a name that appears *only* in the argument list is not yet in the record; nothing
 in the corpus asks for it, and saying so here is cheaper than guessing.
 
+## A function type is not a call — **closed 2026-11-15**
+
+**The question.** `pick: fn(&Corners) -> f64` is a function *type* in a closure's
+parameter list. The lexer read the group as a call — `fn` as the callee, `Corners`
+as its argument — and then read the `->` as a member separator, so `f64` arrived
+as a *name of the value*. The CST wrote the parameter's type name and nothing
+else, and the file was blamed for a call and a name the source never makes.
+
+**The reproduction.** `/tmp/rgrepro1/a.rs`, four lines:
+
+```rust
+fn f() {
+    let corner = |prop: &str, pick: fn(&Corners) -> f64| {
+        prop.len()
+    };
+}
+```
+
+The lexer wrote `t:[m:[n:prop,n:str],m:[n:pick,c(0;[n:Corners])]]`, the CST
+`m:[n:prop,n:str,n:pick,n:Corners]`.
+
+**The reading that lost, with its number.** `fn` as a callee: rust **28** files
+and 31 losses of 1,816. `rust_type_group` excused `dyn Fn(..)` and `impl Fn(..)`
+by the word two tokens before the group; for `fn(..)` the keyword is the token
+*in front* of it, so the same reading was never applied.
+
+**The reading that won.** `fn` followed by `(` opens a type in the value reader:
+the parameter list is consumed and the `-> T` after it is consumed as a type,
+with the two words written to the record only when they are names — which they
+are not. One branch in `src/expr.rs`, reached only for Rust's `fn`.
+
+**Measured, on the four corpora, before and after** (`tools/loss_count.py`,
+release/musl binary):
+
+| corpus | before | after |
+| --- | ---: | ---: |
+| js | 5 / 1854 (7 losses) | 5 / 1854 (7) |
+| ts | 36 / 2000 (19) | 36 / 2000 (19) |
+| python | 8 / 568 (8) | 8 / 568 (8) |
+| rust | 28 / 1816 (31) | **27 / 1816 (30)** |
+
+**Closed by** the `fn` branch, in the commit that carries this section. It clears
+one file: the `fn`-typed parameter is rare in the corpus, and the six closures
+whose parameter is a `dyn Fn(..)` were cleared by the `function_trait` arm above.
+
 ## Still open
 
 The codes, counts and owning modules are regenerated into

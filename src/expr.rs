@@ -1140,6 +1140,38 @@ impl Emit<'_> {
             return;
         }
         self.pos += 1;
+        // `pick: fn(&Corners) -> f64`: a function *type*. `fn` is a keyword that
+        // names no value, its parentheses are a parameter list, and the type
+        // after `->` is a type. Read as a value chain the two words `fn` and
+        // `f64` reached the record as a name, and the CST — which writes the
+        // parameter's type name and nothing else — was blamed for them.
+        if self.lang.tag == "RS" && word == "fn" && self.op_byte(0) == b'(' {
+            self.pos += 1;
+            let mut params = String::new();
+            self.list(&mut params, b')', false);
+            if self.is_op(0, b"->") {
+                self.pos += 2;
+                let mut depth = 0usize;
+                while let Some(token) = self.tok(0) {
+                    if token.kind == Kind::Op {
+                        let raw = &self.src[token.start as usize..token.end as usize];
+                        match raw {
+                            b"(" | b"[" | b"<" => depth += 1,
+                            b">" => {
+                                if depth == 0 {
+                                    break;
+                                }
+                                depth -= 1;
+                            }
+                            b"{" | b")" | b"]" | b"}" | b"," | b";" | b"=" | b"|" if depth == 0 => break,
+                            _ => {}
+                        }
+                    }
+                    self.pos += 1;
+                }
+            }
+            return;
+        }
         // `await import('./x.js')`: a dynamic import is a module load, not a
         // call. The CST records no call for it, and the lexer's `import` call
         // lost 12 js files; the value it produces is its argument group.
