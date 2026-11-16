@@ -65,6 +65,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "function f(stmt, output) {\n  if (a) {\n    g();\n  } else output.with_block(function() {\n    output.indent();\n  }, stmt.end);\n}\n",
     ),
     (
+        "async called with a callback",
+        "function f(callback) {\n  async(callback)(null, this.results);\n}\n",
+    ),
+    (
         "block statement",
         "function f(x) {\n  let y = x;\n  return y;\n}\n",
     ),

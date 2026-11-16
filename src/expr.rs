@@ -84,6 +84,19 @@ impl Emit<'_> {
         })
     }
 
+    /// `async (x) => …`: the parenthesised list is an arrow's parameter list,
+    /// and `async` there names nothing. `async(callback)` is a plain call and is
+    /// settled by the caller, not by the word alone. `open_at` is the offset of
+    /// the `(` from the word under the cursor.
+    fn async_arrow_head(&self, open_at: usize) -> bool {
+        if !self.is_op(open_at, b"(") {
+            return false;
+        }
+        let Some(after) = self.skip_balanced(self.pos + open_at, b"(", b")") else { return false };
+        let Some(token) = self.toks.get(after) else { return false };
+        token.kind == Kind::Op && &self.src[token.start as usize..token.end as usize] == b"=>"
+    }
+
     fn op_byte(&self, offset: usize) -> u8 {
         match self.tok(offset) {
             Some(token) if token.kind == Kind::Op && token.end - token.start == 1 => self.src[token.start as usize],
@@ -1153,7 +1166,12 @@ impl Emit<'_> {
         // the record differed by a constant that was never there.
         let js_family = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
         let noise = if js_family {
+            // `async(callback)(null, x)`: `async` is an ordinary name being
+            // called, and reading it as noise left the call with no callee
+            // (the first argument was recorded instead). Only an arrow head
+            // (`async (x) => …`) is a keyword that names nothing.
             JS_NOISE.contains(&word.as_str())
+                && !(word == "async" && self.op_byte(1) == b'(' && !self.async_arrow_head(1))
         } else if self.lang.tag == "PY" {
             PY_NOISE.contains(&word.as_str())
         } else if self.lang.tag == "RS" {
