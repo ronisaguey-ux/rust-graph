@@ -465,6 +465,10 @@ struct Walker<'a> {
     /// the binding gives it. A function expression has no name of its own; the
     /// binding is the name, exactly as the lexer reads it.
     bound: Vec<(u32, String)>,
+    /// Nodes whose statement an enclosing arm already wrote as one event: the
+    /// members of an enum are a single assignment to the lexer, so visiting
+    /// each one on its own must not write a second, unpaired event.
+    consumed: Vec<u32>,
     /// The form text a call node already produced, by node id. A block value is
     /// read twice — once for the value the assignment carries, once when the
     /// walk reaches the statements inside it — and the second read pushed a
@@ -535,6 +539,7 @@ impl<'a> Walker<'a> {
             facts,
             stack: vec![Frame { node: tree.root, symbol: 0, class: String::new(), receiver: String::new(), container: false, defines: None }],
             bound: Vec::new(),
+            consumed: Vec::new(),
             call_texts: std::collections::HashMap::new(),
         }
     }
@@ -1033,6 +1038,81 @@ impl<'a> Walker<'a> {
             // `public string Key { get; set; }`: the header is a statement to
             // the lexer, and the accessors are its own statements.
             "property_declaration" => self.java_header_event(id),
+            // `enum E { A = 1, B }`: every member is an assignment statement to
+            // the lexer, and the tree wrote nothing for it, so an enum's own
+            // lines were the first loss on most enum-bearing files.
+            // `enum E { Binary = 0x00, Number = 1, … }`: the lexer unpacks the
+            // member list exactly as it unpacks a declarator list - one
+            // assignment to the first member whose value is a tuple of the
+            // rest (`t:[0,n:Number,m:[n:Text,0]]`) - so one assignment per
+            // member disagreed on every enum in the corpus.
+            "enum_body" => {
+                let members: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.kind(child) == "enum_member")
+                    .collect();
+                self.consumed.extend(members.iter().copied());
+                if let Some((first, rest)) = members.split_first() {
+                    let line = self.line(*first);
+                    let name = self.first_identifier(*first);
+                    if let Some(name) = name {
+                        let first_value = self.enum_member_value(*first);
+                        let parts: Vec<String> = if rest.is_empty() {
+                            vec![first_value]
+                        } else {
+                            let mut parts = vec![first_value];
+                            for member in rest {
+                                match (self.first_identifier(*member), self.enum_member_value(*member)) {
+                                    (Some(member_name), value) if value == "0" => {
+                                        let mut form = String::from("[\"n\",");
+                                        push_string(&mut form, &member_name);
+                                        form.push(']');
+                                        parts.push(form);
+                                    }
+                                    (Some(member_name), value) => {
+                                        let mut key = String::from("[\"n\",");
+                                        push_string(&mut key, &member_name);
+                                        key.push(']');
+                                        parts.push(format!("[\"m\",[{key},{value}]]"));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            parts
+                        };
+                        let value = if parts.len() == 1 {
+                            parts[0].clone()
+                        } else {
+                            format!("[\"t\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'a', line, &[name], &value, false);
+                    }
+                }
+            }
+            "enum_member" => {
+                if self.consumed.contains(&id) {
+                    return;
+                }
+                let line = self.line(id);
+                let name = self.first_identifier(id);
+                if let Some(name) = name {
+                    let value = self
+                        .children(id)
+                        .into_iter()
+                        .filter(|&child| child != id)
+                        .rev()
+                        .find(|&child| {
+                            !matches!(self.kind(child), "identifier" | "=" | ",")
+                                && !self.is_layout(child)
+                        })
+                        .map(|child| self.decl_value(child))
+                        .unwrap_or_else(|| "0".to_string());
+                    let value = if value.is_empty() { "0".to_string() } else { value };
+                    let targets = vec![name];
+                    self.lexer_event(b'a', line, &targets, &value, false);
+                }
+            }
             "expression_statement" => self.expression_statement(id),
             // Scala's `def f(): T = expr` writes the body as a `def_body` whose
             // child is the expression itself. Nothing read that node, so a call
@@ -1629,6 +1709,25 @@ impl<'a> Walker<'a> {
         }
         let _ = def;
         out
+    }
+
+    /// The value of one enum member as a flow form: a literal is `0`, and a
+    /// reference is its name - the same shapes the lexer writes.
+    pub(crate) fn enum_member_value(&self, id: u32) -> String {
+        for child in self.children(id) {
+            let kind = self.kind(child);
+            if matches!(kind, "identifier") {
+                let text = self.text_string(child);
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, &text);
+                form.push(']');
+                return form;
+            }
+            if kind.contains("literal") || kind == "number" || kind == "integer" {
+                return "0".to_string();
+            }
+        }
+        "0".to_string()
     }
 
     pub(crate) fn first_identifier(&self, id: u32) -> Option<String> {
