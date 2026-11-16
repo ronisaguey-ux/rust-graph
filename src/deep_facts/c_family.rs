@@ -87,6 +87,41 @@ impl<'a> Walker<'a> {
                 let line = self.line(id);
                 self.push_call("__attribute__".to_string(), line);
             }
+            // `@property (nonatomic, strong) UILabel *label;`: the lexer reads
+            // `property` as a call of that name, and the node was never read -
+            // 155 one-loss files on the Objective-C corpus.
+            "objc_property_declaration" => {
+                let line = self.line(id);
+                let index = self.push_call("property".to_string(), line);
+                // The line itself is an `x` event whose first element is that
+                // call, with the attribute words as its arguments, followed by
+                // the type and the declared name - exactly the merge the lexer
+                // writes for a statement.
+                let name_form = |text: &str| {
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, text);
+                    form.push(']');
+                    form
+                };
+                let mut attributes: Vec<String> = Vec::new();
+                let mut rest: Vec<String> = Vec::new();
+                for child in self.children(id) {
+                    let bucket = if self.kind(child) == "property_attributes" {
+                        &mut attributes
+                    } else {
+                        &mut rest
+                    };
+                    for name in self.c_words_of(child) {
+                        bucket.push(name);
+                    }
+                }
+                let args: Vec<String> = attributes.iter().map(|name| name_form(name)).collect();
+                let call = format!("[\"c\",{index},0,[{}]]", args.join(","));
+                let mut parts = vec![call];
+                parts.extend(rest.iter().map(|name| name_form(name)));
+                let value = format!("[\"m\",[{}]]", parts.join(","));
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
             "namespace_definition" => self.c_namespace(id),
             // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
             // grammar gives it a declaration node, and nothing read it.
@@ -364,7 +399,17 @@ impl<'a> Walker<'a> {
     pub(crate) fn c_includes(&mut self) {
         let text = String::from_utf8_lossy(self.src);
         for (index, line) in text.lines().enumerate() {
-            let Some(rest) = line.trim_start().strip_prefix("#include") else { continue };
+            // Objective-C imports with `#import`, which is the same directive
+            // to the lexer under another word: nothing read it, so every
+            // `#import "Local.h"` in the corpus lost its import (464 rows on
+            // the Objective-C corpus alone).
+            let trimmed = line.trim_start();
+            let Some(rest) = trimmed
+                .strip_prefix("#include")
+                .or_else(|| trimmed.strip_prefix("#import"))
+            else {
+                continue;
+            };
             let rest = rest.trim_start();
             // A quoted include names a file of this project and is the import
             // the lexer files (a star import: `<stdio.h>` is the system's).
