@@ -1113,6 +1113,19 @@ impl<'a> Walker<'a> {
                     self.lexer_event(b'a', line, &targets, &value, false);
                 }
             }
+            // `return (byte[])_obj.GetValue(value, n);`, `(DataTable)conv.
+            // ReadJson(...)`: the call sits inside a cast, and nothing
+            // descended into that node - every cast-and-call in the C# corpus
+            // lost its call.
+            "cast_expression" => {
+                let mut calls = Vec::new();
+                for child in self.children(id) {
+                    self.c_calls_in_pub(child, &mut calls);
+                }
+                for call in calls {
+                    self.form(call);
+                }
+            }
             "expression_statement" => self.expression_statement(id),
             // Scala's `def f(): T = expr` writes the body as a `def_body` whose
             // child is the expression itself. Nothing read that node, so a call
