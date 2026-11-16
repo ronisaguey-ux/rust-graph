@@ -1017,6 +1017,12 @@ impl Emit<'_> {
         // grammar writes the call, the lexer dropped `new` as layout and left
         // the callee standing as a name. `new.target` is not a call, and a
         // dotted or parenthesised callee keeps the old path.
+        // `<` is the fourth way a constructor has something after its callee:
+        // `new Map<keyof Events, Array<Handler<any>>>()` writes type arguments,
+        // which are erased at runtime. Read as the no-parenthesis form, the
+        // call was emitted with no arguments and the type argument list was
+        // read as a value of its own, so the statement carried a merge the CST
+        // never writes.
         if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
             && word == "new"
             && self.op_byte(1) != b'.'
@@ -1025,6 +1031,7 @@ impl Emit<'_> {
             && self.op_byte(2) != b'.'
             && self.op_byte(2) != b'('
             && self.op_byte(2) != b'['
+            && self.op_byte(2) != b'<'
         {
             let name = self.word(1).unwrap_or_default();
             let target = self.toks[self.pos + 1].line;

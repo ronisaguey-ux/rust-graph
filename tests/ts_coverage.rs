@@ -133,6 +133,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "type annotations: a generic annotation is cut at its colon, not its commas",
         "interface Matcher<A, B> { id: A; other: B }\nconst proto: Omit<\n  Matcher<any, any, any, any, any>,\n  \"provided\" | \"value\"\n> = {\n  id: 1,\n};\n",
     ),
+    (
+        "type arguments: `new` with type arguments is one call, not a merge",
+        "type Events = \"open\" | \"close\";\ndeclare class Handler<T> {}\nconst handlers = new Map<keyof Events | \"*\", Array<Handler<any>>>();\nconst empty = new Map<string, number>();\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
