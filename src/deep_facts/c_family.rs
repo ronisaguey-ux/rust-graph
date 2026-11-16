@@ -40,6 +40,16 @@ impl<'a> Walker<'a> {
             "class_specifier" | "struct_or_union_specifier" | "struct_specifier" | "enum_specifier" => {
                 self.c_class(id)
             }
+            // `weak_alias(a, b)` at file scope: the grammar gives the statement
+            // its own node, and nothing read it, so every macro invocation the
+            // lexer files as a call was lost (185 of the C corpus's losses).
+            "macro_call_statement" => {
+                if let Some(node) = self.child_of_kind(id, "identifier") {
+                    let name = self.text_string(node);
+                    let line = self.line(id);
+                    self.push_call(name, line);
+                }
+            }
             "namespace_definition" => self.c_namespace(id),
             // `char buf[BUF];` / `int x = 0;`: the lexer reads the declaration
             // as the run of names on its line (plus the initializer's value when
@@ -203,6 +213,47 @@ impl<'a> Walker<'a> {
         self.facts.symbols[index].bases = bases;
         let symbol = self.frame().symbol;
         self.stack.push(Frame { node: id, symbol, class: name, receiver: String::new(), container: true, defines: Some(index) });
+        // A member's line is a statement to the lexer: `char *host;` is an
+        // event with the names on that line. The body's declarations are flat
+        // siblings, so they are read by line rather than by node.
+        if let Some(body) = self
+            .child_of_kind(id, "field_declaration_list")
+            .or_else(|| self.child_of_kind(id, "struct_body"))
+        {
+            self.c_field_events(body);
+        }
+    }
+
+    /// One `x` event per member line inside an aggregate body.
+    fn c_field_events(&mut self, body: u32) {
+        let mut by_line: std::collections::BTreeMap<u32, Vec<String>> = std::collections::BTreeMap::new();
+        let mut stack = vec![body];
+        while let Some(node) = stack.pop() {
+            let item = self.node(node);
+            if item.first_child == NONE {
+                if let Some(name) = self.leaf_name(node) {
+                    let line = self.line(node);
+                    by_line.entry(line).or_default().push(name);
+                }
+                continue;
+            }
+            for child in self.children(node).into_iter().rev() {
+                stack.push(child);
+            }
+        }
+        for (line, names) in by_line {
+            let mut value = "[\"m\",[".to_string();
+            for (index, name) in names.iter().enumerate() {
+                if index > 0 {
+                    value.push(',');
+                }
+                value.push_str("[\"n\",");
+                push_string(&mut value, name);
+                value.push(']');
+            }
+            value.push_str("]]");
+            self.lexer_event(b'x', line, &[], &value, false);
+        }
     }
 
     /// `namespace app { ... }`: the lexer files a namespace as a class, and its

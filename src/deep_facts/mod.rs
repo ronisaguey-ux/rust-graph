@@ -848,6 +848,11 @@ impl<'a> Walker<'a> {
             // declares left an event the tree never wrote. Go has the same arm
             // in its own statement model.
             "field_declaration" | "event_field_declaration" => self.decl_statement(id),
+            // `size_t n = strlen(s);`: a declaration with an initializer is one
+            // statement to the lexer, and the call in it is a fact. C, C++ and
+            // Objective-C declare this way on nearly every line, so nothing
+            // read the node and every such call was lost.
+            "declaration_statement" => self.decl_statement(id),
             // `public string Key { get; set; }`: the lexer reads each accessor
             // as an expression statement and names it `get` / `set`. Nothing
             // read `accessor_declaration`, so a property lost one event per
