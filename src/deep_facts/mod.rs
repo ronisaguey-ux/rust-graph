@@ -484,12 +484,7 @@ pub fn lang_for(tag: &str) -> Option<Lang> {
     // files, so choosing them automatically would pay for a second parse and
     // then throw it away.
     match tag {
-        // The C family and the brace languages beside it read well enough that
-        // the guard keeps the CST on almost every file (measured: 0-2 fallbacks
-        // per corpus, P6-09), so a second parse is paid for and kept.
-        "PY" | "JS" | "TS" | "RS" | "C" | "CPP" | "CS" | "KT" | "SCALA" | "SWIFT" | "OBJC" => {
-            lang_for_forced(tag)
-        }
+        "PY" | "JS" | "TS" | "RS" => lang_for_forced(tag),
         _ => None,
     }
 }
