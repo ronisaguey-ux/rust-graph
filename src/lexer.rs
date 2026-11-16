@@ -71,6 +71,14 @@ impl<'a> Lexer<'a> {
         if src.starts_with(b"#!") {
             lexer.skip_to_newline();
         }
+        // A byte-order mark is not the first name of the file. Read as one it
+        // glued the first line to whatever followed: nearly every C# file in
+        // the corpus opens with a BOM and a `#region`, so the merge carried
+        // the region's words and the first `using` into one event on line 1.
+        if src.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            lexer.pos = 3;
+            lexer.line_start = 3;
+        }
         lexer
     }
 
