@@ -230,6 +230,36 @@ impl<'a> Walker<'a> {
                 return false;
             }
             "namespace_definition" => self.c_namespace(id),
+            // `typedef struct aeApiState { … } aeApiState;` whose field list the
+            // grammar cannot read leaves the closing declarator in an ERROR node
+            // at file scope, on a line that opens with `}` and closes with `;`;
+            // the lexer writes that name, so it is read from the line (13 files).
+            "ERROR" => {
+                // The region itself carries only the `}` (the declarator after it
+                // is lost outright), so the name is read from the line.
+                let line = self.line(id);
+                if let (Some(start), Some(end)) = (
+                    self.line_starts.get(line.saturating_sub(1) as usize).copied(),
+                    self.line_starts.get(line as usize).copied(),
+                ) {
+                    let text = String::from_utf8_lossy(&self.src[start as usize..end as usize]);
+                    let line_text = text.trim();
+                    if let Some(rest) = line_text.strip_prefix('}') {
+                        let name: String = rest
+                            .trim_start()
+                            .chars()
+                            .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                            .collect();
+                        let tail = rest.trim_start()[name.len()..].trim();
+                        if !name.is_empty() && tail == ";" {
+                            let mut value = String::from("[\"n\",");
+                            push_string(&mut value, &name);
+                            value.push(']');
+                            self.lexer_event(b'x', line, &[], &value, false);
+                        }
+                    }
+                }
+            }
             // `robj *bitroarCreate(void);`: a pointer return whose type the
             // grammar does not know is a `user_pointer_declaration`, and only
             // the declaration path read it - it never filed the call, so every
