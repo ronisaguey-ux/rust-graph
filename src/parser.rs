@@ -661,7 +661,15 @@ impl<'a> Parser<'a> {
         if label > 0 && self.stmt.len() == label {
             return true;
         }
-        if self.has_def_word(&self.stmt) || self.assigned_class(&self.stmt).is_some() {
+        // `export function f(s: string): { readonly group: string } { ... }`:
+        // the `{` after `:`, `&`, or `|` opens an inline return type literal,
+        // not the function body. `declare function f(...): { ... }` has no
+        // body and stays handled by `on_open_brace` as `type_only`.
+        let ts_return_type_brace = matches!(self.lang.tag, "TS" | "TSX")
+            && last.kind == Kind::Op
+            && matches!(self.raw(&last), b":" | b"&" | b"|")
+            && !self.is_declare_function(&self.stmt);
+        if (!ts_return_type_brace && self.has_def_word(&self.stmt)) || self.assigned_class(&self.stmt).is_some() {
             return true;
         }
         if matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
