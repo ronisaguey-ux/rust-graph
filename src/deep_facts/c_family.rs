@@ -369,6 +369,33 @@ impl<'a> Walker<'a> {
                 // plus a call of the declared function - `m:[n:hidden,c(0;[0])]`
                 // - and the reader wrote the words form, so every musl
                 // visibility-decorated prototype lost its line (36 files).
+                // `size_t n1 = CHUNK_SIZE(self);`: the initialiser is a call
+                // inside a `bare_user_declaration`, which c_initializers never
+                // looked into, so the binding the lexer makes (`n1` holds
+                // `CHUNK_SIZE`) was never made (18 files).
+                for child in self.children(id) {
+                    if self.kind(child) != "bare_user_declaration" {
+                        continue;
+                    }
+                    let inner = self.children(child);
+                    if let Some(call) = inner
+                        .iter()
+                        .copied()
+                        .find(|&node| self.kind(node) == "call_expression")
+                    {
+                        let name = inner
+                            .iter()
+                            .copied()
+                            .find(|&node| self.kind(node) == "identifier")
+                            .map(|node| self.text_string(node))
+                            .unwrap_or_default();
+                        let path = self.decl_path(call);
+                        let last = path.rsplit('.').next().unwrap_or("").to_string();
+                        if !name.is_empty() && !last.is_empty() {
+                            self.facts.vars.push((name, last));
+                        }
+                    }
+                }
                 let forced = self.macro_prefix.take();
                 if let Some(word) = forced
                     .clone()
