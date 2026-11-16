@@ -375,7 +375,21 @@ impl<'a> Walker<'a> {
                     // assignment per declarator left the first one unequal on
                     // every multi-declarator statement in the corpus.
                     let first = inits[0].clone();
-                    if inits.len() == 1 {
+                    if inits.len() == 1 && self.kind(first.1) == "initializer_list" {
+                        // `static const uint32_t K[64] = { 0, 0, … };`: the
+                        // lexer reads the brace list as a merge of its
+                        // elements, each a constant, and the value written here
+                        // was the constant alone - every constant table in the
+                        // corpus disagreed (97 rows).
+                        let (name, node, line) = first;
+                        let elements = self
+                            .children(node)
+                            .into_iter()
+                            .filter(|&child| self.kind(child) != ",")
+                            .count();
+                        let value = format!("[\"m\",[{}]]", vec!["0"; elements].join(","));
+                        self.lexer_event(b'a', line, &[name], &value, false);
+                    } else if inits.len() == 1 {
                         let (name, node, line) = first;
                         self.assignment_parts(vec![name], node, line, false);
                     } else {
