@@ -50,10 +50,31 @@ impl<'a> Walker<'a> {
                     let line = self.line(id);
                     self.event(&format!("[\"x\",{line},{form}]"));
                 }
+                // `size_t n = strlen(s);` — the words form carries the names,
+                // and the initializer's calls are facts of their own. Reading
+                // only the words lost every call written in a declaration,
+                // which in C is most of them.
+                let mut calls = Vec::new();
+                self.c_calls_in(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
             }
             _ => return false,
         }
         true
+    }
+
+    /// Every `call_expression` inside `id`, in source order, not descending
+    /// into a nested function or class body (those are walked on their own).
+    fn c_calls_in(&self, id: u32, out: &mut Vec<u32>) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "call_expression" => out.push(child),
+                "lambda_expression" | "class_specifier" | "function_definition" | "compound_statement" => {}
+                _ => self.c_calls_in(child, out),
+            }
+        }
     }
 
     /// `#include "settings.h"` and `#include <stdio.h>`: the grammar drops the
