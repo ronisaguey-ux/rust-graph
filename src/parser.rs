@@ -2187,7 +2187,14 @@ impl<'a> Parser<'a> {
         // as an import of the module "function" — the module must be the
         // argument, not a comparison operand.
         let module = match (stmt.get(at + 1), stmt.get(at + 2)) {
-            (Some(open), Some(argument)) if self.is_op(open, b"(") && argument.kind == Kind::Str => {
+            // `require(\`${PROJECT_DIR}/lib/jake\`)` is a path the source builds,
+            // not one it states: a template with an interpolation hole has no
+            // module name until the program runs, and the CST records no import
+            // for it. Reading the cooked text as the module invented fact
+            // `import ${PROJECT_DIR}/lib/jake` (measured: jake's rule.js).
+            (Some(open), Some(argument))
+                if self.is_op(open, b"(") && argument.kind == Kind::Str && argument.interp.is_none() =>
+            {
                 Some(self.string_value(argument))
             }
             _ => None,
