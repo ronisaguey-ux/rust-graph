@@ -741,6 +741,12 @@ impl<'a> Walker<'a> {
                 // the name `n:null`, so a return that read it as layout wrote
                 // the constant 0 and lost the value.
                 | "null"
+                // A number is a value, and Python writes `.01` with no digit
+                // before the dot: read as punctuation it left the record, so
+                // `time.sleep(.01)` formed as a call with no argument at all.
+                | "number"
+                | "integer"
+                | "float"
                 // A regex literal is a value, not punctuation: the lexer
                 // writes it as the constant 0, and dropping it as layout lost
                 // one argument from every call that takes a regex
