@@ -404,7 +404,7 @@ rust_graph_deep::grammar! { TYPESCRIPT {
     /// bare `function () {}` statement is not a declaration, so the rule stays
     /// out of `_declaration`.
     default_function_declaration: ["async"] "function" ["*"] _signature [statement_block | ";"],
-    class_declaration: decorator* ["abstract"] "class" _name [type_parameters] [LINE_END] [class_heritage] class_body,
+    class_declaration: decorator* ["abstract"] "class" _name [variance_type_parameters] [LINE_END] [class_heritage] class_body,
     class_heritage: "extends" _expression@member [type_arguments] [implements_clause] | implements_clause,
     implements_clause: "implements" (_type % ","),
     class_body: "{" _class_member* "}",
@@ -445,8 +445,8 @@ rust_graph_deep::grammar! { TYPESCRIPT {
     enum_body: "{" (enum_assignment %? ",") "}",
     enum_assignment: (_property_name | STRING | NUMBER | computed_property_name) ["=" _expression@assign],
 
-    type_alias_declaration: "type" _name [type_parameters] "=" _type [_semi],
-    interface_declaration: "interface" _name [type_parameters] [LINE_END] [extends_type_clause] object_type,
+    type_alias_declaration: "type" _name [variance_type_parameters] "=" _type [_semi],
+    interface_declaration: "interface" _name [variance_type_parameters] [LINE_END] [extends_type_clause] object_type,
     extends_type_clause: "extends" (_type % ","),
     internal_module: ("namespace" | "module") (_entity_name | STRING) [statement_block] [_semi],
     ambient_declaration: "declare" ("global" statement_block | _declaration),
@@ -582,7 +582,7 @@ rust_graph_deep::grammar! { TYPESCRIPT {
     /// A `{` after `=>` opens a block: the expression form starts with no `{`.
     _arrow_body: statement_block | &("async" "function") function_expression | &("function") function_expression | class | _expression_st,
     function_expression: ["async"] "function" ["*"] [_name] _signature statement_block,
-    class: decorator* "class" [_name] [type_parameters] [LINE_END] [class_heritage] class_body,
+    class: decorator* "class" [_name] [variance_type_parameters] [LINE_END] [class_heritage] class_body,
     parenthesized_expression: "(" _expressions ")",
     /// A template literal: its opening backtick, its text and one node per
     /// substitution, then the closing backtick. `` `plain` `` is this node with
@@ -652,6 +652,16 @@ rust_graph_deep::grammar! { TYPESCRIPT {
     type_predicate: (_name | "this") "is" _type,
 
     type_parameters: "<" (type_parameter %? ",") _gt,
+    /// TypeScript allows a variance modifier on the parameters of a declared
+    /// type and nowhere else: `interface F<out A, in out B>`. `in` and `out`
+    /// are contextual words - `interface F<out>` names its parameter `out` -
+    /// so a modifier is only read when the parameter's own name follows it.
+    variance_type_parameters: "<" (variance_type_parameter %? ",") _gt,
+    variance_type_parameter:
+        &("in" _name _name) "in" _name _name ["extends" _type] ["=" _type]
+        | &("in" _name) "in" _name ["extends" _type] ["=" _type]
+        | &(_name _name) _name _name ["extends" _type] ["=" _type]
+        | type_parameter,
     type_parameter: ["const"] ["in"] _name ["extends" _type] ["=" _type],
     type_arguments: "<" (_type %? ",") _gt,
     _gt: ">" | GT_JOINED,

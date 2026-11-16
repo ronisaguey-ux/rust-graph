@@ -156,6 +156,14 @@ fn a_qualified_type_may_end_in_a_keyword() {
 }
 
 #[test]
+fn a_declared_type_marks_parameter_variance() {
+    // `interface Fiber<out A, out E>`: `out` is a variance modifier here and a
+    // plain name everywhere else, so it is read only when a name follows.
+    assert!(clean("interface F<out A, out E = never> extends P {\n  readonly x: number\n}\ntype G<out T> = T;\nclass C<in A, out B> {}\n", &TYPESCRIPT));
+    assert!(clean("interface Out<out> {}\nlet out = 1;\nconst o = { out }.out;\n", &TYPESCRIPT));
+}
+
+#[test]
 fn line_ends_end_statements_where_asi_does() {
     assert_eq!(
         named("a\n++b\nlet x = 1\n[1, 2].map(f)\nreturn\n", &JAVASCRIPT),
