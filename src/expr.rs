@@ -1029,6 +1029,27 @@ impl Emit<'_> {
             let name = self.word(1).unwrap_or_default();
             let target = self.toks[self.pos + 1].line;
             self.pos += 2;
+            // `new Map<keyof Events | '*', Array<Handler<any>>>()`: TypeScript
+            // type arguments sit between the callee and its argument list, and
+            // read as a value they put the type's words (`keyof`, `Events`) in
+            // the record where the CST has one call and nothing else. The
+            // group after them is that call's arguments, so it is read here.
+            if matches!(self.lang.tag, "TS" | "TSX") && self.is_op(0, b"<") {
+                if let Some(after) = self.skip_ts_type_args(self.pos) {
+                    // The call sits on the callee's line, the way the CST
+                    // writes it: the type list may run over several lines and
+                    // the argument list opens on another one, and a call
+                    // stamped with the argument's line is a call the CST does
+                    // not have.
+                    self.pos = after + 1;
+                    let id = self.new_call(name.clone(), target);
+                    let mut args = String::new();
+                    self.list(&mut args, b')', true);
+                    let value = format!("[\"c\",{id},0,[{args}]]");
+                    self.chain(out, value, String::new(), target);
+                    return;
+                }
+            }
             let id = self.new_call(name, target);
             out.push_str(&format!("[\"c\",{id},0,[]]"));
             return;

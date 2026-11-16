@@ -523,3 +523,24 @@ fn a_receiver_group_may_hold_a_type_argument_list() {
         "the receiver survives the type argument list: {json}"
     );
 }
+/// `new Map<keyof Events | "*", Array<Handler<any>>>()`: the type arguments sit
+/// between the callee and its argument list and are not a value. Read as names
+/// they put `keyof` and `Events` in the record beside the call, which the CST
+/// writes as one call and nothing else.
+#[test]
+fn new_with_type_arguments_reads_its_argument_list() {
+    let tree = Tree::new("new-generic", &[(
+        "app/make.ts",
+        "class E {\n  #handlers = new Map<keyof Events | \"*\", Array<Handler<any>>>();\n}\n",
+    )]);
+    let (json, _) = tree.json(&["--stdout", "--no-cache"]);
+    let row = source_row(&json, "app/make.ts");
+    assert!(row.contains("\"parsed_by\":\"deep\""), "{row}");
+    assert!(!row.contains("deep_fallback"), "nothing to fall back on: {row}");
+    assert!(json.contains(r#""fallbacks":0"#), "{json}");
+    assert!(
+        json.contains(r#"["a",2,["handlers"],["c",0,0,[]],0]"#),
+        "the value is the call, with no type argument beside it: {json}"
+    );
+    assert!(json.contains(r#"["Map",2"#), "the callee keeps its line: {json}");
+}
