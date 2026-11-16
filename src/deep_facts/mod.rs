@@ -1570,6 +1570,50 @@ impl<'a> Walker<'a> {
                 }
                 continue;
             }
+            // `@class A, B;` / `@synthesize window = _window;`: forward and
+            // synthesized declarations are one statement to the lexer, and the
+            // grammar has no node for either.
+            for (prefix, keyword) in [("@class", "class"), ("@synthesize", "synthesize")] {
+                let Some(rest) = trimmed.strip_prefix(prefix) else { continue };
+                let names: Vec<String> = rest
+                    .trim()
+                    .trim_end_matches(';')
+                    .split(',')
+                    .map(|part| part.split('=').next().unwrap_or("").trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    .collect();
+                if names.is_empty() {
+                    break;
+                }
+                let name_form = |text: &str| {
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, text);
+                    form.push(']');
+                    form
+                };
+                let mut parts: Vec<String> = Vec::new();
+                if names.len() > 1 {
+                    parts.push(format!("[\"m\",[{}]]", [name_form(keyword), name_form(&names[0])].join(",")));
+                    for name in &names[1..] {
+                        parts.push(name_form(name));
+                    }
+                } else {
+                    parts.push(format!(
+                        "[\"m\",[{}]]",
+                        [name_form(keyword), name_form(&names[0])].join(",")
+                    ));
+                }
+                let value = if parts.len() > 1 {
+                    format!("[\"t\",[{}]]", parts.join(","))
+                } else {
+                    parts.pop().unwrap()
+                };
+                self.lexer_event(b'x', line, &[], &value, false);
+                break;
+            }
+            if trimmed.starts_with("@class") || trimmed.starts_with("@synthesize") {
+                continue;
+            }
             // `@property (nonatomic, readonly, getter=isWindow) BOOL isWindow;`:
             // the grammar hands many of these back as macro calls, so the arm
             // never fires and the line lost the call the lexer writes. Read from
