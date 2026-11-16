@@ -3299,6 +3299,16 @@ fn dotted_piece(text: &str) -> bool {
                 base
             }
             "parenthesized_expression" | "try_expression" | "await_expression" => {
+                // `(a, b)[i]`: parens around a comma list hold a value, not a
+                // name. Reading the first item as a path dropped the rest of the
+                // tuple, so traceback's `(self.filename, self.lineno, ...)[0]`
+                // and imaplib's `(time.timezone, time.altzone)[dst]` formed as
+                // the first name alone.
+                if self.kind(id) == "parenthesized_expression"
+                    && self.children(id).into_iter().filter(|&child| !self.is_layout(child)).count() > 1
+                {
+                    return String::new();
+                }
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
             "as_expression" | "satisfies_expression" | "type_assertion" | "non_null_expression" => {
