@@ -196,7 +196,9 @@ impl<'a> Walker<'a> {
             .find(|&&child| self.kind(child) == "identifier")
             .map(|&child| self.text_string(child));
         if let Some(target) = target {
-            self.facts.vars.push((target, path));
+            // The lexer binds the *last* name of the chain:
+            // `JsonConvert.SerializeObject(o)` binds `SerializeObject`.
+            self.facts.vars.push((target, last.to_string()));
         }
     }
 
