@@ -323,7 +323,7 @@ impl<'a> Parser<'a> {
     fn next_starts_with_ternary(&self, end: usize) -> bool {
         let Some(at) = self.next_line_start(end) else { return false };
         matches!(self.src.get(at), Some(b'?') | Some(b':') | Some(b'>'))
-            || matches!(self.src.get(at..at + 2), Some(b"||" | b"&&" | b"??" | b"* " | b"+ "))
+            || matches!(self.src.get(at..at + 2), Some(b"||" | b"&&" | b"??" | b"* " | b"+ " | b"- "))
     }
 
     /// Whether the next line begins with `{`, the body of a function expression
