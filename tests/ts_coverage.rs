@@ -130,6 +130,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "export interface declareConstructor<T, E> extends\n  Bottom<\n    T,\n    E\n  >\n{\n  readonly id: number\n}\n",
     ),
     (
+        "a type operator in front of a group: an extends constraint is not a call",
+        "declare const M: <Self extends (new (...args: any[]) => any) & { readonly identifier: string }>(self: Self) => void;\n",
+    ),
+    (
         "type operators in front of a group: a readonly array constraint is not a call",
         "declare const M: <const Keys extends readonly (\"json\" | \"insert\")[]>(keys: Keys) => void;\n",
     ),

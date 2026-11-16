@@ -3964,12 +3964,12 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
     let keywords: &[&str] = match tag {
         "PY" => &["assert", "del", "raise", "with", "lambda", "return", "yield", "await", "not"],
         // A TypeScript type is written with words that never name a value:
-        // `<K extends readonly ("a" | "b")[]>` puts `readonly` in front of a
-        // group, so the one-pass reader read it as a callee. The CST writes a
-        // modified type, not a call.
+        // `<Self extends (new (…) => any)>` and `<K extends readonly ("a" |
+        // "b")[]>` put a keyword in front of a group, so the one-pass reader
+        // read each as a callee. The CST writes a constraint, not a call.
         "TS" | "TSX" => &[
             "function", "if", "for", "while", "return", "typeof", "delete", "await", "yield", "switch", "catch",
-            "keyof", "infer", "satisfies", "asserts", "unique", "readonly", "implements",
+            "extends", "keyof", "infer", "satisfies", "asserts", "unique", "readonly", "implements",
         ],
         "JS" => &["function", "if", "for", "while", "return", "typeof", "delete", "await", "yield", "switch", "catch"],
         "GO" => &["func", "go", "defer", "range", "select", "switch", "if", "for", "type", "var", "const", "return"],
