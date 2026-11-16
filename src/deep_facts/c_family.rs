@@ -35,7 +35,11 @@ impl<'a> Walker<'a> {
             | "specified_user_function"
             | "scoped_user_function"
             | "specified_scoped_function" => self.c_function(id),
-            "class_specifier" => self.c_class(id),
+            // C spells it `struct_or_union_specifier`, C++ `class_specifier`;
+            // both carry a body and a name, and the lexer files both as a class.
+            "class_specifier" | "struct_or_union_specifier" | "struct_specifier" | "enum_specifier" => {
+                self.c_class(id)
+            }
             "namespace_definition" => self.c_namespace(id),
             // `char buf[BUF];` / `int x = 0;`: the lexer reads the declaration
             // as the run of names on its line (plus the initializer's value when
@@ -59,10 +63,31 @@ impl<'a> Walker<'a> {
                 for call in calls {
                     self.form(call);
                 }
+                // `struct althost { … };` sits inside the declaration statement,
+                // which this arm claims, so the walk never descends to it and
+                // the struct had no symbol at all.
+                let mut bodies = Vec::new();
+                self.c_specifiers_in(id, &mut bodies);
+                for body in bodies {
+                    self.c_class(body);
+                }
             }
             _ => return false,
         }
         true
+    }
+
+    /// Every `struct`/`union`/`enum` specifier inside `id`.
+    fn c_specifiers_in(&self, id: u32, out: &mut Vec<u32>) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "struct_or_union_specifier" | "struct_specifier" | "enum_specifier" | "class_specifier" => {
+                    out.push(child)
+                }
+                "compound_statement" | "function_definition" => {}
+                _ => self.c_specifiers_in(child, out),
+            }
+        }
     }
 
     /// Every `call_expression` inside `id`, in source order, not descending
@@ -147,7 +172,14 @@ impl<'a> Walker<'a> {
     /// members take its name as their owner. A declaration with no body is a
     /// use of the type, not a definition, and the lexer opens no symbol for it.
     pub(crate) fn c_class(&mut self, id: u32) {
-        if self.child_of_kind(id, "class_body").is_none() && self.child_of_kind(id, "struct_body").is_none() {
+        // `struct althost { char *host; };` in C has a field list, not a
+        // `struct_body`; without it every C struct and enum was unnamed, and
+        // the lexer's symbol for it had no counterpart.
+        if self.child_of_kind(id, "class_body").is_none()
+            && self.child_of_kind(id, "struct_body").is_none()
+            && self.child_of_kind(id, "field_declaration_list").is_none()
+            && self.child_of_kind(id, "enumerator_list").is_none()
+        {
             return;
         }
         let Some(name_node) = self.child_of_kind(id, "identifier") else { return };
