@@ -369,7 +369,10 @@ fn kinds(lang: Lang) -> Kinds {
         Lang::Python => {
             Kinds { definitions: PY_DEFS, calls: PY_CALLS, imports: PY_IMPORTS, soft: PY_SOFT, family: Family::Plain }
         }
-        Lang::C | Lang::Cpp => Kinds {
+        // Objective-C keeps the C tables: `@interface` / `@implementation`
+        // are the C reader's containers, and `[receiver selector]` is a
+        // postfix the shared walk reads like a call.
+        Lang::C | Lang::Cpp | Lang::ObjC => Kinds {
             definitions: if lang == Lang::Cpp { CPP_DEFS } else { C_DEFS },
             calls: if lang == Lang::Cpp { CPP_CALLS } else { C_CALLS },
             imports: if lang == Lang::Cpp { CPP_IMPORTS } else { C_IMPORTS },
@@ -426,6 +429,7 @@ fn tag(lang: Lang) -> &'static str {
         Lang::Kotlin => "KT",
         Lang::Scala => "SCALA",
         Lang::Swift => "SWIFT",
+        Lang::ObjC => "OBJC",
     }
 }
 
@@ -480,7 +484,12 @@ pub fn lang_for(tag: &str) -> Option<Lang> {
     // files, so choosing them automatically would pay for a second parse and
     // then throw it away.
     match tag {
-        "PY" | "JS" | "TS" | "RS" => lang_for_forced(tag),
+        // The C family and the brace languages beside it read well enough that
+        // the guard keeps the CST on almost every file (measured: 0-2 fallbacks
+        // per corpus, P6-09), so a second parse is paid for and kept.
+        "PY" | "JS" | "TS" | "RS" | "C" | "CPP" | "CS" | "KT" | "SCALA" | "SWIFT" | "OBJC" => {
+            lang_for_forced(tag)
+        }
         _ => None,
     }
 }
@@ -503,6 +512,7 @@ pub fn lang_for_forced(tag: &str) -> Option<Lang> {
         "KT" => Some(Lang::Kotlin),
         "SCALA" => Some(Lang::Scala),
         "SWIFT" => Some(Lang::Swift),
+        "OBJC" => Some(Lang::ObjC),
         // JSON stays out: a data file has no symbols, calls or imports to
         // read, so the CST would add the module symbol the lexer already
         // writes and nothing else. See `tests/facts_rust_json.rs`.
@@ -837,6 +847,19 @@ impl<'a> Walker<'a> {
             Family::Plain | Family::Js | Family::Rust => {}
         }
         match kind {
+            // A field declaration is a statement to the lexer: `private readonly
+            // DeserializationTracker _tracker;` is an `x` event over the whole
+            // header, and nothing read the node, so every C# field an API
+            // declares left an event the tree never wrote. Go has the same arm
+            // in its own statement model.
+            "field_declaration" | "event_field_declaration" => self.decl_statement(id),
+            // `public string Key { get; set; }`: the lexer reads each accessor
+            // as an expression statement and names it `get` / `set`. Nothing
+            // read `accessor_declaration`, so a property lost one event per
+            // accessor — the largest single C# cluster left.
+            "accessor_declaration" if self.child_of_kind(id, "accessor_body").is_none() => {
+                self.expression_statement(id)
+            }
             "expression_statement" => self.expression_statement(id),
             // Scala's `def f(): T = expr` writes the body as a `def_body` whose
             // child is the expression itself. Nothing read that node, so a call
@@ -1162,6 +1185,12 @@ impl<'a> Walker<'a> {
             // Java: when an annotation sits in front of it the lexer does not
             // see a class and reads the header as an expression statement.
             if self.kinds.family == Family::Java {
+                self.java_header_event(id);
+            }
+            // C# and the brace languages beside it: `public enum ExclusionFilters`
+            // is a statement to the lexer, and the tree wrote only the symbol, so
+            // the header event had no counterpart on nearly every file.
+            if matches!(self.language.name, "csharp" | "kotlin" | "scala" | "swift" | "objc") {
                 self.java_header_event(id);
             }
             return;

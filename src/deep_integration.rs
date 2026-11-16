@@ -90,6 +90,8 @@ pub enum Lang {
     Kotlin,
     Scala,
     Swift,
+    /// Objective-C, whose `Lang::tag` spelling is the lexer's `OBJC`.
+    ObjC,
 }
 
 impl Lang {
@@ -111,6 +113,7 @@ impl Lang {
             Lang::Kotlin => &deep::batch_a::kotlin::KOTLIN,
             Lang::Scala => &deep::batch_b::scala::SCALA,
             Lang::Swift => &deep::batch_b::swift::SWIFT,
+            Lang::ObjC => &deep::batch_c::objc::OBJC,
         }
     }
 }
