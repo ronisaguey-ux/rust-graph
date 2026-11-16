@@ -2215,6 +2215,16 @@ impl<'a> Parser<'a> {
         {
             return false;
         }
+        // A method body is the same nested scope without the keyword:
+        // `get X() { return require("./m") }` written inside an object literal
+        // is a getter, and the require is the body's return value, not the
+        // value the enclosing statement binds. Read as one statement, the
+        // target of `module.exports = mergeExports(resolve, {…})` named the
+        // require (alias `exports`), an alias the CST never writes (measured:
+        // webpack's index.js).
+        if at >= rhs_start && self.crosses_a_body(&stmt[rhs_start..at]) {
+            return false;
+        }
         let Some(equal) = equal else {
             self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
             return true;
@@ -2534,6 +2544,38 @@ impl<'a> Parser<'a> {
             toks = &toks[1..toks.len() - 1];
         }
         toks
+    }
+
+    /// Whether `toks` opens a body that is still open at its end — a `{`
+    /// directly behind `)` is a method's or a function's statement block, and
+    /// the tokens after it belong to that body rather than to the statement
+    /// that surrounds it.
+    fn crosses_a_body(&self, toks: &[Token]) -> bool {
+        let mut depth = 0usize;
+        let mut body: Option<usize> = None;
+        for (index, token) in toks.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" => depth += 1,
+                b")" | b"]" => depth = depth.saturating_sub(1),
+                b"{" => {
+                    depth += 1;
+                    if index > 0 && self.is_op(&toks[index - 1], b")") {
+                        body = Some(depth);
+                    }
+                }
+                b"}" => {
+                    depth = depth.saturating_sub(1);
+                    if body.is_some_and(|open| depth < open) {
+                        body = None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        body.is_some()
     }
 
     fn top_level_assign(&self, toks: &[Token]) -> Option<usize> {
