@@ -1283,9 +1283,9 @@ impl<'a> Walker<'a> {
         let children = self.children(id);
         let at = children.iter().position(|&child| self.kind(child) == params)?;
         let mut name = *children.get(at.checked_sub(1)?)?;
-        // `get` and `set` ARE the name here; the words to step over are the ones
-        // the grammar writes between a declaration and its parameters.
-        if matches!(self.text_string(name).as_str(), "*" | "function" | "async" | "static") {
+        // `get`, `set` and `async` ARE the name here; the words to step over are
+        // the ones the grammar writes between a declaration and its parameters.
+        if matches!(self.text_string(name).as_str(), "*" | "function" | "static") {
             let before = *children.get(at.checked_sub(2)?)?;
             if matches!(self.text_string(before).as_str(), "function" | "async") {
                 return None;
@@ -1482,6 +1482,7 @@ mod accessor_name_tests {
             ("function set(a, b) { return a; }", "set"),
             ("function get(a) { return a; }", "get"),
             ("function setter(a) { return a; }", "setter"),
+            ("return function async(_x) {};", "async"),
         ] {
             let tree = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a tree");
             let facts = extract(source.as_bytes(), &tree, Lang::JavaScript);
