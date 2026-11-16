@@ -1023,13 +1023,17 @@ impl<'a> Walker<'a> {
             // accessor — the largest single C# cluster left.
             // `get;` / `set;`: the notifier token is the value — a keyword leaf
             // carries no expression child, so the arm writes the name itself.
-            "accessor_declaration" if self.child_of_kind(id, "accessor_body").is_none() => {
+            "accessor_declaration" => {
                 let name = self
                     .children(id)
                     .into_iter()
-                    .find(|&child| !self.is_layout(child))
                     .map(|child| self.kind(child).to_string())
-                    .or_else(|| self.children(id).first().map(|&child| self.kind(child).to_string()))
+                    .find(|kind| matches!(kind.as_str(), "get" | "set" | "init" | "add" | "remove"))
+                    .or_else(|| {
+                        self.children(id)
+                            .first()
+                            .map(|&child| self.kind(child).to_string())
+                    })
                     .unwrap_or_default();
                 if !name.is_empty() {
                     let line = self.line(id);
