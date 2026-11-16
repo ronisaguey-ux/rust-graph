@@ -122,6 +122,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "var Event: typeof globalThis extends { onmessage: any, Event: infer T }\n    ? T\n    : { prototype: __Event };\n",
     ),
     (
+        "a heritage clause that wraps: the interface header spans the line break",
+        "export interface declareConstructor<T, E> extends\n  Bottom<\n    T,\n    E\n  >\n{\n  readonly id: number\n}\n",
+    ),
+    (
         "type operators in front of a group: a readonly array constraint is not a call",
         "declare const M: <const Keys extends readonly (\"json\" | \"insert\")[]>(keys: Keys) => void;\n",
     ),

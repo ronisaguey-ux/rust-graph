@@ -408,7 +408,14 @@ impl<'a> Parser<'a> {
             if matches!(self.lang.tag, "TS" | "TSX")
                 && self.type_declaration(&self.stmt)
                 && (self.next_starts_with_brace(last.end as usize)
-                    || self.next_starts_with_word(last.end as usize, b"extends"))
+                    || self.next_starts_with_word(last.end as usize, b"extends")
+                    // `export interface X<T> extends` ends the line with the
+                    // keyword itself and the base type is on the next line. A
+                    // heritage clause cannot end there, so the newline is
+                    // inside the header: ended here, the continuation read as a
+                    // value and the body it opens wrote type members as
+                    // statements the CST never writes.
+                    || (last.kind == Kind::Ident && self.raw(last) == b"extends"))
             {
                 return;
             }
