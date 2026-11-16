@@ -144,6 +144,18 @@ fn a_declaration_file_exports_an_anonymous_default_function() {
 }
 
 #[test]
+fn a_qualified_type_may_end_in_a_keyword() {
+    // After a dot in a type path every word is a name, as `A.default` shows;
+    // the path only took `_name`, so `typeof import('m').default` broke the
+    // whole declaration and the file fell back to the lexer.
+    assert!(clean("type A = typeof import('./d').default;\ntype B = typeof import ('./h').Handler;\n", &TYPESCRIPT));
+    assert_eq!(
+        named("let d: typeof import('./d').default;\n", &TYPESCRIPT),
+        "(program (lexical_declaration let (variable_declarator identifier (type_annotation (nested_type_identifier (type_query typeof import (arguments string)) default)))))"
+    );
+}
+
+#[test]
 fn line_ends_end_statements_where_asi_does() {
     assert_eq!(
         named("a\n++b\nlet x = 1\n[1, 2].map(f)\nreturn\n", &JAVASCRIPT),

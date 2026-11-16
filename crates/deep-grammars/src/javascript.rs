@@ -666,7 +666,7 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         prefix "readonly" => readonly_type,
         prefix "unique" => unique_type,
         postfix type_subscript => lookup_type,
-        postfix "." _type_name => nested_type_identifier,
+        postfix "." _property_name => nested_type_identifier,
         postfix type_arguments => generic_type,
     },
     type_subscript: "[" [_type] "]",
@@ -698,10 +698,10 @@ rust_graph_deep::grammar! { TYPESCRIPT {
     infer_type: "infer" _name,
     literal_type: STRING | NUMBER | "-" NUMBER,
     _type_path: precedence _type_name {
-        postfix "." _name => nested_type_identifier,
+        postfix "." _property_name => nested_type_identifier,
         postfix type_arguments => generic_type,
     },
-    _entity_name: _name ("." _name)*,
+    _entity_name: _name ("." _property_name)*,
 
     object_type: "{" (_type_member [";" | "," | LINE_END])* "}",
     _type_member:
