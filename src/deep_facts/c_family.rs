@@ -580,6 +580,38 @@ impl<'a> Walker<'a> {
                     return true;
                 }
                 let mut wrote_prototype = false;
+                // `extern hidden volatile int *const __x_lockptr;` splits into
+                // two declarations on one line when the type is not a keyword,
+                // and the lexer reads the line as one run of names with `const`
+                // dropped - so the event written per statement was missing the
+                // first one's words (23 musl files, 52 lines).
+                if inits.is_empty() {
+                    let line = self.line(id);
+                    if let Some(text) = self.line_text(line) {
+                        let first = leading_word(text.trim_start()).unwrap_or("");
+                        if matches!(first, "extern" | "hidden" | "weak") && !text.contains('(') {
+                            let words: Vec<String> = text
+                                .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                                .filter(|word| !word.is_empty() && *word != "const")
+                                .map(str::to_string)
+                                .collect();
+                            if words.len() > 2 {
+                                let parts: Vec<String> = words
+                                    .iter()
+                                    .map(|word| {
+                                        let mut part = String::from("[\"n\",");
+                                        push_string(&mut part, word);
+                                        part.push(']');
+                                        part
+                                    })
+                                    .collect();
+                                let value = format!("[\"m\",[{}]]", parts.join(","));
+                                self.lexer_event(b'x', line, &[], &value, false);
+                                wrote_prototype = true;
+                            }
+                        }
+                    }
+                }
                 if !inits.is_empty() {
                     // `char *a=0, *b=0, *c=0;`: the lexer unpacks the declarator
                     // list and keeps the later names as elements of the first
@@ -994,6 +1026,17 @@ impl<'a> Walker<'a> {
         push_string(&mut form, last);
         form.push(']');
         form
+    }
+
+    /// One source line, without its break, when it is in range.
+    pub(crate) fn line_text(&self, line: u32) -> Option<String> {
+        let start = self.line_starts.get(line.saturating_sub(1) as usize).copied()?;
+        let end = self
+            .line_starts
+            .get(line as usize)
+            .copied()
+            .unwrap_or(self.src.len() as u32);
+        Some(String::from_utf8_lossy(&self.src[start as usize..end as usize]).trim_end().to_string())
     }
 
     /// A parameter list as the lexer reads it: the last name of each
