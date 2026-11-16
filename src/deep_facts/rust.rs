@@ -712,7 +712,7 @@ impl<'a> Walker<'a> {
             // and nothing called. The turbofish names a type; the value is the
             // path in front of it, which the lexer writes as a name. With no arm
             // here the node formed as the constant and the name left the record.
-            "generic_function" => {
+            "generic_function" if self.is_rust() => {
                 let head = self.children(id).into_iter().find(|&child| !matches!(self.kind(child), "type_arguments" | "::"))?;
                 Some(self.form(head))
             }
@@ -1249,9 +1249,16 @@ impl<'a> Walker<'a> {
                 let base = self.path_of(object);
                 Some(if base.is_empty() { format!(".{name}") } else { format!("{base}.{name}") })
             }
-            // `u32::from` is `u32.from`, the lexer's spelling of a path.
+            // `u32::from` is `u32.from`, the lexer's spelling of a path. The turbofish
+            // arm is Rust-only: `scoped_identifier` is not a Rust node, so routing
+            // Python's dotted names through it made the CST invent calls the lexer
+            // never read (`asyncio|7` on the python fixture `async_worker.py`).
             "scoped_identifier" | "scoped_type_identifier" => {
-                Some(self.rust_turbofish_path(id).unwrap_or_else(|| self.text_string(id).replace("::", ".")))
+                if self.is_rust() {
+                    Some(self.rust_turbofish_path(id).unwrap_or_else(|| self.text_string(id).replace("::", ".")))
+                } else {
+                    Some(self.text_string(id).replace("::", "."))
+                }
             }
             "call_expression" | "macro_invocation" => Some(String::new()),
             "struct_expression" => self.children(id).first().map(|&name| self.path_of(name)),
