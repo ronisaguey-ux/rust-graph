@@ -129,6 +129,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "type operators in front of a group: a readonly array constraint is not a call",
         "declare const M: <const Keys extends readonly (\"json\" | \"insert\")[]>(keys: Keys) => void;\n",
     ),
+    (
+        "type annotations: a generic annotation is cut at its colon, not its commas",
+        "interface Matcher<A, B> { id: A; other: B }\nconst proto: Omit<\n  Matcher<any, any, any, any, any>,\n  \"provided\" | \"value\"\n> = {\n  id: 1,\n};\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.

@@ -4073,6 +4073,32 @@ impl<'a> Parser<'a> {
                     _ => {}
                 }
             }
+        } else if matches!(self.lang.tag, "TS" | "TSX") {
+            // `const Proto: Omit<ValueMatcher<any, any>, "value"> = {`: the
+            // annotation is a type, not a target, and the commas inside its
+            // generic argument list sit at depth 0 for a reader that counts
+            // only brackets. One binding was read as four names the CST never
+            // writes. A colon inside a destructuring pattern is at depth 1 and
+            // is left for `unpack_one` to read as a rename.
+            let mut depth = 0i32;
+            let mut colon = None;
+            for (index, token) in targets.iter().enumerate() {
+                if token.kind == Kind::Op {
+                    match self.raw(token) {
+                        b"(" | b"[" | b"{" => depth += 1,
+                        b")" | b"]" | b"}" => depth -= 1,
+                        b":" if depth == 0 => {
+                            colon = Some(index);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(at) = colon {
+                trimmed = targets[..at].to_vec();
+                targets = &trimmed;
+            }
         }
         let unpacked = self.unpack_targets(targets);
         let weak = augmented || targets.last().is_some_and(|token| self.is_op(token, b"]"));
