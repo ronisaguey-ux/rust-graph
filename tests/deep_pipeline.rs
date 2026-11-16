@@ -503,3 +503,23 @@ fn a_cast_in_a_receiver_group_names_the_receiver() {
         "the binder is the receiver, not the cast: {json}"
     );
 }
+/// `(globalThis as Record<string, unknown>).window = …`: a type argument list's
+/// comma separates type arguments, not path segments, so the group is still a
+/// receiver and the target is `globalThis.window`. Read as a comparison the
+/// group was rejected and the target was the member alone (`.window`).
+#[test]
+fn a_receiver_group_may_hold_a_type_argument_list() {
+    let tree = Tree::new("cast-group", &[(
+        "app/group.ts",
+        "function setup() {\n  (globalThis as Record<string, unknown>).window = { confirm: vi.fn() };\n}\n",
+    )]);
+    let (json, _) = tree.json(&["--stdout", "--no-cache"]);
+    let row = source_row(&json, "app/group.ts");
+    assert!(row.contains("\"parsed_by\":\"deep\""), "{row}");
+    assert!(!row.contains("deep_fallback"), "nothing to fall back on: {row}");
+    assert!(json.contains(r#""fallbacks":0"#), "{json}");
+    assert!(
+        json.contains(r#"["a",2,["globalThis.window"]"#),
+        "the receiver survives the type argument list: {json}"
+    );
+}

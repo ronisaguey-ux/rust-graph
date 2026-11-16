@@ -3845,6 +3845,30 @@ impl<'a> Parser<'a> {
             let token = &inner[i];
             if token.kind == Kind::Ident || self.is_join(token) {
                 i += 1;
+            } else if self.is_op(token, b"<") && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") {
+                // `(x as Record<string, unknown>).window`: a TypeScript type
+                // argument list is one nested unit, and its commas separate
+                // type arguments rather than paths. Read as a comparison the
+                // group was rejected and the receiver's own name was lost, so
+                // the target was the member alone (`.window`).
+                let mut depth = 0usize;
+                while i < inner.len() {
+                    if self.is_op(&inner[i], b"<") {
+                        depth += 1;
+                    } else if self.is_op(&inner[i], b">") {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else if self.is_op(&inner[i], b";") {
+                        return false;
+                    }
+                    i += 1;
+                }
+                if depth != 0 {
+                    return false;
+                }
+                i += 1;
             } else if self.is_op(token, b"(") || self.is_op(token, b"[") {
                 let (open, close) = if self.is_op(token, b"(") { (b"(", b")") } else { (b"[", b"]") };
                 let mut depth = 0usize;
