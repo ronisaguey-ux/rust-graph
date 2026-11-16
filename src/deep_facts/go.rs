@@ -1718,6 +1718,66 @@ impl<'a> Walker<'a> {
         self.facts.imports.push(Import { line, module, alias, kind, ..Import::default() });
     }
 
+    /// The statements inside a Kotlin lambda, read one at a time: the body is a
+    /// list of statements, not an expression, and reading it as a value turned
+    /// `repositories { … }` into an anonymous call.
+    pub(crate) fn kt_lambda_statements(&mut self, id: u32) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "lambda_body" | "lambda_items" | "statements" => self.kt_lambda_statements(child),
+                "expression_statement" => self.expression_statement(child),
+                "script_statement" => self.kt_script_statement(child),
+                "property_declaration" => self.kt_property(child),
+                "call_expression" => {
+                    self.form(child);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `rootProject.name = "demo"`, `group = "com.x"`: the flat statement a
+    /// Kotlin script keeps, written as the assignment the lexer files.
+    pub(crate) fn kt_script_statement(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut names: Vec<String> = Vec::new();
+        let mut value: Option<u32> = None;
+        for child in self.children(id) {
+            let kind = self.kind(child);
+            if self.is_layout(child) || kind == "=" {
+                continue;
+            }
+            if value.is_none() && matches!(kind, "identifier" | "simple_identifier") {
+                names.push(self.text_string(child));
+                continue;
+            }
+            value = Some(child);
+        }
+        if names.is_empty() {
+            return;
+        }
+        match value {
+            // `tasks.test { … }`: a trailing lambda is not a value, and the
+            // lexer files the line as the name alone. The lambda's own body is
+            // walked here because this arm claims the node.
+            Some(node) if matches!(self.kind(node), "lambda_literal" | "annotated_lambda" | "lambda_expression") => {
+                self.kt_lambda_statements(node);
+                let mut text = "[[\"n\",".to_string();
+                push_string(&mut text, &names.join("."));
+                text.push_str("]]");
+                self.event(&format!("[\"x\",{line},[\"m\",{text}]]"));
+            }
+            Some(node) => self.assignment_parts(vec![names.join(".")], node, line, false),
+            None => {
+                let mut text = "[[\"n\",".to_string();
+                push_string(&mut text, &names.join("."));
+                text.push_str("]]");
+                let value = format!("[\"m\",{text}]");
+                self.event(&format!("[\"x\",{line},{value}]"));
+            }
+        }
+    }
+
     /// `val a = 1`, `private val b: Int = 2`: the declared name and the value,
     /// as the assignment the lexer files.
     pub(crate) fn kt_property(&mut self, id: u32) {
@@ -1950,6 +2010,19 @@ impl<'a> Walker<'a> {
             }
         }
         if self.kinds.calls.contains(&kind) {
+            // `repositories { mavenCentral() }`: the Kotlin DSL idiom, a call
+            // whose only argument is a lambda. The lexer files the line as the
+            // name, not as a call, so the value is the name and the call below
+            // is still recorded for the resolver.
+            if self.is_kotlin() {
+                if let Some(name) = self.kotlin_dsl_name(id) {
+                    let _ = self.call_form_link(id);
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    return out;
+                }
+            }
             return self.call_form(id);
         }
         // Python has no boolean keyword in this grammar, but the lexer reads
@@ -2599,6 +2672,43 @@ impl<'a> Walker<'a> {
         }
         out.push_str("]]");
         out
+    }
+
+    /// The name of a Kotlin DSL call: an identifier followed by a single
+    /// lambda argument, which the lexer reads as the name alone.
+    fn kotlin_dsl_name(&self, id: u32) -> Option<String> {
+        let children = self.children(id);
+        let callee = children
+            .iter()
+            .copied()
+            .find(|&child| !matches!(self.kind(child), "argument_list" | "arguments" | "type_arguments" | "(" | ")"))?;
+        if !matches!(self.kind(callee), "identifier" | "simple_identifier") {
+            return None;
+        }
+        // The grammar keeps a trailing lambda as a direct child of the call,
+        // not inside an `arguments` node, which is why the check below has to
+        // look at both.
+        let args: Vec<u32> = children
+            .into_iter()
+            .filter(|&child| {
+                matches!(
+                    self.kind(child),
+                    "lambda_literal" | "annotated_lambda" | "lambda_expression" | "argument_list" | "arguments"
+                )
+            })
+            .flat_map(|child| {
+                if matches!(self.kind(child), "argument_list" | "arguments") {
+                    self.children(child)
+                } else {
+                    vec![child]
+                }
+            })
+            .filter(|&arg| !self.is_layout(arg))
+            .collect();
+        if args.len() != 1 || !matches!(self.kind(args[0]), "lambda_literal" | "annotated_lambda") {
+            return None;
+        }
+        Some(self.text_string(callee))
     }
 
     pub(crate) fn call_form(&mut self, id: u32) -> String {

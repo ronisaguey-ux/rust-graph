@@ -860,6 +860,11 @@ impl<'a> Walker<'a> {
             // plain identifier instead of a `property_head`, so the arm reads
             // both.
             "property_declaration" => self.kt_property(id),
+            // `rootProject.name = "demo"` in a .kts script: the grammar keeps
+            // the line as one flat node, nothing read it, and every Gradle
+            // script in the corpus lost its assignments (rootProject.name,
+            // group, version: 165 rows).
+            "script_statement" => self.kt_script_statement(id),
             // `public string Key { get; set; }`: the lexer reads each accessor
             // as an expression statement and names it `get` / `set`. Nothing
             // read `accessor_declaration`, so a property lost one event per
