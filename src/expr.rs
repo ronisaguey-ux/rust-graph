@@ -1386,6 +1386,14 @@ impl Emit<'_> {
                 self.pos += 1;
                 continue;
             }
+            // `start.await.status`: `.await` is the other postfix operator, and
+            // it is no more a member than `?` is. Kept as a segment the lexer
+            // named `start.await.status` where the CST, which reads through an
+            // `await_expression`, names `start.status`.
+            if self.lang.tag == "RS" && self.is_op(0, b".") && self.word(1).as_deref() == Some("await") {
+                self.pos += 2;
+                continue;
+            }
             let separator = self.is_op(0, b".")
                 || self.is_op(0, b"->")
                 || self.is_op(0, b"::")
