@@ -40,6 +40,28 @@ impl<'a> Walker<'a> {
             "class_specifier" | "struct_or_union_specifier" | "struct_specifier" | "enum_specifier" => {
                 self.c_class(id)
             }
+            // `__asm__("bsr %1,%0" : …)`: the grammar gives it its own node and
+            // nothing read it, so every inline asm the lexer files as a call was
+            // lost (161 of the C corpus's losses, the largest single cluster).
+            // The lexer names the call after the token as written, `__asm__` or
+            // `asm`, and a leading `__volatile__` is a second call to it.
+            "asm_statement" | "gnu_asm_expression" => {
+                let line = self.line(id);
+                let text = self.text_string(id);
+                let mut rest = text.trim_start();
+                let mut first = true;
+                for _ in 0..3 {
+                    let Some(word) = leading_word(rest) else { break };
+                    if first || word == "volatile" || word == "__volatile__" {
+                        self.push_call(word.to_string(), line);
+                    }
+                    first = false;
+                    rest = rest[word.len()..].trim_start();
+                    if rest.starts_with('(') {
+                        break;
+                    }
+                }
+            }
             // `weak_alias(a, b)` at file scope: the grammar gives the statement
             // its own node, and nothing read it, so every macro invocation the
             // lexer files as a call was lost (185 of the C corpus's losses).
@@ -47,7 +69,14 @@ impl<'a> Walker<'a> {
                 if let Some(node) = self.child_of_kind(id, "identifier") {
                     let name = self.text_string(node);
                     let line = self.line(id);
-                    self.push_call(name, line);
+                    let index = self.push_call(name, line);
+                    // The lexer files the statement twice: the call, and an
+                    // event whose value is that call's form. Writing only the
+                    // call left one loss on every alias line in musl.
+                    if let Some(list) = self.child_of_kind(id, "arguments") {
+                        let args = self.arguments(list);
+                        self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
+                    }
                 }
             }
             "namespace_definition" => self.c_namespace(id),
@@ -60,7 +89,17 @@ impl<'a> Walker<'a> {
                     id,
                     &["class_body", "struct_body", "compound_statement", "function_definition"],
                 );
-                if form != "0" {
+                // `static const double huge = 0x1p1023;`: a declaration with
+                // an initializer is an assignment to the lexer, and the words
+                // form wrote an `x` it never wrote, so every initialised
+                // constant in musl lost its line.
+                let mut inits = Vec::new();
+                self.c_initializers(id, &mut inits);
+                if !inits.is_empty() {
+                    for (name, node, line) in inits {
+                        self.assignment_parts(vec![name], node, line, false);
+                    }
+                } else if form != "0" {
                     let line = self.line(id);
                     self.event(&format!("[\"x\",{line},{form}]"));
                 }
@@ -81,10 +120,94 @@ impl<'a> Walker<'a> {
                 for body in bodies {
                     self.c_class(body);
                 }
+                // `int g(void);` — the lexer reads a declared name followed by
+                // its parameter list as a call, and a header is mostly
+                // prototypes, so every one of them was a loss.
+                if !self.c_has_kind(id, "compound_statement")
+                    && self.c_has_kind(id, "parameter_list")
+                {
+                    if let Some(name) = self.declarator_name(id) {
+                        let line = self.line(id);
+                        self.push_call(name, line);
+                    }
+                }
             }
             _ => return false,
         }
         true
+    }
+
+    /// `(name, value node, line)` for each declarator of a declaration that has
+    /// an initializer, in source order.
+    fn c_initializers(&mut self, id: u32, out: &mut Vec<(String, u32, u32)>) {
+        let mut pending: Option<String> = None;
+        for child in self.children(id) {
+            match self.kind(child) {
+                "declaration_specifiers" => continue,
+                "direct_declarator" => {
+                    pending = self.declarator_of(child);
+                    continue;
+                }
+                _ => {}
+            }
+            if self.is_layout(child) {
+                continue;
+            }
+            if let Some(name) = pending.take() {
+                let line = self.line(id);
+                out.push((name, child, line));
+            }
+        }
+    }
+
+    /// Whether any descendant of `id` is of `kind`.
+    fn c_has_kind(&self, id: u32, kind: &str) -> bool {
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            for child in self.children(node) {
+                if self.kind(child) == kind {
+                    return true;
+                }
+                stack.push(child);
+            }
+        }
+        false
+    }
+
+    /// The name inside a `direct_declarator` node itself.
+    fn declarator_of(&self, id: u32) -> Option<String> {
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            for child in self.children(node).into_iter().rev() {
+                match self.kind(child) {
+                    "parameter_list" | "compound_statement" | "initializer_list" => {}
+                    "identifier" => return Some(self.text_string(child)),
+                    _ => stack.push(child),
+                }
+            }
+        }
+        None
+    }
+
+    /// The declared name of a declaration: the first identifier under a
+    /// `direct_declarator`, never one inside its parameter list.
+    fn declarator_name(&self, id: u32) -> Option<String> {
+        let mut stack = vec![id];
+        let mut seen_declarator = false;
+        while let Some(node) = stack.pop() {
+            for child in self.children(node).into_iter().rev() {
+                match self.kind(child) {
+                    "parameter_list" | "compound_statement" | "initializer_list" => {}
+                    "direct_declarator" => {
+                        seen_declarator = true;
+                        stack.push(child);
+                    }
+                    "identifier" if seen_declarator => return Some(self.text_string(child)),
+                    _ => stack.push(child),
+                }
+            }
+        }
+        None
     }
 
     /// Every `struct`/`union`/`enum` specifier inside `id`.
@@ -367,4 +490,18 @@ fn line_starts(src: &[u8]) -> Vec<u32> {
         }
     }
     out
+}
+
+/// The identifier characters at the start of `text`, if any.
+fn leading_word(text: &str) -> Option<&str> {
+    let end = text
+        .char_indices()
+        .find(|(_, ch)| !(ch.is_ascii_alphanumeric() || *ch == '_'))
+        .map(|(at, _)| at)
+        .unwrap_or(text.len());
+    if end == 0 {
+        None
+    } else {
+        Some(&text[..end])
+    }
 }
