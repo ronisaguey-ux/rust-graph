@@ -31,6 +31,8 @@ impl<'a> Walker<'a> {
             if matches!(
                 self.kind(child),
                 "class_body" | "enum_body" | "interface_body" | "annotation_type_body" | "record_body" | "constructor_body"
+                    // A C# property's body is statements of its own.
+                    | "property_body"
             ) {
                 continue;
             }
