@@ -1061,8 +1061,10 @@ impl Emit<'_> {
                         }
                     }
                 }
+            } else if self.tok(0).is_some_and(|t| t.kind == Kind::Lambda) {
+                self.pos += 1;
             }
-            out.push('0');
+            self.chain(out, "0".to_string(), String::new(), line);
             return;
         }
         // `{} as Record<string, number>`: a type assertion's type is not a
@@ -1619,6 +1621,9 @@ mod tests {
         assert_eq!(calls, ["f"]);
         let (value, _) = form("js", "f(function st(x) { g(x); })");
         assert_eq!(value, r#"["c",0,0,[0]]"#);
+        let (value, calls) = form("js", "f(function () { this.sign(); }.bind(this))");
+        assert_eq!(value, r#"["c",0,0,[["c",1,0,[["n","self"]]]]]"#);
+        assert_eq!(calls, ["f", ".bind"]);
     }
 
     #[test]
