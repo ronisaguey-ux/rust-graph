@@ -76,3 +76,40 @@ they cost the most rust files:
 5. **Grammar recovery over budget** (`CST_DEGRADED:recovery`): error nodes are
    the CVD parser's recovery, not a reader disagreement, and the threshold is
    the only knob that is honest here.
+6. **The two readers disagree about a call's targets**
+   (`CST_SHAPE_MISMATCH:targets`): the bucket is named when the reason reads
+   "target list differs" (`reason_code` in `src/pipeline.rs`), and it is a
+   reader/guard agreement, not a grammar gap — the CST writes one target list,
+   the lexer another, and neither is wrong on its own.
+7. **The CST has no node for a symbol the lexer read**
+   (`CST_MISSING_KIND:symbol`): the generic "the CST lost a symbol" reason, so
+   the owning module is the language's table and walk arm
+   (`src/deep_facts/<lang>.rs` and its `src/deep/` kinds), never the guard.
+
+Entries 6 and 7 were missing from this list while the corpora paid for them:
+they are the two codes that `reason_code` produces with no question written
+here, which P8-08 cannot close until each fallback is attributed.
+
+This list is ordered by **rust** cost, and the C family does not pay in that
+order. Measured 2026-11-16 with both readers forced on (C 554 fallbacks of
+1,849 files, Go 5,828 of 12,004). Neither number can be produced in `auto`:
+`lang_for` answers `None` for C and Go, so `auto` sends both to the lexer and
+reports zero fallbacks — the counts come from a throwaway worktree that flips
+`lang_for` for a measurement sweep, and that flip is deliberately not in this
+repository.
+
+| files | code | C | Go |
+|---:|---|---:|---:|
+| 1610 | `CST_MISSING_KIND:call` | 195 | 1415 |
+| 1030 | `LEX_OVER_EMIT:name` | 71 | 959 |
+| 950 | `CST_MISSING_KIND:symbol` | 9 | 941 |
+| 879 | `LEX_OVER_EMIT:call` | 21 | 858 |
+| 833 | `CST_SHAPE_MISMATCH:targets` | 5 | 828 |
+| 688 | `PAIR_AMBIGUOUS:1` | 60 | 628 |
+| 174 | `CST_DEGRADED:recovery` | 128 | 46 |
+| 73 | `CST_MISSING_KIND:constant` | 51 | 22 |
+
+`CST_DEGRADED:recovery` is 128 of C's 554 — the second-largest single reason in
+that corpus is grammar recovery, not a reader disagreement, and no current target
+covers it. Reading the table in rust order would spend the next pass on the
+wrong two codes.
