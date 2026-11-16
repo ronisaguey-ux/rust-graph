@@ -6,8 +6,11 @@ a question still open says where the disagreement is counted
 (`docs/RUST_CONSTRUCTS.md`) and which module owns it. `docs/PAIRING.md` is the
 design behind the guard; this is the history of the shapes that shaped it.
 
-Current state, 2026-11-15: rust 48 fallbacks of 1,816 files, js 36, ts 41,
-python 8, pinned by `tools/phase4_gate.py` (see `docs/MEASURE.md`).
+Current state, 2026-11-16: rust 16 fallbacks of 1,816 files, js 2, ts 34,
+python 7, measured by `tools/phase4_gate.py` (see `docs/MEASURE.md`). The pins in
+`tools/baselines/constructs.json` still record the 2026-11-15 sweep (rust 48, js
+36, ts 41, python 8), so the gate prints `MOVED` for python and rust until
+`tools/construct_report.py --measure` re-pins them.
 
 ## Match arms: a block that belongs to the arm — **closed 2026-11-15**
 
@@ -103,6 +106,14 @@ release/musl binary):
 (`fix(rust): a ? or .await keeps its receiver`). No test pinned the leading-dot
 spelling the CST used to write, so nothing had to be re-pinned for it; the
 existing `tests/deep_facts.rs` rows still pass.
+
+**Half of it, on one side only.** `path_of` is the CST. The lexer half of `.await`
+was still open when this section was written: the `?` arm of the chain already
+skipped its operator, but `.await` was consumed as a *segment*, so the same call
+reached the record as `self.server_handle.await.unwrap` on one side of the guard
+and `self.server_handle.unwrap` on the other. The `?` shape was answered here;
+the `.await` shape only closed on 2026-11-16, in `src/expr.rs` (see "`.await` is
+a postfix operator, not a member" below).
 
 ## A trait object names its own types — **closed 2026-11-15**
 
@@ -238,40 +249,133 @@ release/musl binary):
 section. Two spellings of one name cannot be told apart from two names, so the
 rename belongs in the reader that renames, not in the guard.
 
+## A turbofish closes where its angle brackets do — **closed 2026-11-16**
+
+**The question.** `f(a, None::<Vec<Entry<T>>>, g(b))`. A turbofish names a type,
+not a value, so the value reader skips it. The tokenizer reads `>>` as one
+operator, and the skip counted only a lone `>`, so the list never closed and the
+skip ran to the end of the statement — every later argument and call went with
+it. `f::<<T as Tr>::Out>` is the same hole pointing the other way: one token opens
+two lists.
+
+**Measured** (`tools/loss_count.py`, release/musl binary): rust 23 / 1,816 files
+(24 losses) → **22 / 1,816 (23)**. js 2 / 1854 (4) and ts 34 / 2000 (19) did not
+move.
+
+**Closed by** `d4242ab`, one block in `src/expr.rs`: the skip is a depth counter
+that reads `<<` as two openers and `>>` as two closers, and a turbofish stamps its
+call on the line of its `::` when the parenthesis is written further down.
+
+## `.await` is a postfix operator, not a member — **closed 2026-11-16**
+
+**The question.** `start.await.status`. The chain keeps its receiver across `?`
+(see above), but `.await` was still consumed as a *segment*, so the lexer named
+`start.await.status` where the CST, reading through an `await_expression`, names
+`start.status`. A member the source never writes is a name the guard blames on
+the wrong reader.
+
+**Measured**: rust 22 / 1,816 (23 losses) → **21 / 1,816 (22)**. js and ts
+unchanged.
+
+**Closed by** `6d4fcc7`, `src/expr.rs`: `.await` is skipped beside `?` for Rust
+only, and no segment is pushed for it.
+
+## An awaited target is not named `.await.inner` — **closed 2026-11-16**
+
+**The question.** `self.rcvs.lock().await.inner = ..`. The target reader
+(`target_path`, `src/parser.rs`) joined every token it walked, so the *place*
+being assigned was spelled `.await.inner` — a path the CST never writes, since the
+CST names the target `.inner` through its `await_expression`.
+
+**Measured**: rust 21 / 1,816 (22 losses) → **20 / 1,816 (21)**. js and ts
+unchanged.
+
+**Closed by** `1535e3c`, `src/parser.rs`: the target walk steps over `.await` the
+way it already steps over a subscript.
+
+## A let condition is stamped where it starts — **closed 2026-11-16**
+
+**The question.** `if let Some(x) =` followed by a value whose first token is
+several lines down. The condition event was stamped on the value's first token,
+while the CST stamps its `let_condition` on the `let`; one condition became two
+events, one line apart, that no line could pair.
+
+**Measured**: rust 20 / 1,816 (21 losses) → **18 / 1,816 (19)**. js and ts
+unchanged.
+
+**Closed by** `87b7722`, `src/parser.rs`: `expression_event_at` takes the line its
+caller names, and a stripped let condition is stamped on its `if`/`while` token.
+`expression_event` keeps the old spelling for every other caller.
+
+## A brace inside a let pattern is not the body — **closed 2026-11-16**
+
+**The question.** `if let Self::Enabled {` newline `core,` newline `..` newline
+`} = self`. That brace lists the fields of a pattern; opened as the body, the
+fields became statements of their own and the condition lost its value to the
+line below them. A `let` in a condition is followed by a pattern until its
+binding `=`.
+
+**Measured**: rust 18 / 1,816 (19 losses) → **16 / 1,816 (15)**. js and ts
+unchanged.
+
+**Closed by** `4e5cd32`, `src/parser.rs`: `rust_let_pattern_open` answers whether
+the statement so far ends inside a condition's pattern (from the last `let` that
+follows `if`/`while`/`&&`/`||` to a top-level `=`), and `if`/`while`/`else` brace
+openers consult it before taking the brace as a body.
+
+## Applying a constructed value is an anonymous call — **closed 2026-11-16**
+
+**The question.** `CFUNCTYPE(c_void_p, c_size_t)(addr)`. The value the
+constructor built is then applied, and an application has no name — exactly like
+`f(x)(y)`. The reader glued the class to the call anyway, so the record named
+`CFUNCTYPE().call`, a method no source spells and one the resolver would tie to
+any method named `call`.
+
+**Measured**: python 8 / 568 (8 losses) → **7 / 568 (7)**; rust stayed at
+16 / 1,816 (15), js and ts unchanged.
+
+**Closed by** `0c1a926`, `src/expr.rs`: when the callee path is empty the class
+that built the value is not glued to the target. A member called on that same
+value still carries its class (`Repo(db).find` stays `Repo().find`).
+
 ## Still open
 
 The codes, counts and owning modules are regenerated into
 `docs/RUST_CONSTRUCTS.md` and `docs/READERS.md` from
 `tools/baselines/constructs.json`; this file does not repeat them, so it cannot
 go stale beside them. The open questions behind those codes are, in the order
-they cost the most rust files:
+they cost the most rust files (rust rows of the 16 fallbacks measured 2026-11-16,
+in parentheses):
 
-1. **The lexer invents a name the CST never writes** (`LEX_OVER_EMIT:name`): the
-   value reader's merges. The fix belongs in `src/expr.rs`, where both readers'
-   value shapes are decided for every language.
-2. **The lexer invents a callee** (`LEX_OVER_EMIT:call`): call detection in the
-   same reader; a pattern, a type or a range read as a call.
-3. **The CST has no node for a call the lexer read**
-   (`CST_MISSING_KIND:call`): a grammar gap, so `src/deep/` and the grammar
-   tables, not the guard.
-4. **Two events on one line that cannot be paired** (`PAIR_AMBIGUOUS:1`): the
-   classifier decides the file; the readers have to agree first.
-5. **Grammar recovery over budget** (`CST_DEGRADED:recovery`): error nodes are
-   the CVD parser's recovery, not a reader disagreement, and the threshold is
-   the only knob that is honest here.
+1. **The CST has no node for a call the lexer read**
+   (`CST_MISSING_KIND:call`, 5 rows): a grammar gap, so `src/deep/` and the
+   grammar tables, not the guard.
+2. **Two events on one line that cannot be paired** (`PAIR_AMBIGUOUS:1`, 4
+   rows): the classifier decides the file; the readers have to agree first.
+3. **The lexer invents a name the CST never writes** (`LEX_OVER_EMIT:name`, 4
+   rows): the value reader's merges. The fix belongs in `src/expr.rs`, where both
+   readers' value shapes are decided for every language.
+4. **Grammar recovery over budget** (`CST_DEGRADED:recovery`, 2 rows): error
+   nodes are the CVD parser's recovery, not a reader disagreement, and the
+   threshold is the only knob that is honest here.
+5. **The lexer invents a callee** (`LEX_OVER_EMIT:call`, 1 row): call detection
+   in the same reader; a pattern, a type or a range read as a call.
 6. **The two readers disagree about a call's targets**
-   (`CST_SHAPE_MISMATCH:targets`): the bucket is named when the reason reads
-   "target list differs" (`reason_code` in `src/pipeline.rs`), and it is a
-   reader/guard agreement, not a grammar gap — the CST writes one target list,
-   the lexer another, and neither is wrong on its own.
+   (`CST_SHAPE_MISMATCH:targets`, no rust row today): the bucket is named when
+   the reason reads "target list differs" (`reason_code` in `src/pipeline.rs`),
+   and it is a reader/guard agreement, not a grammar gap — the CST writes one
+   target list, the lexer another, and neither is wrong on its own.
 7. **The CST has no node for a symbol the lexer read**
-   (`CST_MISSING_KIND:symbol`): the generic "the CST lost a symbol" reason, so
-   the owning module is the language's table and walk arm
+   (`CST_MISSING_KIND:symbol`, no rust row today): the generic "the CST lost a
+   symbol" reason, so the owning module is the language's table and walk arm
    (`src/deep_facts/<lang>.rs` and its `src/deep/` kinds), never the guard.
 
 Entries 6 and 7 were missing from this list while the corpora paid for them:
 they are the two codes that `reason_code` produces with no question written
-here, which P8-08 cannot close until each fallback is attributed.
+here, which P8-08 cannot close until each fallback is attributed. Neither costs a
+rust file any more — the rust corpus moved under them while the C and Go tables
+below kept them near the top, which is the reason the rust order above is not the
+order the C family pays in.
 
 This list is ordered by **rust** cost, and the C family does not pay in that
 order. Measured 2026-11-16 with both readers forced on (C 554 fallbacks of
