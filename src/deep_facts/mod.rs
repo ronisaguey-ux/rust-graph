@@ -847,7 +847,19 @@ impl<'a> Walker<'a> {
             // header, and nothing read the node, so every C# field an API
             // declares left an event the tree never wrote. Go has the same arm
             // in its own statement model.
-            "field_declaration" | "event_field_declaration" => self.decl_statement(id),
+            "field_declaration" | "event_field_declaration" => {
+                self.decl_statement(id);
+                self.field_initializer_calls(id);
+                self.cs_declared_vars(id);
+            }
+            // `var o = JObject.Parse(text);`: a C# local initialised with a call
+            // recorded nothing at all - deep 0 against lexer 2 on a two-line
+            // method. Only C# spells its call kinds this way, so the arm is
+            // gated on them rather than on the family.
+            "local_variable_declaration" if self.kinds.calls.contains(&"object_creation_expression") => {
+                self.field_initializer_calls(id);
+                self.cs_declared_vars(id);
+            }
             // `size_t n = strlen(s);`: a declaration with an initializer is one
             // statement to the lexer, and the call in it is a fact. C, C++ and
             // Objective-C declare this way on nearly every line, so nothing

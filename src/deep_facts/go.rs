@@ -88,6 +88,68 @@ impl<'a> Walker<'a> {
     }
 
 
+    /// `private Encoding Encoding = new UTF8Encoding(false);`: a C# field
+    /// initialised with a creation or a call records the call, and the field's
+    /// own value stays the merge of names the lexer writes for a field. Read
+    /// through `decl_value` the creation became the whole value instead, which
+    /// traded the lost call for a lost event.
+    pub(crate) fn field_initializer_calls(&mut self, id: u32) {
+        let mut pending = vec![id];
+        while let Some(node) = pending.pop() {
+            for child in self.children(node) {
+                let kind = self.kind(child);
+                if matches!(
+                    kind,
+                    "object_creation" | "object_creation_expression" | "invocation_expression" | "call_expression"
+                        | "nameof_expression"
+                ) {
+                    let path = if kind == "nameof_expression" {
+                        "nameof".to_string()
+                    } else {
+                        let callee = self.decl_callee(child);
+                        self.decl_path(callee)
+                    };
+                    if !path.is_empty() && path != "new" {
+                        let line = self.line(child);
+                        self.push_call(path, line);
+                    }
+                }
+                pending.push(child);
+            }
+        }
+    }
+
+    /// `var Constructor = CreateParameterizedConstructor(t);`: the lexer files
+    /// a binding whose value is a capitalised call as an instance of that name,
+    /// so a `var` initialised from a factory lost its record (233 rows of one
+    /// C# slice, the largest cluster left once the calls themselves were
+    /// read). The name is the whole dotted path, as the lexer's chain is.
+    pub(crate) fn cs_declared_vars(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(at) = children.iter().rposition(|&child| {
+            matches!(
+                self.kind(child),
+                "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression"
+            )
+        }) else {
+            return;
+        };
+        let value = children[at];
+        let path = self.decl_path(value);
+        let last = path.rsplit('.').next().unwrap_or("");
+        if !last.starts_with(|ch: char| ch.is_uppercase()) {
+            return;
+        }
+        let target = children[..at]
+            .iter()
+            .rev()
+            .find(|&&child| self.kind(child) == "identifier")
+            .map(|&child| self.text_string(child));
+        if let Some(target) = target {
+            self.facts.vars.push((target, path));
+        }
+    }
+
     /// `int total = 0;`, `List<Item> items = f();`, `private Map<...> index;`.
     /// With an initializer the lexer writes an assignment to the declared name;
     /// without one the statement is an expression, and the type names are in it.
@@ -358,6 +420,13 @@ impl<'a> Walker<'a> {
         // produced a merge of the callee's name and the raw arguments, which
         // never equals the lexer's event and made every Go file look like it had
         // lost a fact.
+        // `nameof(x)` is a call to the lexer, but the *statement* it sits in is
+        // still a name to it, so the call is recorded here and the value keeps
+        // falling through to the plain-name path.
+        if kind == "nameof_expression" {
+            let line = self.line(id);
+            self.push_call("nameof".to_string(), line);
+        }
         if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression") {
             let index = self.decl_call(id);
             let args = self
@@ -387,7 +456,12 @@ impl<'a> Walker<'a> {
         let mut parts = Vec::new();
         if matches!(
             kind,
-            "selector_expression" | "qualified_type" | "field_access" | "dotted_name" | "scoped_identifier"
+            // `JObject.Parse(x)`: the C# grammar keeps a member access as
+            // `member_access` with two name leaves, and without it every call
+            // through a type or an object lost its receiver and the whole
+            // dotted name with it - 592 rows of one C# slice.
+            "member_access"
+                | "selector_expression" | "qualified_type" | "field_access" | "dotted_name" | "scoped_identifier"
                 | "navigation_expression"
                 | "scoped_type_identifier" | "nested_type_identifier" | "class_literal" | "method_reference"
         ) {
@@ -489,7 +563,11 @@ impl<'a> Walker<'a> {
             | "scoped_type_identifier" | "nested_type_identifier" | "class_literal" | "method_reference"
             // Kotlin's `user.title` in a template hole is a navigation; the
             // path is the receiver and the member, like every other dotted name.
-            | "navigation_expression" => {
+            | "navigation_expression"
+            // `JObject.Parse`: the C# member access carries two name leaves and
+            // no dotted kind at all, so every call through a type lost its
+            // receiver - 592 rows of one C# slice.
+            | "member_access" => {
                 let children = self.children(id);
                 // The last segment is read by its text: `Mockito.when` names a
                 // member called `when`, which this grammar gives a keyword kind.
@@ -509,7 +587,7 @@ impl<'a> Walker<'a> {
                 let base = if base.is_empty() { String::new() } else { format!("{base}.") };
                 format!("{base}{name}")
             }
-            "method_invocation" => {
+            "method_invocation" | "invocation_expression" | "object_creation" | "object_creation_expression" => {
                 // A call has no name of its own: the name belongs to its callee.
                 let callee = self.decl_callee(id);
                 if callee == id {
@@ -3074,7 +3152,10 @@ impl<'a> Walker<'a> {
                     text.trim_start_matches('#').to_string()
                 }
             }
-            "attribute" | "member_expression" => {
+            // `JObject.Parse`: the C# grammar spells a member access with two
+            // name leaves, and read as a leaf the whole receiver vanished -
+            // every call through a type in the corpus lost its dotted name.
+            "attribute" | "member_expression" | "member_access" => {
                 let children = self.children(id);
                 let name = self.member_name(id);
                 let base = children.first().map(|&child| self.path_of(child)).unwrap_or_default();
@@ -3098,7 +3179,7 @@ impl<'a> Walker<'a> {
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
             // A call has no name of its own: `f().x` names `.x`.
-            "call" | "call_expression" | "new_expression" => String::new(),
+            "call" | "call_expression" | "new_expression" | "invocation_expression" => String::new(),
             // `match.group`, `type.name`: a keyword reused as an identifier.
             _ => self.leaf_name(id).map(|text| if text == "this" { "self".to_string() } else { text }).unwrap_or_default(),
         }
