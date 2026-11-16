@@ -734,9 +734,46 @@ impl<'a> Parser<'a> {
     }
 
     fn function_word_in_tail(&self) -> bool {
-        self.stmt.iter().rev().take(32).any(|token| {
-            token.kind == Kind::Ident && self.lang.defs.iter().any(|word| word.as_bytes() == self.raw(token))
-        })
+        let mut depth = 0usize;
+        let mut open = None;
+        for (index, token) in self.stmt.iter().enumerate().rev() {
+            if self.is_op(token, b")") {
+                depth += 1;
+            } else if self.is_op(token, b"(") {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    open = Some(index);
+                    break;
+                }
+            }
+        }
+        let Some(mut cursor) = open else { return false };
+        if cursor > 0 && self.is_op(&self.stmt[cursor - 1], b">") {
+            let mut angle = 0usize;
+            for index in (0..cursor).rev() {
+                if self.is_op(&self.stmt[index], b">") {
+                    angle += 1;
+                } else if self.is_op(&self.stmt[index], b"<") {
+                    angle -= 1;
+                    if angle == 0 {
+                        cursor = index;
+                        break;
+                    }
+                }
+            }
+        }
+        if cursor > 0 && self.stmt[cursor - 1].kind == Kind::Ident {
+            if self.lang.defs.iter().any(|word| word.as_bytes() == self.raw(&self.stmt[cursor - 1])) {
+                return true;
+            }
+            cursor -= 1;
+        }
+        if cursor > 0 && self.is_op(&self.stmt[cursor - 1], b"*") {
+            cursor -= 1;
+        }
+        cursor > 0
+            && self.stmt[cursor - 1].kind == Kind::Ident
+            && self.lang.defs.iter().any(|word| word.as_bytes() == self.raw(&self.stmt[cursor - 1]))
     }
 
     /// Advance past leading modifiers, including Rust attributes (`#[...]`,
