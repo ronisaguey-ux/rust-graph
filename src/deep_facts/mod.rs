@@ -1185,6 +1185,34 @@ impl<'a> Walker<'a> {
             "public_field_definition" | "field_definition" | "property_signature" if self.is_js() => {
                 self.field(id)
             }
+            // `ticks = DateTimeUtils.ConvertDateTimeToJavaScriptTicks(d);`:
+            // the lexer reads a plain assignment as a declaration of its
+            // target, binding the last name of the call on the right. Nothing
+            // here read the statement at all, so every such reassignment in
+            // the corpus was a variable the lexer had and the tree did not.
+            "assignment_expression" if self.kinds.calls.contains(&"object_creation_expression") => {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
+                    let target = children[..at]
+                        .iter()
+                        .rev()
+                        .find(|&&child| self.kind(child) == "identifier")
+                        .map(|&child| self.text_string(child));
+                    let value = children.get(at + 1).copied();
+                    if let (Some(target), Some(value)) = (target, value) {
+                        if matches!(
+                            self.kind(value),
+                            "invocation_expression" | "object_creation" | "call_expression"
+                        ) {
+                            let path = self.decl_path(value);
+                            let last = path.rsplit('.').next().unwrap_or("").to_string();
+                            if !last.is_empty() {
+                                self.facts.vars.push((target, last));
+                            }
+                        }
+                    }
+                }
+            }
             "throw_statement" => self.expression_statement(id),
             // `@dec` / `@Component({...})` decorates the declaration that
             // follows; in JS/TS it is not a statement. Read as an expression
