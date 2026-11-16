@@ -594,12 +594,28 @@ impl<'a> Walker<'a> {
                         // was the constant alone - every constant table in the
                         // corpus disagreed (97 rows).
                         let (name, node, line) = first;
-                        let elements = self
+                        // `static const uint32_t psbox[8][64] = { { … }, … };`:
+                        // a brace list of brace lists is a merge of merges, one
+                        // inner merge per row - counting only the outer children
+                        // flattened the whole table to eight zeros.
+                        let parts: Vec<String> = self
                             .children(node)
                             .into_iter()
                             .filter(|&child| self.kind(child) != ",")
-                            .count();
-                        let value = format!("[\"m\",[{}]]", vec!["0"; elements].join(","));
+                            .map(|child| {
+                                if self.kind(child) == "initializer_list" {
+                                    let inner = self
+                                        .children(child)
+                                        .into_iter()
+                                        .filter(|&item| self.kind(item) != ",")
+                                        .count();
+                                    format!("[\"m\",[{}]]", vec!["0"; inner].join(","))
+                                } else {
+                                    "0".to_string()
+                                }
+                            })
+                            .collect();
+                        let value = format!("[\"m\",[{}]]", parts.join(","));
                         self.lexer_event(b'a', line, &[name], &value, false);
                     } else if inits.len() == 1 {
                         let (name, node, line) = first;
