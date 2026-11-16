@@ -3760,6 +3760,39 @@ impl<'a> Parser<'a> {
                 at_token += 2;
                 continue;
             }
+
+            // `(x as any).async = v`: the cast's type is erased at runtime, so
+            // the binding is `x.async`. The type is made of names like any
+            // other, so the path took them and named the target
+            // `xasany.async` — a name the source never has and the CST never
+            // writes. Everything from `as` / `satisfies` to the closing paren
+            // of the group it sits in is the type, and none of it is a segment.
+            if matches!(self.lang.tag, "TS" | "TSX")
+                && token.kind == Kind::Ident
+                && matches!(self.text(token).as_str(), "as" | "satisfies")
+                && !(at_token > start && self.is_join(&toks[at_token - 1]))
+            {
+                at_token += 1;
+                let mut depth = 0usize;
+                while at_token < at {
+                    let inner = &toks[at_token];
+                    if inner.kind == Kind::Op {
+                        match self.raw(inner) {
+                            b"(" | b"[" | b"{" => depth += 1,
+                            b")" | b"]" | b"}" => {
+                                if depth == 0 {
+                                    break;
+                                }
+                                depth -= 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    at_token += 1;
+                }
+
+                continue;
+            }
             at_token += 1;
             if token.kind == Kind::Ident {
                 let word = self.text(token);

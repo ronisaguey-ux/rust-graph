@@ -482,3 +482,24 @@ fn the_same_input_yields_byte_identical_facts() {
     // The extraction runs inside the pipeline above; a second build is the
     // determinism check that matters, because the record is what a caller reads.
 }
+/// `(x as any).async = true`: a cast's type is erased at runtime, so the
+/// binding is `x.async`. The one-pass lexer took the type's own words as path
+/// segments and named the target `selfasany.async` — a name the source never
+/// has — while the CST wrote `self.async`, so the file fell back on a statement
+/// both readers understood.
+#[test]
+fn a_cast_in_a_receiver_group_names_the_receiver() {
+    let tree = Tree::new("cast-target", &[(
+        "app/cast.ts",
+        "class A {\n  m() {\n    (this[\"~standard\"] as any).async = true;\n  }\n}\n",
+    )]);
+    let (json, _) = tree.json(&["--stdout", "--no-cache"]);
+    let row = source_row(&json, "app/cast.ts");
+    assert!(row.contains("\"parsed_by\":\"deep\""), "{row}");
+    assert!(!row.contains("deep_fallback"), "nothing to fall back on: {row}");
+    assert!(json.contains(r#""fallbacks":0"#), "{json}");
+    assert!(
+        json.contains(r#"["a",3,["self.async"],["n","true"],0]"#),
+        "the binder is the receiver, not the cast: {json}"
+    );
+}
