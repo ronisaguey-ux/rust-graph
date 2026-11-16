@@ -1277,7 +1277,16 @@ impl<'a> Parser<'a> {
             if self.lang.tag == "RS" {
                 let kept = self.strip_let_patterns(&stmt[1..], true);
                 if kept.len() != stmt.len() - 1 {
-                    self.expression_event("x", &kept);
+                    // The condition is stamped where it starts, which is where
+                    // the CST stamps its `let_condition`. A pattern written over
+                    // several lines leaves the first kept token — the value
+                    // after `=` — lines below the `let`, and stamped there the
+                    // one condition was two events no line could pair.
+                    let start = stmt[1..]
+                        .iter()
+                        .find(|token| !(token.kind == Kind::Ident && matches!(self.raw(token), b"if" | b"while")))
+                        .map_or(stmt[1].line, |token| token.line);
+                    self.expression_event_at("x", &kept, start);
                     return;
                 }
             }
@@ -1434,7 +1443,15 @@ impl<'a> Parser<'a> {
 
     fn expression_event(&mut self, form: &str, toks: &[Token]) {
         let Some(first) = toks.first() else { return };
-        let line = first.line;
+        self.expression_event_at(form, toks, first.line);
+    }
+
+    /// An expression event stamped on a line the caller names, for a value
+    /// whose first token is not where its statement starts.
+    fn expression_event_at(&mut self, form: &str, toks: &[Token], line: u32) {
+        if toks.is_empty() {
+            return;
+        }
         let value = self.values(toks);
         if value != "0" || form == "r" {
             self.event(&format!("[\"{form}\",{line},{value}]"));
