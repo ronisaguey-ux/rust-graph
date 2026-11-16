@@ -1194,6 +1194,39 @@ impl<'a> Walker<'a> {
             "public_field_definition" | "field_definition" | "property_signature" if self.is_js() => {
                 self.field(id)
             }
+            // `ts.chunked_encoding = Curl_compareheader(x);`: an assignment
+            // to a member is a binding to the lexer - the dotted target is the
+            // name and the call's last segment is what it holds - and nothing
+            // read it in the C family, so every such assignment in curl lost a
+            // variable.
+            "assignment_expression"
+                if matches!(self.facts.tag.as_str(), "C" | "CPP" | "OBJC") =>
+            {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
+                    let target = children[..at]
+                        .iter()
+                        .rev()
+                        .find(|&&child| !self.is_layout(child))
+                        .copied();
+                    let value = children.get(at + 1).copied();
+                    if let (Some(target), Some(value)) = (target, value) {
+                        if self.kind(value) == "call_expression" {
+                            let name = self.c_path(target).unwrap_or_default();
+                            let path = self.decl_path(value);
+                            let last = path.rsplit('.').next().unwrap_or("").to_string();
+                            if !name.is_empty() && !last.is_empty() {
+                                // The statement is an assignment to the lexer:
+                                // `a ["cf.connected"] c(0;[n:cf])`.
+                                let line = self.line(id);
+                                let form = self.form(value);
+                                self.lexer_event(b'a', line, &[name.clone()], &form, false);
+                                self.facts.vars.push((name, last));
+                            }
+                        }
+                    }
+                }
+            }
             // `ticks = DateTimeUtils.ConvertDateTimeToJavaScriptTicks(d);`:
             // the lexer reads a plain assignment as a declaration of its
             // target, binding the last name of the call on the right. Nothing
