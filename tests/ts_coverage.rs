@@ -122,6 +122,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "var Event: typeof globalThis extends { onmessage: any, Event: infer T }\n    ? T\n    : { prototype: __Event };\n",
     ),
     (
+        "a type-parameter list that wraps: an object type inside the list is not the body",
+        "export interface encodeKeys<\n  S extends Top & { readonly fields: Struct.Fields },\n  M extends { readonly [K in keyof S[\"fields\"]]?: PropertyKey }\n> extends\n  decodeTo<\n    S\n  >\n{\n  readonly a: number\n}\n",
+    ),
+    (
         "a heritage clause that wraps: the interface header spans the line break",
         "export interface declareConstructor<T, E> extends\n  Bottom<\n    T,\n    E\n  >\n{\n  readonly id: number\n}\n",
     ),

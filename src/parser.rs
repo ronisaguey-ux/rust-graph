@@ -343,6 +343,24 @@ impl<'a> Parser<'a> {
                 .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
     }
 
+    /// How many `<` the open statement has not closed. A type-parameter or
+    /// type-argument list is the only reason TS leaves one open across a line.
+    fn angle_depth(&self) -> i32 {
+        let mut depth = 0;
+        for token in &self.stmt {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"<" => depth += 1,
+                b">" => depth -= 1,
+                b">>" => depth -= 2,
+                _ => {}
+            }
+        }
+        depth
+    }
+
     fn on_newline(&mut self) {
         if !self.brackets.is_empty() || self.stmt.is_empty() {
             return;
@@ -415,7 +433,13 @@ impl<'a> Parser<'a> {
                     // inside the header: ended here, the continuation read as a
                     // value and the body it opens wrote type members as
                     // statements the CST never writes.
-                    || (last.kind == Kind::Ident && self.raw(last) == b"extends"))
+                    || (last.kind == Kind::Ident && self.raw(last) == b"extends")
+                    // `export interface encodeKeys<` newline `  S extends Top & {…},`
+                    // newline `> extends`: the type-parameter list of a type
+                    // declaration spans lines, and a fragment of it is not a
+                    // statement — read as one it wrote a value the CST never
+                    // writes.
+                    || self.angle_depth() > 0)
             {
                 return;
             }
@@ -698,6 +722,14 @@ impl<'a> Parser<'a> {
         // the `{` after `:`, `&`, or `|` opens an inline return type literal,
         // not the function body. `declare function f(...): { ... }` has no
         // body and stays handled by `on_open_brace` as `type_only`.
+        // `export interface encodeKeys<` newline `  S extends Top & { … },`
+        // newline `> extends decodeTo<…> {`: the object type written inside a
+        // type-parameter list is not the declaration's body. Read as one, the
+        // header ended at the member's `}` and every line after it became a
+        // statement the CST never writes.
+        if matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(&self.stmt) && self.angle_depth() > 0 {
+            return false;
+        }
         let ts_return_type_brace = matches!(self.lang.tag, "TS" | "TSX")
             && last.kind == Kind::Op
             && matches!(self.raw(&last), b":" | b"&" | b"|")
