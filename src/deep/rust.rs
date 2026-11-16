@@ -185,7 +185,8 @@ rust_graph_deep::grammar! { RUST {
         | foreign_mod_item
         | macro_definition
         | &([visibility_modifier] "macro") decl_macro
-        | macro_invocation_item
+        | &_macro_item macro_invocation_item
+        | &_stray_statement expression_statement
         | attribute_item
         | inner_attribute_item
         | empty_statement,
@@ -259,6 +260,16 @@ rust_graph_deep::grammar! { RUST {
     decl_macro: [visibility_modifier] "macro" _name (token_tree token_tree_brace | token_tree_brace),
     /// A macro call where items go. In expressions, types and patterns it is a row: `macro_invocation`.
     macro_invocation_item: _macro_path "!" (token_tree_brace | (token_tree | token_tree_bracket) [";"]),
+    /// The `!` is the only thing that makes a macro item: a file merged out of
+    /// several method bodies leaves statements where items go, and
+    /// `self.max_deque.clear();` used to match `macro_invocation_item` with a
+    /// MISSING `!`, which swallowed the call whole (001183_stochastics.rs:188).
+    /// With the head spelled out here, no bang means no macro item.
+    _macro_item: _macro_path "!",
+    /// A statement where an item cannot go. The `;` (or a block) is what tells
+    /// the two apart: `default impl X {}` is an item, `default;` is a path
+    /// statement, and as a lookahead the bare expression would accept both.
+    _stray_statement: let_declaration | (_expression_nb ";") | _block_like_chain,
     _simple_path: ["::"] _path_name ("::" _path_name)*,
     /// A path that cannot be `macro_rules`, which starts a definition there.
     _macro_path: (IDENT | "union" | "default" | "raw" | "auto" | "safe" | "self" | "super" | "crate" | "Self" | "::" _path_name) ("::" _path_name)*,
@@ -986,8 +997,22 @@ mod tests {
     }
 
     #[test]
-    fn lexing_literals_lifetimes_and_comments() {
-        let workspace = parse("/* a /* nested */ b */ 'a 'b' b\"x\" br##\"y\"# \"##z 1.5e3f64 0x1F_u8 1. r#match // end\n");
+    fn a_statement_where_an_item_cannot_go_is_still_a_statement() {
+        // 001183_stochastics.rs:188 — the file merges several copies of a method
+        // body, so `self.max_deque.clear();` sits in the `impl` body. A macro
+        // item matched it with a MISSING `!` and the call left the record.
+        let tree = named("impl S {\n    fn reset(&mut self) { self.a.clear(); }\n    self.max_deque.clear();\n}\n");
+        assert!(
+            tree.contains("(expression_statement (call_expression (field_expression (field_expression self identifier) identifier) (arguments)))"),
+            "{tree}"
+        );
+        assert!(!tree.contains("MISSING"), "{tree}");
+        // A real macro item is still an item.
+        assert!(clean("impl S {\n    fn a() {}\n}\nlazy_static! { static ref X: u8 = 1; }\n"));
+    }
+
+    #[test]
+    fn lexing_literals_lifetimes_and_comments() {        let workspace = parse("/* a /* nested */ b */ 'a 'b' b\"x\" br##\"y\"# \"##z 1.5e3f64 0x1F_u8 1. r#match // end\n");
         let kinds: Vec<&str> = (0..workspace.tokens.len())
             .filter(|&at| !RUST.is_trivia(workspace.tokens.kind[at]))
             .map(|at| RUST.name(workspace.tokens.kind[at]))

@@ -184,6 +184,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "a class binding: the variant itself, a call chain, try and parentheses",
         "fn f(m: Msg) {\n    let v = Value::Object(m);\n    let text = Value::Object(m).to_string();\n    let u = Value::Object(m)?;\n    let w = (Value::Object(m));\n}\n",
     ),
+    (
+        "a statement where an item cannot go: a merge out of method bodies (001183_stochastics.rs:188)",
+        "impl S {\n    fn reset(&mut self) { self.a.clear(); }\n    self.max_deque.clear();\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.
