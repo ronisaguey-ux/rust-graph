@@ -204,6 +204,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "for over a struct pattern: the brace is the pattern's (000942_workflow_future.rs:399)",
         "fn f(jobs: Vec<Job>) {\n    for Job { variant } in jobs {\n        let _ = variant;\n    }\n}\n",
     ),
+    (
+        "a multi-line literal: a field on its own line after an if let (000930_worker.rs:488)",
+        "fn f(ctx: C) -> S {\n    S {\n        a: 1,\n        b: match ctx.v() {\n            0 => 2,\n            _ => 3,\n        },\n        c: ctx.sticky(),\n    }\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.

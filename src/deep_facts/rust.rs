@@ -222,6 +222,27 @@ impl<'a> Walker<'a> {
                 self.rust_field_list(id);
                 true
             }
+            // `SlotReserveCtx { .., is_sticky: ctx.is_sticky(), }`: the one-pass
+            // reader starts a statement on every line of a multi-line literal, so
+            // a field written on a line of its own is an event of its own whose
+            // value is that field's form. The literal is already one event,
+            // stamped where it opens, so only the fields that leave that line are
+            // written here (000930_worker.rs:488).
+            "field_initializer_list" => {
+                let start = self.line(id);
+                for child in self.children(id) {
+                    if self.kind(child) != "field_initializer" || self.line(child) == start {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value == "0" {
+                        continue;
+                    }
+                    let line = self.line(child);
+                    self.event(&format!("[\"x\",{line},{value}]"));
+                }
+                false
+            }
             "return_expression" => {
                 let line = self.line(id);
                 let value = match self.expression_child(id) {
