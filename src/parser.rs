@@ -438,7 +438,9 @@ impl<'a> Parser<'a> {
             let trailing_nullish = self.stmt.len() >= 2
                 && self.is_op(&self.stmt[self.stmt.len() - 1], b"?")
                 && self.is_op(&self.stmt[self.stmt.len() - 2], b"?");
-            if continues || trailing_equal || trailing_nullish {
+            let trailing_ternary = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                && self.is_op(last, b"?");
+            if continues || trailing_equal || trailing_nullish || trailing_ternary {
                 return;
             }
         }
