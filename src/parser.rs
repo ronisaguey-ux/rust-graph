@@ -2633,6 +2633,20 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        // `struct __attribute__ ((__packed__)) hdr { … }`: the attribute is not
+        // the struct's name. Read as one it opened a class symbol called
+        // `__attribute__` that the tree never writes, and the struct's own
+        // members had no owner.
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && matches!(self.word_at(toks, at).as_deref(), Some("__attribute__") | Some("__attribute"))
+        {
+            at += 1;
+            if toks.get(at).is_some_and(|token| self.is_op(token, b"(")) {
+                if let Some(close) = self.matching_close(toks, at) {
+                    at = close + 1;
+                }
+            }
+        }
         let mut name = self.word_at(toks, at)?;
         // `impl tonic::client::X {`: a path names its type by its last segment.
         // Taking the first one opened a class called `tonic`, a symbol the CST
