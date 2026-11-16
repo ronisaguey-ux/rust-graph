@@ -2942,13 +2942,24 @@ impl<'a> Parser<'a> {
 
     fn skip_generics(&self, toks: &[Token], mut at: usize) -> usize {
         if toks.get(at).is_some_and(|token| self.is_op(token, b"<")) {
-            let mut depth = 0;
+            let mut depth = 0i32;
             while let Some(token) = toks.get(at) {
                 if self.is_op(token, b"<") {
                     depth += 1;
                 } else if self.is_op(token, b">") {
                     depth -= 1;
                     if depth == 0 {
+                        return at + 1;
+                    }
+                } else if self.is_op(token, b">>") || self.is_op(token, b">>>") {
+                    // `Readonly<[A, ...B[]]>>(`: two closing angles written
+                    // next to each other are one token. Read as neither, the
+                    // scan ran past the type and the head of
+                    // `static create = <O extends R<Y>>(…) => …` was never
+                    // found, so the field was blamed for an assignment the CST
+                    // never writes.
+                    depth -= if self.is_op(token, b">>") { 2 } else { 3 };
+                    if depth <= 0 {
                         return at + 1;
                     }
                 }

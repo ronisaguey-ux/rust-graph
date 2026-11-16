@@ -563,3 +563,24 @@ fn an_annotated_binding_names_the_binder() {
         "the binder is the name before the colon: {json}"
     );
 }
+/// `static create = <O extends Readonly<[X, Y]>>(\n): Z<O> => {`: two closing
+/// angles written next to each other are one token. Unread, the head scan ran
+/// past the type and the field was recorded as an assignment with a constant
+/// value, where the CST has a definition and writes no assignment at all.
+#[test]
+fn a_generic_arrow_with_two_closing_angles_is_a_definition() {
+    let tree = Tree::new("generic-arrow", &[(
+        "app/arrow.ts",
+        "class U {\n  static create = <O extends Readonly<[X, Y]>>(\n  ): Z<O> => {\n    return 1;\n  };\n}\n",
+    )]);
+    let (json, _) = tree.json(&["--stdout", "--no-cache"]);
+    let row = source_row(&json, "app/arrow.ts");
+    assert!(row.contains("\"parsed_by\":\"deep\""), "{row}");
+    assert!(!row.contains("deep_fallback"), "nothing to fall back on: {row}");
+    assert!(json.contains(r#""fallbacks":0"#), "{json}");
+    assert!(json.contains(r#""id":"app/arrow.ts:U.create""#), "the field is a definition: {json}");
+    assert!(
+        !json.contains(r#"["a",2,["create"]"#),
+        "a definition writes no assignment: {json}"
+    );
+}
