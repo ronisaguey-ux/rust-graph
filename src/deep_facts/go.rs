@@ -388,6 +388,7 @@ impl<'a> Walker<'a> {
         if matches!(
             kind,
             "selector_expression" | "qualified_type" | "field_access" | "dotted_name" | "scoped_identifier"
+                | "navigation_expression"
                 | "scoped_type_identifier" | "nested_type_identifier" | "class_literal" | "method_reference"
         ) {
             let path = self.decl_path(id);
@@ -485,7 +486,10 @@ impl<'a> Walker<'a> {
                 }
             }
             "selector_expression" | "qualified_type" | "field_access" | "scoped_identifier" | "dotted_name"
-            | "scoped_type_identifier" | "nested_type_identifier" | "class_literal" | "method_reference" => {
+            | "scoped_type_identifier" | "nested_type_identifier" | "class_literal" | "method_reference"
+            // Kotlin's `user.title` in a template hole is a navigation; the
+            // path is the receiver and the member, like every other dotted name.
+            | "navigation_expression" => {
                 let children = self.children(id);
                 // The last segment is read by its text: `Mockito.when` names a
                 // member called `when`, which this grammar gives a keyword kind.
@@ -1414,7 +1418,7 @@ impl<'a> Walker<'a> {
                 })?;
                 (callee != id).then(|| self.root_callee(callee)).flatten()
             }
-            "attribute" | "member_expression" => {
+            "attribute" | "member_expression" | "navigation_expression" => {
                 let object = self.children(id).first().copied()?;
                 let path = self.path_of(id);
                 // `Config.Array(...).pipe` starts with a call: unwrap to that
@@ -1863,7 +1867,9 @@ impl<'a> Walker<'a> {
             // constant and the name left the record.
             "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression" | "meta_property"
             // `Ordering::Acquire` in an argument list is a path, not a constant.
-            | "scoped_identifier" | "scoped_type_identifier" => {
+            | "scoped_identifier" | "scoped_type_identifier"
+            // Kotlin's `user.title` in a `"${user.title}"` hole.
+            | "navigation_expression" => {
                 let path = self.form_path(id);
                 if path.is_empty() || path.starts_with('.') {
                     // `f(x)[0].y`: the base is a call, so there is no path, and
@@ -2211,13 +2217,40 @@ impl<'a> Walker<'a> {
             // string reader forms the same merge of them. So a call written in
             // a field is a fact on both paths, and a field with no call saves
             // nothing to compare.
-            "f_string" | "template_string" => {
+            // Kotlin's `"$a ${f(b)}"` and Swift's `"\(f(b))"` are one
+            // `string_literal` with an `interpolation` per hole, exactly as
+            // Python's f-string and JavaScript's template are. Reading the
+            // literal as text made every call in a hole invisible — the lexer's
+            // string reader does see them, so the hole is the fact.
+            "f_string" | "template_string" | "string_literal"
+                if matches!(kind, "f_string" | "template_string")
+                    || matches!(self.language.name, "kotlin" | "swift") =>
+            {
                 // Python's replacement field is `interpolation`, JavaScript's
                 // is `template_substitution`; everything else is the same
                 // shape, and a template with no substitution is still `0`.
-                let field = if kind == "f_string" { "interpolation" } else { "template_substitution" };
+                let field = if matches!(kind, "f_string" | "string_literal") {
+                    "interpolation"
+                } else {
+                    "template_substitution"
+                };
                 let mut parts = Vec::new();
                 for child in self.children(id) {
+                    // Kotlin's `$name` is a token, not a node: the grammar hands
+                    // it over as `template_name`, and its text is the name
+                    // between the `$`. Skipped, the hole became the constant 0
+                    // and the lexer's `n:name` had nowhere to pair.
+                    if self.kind(child) == "template_name" {
+                        let text = self.text_string(child);
+                        let name = text.trim_start_matches('$');
+                        if !name.is_empty() {
+                            let mut out = "[\"n\",".to_string();
+                            push_string(&mut out, name);
+                            out.push(']');
+                            parts.push(out);
+                        }
+                        continue;
+                    }
                     if self.kind(child) != field {
                         continue;
                     }
@@ -2231,7 +2264,12 @@ impl<'a> Walker<'a> {
                     // children of its own skipped `{a}` entirely and left the
                     // field as the constant 0.
                     let value = self.children(child).into_iter().find(|&part| {
-                        !self.is_layout(part) && !matches!(self.kind(part), "{" | "}" | ":" | "!") && self.kind(part) != field
+                        !self.is_layout(part)
+                            && !matches!(
+                                self.kind(part),
+                                "{" | "}" | ":" | "!" | "template_open" | "template_close"
+                            )
+                            && self.kind(part) != field
                     });
                     if let Some(value) = value {
                         parts.push(self.form(value));
@@ -2240,7 +2278,10 @@ impl<'a> Walker<'a> {
                         if self.kind(sub) == field {
                             let inner = self.children(sub).into_iter().find(|&part| {
                                 !self.is_layout(part)
-                                    && !matches!(self.kind(part), "{" | "}" | ":" | "!")
+                                    && !matches!(
+                                        self.kind(part),
+                                        "{" | "}" | ":" | "!" | "template_open" | "template_close"
+                                    )
                                     && self.kind(part) != field
                             });
                             if let Some(inner) = inner {
