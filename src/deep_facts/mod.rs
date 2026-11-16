@@ -1037,9 +1037,29 @@ impl<'a> Walker<'a> {
                     .unwrap_or_default();
                 if !name.is_empty() {
                     let line = self.line(id);
-                    let mut value = "[\"n\",".to_string();
-                    push_string(&mut value, &name);
-                    value.push(']');
+                    // `get; private set;`: the accessor's own modifier words
+                    // are the first elements of the value, the keyword last.
+                    let mut parts: Vec<String> = Vec::new();
+                    for child in self.children(id) {
+                        if self.kind(child) == name {
+                            break;
+                        }
+                        for word in self.c_words_of(child) {
+                            let mut form = String::from("[\"n\",");
+                            push_string(&mut form, &word);
+                            form.push(']');
+                            parts.push(form);
+                        }
+                    }
+                    let mut keyword = String::from("[\"n\",");
+                    push_string(&mut keyword, &name);
+                    keyword.push(']');
+                    parts.push(keyword);
+                    let value = if parts.len() == 1 {
+                        parts.pop().unwrap()
+                    } else {
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
                     self.lexer_event(b'x', line, &[], &value, false);
                 }
             }
