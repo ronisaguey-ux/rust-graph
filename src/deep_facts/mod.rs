@@ -1166,6 +1166,20 @@ impl<'a> Walker<'a> {
             }
             return;
         }
+        // A computed property name on a method (`[expr]() {}`) is evaluated in
+        // the enclosing scope when the class or object is defined, not inside
+        // the method's own frame.
+        if let Some(computed) = self.child_of_kind(id, "computed_property_name") {
+            for child in self.children(computed) {
+                if !self.is_layout(child) {
+                    let value = self.form(child);
+                    if value != "0" {
+                        let at = self.line(child);
+                        self.event(&format!("[\"x\",{at},{value}]"));
+                    }
+                }
+            }
+        }
         let named = self
             .def_name(id, def)
             .or_else(|| {
