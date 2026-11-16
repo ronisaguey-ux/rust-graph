@@ -2920,24 +2920,45 @@ impl<'a> Parser<'a> {
             }
             return Some(head);
         }
-        let mut depth = 0i32;
-        let mut arrow = None;
-        for (index, token) in rhs.iter().enumerate() {
-            if token.kind == Kind::Op {
-                match self.raw(token) {
-                    b"(" | b"[" | b"{" => depth += 1,
-                    b")" | b"]" | b"}" => depth -= 1,
-                    b"?" if depth == 0 => return None,
-                    b"=>" if depth == 0 => {
-                        arrow = Some(index);
-                        break;
-                    }
-                    _ => {}
+        let param_start = self.skip_generics(rhs, skip);
+        let arrow = match rhs.get(param_start) {
+            Some(token) if token.kind == Kind::Ident && param_start == skip => {
+                if rhs.get(param_start + 1).is_some_and(|next| self.is_op(next, b"=>")) {
+                    param_start + 1
+                } else {
+                    return None;
                 }
             }
-        }
-        let arrow = arrow?;
-        let params = self.arrow_params(&rhs[skip..arrow]);
+            Some(token) if self.is_op(token, b"(") => {
+                let (_, close) = self.group_at(rhs, param_start)?;
+                let after = close + 1;
+                if rhs.get(after).is_some_and(|next| self.is_op(next, b"=>")) {
+                    after
+                } else if rhs.get(after).is_some_and(|next| self.is_op(next, b":")) {
+                    let mut depth = 0i32;
+                    let mut found = None;
+                    for (index, token) in rhs.iter().enumerate().skip(after + 1) {
+                        if token.kind == Kind::Op {
+                            match self.raw(token) {
+                                b"(" | b"[" | b"{" => depth += 1,
+                                b")" | b"]" | b"}" => depth -= 1,
+                                b"?" if depth == 0 => return None,
+                                b"=>" if depth == 0 => {
+                                    found = Some(index);
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    found?
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        let params = self.arrow_params(&rhs[param_start..arrow]);
         let body = equal + 1 + arrow + 1;
         Some(Head { name, owner, params, body: Some(body), assigned_name: true, ..Head::default() })
     }
