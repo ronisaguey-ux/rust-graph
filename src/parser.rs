@@ -984,7 +984,33 @@ impl<'a> Parser<'a> {
             if let Some(at) = self.expr_class_at(&stmt) {
                 if let Some((name, bases)) = self.assigned_class_head(&stmt[at..]) {
                     let brackets = std::mem::take(&mut self.brackets);
-                    stmt.truncate(at);
+                    let mut depth = 0i32;
+                    let mut ext = None;
+                    let mut imp = None;
+                    for (i, t) in stmt[at..].iter().enumerate() {
+                        if t.kind == Kind::Op {
+                            match self.raw(t) {
+                                b"(" | b"[" | b"{" => depth += 1,
+                                b")" | b"]" | b"}" => depth -= 1,
+                                _ => {}
+                            }
+                        } else if depth == 0 && t.kind == Kind::Ident {
+                            if ext.is_none() && self.raw(t) == b"extends" {
+                                ext = Some(at + i);
+                            } else if ext.is_some() && self.raw(t) == b"implements" {
+                                imp = Some(at + i);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(ext_at) = ext {
+                        if let Some(imp_at) = imp {
+                            stmt.truncate(imp_at);
+                        }
+                        stmt.drain(at..ext_at + 1);
+                    } else {
+                        stmt.truncate(at);
+                    }
                     self.push_class(name, bases, start_col, Some((stmt, brackets)));
                     return;
                 }

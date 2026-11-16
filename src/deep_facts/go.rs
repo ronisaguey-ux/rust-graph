@@ -2315,7 +2315,9 @@ impl<'a> Walker<'a> {
             // deferred, but the `extends` heritage expression is evaluated when
             // the class expression is evaluated.
             "class" => match self.children(id).into_iter().find(|&child| self.kind(child) == "class_heritage") {
-                Some(heritage) => self.form(heritage),
+                Some(heritage) => self
+                    .expression_child(heritage)
+                    .map_or_else(|| "0".to_string(), |child| self.form(child)),
                 None => "0".to_string(),
             },
             // A region the grammar could not name. The tokens are still there —
