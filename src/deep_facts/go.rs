@@ -2957,6 +2957,10 @@ impl<'a> Walker<'a> {
                     None => (String::new(), "0".to_string()),
                 }
             }
+            // `.macOS("10.10")`: an implicit member has no receiver, and the
+            // call is named by the member alone. Read through the default arm
+            // it had no name at all, so the call the lexer records was missing.
+            "implicit_member_expression" => (self.member_name(callee), "0".to_string()),
             "attribute" | "member_expression" | "member_access_expression" | "member_access" | "navigation_expression" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
@@ -3107,6 +3111,20 @@ impl<'a> Walker<'a> {
             // (`path.Join(os.Getenv(..))`) would come back as `0`.
             let value = if ellipsis {
                 "0".to_string()
+            } else if kind == "labeled_argument" {
+                // `Package(name: "x", platforms: [.macOS("10")])`: a Swift
+                // labeled argument is a keyword argument to the lexer -
+                // `[\"k\",name,value]` - and read as a plain form it came back
+                // as `0`, which every manifest line failed on.
+                let parts = self.children(child);
+                let name = parts.first().map(|&node| self.path_of(node)).unwrap_or_default();
+                let inner = parts.last().map(|&node| self.form(node)).unwrap_or_else(|| "0".to_string());
+                let mut keyed = "[\"k\",".to_string();
+                push_string(&mut keyed, &name);
+                keyed.push(',');
+                keyed.push_str(&inner);
+                keyed.push(']');
+                keyed
             } else if self.kinds.family == Family::Plain && kind == "assignment" {
                 // `@deprecated("old", since = "2")`: a named argument is the
                 // lexer's keyword form, not the assignment's merge.
@@ -3165,6 +3183,9 @@ impl<'a> Walker<'a> {
                     format!("{base}.{name}")
                 }
             }
+            // `.macOS("10.10")` — an implicit member: the name is the member,
+            // with no receiver. Read as a leaf the call lost its name entirely.
+            "implicit_member_expression" => self.leaf_name(id).unwrap_or_default(),
             "meta_property" => self.text_string(id).chars().filter(|ch| !ch.is_whitespace()).collect(),
             // A subscript is transparent in a path: `elements[i].innerHTML`
             // names `elements.innerHTML`, and `x[0].y` names `x.y`. Rust spells
