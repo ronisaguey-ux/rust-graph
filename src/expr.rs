@@ -1333,21 +1333,33 @@ impl Emit<'_> {
             // `.collect::<Vec<_>>()`: a turbofish names a type, not a value.
             // Reading its words as names put `Vec` and `_` in the record where
             // the CST has a call and nothing else.
-            if self.is_op(0, b"::") && self.is_op(1, b"<") {
-                self.pos += 2;
-                let mut depth = 1;
+            if self.is_op(0, b"::") && (self.is_op(1, b"<") || self.is_op(1, b"<<")) {
+                let opened = self.toks[self.pos].line;
+                self.pos += 1;
+                // `None::<Vec<Entry<T>>>`: the tokenizer reads `>>` as one
+                // operator, and here it closes two lists (`<<` opens two, in
+                // `f::<<T as Tr>::Out>`). Counting only a lone `>` never closed
+                // such a turbofish, so the skip ran to the end of the statement
+                // and took every later argument and call with it.
+                let mut depth = 0i32;
                 while let Some(token) = self.tok(0) {
-                    let text = &self.src[token.start as usize..token.end as usize];
-                    if text == b"<" {
-                        depth += 1;
-                    } else if text == b">" {
-                        depth -= 1;
-                        if depth == 0 {
-                            self.pos += 1;
-                            break;
-                        }
+                    match &self.src[token.start as usize..token.end as usize] {
+                        b"<" => depth += 1,
+                        b"<<" => depth += 2,
+                        b">" => depth -= 1,
+                        b">>" => depth -= 2,
+                        _ => {}
                     }
                     self.pos += 1;
+                    if depth <= 0 {
+                        break;
+                    }
+                }
+                // `transmute::<` newline `A,` newline `>(x)`: the call is
+                // written where its name is, which is the line the CST stamps;
+                // the parenthesis can be any number of lines further down.
+                if self.op_byte(0) == b'(' {
+                    type_arg_line = Some(opened);
                 }
                 continue;
             }
@@ -1712,6 +1724,25 @@ mod tests {
         let (out, calls) = form("ts", "a < b && c > (d)");
         assert!(calls.is_empty());
         assert_eq!(out, r#"["m",[["n","a"],["n","b"],["n","c"],["n","d"]]]"#);
+    }
+
+    #[test]
+    fn a_turbofish_closes_where_its_angle_brackets_do() {
+        // `>>` is one token to the tokenizer and two closers to a turbofish.
+        // The skip used to run past it to the end of the statement, so the
+        // arguments after `None::<Vec<Entry<T>>>` left the record.
+        let (out, calls) = form("rs", "f(a, None::<Vec<Entry<T>>>, g(b))");
+        assert_eq!(calls, ["f", "g"]);
+        assert_eq!(out, r#"["c",0,0,[["n","a"],["n","None"],["c",1,0,[["n","b"]]]]]"#);
+        let (out, calls) = form("rs", "x.collect::<Vec<Vec<u8>>>().len()");
+        assert_eq!(calls, ["x.collect", ".len"]);
+        assert_eq!(out, r#"["c",1,["c",0,["n","x"],[]],[]]"#);
+        // `<<` opens two lists the same way, and the call behind them is read.
+        let (out, calls) = form("rs", "size_of::<<T as Tr>::Out>() + n");
+        assert_eq!(calls, ["size_of"]);
+        assert_eq!(out, r#"["m",[["c",0,0,[]],["n","n"]]]"#);
+        // A lone `>` still closes one list, and the path goes on behind it.
+        assert_eq!(form("rs", "Option::<T>::None").0, r#"["n","Option.None"]"#);
     }
 
     #[test]
