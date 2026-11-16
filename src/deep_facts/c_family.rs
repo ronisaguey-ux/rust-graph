@@ -80,6 +80,12 @@ impl<'a> Walker<'a> {
                 }
             }
             "namespace_definition" => self.c_namespace(id),
+            // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
+            // grammar gives it a declaration node, and nothing read it.
+            "static_assert_declaration" | "static_assert" => {
+                let line = self.line(id);
+                self.push_call("static_assert".to_string(), line);
+            }
             // `char buf[BUF];` / `int x = 0;`: the lexer reads the declaration
             // as the run of names on its line (plus the initializer's value when
             // there is one), so the CST writes the same event instead of
@@ -349,9 +355,40 @@ impl<'a> Walker<'a> {
 
     /// One `x` event per member line inside an aggregate body.
     fn c_field_events(&mut self, body: u32) {
+        // `BIT(persist);`: the grammar reads a function-like macro member as a
+        // type name followed by a declarator, and the lexer reads the same
+        // tokens as a call to that name. curl's bit fields are 48 C++ files.
+        for child in self.children(body) {
+            if self.kind(child) != "user_struct_declaration" || !self.c_has_kind(child, "parenthesized_declarator") {
+                continue;
+            }
+            let Some(first) = self
+                .children(child)
+                .into_iter()
+                .find(|&node| self.kind(node) == "user_type_name")
+            else {
+                continue;
+            };
+            let text = self.text_string(first);
+            let Some(name) = leading_word(text.trim_start()).map(str::to_string) else { continue };
+            let line = self.line(child);
+            self.push_call(name, line);
+        }
         let mut by_line: std::collections::BTreeMap<u32, Vec<String>> = std::collections::BTreeMap::new();
         let mut stack = vec![body];
         while let Some(node) = stack.pop() {
+            // `BIT(persist);` in a struct body: a member the lexer reads as a
+            // call, because a macro member is a call to anyone reading tokens.
+            // 48 files of the C++ corpus are curl's bit fields alone.
+            if self.kind(node) == "call_expression" {
+                if let Some(callee) = self.children(node).first().copied() {
+                    let path = self.path_of(callee);
+                    if !path.is_empty() {
+                        let line = self.line(node);
+                        self.push_call(path, line);
+                    }
+                }
+            }
             let item = self.node(node);
             if item.first_child == NONE {
                 if let Some(name) = self.leaf_name(node) {
@@ -450,7 +487,16 @@ impl<'a> Walker<'a> {
             "field_expression" | "qualified_expression" => {
                 let name = self.member_name(id);
                 let object = self.children(id).into_iter().next()?;
-                let base = self.path_of(object);
+                // `cf->next->cft->do_connect(…)`: the receiver is itself a
+                // field expression, and `path_of` reads a name, not a chain, so
+                // the call came out as `.do_connect` and matched nothing.
+                let base = self
+                    .c_path(object)
+                    .or_else(|| {
+                        let path = self.path_of(object);
+                        (!path.is_empty()).then_some(path)
+                    })
+                    .unwrap_or_default();
                 Some(if base.is_empty() { format!(".{name}") } else { format!("{base}.{name}") })
             }
             "plain_type_name" | "user_type_name" => {
