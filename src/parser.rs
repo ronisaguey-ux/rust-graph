@@ -196,6 +196,40 @@ impl<'a> Parser<'a> {
         depth > 0
     }
 
+    /// Whether the statement has an unmatched `<` that opens a type-argument
+    /// list rather than a comparison. `getRandomValues<` holds the angle against
+    /// the name; a less-than is written with space on both sides, and `<=` is
+    /// arithmetic on any reading.
+    fn open_type_arguments(&self) -> bool {
+        if !matches!(self.lang.tag, "TS" | "TSX") {
+            return false;
+        }
+        let mut depth = 0i32;
+        let mut open: Option<usize> = None;
+        for (index, token) in self.stmt.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"<" => {
+                    if depth == 0 {
+                        open = Some(index);
+                    }
+                    depth += 1;
+                }
+                b">" => depth -= 1,
+                b">>" => depth -= 2,
+                b">>>" => depth -= 3,
+                _ => {}
+            }
+        }
+        if depth <= 0 {
+            return false;
+        }
+        let Some(at) = open else { return false };
+        at > 0 && self.stmt[at - 1].kind == Kind::Ident && self.stmt[at - 1].end == self.stmt[at].start
+    }
+
     fn top(&self) -> &Frame {
         self.frames.last().expect("the module frame is never popped")
     }
@@ -396,6 +430,15 @@ impl<'a> Parser<'a> {
             if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
                 && self.next_starts_with_ternary(last.end as usize)
             {
+                return;
+            }
+            // `getRandomValues<` newline `T extends` newline `| Int8Array,`
+            // newline `>(buffer: T): T;` is one member signature: the
+            // type-parameter list spans the breaks and ends at its own `>`.
+            // Ended at the first break, each line became an expression the CST
+            // never writes - the first one an `x` merge of the name, `T` and
+            // `extends`.
+            if self.open_type_arguments() {
                 return;
             }
             // `var result,` newline `index = -1,`: a declarator list broken over

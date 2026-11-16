@@ -149,6 +149,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "an arrow with a function-typed parameter keeps its annotated return type whole",
         "const t = (f: (e: A) => B): C<D, E> => from(f)\nconst u = (f: (e: A) => B): C<D> => from(f)\n",
     ),
+    (
+        "a generic method signature whose type parameter list wraps in a union",
+        "declare abstract class Crypto {\n  getRandomValues<\n    T extends\n      | Int8Array\n      | Uint8Array,\n  >(buffer: T): T;\n}\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
