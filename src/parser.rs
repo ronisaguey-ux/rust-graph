@@ -612,9 +612,27 @@ impl<'a> Parser<'a> {
             // `let render = |out: &mut dyn Write| -> io::Result<()> {`: a
             // closure's block is statements of its own, whether the header
             // ends on the closing bar or on a return type after `->`.
+            let bars: Vec<usize> = (0..self.stmt.len())
+                .filter(|at| matches!(self.raw(&self.stmt[*at]), b"|" | b"||"))
+                .collect();
+            let line_of = |at: usize| self.stmt.get(at).map(|token| token.line);
+            let header_on_one_line = match (bars.first(), bars.last()) {
+                (Some(first), Some(last)) => line_of(*first) == line_of(*last),
+                _ => false,
+            };
             let closure_header = self.stmt.last().is_some_and(|token| matches!(self.raw(token), b"|" | b"||"))
-                || (self.stmt.iter().any(|token| matches!(self.raw(token), b"|" | b"||"))
-                    && self.stmt.iter().any(|token| self.is_op(token, b"->")));
+                || if header_on_one_line && bars.len() <= 2 {
+                    // `let fold = |pick: fn(f64, f64) -> f64, start: f64| Rgba {`:
+                    // the `->` is a parameter's own type, so the header closes at
+                    // the bar and this brace opens the struct literal the closure
+                    // returns (001452:386).
+                    bars.last().is_some_and(|bar| self.stmt[bar + 1..].iter().any(|token| self.is_op(token, b"->")))
+                } else {
+                    // A statement whose bars are rows apart is a merge, and its
+                    // arrows belong to other declarations: the older reading is
+                    // the one that keeps them from reading as one value.
+                    !bars.is_empty() && self.stmt.iter().any(|token| self.is_op(token, b"->"))
+                };
             if closure_header {
                 return true;
             }

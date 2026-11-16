@@ -181,6 +181,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn f(client: H) {\n    client\n        .borrow()?\n        .core\n        .set(1);\n}\n",
     ),
     (
+        "a closure whose parameter type is a function type (001452:386)",
+        "fn f(stops: S) -> Fold {\n    let fold = |pick: fn(f64, f64) -> f64, start: f64| Rgba {\n        r: stops.iter().fold(start, pick),\n    };\n    fold\n}\n",
+    ),
+    (
         "a block that opens with a use names nothing (001538:189)",
         "fn f(b: &[u8]) -> String {\n    let d = {\n        use sha2::Digest;\n        let mut h = New::new();\n        h.update(b);\n        finish(h)\n    };\n    d\n}\n",
     ),
