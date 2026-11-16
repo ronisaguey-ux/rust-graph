@@ -121,6 +121,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "conditional type on a declaration with comma-separated object type and object fallback",
         "var Event: typeof globalThis extends { onmessage: any, Event: infer T }\n    ? T\n    : { prototype: __Event };\n",
     ),
+    (
+        "type operators in front of a group: a readonly array constraint is not a call",
+        "declare const M: <const Keys extends readonly (\"json\" | \"insert\")[]>(keys: Keys) => void;\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
