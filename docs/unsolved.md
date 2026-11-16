@@ -55,6 +55,55 @@ it in history (`tools/baselines/merge_fix.json` holds the pin).
 wildcard", plus the guard, or-pattern, binding-at and range-pattern rows from
 P5-10).
 
+## A call through `?` or `.await` keeps its receiver — **closed 2026-11-15**
+
+**The question.** `self.server_handle.await.unwrap()` and `file?.as_str()?` put a
+postfix operator between the value and the member. Both readers see the call;
+they disagree on what the call is *named*. The lexer wrote the receiver's path
+(`self.server_handle.unwrap`, `file.as_str`), the CST wrote a path that starts
+with a dot (`.unwrap`, `.as_str`) because `path_of` did not look through
+`try_expression` and `await_expression` — the two nodes Rust's grammar builds for
+`?` and `.await`. A leading dot is the record's spelling for a call with no
+name, so the guard read the whole call as one the CST never wrote.
+
+**The reproduction.** Four lines, `/tmp/rgrepro1/a.rs`:
+
+```rust
+fn f(x: Option<String>) -> Option<&str> {
+    let y = x?.as_str()?;
+    Some(y)
+}
+```
+
+The lexer wrote `c(n:x;[])`, the CST `n:x`: `?` is not a value, so whoever reads
+the chain must keep the name on either side of it.
+
+**The reading that lost, with its number.** Leaving the two postfix operators
+opaque: rust **48** files and 51 losses of 1,816. The class is wider than the
+`?` shape — the same hole lost `.await` receivers, and it is the same arm in
+`path_of` that TypeScript's `!` already had.
+
+**The reading that won.** `path_of` unwraps `try_expression` and
+`await_expression` the way it already unwraps `parenthesized_expression` and
+`non_null_expression`: a postfix operator does not rename the value it is applied
+to, so the chain keeps its receiver. One arm in `src/deep_facts/go.rs`; the two
+node kinds only Rust's grammar builds, so no other language's path can reach it.
+
+**Measured, on the four corpora, before and after** (`tools/loss_count.py`,
+release/musl binary):
+
+| corpus | before | after |
+| --- | ---: | ---: |
+| js | 5 / 1854 (7 losses) | 5 / 1854 (7) |
+| ts | 36 / 2000 (19) | 36 / 2000 (19) |
+| python | 8 / 568 (8) | 8 / 568 (8) |
+| rust | 48 / 1816 (51) | **36 / 1816 (39)** |
+
+**Closed by** the `path_of` arm above, in the commit that carries this section
+(`fix(rust): a ? or .await keeps its receiver`). No test pinned the leading-dot
+spelling the CST used to write, so nothing had to be re-pinned for it; the
+existing `tests/deep_facts.rs` rows still pass.
+
 ## Still open
 
 The codes, counts and owning modules are regenerated into

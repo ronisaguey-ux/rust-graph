@@ -3174,7 +3174,9 @@ impl<'a> Walker<'a> {
                 let base = self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default();
                 base
             }
-            "parenthesized_expression" => self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default(),
+            "parenthesized_expression" | "try_expression" | "await_expression" => {
+                self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
+            }
             "as_expression" | "satisfies_expression" | "type_assertion" | "non_null_expression" => {
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
