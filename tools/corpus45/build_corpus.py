@@ -101,6 +101,9 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
     "objective-c": ([".m", ".h"], [
         ("cocoalumberjack", "https://github.com/CocoaLumberjack/CocoaLumberjack", "master", "Sources"),
         ("sdwebimage", "https://github.com/SDWebImage/SDWebImage", "master", ""),
+        ("afnetworking", "https://github.com/AFNetworking/AFNetworking", "master", ""),
+        ("mbprogresshud", "https://github.com/jdg/MBProgressHUD", "master", ""),
+        ("yykit", "https://github.com/ibireme/YYKit", "master", ""),
         ("reactiveobjc", "https://github.com/ReactiveCocoa/ReactiveObjC", "master", ""),
         ("afnetworking", "https://github.com/AFNetworking/AFNetworking", "master", "AFNetworking"),
     ]),
@@ -151,12 +154,18 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
     "clojure": ([".clj", ".cljs"], [
         ("clojure", "https://github.com/clojure/clojure", "master", "src"),
         ("clojurescript", "https://github.com/clojure/clojurescript", "master", "src/main/cljs"),
+        ("compojure", "https://github.com/weavejester/compojure", "master", "src"),
+        ("reagent", "https://github.com/reagent-project/reagent", "master", "src"),
         ("ring", "https://github.com/ring-clojure/ring", "master", "ring-core/src"),
     ]),
     "elm": ([".elm"], [
         ("core", "https://github.com/elm/core", "master", ""),
         ("elm-test", "https://github.com/elm-explorations/test", "master", ""),
         ("elm-ui", "https://github.com/mdgriffith/elm-ui", "master", "src"),
+        ("elm-browser", "https://github.com/elm/browser", "master", "src"),
+        ("elm-http", "https://github.com/elm/http", "master", "src"),
+        ("elm-json", "https://github.com/elm/json", "master", "src"),
+        ("elm-parser", "https://github.com/elm/parser", "master", "src"),
     ]),
     "solidity": ([".sol"], [
         ("openzeppelin", "https://github.com/OpenZeppelin/openzeppelin-contracts", "master", "contracts"),
@@ -179,6 +188,9 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
         ("winutil", "https://github.com/ChrisTitusTech/winutil", "main", ""),
         ("scoop", "https://github.com/ScoopInstaller/Scoop", "master", "lib"),
         ("poshgit", "https://github.com/dahlbyk/posh-git", "master", ""),
+        ("psreadline", "https://github.com/PowerShell/PSReadLine", "master", ""),
+        ("powershellget", "https://github.com/PowerShell/PowerShellGet", "master", ""),
+        ("plaster", "https://github.com/PowerShell/Plaster", "master", ""),
     ]),
     "assembly": ([".s", ".S", ".asm"], [
         ("musl", "https://github.com/kraj/musl", "master", "src"),
