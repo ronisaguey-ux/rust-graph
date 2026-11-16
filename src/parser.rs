@@ -181,7 +181,15 @@ impl<'a> Parser<'a> {
             }
             match self.raw(token) {
                 b"<" | b"<=" => depth += 1,
-                b">" | b">=" | b"->" | b"=>" => depth -= 1,
+                // An arrow ends the angle context it is in: `(e: A) => B` is a
+                // function type, and its `=>` never closes a type-argument list
+                // opened earlier on the line. Counting it as a close made the
+                // depth negative, so the `<` of a return type's own list looked
+                // unmatched and a declarator split at its comma -
+                // `const t = (f: (e: A) => B): C<D, E> => 1` became two
+                // statements where the CST reads one arrow with an annotation.
+                b"->" | b"=>" => depth = 0,
+                b">" | b">=" => depth -= 1,
                 _ => {}
             }
         }

@@ -145,6 +145,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "type arguments: `new` with type arguments is one call, not a merge",
         "type Events = \"open\" | \"close\";\ndeclare class Handler<T> {}\nconst handlers = new Map<keyof Events | \"*\", Array<Handler<any>>>();\nconst empty = new Map<string, number>();\n",
     ),
+    (
+        "an arrow with a function-typed parameter keeps its annotated return type whole",
+        "const t = (f: (e: A) => B): C<D, E> => from(f)\nconst u = (f: (e: A) => B): C<D> => from(f)\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
