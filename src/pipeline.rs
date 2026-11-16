@@ -3038,7 +3038,11 @@ fn type_as_target(src: &Lines<'_>, want: &(u8, Shape), found: &[(u8, Shape)], ta
         // written first, the colon follows it, and the name the lexer bound is
         // the annotation's type. Both are on this line, in that order.
         let Some(colon) = line.find(':') else { return false };
-        match (line.find(deep.as_str()), line.find(lexer_names[0].as_str())) {
+        // The annotation's type is a word of its own after the colon: searched
+        // as a substring, `self.dict: dict[str, Any] = {}` matched the `dict`
+        // inside the binder, which sits before the colon, so the invented
+        // binder was reported as a loss on a statement the CST read correctly.
+        match (line.find(deep.as_str()), whole_word_after(line, lexer_names[0].as_str(), colon)) {
             (Some(binder), Some(annotation)) => binder < colon && annotation > colon && line[annotation..].contains('='),
             _ => false,
         }
@@ -3047,6 +3051,29 @@ fn type_as_target(src: &Lines<'_>, want: &(u8, Shape), found: &[(u8, Shape)], ta
 
 /// The identifiers in a shape's text, quoted or bare: the lexer writes
 /// `["x"]` and `[x]` for a binder depending on the language.
+/// Where `name` stands as a whole word after `from`: `dict` in
+/// `self.dict: dict[str, Any]` is the annotation, the one inside the binder is
+/// the binder's own text.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn whole_word_after(line: &str, name: &str, from: usize) -> Option<usize> {
+    let mut at = from;
+    while let Some(found) = line.get(at..).and_then(|rest| rest.find(name)) {
+        let start = at + found;
+        let end = start + name.len();
+        let before = line[..start].chars().next_back();
+        let after = line[end..].chars().next();
+        let continues = |ch: Option<char>, dots: bool| match ch {
+            None => false,
+            Some(ch) => ch.is_alphanumeric() || ch == '_' || (dots && ch == '.'),
+        };
+        if !continues(before, true) && !continues(after, false) {
+            return Some(start);
+        }
+        at = end;
+    }
+    None
+}
+
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn name_list(text: &str) -> Vec<String> {
     let mut out = Vec::new();
