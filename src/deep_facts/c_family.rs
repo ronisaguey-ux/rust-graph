@@ -230,6 +230,16 @@ impl<'a> Walker<'a> {
                 return false;
             }
             "namespace_definition" => self.c_namespace(id),
+            // `return (void *)a_cas((volatile int *)p, (int)t, (int)s);`: the
+            // call sits behind a cast and nothing descended into that node, so
+            // every cast-receiver call in musl lost its call (3 shapes, 8 rows).
+            "cast_expression" => {
+                let mut calls = Vec::new();
+                self.c_calls_in_pub(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
             // `hidden void __vm_wait(void);`: the macro before the type is its
             // own node, and the lexer keeps it as the first name of the line.
             "macro_qualified_item" => {
