@@ -413,6 +413,14 @@ impl<'a> Parser<'a> {
                 return;
             }
         }
+        // `x = a ? // a comment` newline `b : c`: a trailing `?` in JS/TS
+        // begins a ternary branch (or `??`), never ends a statement. Ending
+        // here split the first branch out and orphaned the following `:`.
+        if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && self.stmt.last().is_some_and(|last| self.is_op(last, b"?"))
+        {
+            return;
+        }
         // `x = a ? b : // a comment` newline `c[0];`: the line ends with the
         // ternary's colon, so the next line continues the statement. Ending it
         // here gave the continuation its own event on the wrong line.
