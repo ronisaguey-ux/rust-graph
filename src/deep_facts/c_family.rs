@@ -109,6 +109,70 @@ impl<'a> Walker<'a> {
                 // constant in musl lost its line.
                 let mut inits = Vec::new();
                 self.c_initializers(id, &mut inits);
+                // `int (*close)(FILE *);` - a function pointer. The lexer reads
+                // the type word and the parenthesised list as a call of that
+                // type, with the pointer's own name as its argument, and keeps
+                // only a storage class in front of it as a name (`const` is not
+                // one to it). Written as the words form the value never had a
+                // call in it, so every function pointer in the corpus lost both
+                // its call and its event.
+                if !self.c_has_kind(id, "compound_statement")
+                    && self.c_has_kind(id, "parenthesized_declarator")
+                    && self.c_has_kind(id, "parameter_list")
+                    // `typedef int (*cmpfun)(…);` is a type name to the lexer,
+                    // not a call: the words form is what pairs there.
+                    && leading_word(self.text_string(id).trim_start()) != Some("typedef")
+                    // With an initialiser the lexer reads the value, not a call.
+                    && inits.is_empty()
+                {
+                    let line = self.line(id);
+                    let text = self.text_string(id);
+                    let mut rest = text.trim_start();
+                    let mut names: Vec<String> = Vec::new();
+                    loop {
+                        let Some(word) = leading_word(rest) else { break };
+                        match word {
+                            "static" | "extern" | "register" | "inline" => {
+                                names.push(word.to_string());
+                                rest = rest[word.len()..].trim_start();
+                            }
+                            "const" | "volatile" | "typedef" => {
+                                rest = rest[word.len()..].trim_start();
+                            }
+                            _ => break,
+                        }
+                    }
+                    if let Some(word) = leading_word(rest) {
+                        let index = self.push_call(word.to_string(), line);
+                        let name = self.c_descendant(id, "parenthesized_declarator")
+                            .and_then(|node| self.declarator_of(node))
+                            .unwrap_or_default();
+                        let mut args = String::new();
+                        if !name.is_empty() {
+                            args = "[[\"n\",".to_string();
+                            push_string(&mut args, &name);
+                            args.push_str("]]");
+                        }
+                        let call = format!("[\"c\",{index},0,{args}]");
+                        let value = if names.is_empty() {
+                            call
+                        } else {
+                            let mut parts: Vec<String> = names
+                                .iter()
+                                .map(|name| {
+                                    let mut form = "[\"n\",".to_string();
+                                    push_string(&mut form, name);
+                                    form.push(']');
+                                    form
+                                })
+                                .collect();
+                            parts.push(call);
+                            format!("[\"m\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'x', line, &[], &value, false);
+                    }
+                    return true;
+                }
                 if !inits.is_empty() {
                     // `char *a=0, *b=0, *c=0;`: the lexer unpacks the declarator
                     // list and keeps the later names as elements of the first
@@ -202,6 +266,20 @@ impl<'a> Walker<'a> {
                 out.push((name, child, line));
             }
         }
+    }
+
+    /// The first descendant of `id` of `kind`, in source order.
+    fn c_descendant(&self, id: u32, kind: &str) -> Option<u32> {
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            for child in self.children(node).into_iter().rev() {
+                if self.kind(child) == kind {
+                    return Some(child);
+                }
+                stack.push(child);
+            }
+        }
+        None
     }
 
     /// Whether any descendant of `id` is of `kind`.
