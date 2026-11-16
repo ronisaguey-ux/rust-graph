@@ -122,6 +122,14 @@ fn declarations_classes_and_modules() {
 }
 
 #[test]
+fn export_type_star_reexports_a_module() {
+    // `export type * from "m"` is TypeScript's type-only star re-export. The
+    // `*` branch did not accept the `type` prefix, so the whole statement was
+    // an error and the file fell back to the lexer.
+    assert!(clean("export type * from './types.js';\nexport type * as ns from './t.js';\n", &TYPESCRIPT));
+}
+
+#[test]
 fn line_ends_end_statements_where_asi_does() {
     assert_eq!(
         named("a\n++b\nlet x = 1\n[1, 2].map(f)\nreturn\n", &JAVASCRIPT),

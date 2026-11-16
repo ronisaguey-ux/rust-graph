@@ -381,6 +381,7 @@ rust_graph_deep::grammar! { TYPESCRIPT {
         "*" ["as" _module_export_name] "from" STRING [import_attribute] [_semi]
         | export_clause ["from" STRING [import_attribute]] [_semi]
         | "default" (&("interface" | "abstract" | "enum") _declaration | &(["async"] "function" ["*"] _name) function_declaration | _expression [_semi])
+        | &("type" "*") "type" "*" ["as" _module_export_name] "from" STRING [import_attribute] [_semi]
         | &("type" export_clause) "type" export_clause ["from" STRING] [_semi]
         | "=" _expression [_semi]
         | "as" "namespace" _name [_semi]
