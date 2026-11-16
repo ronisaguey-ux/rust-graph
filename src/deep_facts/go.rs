@@ -1553,6 +1553,11 @@ impl<'a> Walker<'a> {
             // of them lost nothing else.
             "import_header" => self.kt_import(id),
             "package_header" => self.kt_package(id),
+            // Scala and Swift spell an import as a flat run of identifiers
+            // (`import java.io.Serializable`) or with selectors
+            // (`import a.b.{C, D}`), and neither had an arm: 147 files of the
+            // scala corpus lost every import.
+            "import_declaration" if self.kinds.family == Family::Plain => self.scala_import(id),
             "import_statement" | "import_from_statement" => {
                 if self.is_js() {
                     self.js_import(id);
@@ -1679,6 +1684,53 @@ impl<'a> Walker<'a> {
                 self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
             }
             index += 1;
+        }
+    }
+
+    /// `import java.io.Serializable`, `import scala.concurrent.duration._`,
+    /// `import a.b.{C, D}`: one import per name bound, with the path as
+    /// written, the member when a selector names one, and the local name.
+    pub(crate) fn scala_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut parts: Vec<String> = Vec::new();
+        let mut selectors: Vec<u32> = Vec::new();
+        for child in self.children(id) {
+            match self.kind(child) {
+                "import" => {}
+                "import_selectors" => selectors = self.children(child),
+                "identifier" | "simple_identifier" | "type_identifier" | "_" | "wildcard" => {
+                    parts.push(self.text_string(child))
+                }
+                _ => {}
+            }
+        }
+        if selectors.is_empty() {
+            if parts.is_empty() {
+                return;
+            }
+            let alias = parts.last().cloned().unwrap_or_default();
+            self.facts.imports.push(Import {
+                line,
+                module: parts.join("."),
+                name: String::new(),
+                alias,
+                kind: IMPORT_MODULE,
+            });
+            return;
+        }
+        let module = parts.join(".");
+        for selector in selectors {
+            if self.is_layout(selector) || matches!(self.kind(selector), "import_selectors" | "," | "{" | "}") {
+                continue;
+            }
+            let name = self.text_string(selector);
+            self.facts.imports.push(Import {
+                line,
+                module: module.clone(),
+                name: name.clone(),
+                alias: name,
+                kind: IMPORT_MODULE,
+            });
         }
     }
 
@@ -2977,6 +3029,18 @@ impl<'a> Walker<'a> {
             // (`path.Join(os.Getenv(..))`) would come back as `0`.
             let value = if ellipsis {
                 "0".to_string()
+            } else if self.kinds.family == Family::Plain && kind == "assignment" {
+                // `@deprecated("old", since = "2")`: a named argument is the
+                // lexer's keyword form, not the assignment's merge.
+                let parts = self.children(child);
+                let name = parts.first().map(|&node| self.path_of(node)).unwrap_or_default();
+                let inner = parts.last().map(|&node| self.form(node)).unwrap_or_else(|| "0".to_string());
+                let mut out = "[\"k\",".to_string();
+                push_string(&mut out, &name);
+                out.push(',');
+                out.push_str(&inner);
+                out.push(']');
+                out
             } else {
                 match self.kinds.family {
                     Family::Go | Family::Java => self.decl_value(child),

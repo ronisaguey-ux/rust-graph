@@ -865,6 +865,29 @@ impl<'a> Walker<'a> {
             // script in the corpus lost its assignments (rootProject.name,
             // group, version: 165 rows).
             "script_statement" => self.kt_script_statement(id),
+            // `package akka`: Scala's clause is the same event Kotlin's is, and
+            // without it every file with a package statement lost its first
+            // line.
+            "package_clause" => self.kt_package(id),
+            // `@throws(classOf[X])`, `@deprecated("old")`: the lexer reads an
+            // annotation as a call of its name, and Scala's stdlib is covered
+            // in them.
+            "annotation" if self.kinds.family == Family::Plain => {
+                if let Some(node) = self.children(id).into_iter().find(|&child| matches!(self.kind(child), "identifier")) {
+                    let name = self.text_string(node);
+                    let line = self.line(id);
+                    let index = self.push_call(name, line);
+                    // The lexer files the annotation's own arguments as an
+                    // event holding the call's form, as it does for any other
+                    // call written as a statement.
+                    if let Some(list) = self.children(id).into_iter().find(|&child| self.kind(child) == "annotation_arguments") {
+                        if self.children(list).iter().any(|&child| !self.is_layout(child)) {
+                            let args = self.arguments(list);
+                            self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
+                        }
+                    }
+                }
+            }
             // `public string Key { get; set; }`: the lexer reads each accessor
             // as an expression statement and names it `get` / `set`. Nothing
             // read `accessor_declaration`, so a property lost one event per
