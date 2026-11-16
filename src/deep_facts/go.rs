@@ -144,6 +144,10 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+        // The whole statement, body included: the lexer writes the range clause
+        // and the loop body as one value (`for _, a := range xs { go f(a) }`
+        // merges both), so narrowing this to the clause alone invented a
+        // disagreement that was not there.
         let value = self.decl_value(id);
         let line = self.line(id);
         self.lexer_event(b'a', line, &targets, &value, false);
@@ -2486,6 +2490,12 @@ impl<'a> Walker<'a> {
             }
         }
         let (path, mut receiver) = self.call_target(callee, receiver_call);
+        // A function literal is not a name: `go func() { … }()` has no callee to
+        // record, and writing a call with an empty path invented an entry the
+        // lexer never had — the literal's own invocation is not an edge.
+        if path.is_empty() && matches!(self.kind(callee), "func_literal") {
+            return ("0".to_string(), None);
+        }
         let line = self.call_line(callee, id);
         let args = children
             .iter()
