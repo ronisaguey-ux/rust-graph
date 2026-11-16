@@ -3016,6 +3016,18 @@ impl<'a> Parser<'a> {
         if self.head_word(toks).is_some_and(|word| CONTROL.contains(&word.as_str())) {
             return None;
         }
+        // `go func() { … }()` and `defer f.Close()`: the Go statement keyword
+        // comes first and the call follows, so `go func() {` is the shape of a
+        // declaration — return type `go`, name `func`, parameters `()` — and it
+        // opened a symbol called `func` that held the literal's body. A `go`,
+        // `defer`, `range` or `select` in front makes the line a statement.
+        if self.lang.tag == "GO"
+            && self
+                .head_word(toks)
+                .is_some_and(|word| matches!(word.as_str(), "go" | "defer" | "range" | "select"))
+        {
+            return None;
+        }
         // In JS/TS, a keyword-less function header before `{` is only a method
         // definition: never a dotted call (`t.advance(2)`), and nothing other
         // than a TS `: ReturnType` can sit between `)` and `{`.
