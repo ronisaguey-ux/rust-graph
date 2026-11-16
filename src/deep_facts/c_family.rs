@@ -87,6 +87,72 @@ impl<'a> Walker<'a> {
                 let line = self.line(id);
                 self.push_call("__attribute__".to_string(), line);
             }
+            // `@interface A : NSObject`: the header line is a statement to the
+            // lexer and nothing wrote it, so every Objective-C interface lost
+            // its first line.
+            "objc_interface" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, "interface");
+                form.push(']');
+                parts.push(form);
+                for child in self.children(id) {
+                    for name in self.c_words_of(child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &name);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                }
+                let value = format!("[\"m\",[{}]]", parts.join(","));
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
+            // `ShaderDesignerWindowController *windowController;` in an ivar
+            // block is a declaration statement to the lexer.
+            "ivar_declaration" => {
+                let form = self.c_words_form_skipping(id, &["initializer_list"]);
+                if form != "0" {
+                    let line = self.line(id);
+                    self.event(&format!("[\"x\",{line},{form}]"));
+                }
+            }
+            // `@synthesize window = _window;` files the binding, and nothing
+            // read it: every synthesized property lost its line.
+            "objc_synthesize" => {
+                let names: Vec<String> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.kind(child) == "identifier")
+                    .map(|child| self.text_string(child))
+                    .collect();
+                if names.len() >= 2 {
+                    let line = self.line(id);
+                    let mut form = |text: &str| {
+                        let mut out = String::from("[\"n\",");
+                        push_string(&mut out, text);
+                        out.push(']');
+                        out
+                    };
+                    // The lexer keeps the first binding's value and the later
+                    // *names* as `[name, value]` merges: `@synthesize a = _a,
+                    // b = _b;` is `a = t:[n:_a, m:[n:b,n:_b]]`.
+                    let pairs: Vec<(String, String)> = names
+                        .chunks(2)
+                        .map(|pair| (pair[0].clone(), pair.get(1).cloned().unwrap_or_default()))
+                        .collect();
+                    let value = if pairs.len() == 1 {
+                        form(&pairs[0].1)
+                    } else {
+                        let mut parts = vec![form(&pairs[0].1)];
+                        for (key, value) in &pairs[1..] {
+                            parts.push(format!("[\"m\",[{},{}]]", form(key), form(value)));
+                        }
+                        format!("[\"t\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'a', line, &[names[0].clone()], &value, false);
+                }
+            }
             // `@selector(run:)`: the lexer files a call of `selector`, and the
             // node was never read.
             "selector_expression" => {
