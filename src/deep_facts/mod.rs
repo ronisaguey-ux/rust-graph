@@ -469,6 +469,9 @@ struct Walker<'a> {
     /// members of an enum are a single assignment to the lexer, so visiting
     /// each one on its own must not write a second, unpaired event.
     consumed: Vec<u32>,
+    /// `hidden void f(void);`: the macro that opened the declaration, read by
+    /// the item's own node and spent on the declaration inside it.
+    macro_prefix: Option<String>,
     /// The form text a call node already produced, by node id. A block value is
     /// read twice — once for the value the assignment carries, once when the
     /// walk reaches the statements inside it — and the second read pushed a
@@ -540,6 +543,7 @@ impl<'a> Walker<'a> {
             stack: vec![Frame { node: tree.root, symbol: 0, class: String::new(), receiver: String::new(), container: false, defines: None }],
             bound: Vec::new(),
             consumed: Vec::new(),
+            macro_prefix: None,
             call_texts: std::collections::HashMap::new(),
         }
     }

@@ -230,6 +230,17 @@ impl<'a> Walker<'a> {
                 return false;
             }
             "namespace_definition" => self.c_namespace(id),
+            // `hidden void __vm_wait(void);`: the macro before the type is its
+            // own node, and the lexer keeps it as the first name of the line.
+            "macro_qualified_item" => {
+                if let Some(first) = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&child| self.kind(child) == "identifier")
+                {
+                    self.macro_prefix = Some(self.text_string(first));
+                }
+            }
             // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
             // grammar gives it a declaration node, and nothing read it.
             "static_assert_declaration" | "static_assert" => {
@@ -277,6 +288,73 @@ impl<'a> Walker<'a> {
                         }
                     }
                 }
+                }
+                // `hidden void __vm_wait(void);`: a leading macro before the
+                // return type makes the lexer read the declaration as names
+                // plus a call of the declared function - `m:[n:hidden,c(0;[0])]`
+                // - and the reader wrote the words form, so every musl
+                // visibility-decorated prototype lost its line (36 files).
+                let forced = self.macro_prefix.take();
+                if let Some(word) = forced
+                    .clone()
+                    .or_else(|| leading_word(self.text_string(id).trim_start()).map(str::to_string))
+                {
+                    const KEYWORDS: &[&str] = &[
+                        "void", "int", "char", "short", "long", "float", "double", "signed",
+                        "unsigned", "const", "volatile", "static", "extern", "inline", "register",
+                        "auto", "struct", "union", "enum", "typedef", "_Bool",
+                    ];
+                    if forced.is_some() || !KEYWORDS.contains(&word.as_str()) {
+                        if let (Some(list), Some(name_node)) = (
+                            self.c_descendant(id, "parameter_list"),
+                            self.child_of_kind(id, "direct_declarator")
+                                .and_then(|node| self.first_identifier(node)),
+                        ) {
+                            let name = name_node;
+                            if !name.is_empty() {
+                                let line = self.line(id);
+                                let text = self.text_string(id);
+                                let mut names: Vec<String> =
+                                    forced.clone().map(|prefix| vec![prefix]).unwrap_or_default();
+                                let mut rest = text.trim_start();
+                                while let Some(word) = leading_word(rest) {
+                                    if word == name {
+                                        break;
+                                    }
+                                    if word != "void" {
+                                        names.push(word.to_string());
+                                    }
+                                    rest = rest[word.len()..].trim_start();
+                                }
+                                let mut args: Vec<String> = Vec::new();
+                                let mut group: Vec<String> = Vec::new();
+                                for child in self.children(list) {
+                                    if self.kind(child) == "," {
+                                        args.push(self.c_param_form(&group));
+                                        group.clear();
+                                        continue;
+                                    }
+                                    group.extend(self.c_words_of(child));
+                                }
+                                args.push(self.c_param_form(&group));
+                                let args: Vec<String> = args.into_iter().filter(|a| !a.is_empty()).collect();
+                                let index = self.push_call(name.clone(), line);
+                                let call = format!("[\"c\",{index},0,[{}]]", args.join(","));
+                                let mut parts: Vec<String> = names
+                                    .iter()
+                                    .map(|name| {
+                                        let mut part = String::from("[\"n\",");
+                                        push_string(&mut part, name);
+                                        part.push(']');
+                                        part
+                                    })
+                                    .collect();
+                                parts.push(call);
+                                self.lexer_event(b'x', line, &[], &format!("[\"m\",[{}]]", parts.join(",")), false);
+                                return true;
+                            }
+                        }
+                    }
                 }
                 let form = self.c_words_form_skipping(
                     id,
@@ -743,6 +821,19 @@ impl<'a> Walker<'a> {
         let owner = if self.frame().container { self.frame().class.clone() } else { String::new() };
         let index = self.add_symbol(name.clone(), owner.clone(), KIND_FUNCTION, line, params);
         self.stack.push(Frame { node: id, symbol: index, class: owner, receiver: String::new(), container: false, defines: Some(index) });
+    }
+
+    /// A parameter group as the lexer reads it: a type with no name is the
+    /// constant 0, `...` is the constant 0, and a name is written as it stands.
+    pub(crate) fn c_param_form(&self, group: &[String]) -> String {
+        let Some(last) = group.last() else { return String::new() };
+        if last == "..." || (group.len() == 1 && last == "void") {
+            return "0".to_string();
+        }
+        let mut form = String::from("[\"n\",");
+        push_string(&mut form, last);
+        form.push(']');
+        form
     }
 
     /// A parameter list as the lexer reads it: the last name of each
