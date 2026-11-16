@@ -884,6 +884,28 @@ impl<'a> Walker<'a> {
             // `@throws(classOf[X])`, `@deprecated("old")`: the lexer reads an
             // annotation as a call of its name, and Scala's stdlib is covered
             // in them.
+            // Swift writes its attributes with the same shape under another
+            // name: `@inline(never)`, `@_spi(Formatting)`, `@_semantics(…)`.
+            // The lexer reads each as a call of its name.
+            "attribute" if self.kinds.family == Family::Plain => {
+                if let Some(node) = self.children(id).into_iter().find(|&child| matches!(self.kind(child), "identifier")) {
+                    let name = self.text_string(node);
+                    let line = self.line(id);
+                    let index = self.push_call(name, line);
+                    // The line is an `x` event whose value is that call, with
+                    // the attribute's own arguments - `c(0;[n:never])`.
+                    if let Some(list) = self
+                        .children(id)
+                        .into_iter()
+                        .find(|&child| matches!(self.kind(child), "attribute_arguments" | "annotation_arguments"))
+                    {
+                        if self.children(list).iter().any(|&child| !self.is_layout(child)) {
+                            let args = self.arguments(list);
+                            self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
+                        }
+                    }
+                }
+            }
             "annotation" if self.kinds.family == Family::Plain => {
                 if let Some(node) = self.children(id).into_iter().find(|&child| matches!(self.kind(child), "identifier")) {
                     let name = self.text_string(node);
