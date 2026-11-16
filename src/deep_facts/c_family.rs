@@ -245,6 +245,22 @@ impl<'a> Walker<'a> {
                 // … } aeApiState;`: the lexer writes the declarator's name on
                 // the closing line (`n:Foo`) and no reader wrote it for either
                 // form.
+                let mut has_body_type = false;
+                let mut pending = vec![id];
+                while let Some(node) = pending.pop() {
+                    match self.kind(node) {
+                        "struct_or_union_specifier" | "struct_specifier" | "enum_specifier" => {
+                            let body = self.child_of_kind(node, "struct_body").is_some()
+                                || self.child_of_kind(node, "field_declaration_list").is_some()
+                                || self.child_of_kind(node, "enumerator_list").is_some();
+                            if body {
+                                has_body_type = true;
+                            }
+                        }
+                        _ => pending.extend(self.children(node)),
+                    }
+                }
+                if has_body_type {
                 if let Some(declarator) = self
                     .children(id)
                     .into_iter()
@@ -260,6 +276,7 @@ impl<'a> Walker<'a> {
                             self.lexer_event(b'x', line, &[], &value, false);
                         }
                     }
+                }
                 }
                 let form = self.c_words_form_skipping(
                     id,
@@ -352,6 +369,7 @@ impl<'a> Walker<'a> {
                     }
                     return true;
                 }
+                let mut wrote_prototype = false;
                 if !inits.is_empty() {
                     // `char *a=0, *b=0, *c=0;`: the lexer unpacks the declarator
                     // list and keeps the later names as elements of the first
@@ -388,7 +406,7 @@ impl<'a> Walker<'a> {
                         let value = format!("[\"t\",[{}]]", parts.join(","));
                         self.lexer_event(b'a', line, &[name], &value, false);
                     }
-                } else if form != "0" {
+                } else if form != "0" && !wrote_prototype {
                     let line = self.line(id);
                     self.event(&format!("[\"x\",{line},{form}]"));
                 }
@@ -417,7 +435,78 @@ impl<'a> Walker<'a> {
                 {
                     if let Some(name) = self.declarator_name(id) {
                         let line = self.line(id);
-                        self.push_call(name, line);
+                        let index = self.push_call(name, line);
+                        // The lexer reads a prototype as one statement: the
+                        // return type's words, then the call with each
+                        // parameter as a merge of its own words - `const` and
+                        // the pointer are dropped, a lone `void` is `0`.
+                        // Writing only the declared name left every prototype
+                        // in every C and C++ header unequal.
+                        let name_form = |text: &str| {
+                            let mut form = String::from("[\"n\",");
+                            push_string(&mut form, text);
+                            form.push(']');
+                            form
+                        };
+                        let mut parts: Vec<String> = Vec::new();
+                        for child in self.children(id) {
+                            if self.kind(child) == "direct_declarator" {
+                                break;
+                            }
+                            for word in self.c_words_of(child) {
+                                if matches!(word.as_str(), "const" | "static" | "extern" | "inline") {
+                                    continue;
+                                }
+                                parts.push(name_form(&word));
+                            }
+                        }
+                        if let Some(list) = self.c_descendant(id, "parameter_list") {
+                            let mut args: Vec<String> = Vec::new();
+                            for parameter in self.children(list) {
+                                let words: Vec<String> = self
+                                    .c_words_of(parameter)
+                                    .into_iter()
+                                    .filter(|word| !matches!(word.as_str(), "const" | "static" | "extern" | "inline"))
+                                    .collect();
+                                if words.is_empty() || (words.len() == 1 && words[0] == "void") {
+                                    args.push("0".to_string());
+                                    continue;
+                                }
+                                let forms: Vec<String> = words.iter().map(|word| name_form(word)).collect();
+                                args.push(format!("[\"m\",[{}]]", forms.join(",")));
+                            }
+                            parts.push(format!("[\"c\",{index},0,[{}]]", args.join(",")));
+                            let value = format!("[\"m\",[{}]]", parts.join(","));
+                            self.lexer_event(b'x', line, &[], &value, false);
+                            wrote_prototype = true;
+                        }
+                    }
+                }
+                // `CURLcode Curl_altsvc_load(struct altsvcinfo *asi);`: a return
+                // type the grammar does not know becomes a `bare_user_declaration`
+                // wrapping the declarator and its parameters, so the prototype
+                // arm above saw no parameter list of its own and every such
+                // prototype in a C++ header lost the call the lexer reads.
+                if !self.c_has_kind(id, "compound_statement") {
+                    for child in self.children(id) {
+                        if self.kind(child) != "bare_user_declaration"
+                            || !self.c_has_kind(child, "parameter_list")
+                        {
+                            continue;
+                        }
+                        // The declarator here is a bare identifier before the
+                        // parameter list - there is no `direct_declarator` node
+                        // for `declarator_name` to follow.
+                        let name = self
+                            .children(child)
+                            .into_iter()
+                            .take_while(|&node| self.kind(node) != "parameter_list")
+                            .find(|&node| self.kind(node) == "identifier")
+                            .map(|node| self.text_string(node));
+                        if let Some(name) = name {
+                            let line = self.line(id);
+                            self.push_call(name, line);
+                        }
                     }
                 }
             }
@@ -508,16 +597,27 @@ impl<'a> Walker<'a> {
     /// `direct_declarator`, never one inside its parameter list.
     fn declarator_name(&self, id: u32) -> Option<String> {
         let mut stack = vec![id];
-        let mut seen_declarator = false;
         while let Some(node) = stack.pop() {
             for child in self.children(node).into_iter().rev() {
                 match self.kind(child) {
                     "parameter_list" | "compound_statement" | "initializer_list" => {}
+                    // Only the declarator's own subtree names it: the type
+                    // before it is a `plain_type_name` with an identifier of
+                    // its own, and returning the first identifier seen after
+                    // the declarator walked the type too named the call
+                    // `CURLcode` where the lexer names it `Curl_amiga_init`.
                     "direct_declarator" => {
-                        seen_declarator = true;
-                        stack.push(child);
+                        let mut own = vec![child];
+                        while let Some(node) = own.pop() {
+                            for inner in self.children(node) {
+                                match self.kind(inner) {
+                                    "parameter_list" | "compound_statement" | "initializer_list" => {}
+                                    "identifier" => return Some(self.text_string(inner)),
+                                    _ => own.push(inner),
+                                }
+                            }
+                        }
                     }
-                    "identifier" if seen_declarator => return Some(self.text_string(child)),
                     _ => stack.push(child),
                 }
             }
