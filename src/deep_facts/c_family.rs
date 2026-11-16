@@ -823,6 +823,7 @@ impl<'a> Walker<'a> {
         // `BIT(persist);`: the grammar reads a function-like macro member as a
         // type name followed by a declarator, and the lexer reads the same
         // tokens as a call to that name. curl's bit fields are 48 C++ files.
+        let mut macro_members: Vec<u32> = Vec::new();
         for child in self.children(body) {
             if self.kind(child) != "user_struct_declaration" || !self.c_has_kind(child, "parenthesized_declarator") {
                 continue;
@@ -837,7 +838,28 @@ impl<'a> Walker<'a> {
             let text = self.text_string(first);
             let Some(name) = leading_word(text.trim_start()).map(str::to_string) else { continue };
             let line = self.line(child);
-            self.push_call(name, line);
+            let index = self.push_call(name.clone(), line);
+            // The line is the call itself: `BIT(header);` is `c(0;[n:header])`
+            // to the lexer, and the member walk wrote `m:[n:BIT,n:header]`.
+            let mut args: Vec<String> = Vec::new();
+            if let Some(paren) = self
+                .children(child)
+                .into_iter()
+                .find(|&node| self.kind(node) == "parenthesized_declarator")
+            {
+                for word in self.c_words_of(paren) {
+                    if word == name {
+                        continue;
+                    }
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, &word);
+                    form.push(']');
+                    args.push(form);
+                }
+            }
+            let value = format!("[\"c\",{index},0,[{}]]", args.join(","));
+            self.lexer_event(b'x', line, &[], &value, false);
+            macro_members.push(child);
         }
         let mut by_line: std::collections::BTreeMap<u32, Vec<String>> = std::collections::BTreeMap::new();
         let mut stack = vec![body];
@@ -853,6 +875,9 @@ impl<'a> Walker<'a> {
                         self.push_call(path, line);
                     }
                 }
+            }
+            if macro_members.contains(&node) {
+                continue;
             }
             let item = self.node(node);
             if item.first_child == NONE {
