@@ -3609,9 +3609,12 @@ impl<'a> Parser<'a> {
     fn unpack_targets(&self, toks: &[Token]) -> Option<Vec<String>> {
         let mut inner = toks;
         let class_field = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
+        let kotlin_scala = matches!(self.lang.tag, "KT" | "SCALA");
         while let Some(word) = self.word_at(inner, 0) {
-            let declaration =
-                matches!(word.as_str(), "const" | "let" | "var" | "my" | "our" | "local" | "val" | "mut");
+            // `val` is only a declaration keyword in Kotlin/Scala; in JS/TS/etc.
+            // `val[i] = x` is a subscript assignment to `val`, not destructuring `[i]`.
+            let declaration = matches!(word.as_str(), "const" | "let" | "var" | "my" | "our" | "local" | "mut")
+                || (kotlin_scala && word == "val");
             // `static [entityKind] = "x"`: a class-field modifier is not the
             // binding. Stripped, the computed key is the target, which is what
             // the CST names; left in, the lexer named the field `static`.
