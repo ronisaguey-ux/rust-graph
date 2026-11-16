@@ -247,8 +247,18 @@ rust_graph_deep::grammar! { CSHARP {
     _qualified_name: _type_name ("." _type_name)*,
 
     attributes: attribute_section+,
+    // `[Obsolete]`, `[assembly: AssemblyVersion("1")]`, `[return: NotNull]`:
+    // the target is part of the section, not part of the attribute's name. The
+    // grammar had no target rule at all, so a return-value attribute — the one
+    // shape a nullable-annotated API writes on every method — left a MISSING
+    // node and swallowed the declaration below it.
+    //
+    // The predicate leads the alternative so a plain `[ApiController]` never
+    // takes the targeted form: `assembly`, `module`, `field` and the rest are
+    // plain identifiers, `return` is the keyword token the lexer produces.
     attribute_section: "[" (attribute %? ",") "]",
-    attribute: _qualified_name [attribute_arguments],
+    attribute: &((IDENT | "return") ":") _targeted_attribute | _qualified_name [attribute_arguments],
+    _targeted_attribute: (IDENT | "return") ":" _qualified_name [attribute_arguments],
     attribute_arguments: "(" (_attribute_argument %? ",") ")",
     _attribute_argument: &(_name ":") named_attribute_argument | _expression,
     named_attribute_argument: _name ":" _expression,
