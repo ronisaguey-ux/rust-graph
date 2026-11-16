@@ -61,6 +61,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "var a = typeof require === 'function';\n",
     ),
     (
+        "else arm whose body is a call with a function expression",
+        "function f(stmt, output) {\n  if (a) {\n    g();\n  } else output.with_block(function() {\n    output.indent();\n  }, stmt.end);\n}\n",
+    ),
+    (
         "block statement",
         "function f(x) {\n  let y = x;\n  return y;\n}\n",
     ),

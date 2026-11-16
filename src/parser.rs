@@ -1088,6 +1088,25 @@ impl<'a> Parser<'a> {
             }
         }
         if in_expression || arrow || expr_function {
+            // `else h(function() { … });`: the brace opens a function inside the
+            // arm's statement, not the arm's block. The arm ends with that
+            // statement, so it is settled here rather than carried into the
+            // function body: left pending, the body's first statement would
+            // claim the arm and pop a frame of its own, and the control frame
+            // then outlived the branch and swallowed the `}` that closes the
+            // enclosing function.
+            if rearmed {
+                self.final_arm(&stmt);
+                // `else if (x) f(function () { … });` carries a header of its
+                // own and its condition is a value; a plain `else f(...)` has
+                // no condition, and reading the call as one invented an event
+                // the CST never writes.
+                if self.word_at(&stmt, 1).as_deref() == Some("if") {
+                    self.control_condition(&stmt);
+                }
+                self.event("[\"j\"]");
+                self.pop_frame();
+            }
             let head = self.lambda_head(&stmt);
             let brackets = std::mem::take(&mut self.brackets);
             self.push_function(head, start_col, Some((stmt, brackets)));
