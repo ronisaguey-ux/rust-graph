@@ -3694,6 +3694,17 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
+            // `self.rcvs.lock().await.inner = ..`: `.await` is a postfix
+            // operator, not a member, and the CST names the target `.inner`.
+            // Spelled as a segment the target was `.await.inner`, a place the
+            // CST never writes.
+            if self.lang.tag == "RS"
+                && self.is_op(token, b".")
+                && toks.get(at_token + 1).is_some_and(|next| next.kind == Kind::Ident && self.raw(next) == b"await")
+            {
+                at_token += 2;
+                continue;
+            }
             at_token += 1;
             if token.kind == Kind::Ident {
                 let word = self.text(token);
