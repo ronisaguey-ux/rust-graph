@@ -832,7 +832,20 @@ impl<'a> Walker<'a> {
     pub(crate) fn c_path(&self, id: u32) -> Option<String> {
         match self.kind(id) {
             "field_expression" | "qualified_expression" => {
-                let name = self.member_name(id);
+                // `s->fn(…)`: the grammar gives the arrow form the same node as
+                // a dot, but the member's own leaf node is empty, so the path
+                // came out as `s.` and the call had no name at all. The source
+                // between the operator is the name.
+                let mut name = self.member_name(id);
+                if name.is_empty() {
+                    let text = self.text_string(id);
+                    let tail: String = text
+                        .chars()
+                        .rev()
+                        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                        .collect();
+                    name = tail.chars().rev().collect();
+                }
                 let object = self.children(id).into_iter().next()?;
                 // `cf->next->cft->do_connect(…)`: the receiver is itself a
                 // field expression, and `path_of` reads a name, not a chain, so

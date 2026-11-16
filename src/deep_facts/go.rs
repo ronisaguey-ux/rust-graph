@@ -3035,8 +3035,11 @@ impl<'a> Walker<'a> {
             // call is named by the member alone. Read through the default arm
             // it had no name at all, so the call the lexer records was missing.
             "implicit_member_expression" => (self.member_name(callee), "0".to_string()),
+            // `s.go()` / `s->go()` in the C family: the grammar writes a field
+            // access as `field_expression`, and read through the default arm
+            // the call had no name at all.
             "attribute" | "member_expression" | "member_access_expression" | "member_access"
-            | "conditional_member_access" | "navigation_expression" => {
+            | "conditional_member_access" | "navigation_expression" | "field_expression" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
                 let object = children.first().copied();
