@@ -2422,6 +2422,21 @@ fn dotted_piece(text: &str) -> bool {
                     }
                 }
             }
+            // `lambda r, proxy=url: ...`: a defaulted parameter is a keyword
+            // argument to the lexer — `["k","proxy",["n","url"]]` — and read as
+            // a merge of the two names it lost the keyword every time a lambda
+            // defaulted a parameter (request's `lambda proxy=url, type=type`).
+            "lambda_parameter" if self.children(id).iter().any(|&child| self.kind(child) == "=") => {
+                let children = self.children(id);
+                let name = children.first().map(|&node| self.path_of(node)).unwrap_or_default();
+                let inner = children.last().map(|&node| self.form(node)).unwrap_or_else(|| "0".to_string());
+                let mut out = "[\"k\",".to_string();
+                push_string(&mut out, &name);
+                out.push(',');
+                out.push_str(&inner);
+                out.push(']');
+                out
+            }
             // `lambda x: f(x)`: the parameters and body form the lambda value.
             "lambda" | "lambda_parameter" | "lambda_star_parameter" | "lambda_parameters" => {
                 let items: Vec<u32> = self
