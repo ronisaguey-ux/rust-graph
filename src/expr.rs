@@ -877,12 +877,20 @@ impl Emit<'_> {
         }
         let mut items = String::new();
         let count = self.list(&mut items, b')', false);
-        let value = match count {
-            0 => String::new(),
-            1 => items,
-            _ => format!("[\"t\",[{items}]]"),
+        let (value, path) = match count {
+            0 => (String::new(), String::new()),
+            // `(operations[node.type])(node)`: in JS/TS, parenthesizing a bare
+            // callee name or subscript does not turn it into an anonymous `.call`.
+            1 if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") && self.op_byte(0) == b'(' => {
+                match items.strip_prefix("[\"n\",\"").and_then(|rest| rest.strip_suffix("\"]")) {
+                    Some(name) if !name.contains('\\') && !name.contains('.') => (String::new(), name.to_string()),
+                    _ => (items, String::new()),
+                }
+            }
+            1 => (items, String::new()),
+            _ => (format!("[\"t\",[{items}]]"), String::new()),
         };
-        self.chain(out, value, String::new(), line);
+        self.chain(out, value, path, line);
     }
 
     fn display(&mut self, out: &mut String, close: u8, form: &str) {
@@ -1672,5 +1680,12 @@ mod tests {
         let (out, calls) = form("ts", "a < b && c > (d)");
         assert!(calls.is_empty());
         assert_eq!(out, r#"["m",[["n","a"],["n","b"],["n","c"],["n","d"]]]"#);
+    }
+
+    #[test]
+    fn js_parenthesized_callee_keeps_its_name() {
+        let (out, calls) = form("js", "(operations[node.type])(node, initialScope)");
+        assert_eq!(calls, ["operations"]);
+        assert_eq!(out, r#"["c",0,0,[["n","node"],["n","initialScope"]]]"#);
     }
 }
