@@ -194,6 +194,18 @@ impl<'a> Walker<'a> {
                 let value = format!("[\"m\",[{}]]", parts.join(","));
                 self.lexer_event(b'x', line, &[], &value, false);
             }
+            // `[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(200, 100)]`:
+            // a call written as a message argument was never recorded - the
+            // message node is not a call to this reader, so nothing descended
+            // into its arguments. 9 one-loss files on the corpus.
+            "message" => {
+                let mut calls = Vec::new();
+                self.c_calls_in(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+                return false;
+            }
             "namespace_definition" => self.c_namespace(id),
             // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
             // grammar gives it a declaration node, and nothing read it.
