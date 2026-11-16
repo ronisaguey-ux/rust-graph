@@ -1718,6 +1718,44 @@ impl<'a> Walker<'a> {
         self.facts.imports.push(Import { line, module, alias, kind, ..Import::default() });
     }
 
+    /// `val a = 1`, `private val b: Int = 2`: the declared name and the value,
+    /// as the assignment the lexer files.
+    pub(crate) fn kt_property(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let name = children
+            .iter()
+            .copied()
+            .find(|&child| self.kind(child) == "property_head")
+            .and_then(|head| {
+                self.children(head)
+                    .into_iter()
+                    .find(|&child| matches!(self.kind(child), "identifier"))
+            })
+            .map(|node| self.text_string(node))
+            .or_else(|| {
+                self.children(id)
+                    .into_iter()
+                    .find(|&child| matches!(self.kind(child), "identifier" | "simple_identifier"))
+                    .map(|node| self.text_string(node))
+            });
+        let Some(name) = name else { return };
+        let value = children
+            .iter()
+            .copied()
+            .rev()
+            .find(|&child| {
+                !matches!(
+                    self.kind(child),
+                    "val" | "var" | "property_head" | "modifiers" | ":" | "=" | "by" | "const" | "lateinit" | "override"
+                        | "private" | "public" | "internal" | "protected" | "type_identifier" | "user_type" | "nullable_type"
+                        | "function_type" | "generic_type" | "unsafe_cast" | "anonymous_function"
+                )
+            });
+        let Some(value) = value else { return };
+        self.assignment_parts(vec![name], value, line, false);
+    }
+
     /// `package a.b`: the lexer files the clause as one event whose value is the
     /// keyword and the dotted name; nothing wrote it, and a Kotlin file with a
     /// package clause lost the first line of most of them.

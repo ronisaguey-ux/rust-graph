@@ -853,6 +853,13 @@ impl<'a> Walker<'a> {
             // Objective-C declare this way on nearly every line, so nothing
             // read the node and every such call was lost.
             "declaration_statement" => self.decl_statement(id),
+            // `val a = 1` in Kotlin: the lexer files an assignment to the
+            // declared name, and nothing opened the property, so every
+            // initialised property in a Kotlin class or object lost its line.
+            // Swift spells it the same way (`let x = 1`), with the name as a
+            // plain identifier instead of a `property_head`, so the arm reads
+            // both.
+            "property_declaration" => self.kt_property(id),
             // `public string Key { get; set; }`: the lexer reads each accessor
             // as an expression statement and names it `get` / `set`. Nothing
             // read `accessor_declaration`, so a property lost one event per
@@ -1176,6 +1183,13 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn is_js(&self) -> bool {
         self.kinds.family == Family::Js
+    }
+
+    /// `true` for Kotlin: it is the only grammar here whose imports table
+    /// carries the package clause, and the walk needs to know before it reads
+    /// `property_declaration`, which Swift also uses.
+    pub(crate) fn is_kotlin(&self) -> bool {
+        self.kinds.imports.iter().any(|kind| *kind == "package_header")
     }
 
     /// `true` for Rust: `impl` names itself from its type, `use` is a path
