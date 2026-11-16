@@ -923,8 +923,28 @@ impl<'a> Walker<'a> {
                 // A field initialised with a call is an assignment to the
                 // lexer; anything else is the header event.
                 if !self.cs_field_assignment(id) {
-                    self.decl_statement(id);
-                    self.field_initializer_calls(id);
+                    // `private int _mask = 31;`: a field with a constant
+                    // initialiser is an assignment to 0 for the lexer, and the
+                    // arm wrote the header alone - no event on the line at all.
+                    let children = self.children(id);
+                    let assigned = children.iter().position(|&child| self.kind(child) == "=");
+                    let target = assigned.and_then(|at| {
+                        children[..at]
+                            .iter()
+                            .rev()
+                            .find(|&&child| self.kind(child) == "identifier")
+                            .map(|&child| self.text_string(child))
+                    });
+                    match (assigned, target) {
+                        (Some(_), Some(name)) => {
+                            let line = self.line(id);
+                            self.lexer_event(b'a', line, &[name], "0", false);
+                        }
+                        _ => {
+                            self.decl_statement(id);
+                            self.field_initializer_calls(id);
+                        }
+                    }
                 }
                 self.cs_declared_vars(id);
             }
