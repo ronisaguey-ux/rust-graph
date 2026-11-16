@@ -2327,6 +2327,18 @@ impl<'a> Parser<'a> {
                     alias = self.word_at(rest, index + 1).unwrap_or_default();
                     index += 1;
                 }
+                // `import static java.util.Objects.requireNonNull`: `static`
+                // is a modifier, not the first segment of the path. Pushed as
+                // an identifier it glued onto the next word (`staticjava.…`),
+                // and every static import in the Java corpus left a record
+                // nothing else could mean.
+                Kind::Ident
+                    if module.is_empty() && matches!(self.text(token).as_str(), "static" | "module") =>
+                {
+                    if rest.get(index + 1).is_some_and(|next| self.is_op(next, b".")) {
+                        index += 1;
+                    }
+                }
                 Kind::Ident => module.push_str(&self.text(token)),
                 Kind::Op if self.is_op(token, b"{") => {
                     let prefix = module.trim_end_matches('.').to_string();

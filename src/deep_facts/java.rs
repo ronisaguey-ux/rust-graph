@@ -105,7 +105,10 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn java_statement(&mut self, id: u32) {
         match self.kind(id) {
-            "local_variable_declaration" | "field_declaration" => self.java_declaration(id),
+            "local_variable_declaration" | "field_declaration" => {
+                self.java_declaration(id);
+                self.java_field_annotations(id);
+            }
             "constant_declaration" => self.java_declaration(id),
             "expression_statement" => match self.expression_child(id) {
                 Some(child) if self.kind(child) == "assignment_expression" => self.java_assign(child),
@@ -129,10 +132,55 @@ impl<'a> Walker<'a> {
                 let line = self.line(id);
                 self.lexer_event(b'x', line, &[], &value, false);
             }
+            // `String name();` in an interface, `abstract void run();`: a
+            // method with no body is a declaration to the grammar and a call to
+            // the lexer, which sees the name and its parameter list, so every
+            // abstract method in the corpus left a call with no counterpart.
+            "method_declaration" => {
+                if self.child_of_kind(id, "block").is_none() && self.child_of_kind(id, "constructor_body").is_none() {
+                    let children = self.children(id);
+                    let name = children
+                        .iter()
+                        .copied()
+                        .take_while(|&child| self.kind(child) != "formal_parameters")
+                        .filter(|&child| matches!(self.kind(child), "identifier"))
+                        .last()
+                        .map(|node| self.text_string(node));
+                    if let Some(name) = name {
+                        let line = self.line(id);
+                        self.push_call(name, line);
+                    }
+                }
+            }
             "try_statement" => {
                 self.java_statements(id);
             }
             _ => {}
+        }
+    }
+
+    /// `@SuppressWarnings("unchecked") private int x;`: on a field or a local
+    /// the lexer reads the annotation as a call of its name, and nothing wrote
+    /// it - only the annotations in front of a class were read.
+    pub(crate) fn java_field_annotations(&mut self, id: u32) {
+        for child in self.children(id) {
+            if self.kind(child) != "modifiers" {
+                continue;
+            }
+            for mark in self.children(child) {
+                if !matches!(self.kind(mark), "annotation" | "marker_annotation") {
+                    continue;
+                }
+                let name = self
+                    .children(mark)
+                    .into_iter()
+                    .find(|&node| matches!(self.kind(node), "identifier"))
+                    .map(|node| self.text_string(node));
+                if let Some(name) = name {
+                    let line = self.line(mark);
+                    self.push_call(name, line);
+                }
+            }
         }
     }
 
