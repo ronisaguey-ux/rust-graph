@@ -652,7 +652,8 @@ impl<'a> Parser<'a> {
             return true;
         }
         if !self.brackets.is_empty() {
-            return self.is_op(&last, b")") && self.function_word_in_tail();
+            return (self.is_op(&last, b")") && self.function_word_in_tail())
+                || self.expr_class_at(&self.stmt).is_some();
         }
         // `'label: { ... }`: a labeled block is a block of statements, not a
         // struct literal or expression value.
@@ -741,6 +742,35 @@ impl<'a> Parser<'a> {
         // A body longer than the scan is a block: a field list that long is not
         // a shape this reader has to win.
         true
+    }
+
+    fn expr_class_at(&self, toks: &[Token]) -> Option<usize> {
+        if !matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX") {
+            return None;
+        }
+        let mut depth = 0i32;
+        for (i, token) in toks.iter().enumerate().rev() {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b")" | b"]" | b"}" => depth += 1,
+                    b"(" | b"[" | b"{" => {
+                        if depth == 0 {
+                            return None;
+                        }
+                        depth -= 1;
+                    }
+                    b"," | b";" if depth == 0 => return None,
+                    _ => {}
+                }
+            } else if depth == 0 && token.kind == Kind::Ident && self.raw(token) == b"class" {
+                let member = i > 0 && toks.get(i - 1).is_some_and(|t| t.kind == Kind::Op && matches!(self.raw(t), b"." | b"?."));
+                let key = toks.get(i + 1).is_some_and(|t| self.is_op(t, b":"));
+                if !member && !key {
+                    return Some(i);
+                }
+            }
+        }
+        None
     }
 
     fn function_word_in_tail(&self) -> bool {
@@ -950,6 +980,16 @@ impl<'a> Parser<'a> {
             && !in_expression
             && !arrow
             && self.expr_function(&stmt);
+        if in_expression {
+            if let Some(at) = self.expr_class_at(&stmt) {
+                if let Some((name, bases)) = self.assigned_class_head(&stmt[at..]) {
+                    let brackets = std::mem::take(&mut self.brackets);
+                    stmt.truncate(at);
+                    self.push_class(name, bases, start_col, Some((stmt, brackets)));
+                    return;
+                }
+            }
+        }
         if in_expression || arrow || expr_function {
             let head = self.lambda_head(&stmt);
             let brackets = std::mem::take(&mut self.brackets);
@@ -1005,11 +1045,11 @@ impl<'a> Parser<'a> {
                 })
                 .flatten()
         }) {
-            self.push_class(name, bases, start_col);
+            self.push_class(name, bases, start_col, None);
         } else if let Some((name, bases)) = self.assigned_class(&stmt) {
-            self.push_class(name, bases, start_col);
+            self.push_class(name, bases, start_col, None);
         } else if let Some((name, bases)) = self.assigned_class_statement(&stmt) {
-            self.push_class(name, bases, start_col);
+            self.push_class(name, bases, start_col, None);
         } else if let Some(head) = self.function_head(&stmt, true) {
             let assigned = head.assigned_name && matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
             self.push_function(head, start_col, None);
@@ -1232,7 +1272,7 @@ impl<'a> Parser<'a> {
         self.facts.symbols.len() - 1
     }
 
-    fn push_class(&mut self, name: String, bases: Vec<String>, col: u32) {
+    fn push_class(&mut self, name: String, bases: Vec<String>, col: u32, saved: Option<(Vec<Token>, Vec<u8>)>) {
         let line = self.last_line;
         let index = self.add_symbol(name.clone(), String::new(), KIND_CLASS, line, Vec::new());
         self.facts.symbols[index].bases = bases;
@@ -1243,9 +1283,9 @@ impl<'a> Parser<'a> {
             class: name,
             receiver: String::new(),
             col,
-            saved: None,
+            saved: saved.map(|(stmt, brackets)| SavedStmt::Expr(stmt, brackets)),
             defines: Some(index),
-        type_only: false,
+            type_only: false,
         });
     }
 
@@ -1651,7 +1691,7 @@ impl<'a> Parser<'a> {
             return;
         }
         if let Some((name, bases)) = self.class_head(header) {
-            self.push_class(name, bases, col);
+            self.push_class(name, bases, col, None);
         } else if let Some(mut head) = self.function_head(header, true) {
             head.body = None;
             self.push_function(head, col, None);
@@ -1749,7 +1789,7 @@ impl<'a> Parser<'a> {
         let col = stmt[0].col;
         if let Some((name, bases)) = self.class_head(stmt) {
             if !one_liner {
-                self.push_class(name, bases, col);
+                self.push_class(name, bases, col, None);
             }
             return;
         }
