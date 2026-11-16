@@ -2598,7 +2598,7 @@ impl<'a> Walker<'a> {
         // `TaintAnalyzer(a, b(), c).run()` the argument `b()` is recorded
         // between the two — and the path keeps the name the source spells.
         let mut receiver_call = None;
-        if matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access") {
+        if matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access" | "navigation_expression") {
             if let Some(&object) = self.children(callee).first() {
                 if self.named_call(object) {
                     // `new URL(x).toString()`, `A().b()`, `A().b().c()`: a
@@ -2679,7 +2679,7 @@ impl<'a> Walker<'a> {
                     None => (String::new(), "0".to_string()),
                 }
             }
-            "attribute" | "member_expression" | "member_access_expression" | "member_access" => {
+            "attribute" | "member_expression" | "member_access_expression" | "member_access" | "navigation_expression" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
                 let object = children.first().copied();
