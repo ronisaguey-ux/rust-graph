@@ -544,3 +544,22 @@ fn new_with_type_arguments_reads_its_argument_list() {
     );
     assert!(json.contains(r#"["Map",2"#), "the callee keeps its line: {json}");
 }
+/// `const V: Omit<…> = {…}`: the annotation is a type, not a target. Its generic
+/// arguments were commas at depth 0, so the binding split into the type's own
+/// words (`any`, `any`) — a target list neither the source nor the CST writes.
+#[test]
+fn an_annotated_binding_names_the_binder() {
+    let tree = Tree::new("annotated-target", &[(
+        "app/annotated.ts",
+        "const ValueMatcherProto: Omit<\n  ValueMatcher<any, any, any, any, any>,\n  \"provided\" | \"value\"\n> = {\n  [TypeId]: { _input: identity },\n  _tag: \"ValueMatcher\",\n};\n",
+    )]);
+    let (json, _) = tree.json(&["--stdout", "--no-cache"]);
+    let row = source_row(&json, "app/annotated.ts");
+    assert!(row.contains("\"parsed_by\":\"deep\""), "{row}");
+    assert!(!row.contains("deep_fallback"), "nothing to fall back on: {row}");
+    assert!(json.contains(r#""fallbacks":0"#), "{json}");
+    assert!(
+        json.contains(r#"["a",1,["ValueMatcherProto"]"#),
+        "the binder is the name before the colon: {json}"
+    );
+}

@@ -3996,15 +3996,29 @@ impl<'a> Parser<'a> {
     }
 
     fn assignment(&mut self, targets: &[Token], value: &[Token], line: u32, augmented: bool) {
-        // `let this: Handle<'a, JsValue> = ..`: the annotation is a type, not a
-        // target. Left in, its generic argument was a comma at depth 0 and the
-        // binding split into three names the CST never writes.
+        // `let this: Handle<'a, JsValue> = ..`, `const m: Omit<A, B> = ..`:
+        // the annotation is a type, not a target. Left in, its generic
+        // argument was a comma at depth 0 and the binding split into three
+        // names the CST never writes — and in TypeScript the type's own words
+        // (`any`) became the statement's target list.
         let trimmed: Vec<Token>;
         let mut targets = targets;
-        if self.lang.tag == "RS" {
-            if let Some(colon) = targets.iter().position(|token| self.is_op(token, b":")) {
-                trimmed = targets[..colon].to_vec();
-                targets = &trimmed;
+        if matches!(self.lang.tag, "RS" | "TS" | "TSX") {
+            let mut depth = 0i32;
+            for (index, token) in targets.iter().enumerate() {
+                if token.kind != Kind::Op {
+                    continue;
+                }
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    b":" if depth == 0 => {
+                        trimmed = targets[..index].to_vec();
+                        targets = &trimmed;
+                        break;
+                    }
+                    _ => {}
+                }
             }
         }
         let unpacked = self.unpack_targets(targets);
