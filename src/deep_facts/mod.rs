@@ -1211,17 +1211,38 @@ impl<'a> Walker<'a> {
                         .copied();
                     let value = children.get(at + 1).copied();
                     if let (Some(target), Some(value)) = (target, value) {
-                        if self.kind(value) == "call_expression" {
-                            let name = self.c_path(target).unwrap_or_default();
-                            let path = self.decl_path(value);
-                            let last = path.rsplit('.').next().unwrap_or("").to_string();
-                            if !name.is_empty() && !last.is_empty() {
-                                // The statement is an assignment to the lexer:
-                                // `a ["cf.connected"] c(0;[n:cf])`.
-                                let line = self.line(id);
-                                let form = self.form(value);
-                                self.lexer_event(b'a', line, &[name.clone()], &form, false);
-                                self.facts.vars.push((name, last));
+                        let name = self.c_path(target).unwrap_or_default();
+                        if !name.is_empty() {
+                            // Every assignment is an `a` event to the lexer -
+                            // `ai->ai_next = ai;` is `a ["prevai.ai_next"] n:ai`
+                            // - and the reader wrote none of them for the C
+                            // family, so each such statement lost its line.
+                            let mut form = self.form(value);
+                            if self.kind(value) == "sizeof_expression" {
+                                // `sizeof(struct sockaddr_in)`: names, not 0.
+                                let words: Vec<String> = self
+                                    .children(value)
+                                    .into_iter()
+                                    .flat_map(|child| self.c_words_of(child))
+                                    .map(|word| {
+                                        let mut part = String::from("[\"n\",");
+                                        push_string(&mut part, &word);
+                                        part.push(']');
+                                        part
+                                    })
+                                    .collect();
+                                if !words.is_empty() {
+                                    form = format!("[\"m\",[{}]]", words.join(","));
+                                }
+                            }
+                            let line = self.line(id);
+                            self.lexer_event(b'a', line, &[name.clone()], &form, false);
+                            if self.kind(value) == "call_expression" {
+                                let path = self.decl_path(value);
+                                let last = path.rsplit('.').next().unwrap_or("").to_string();
+                                if !last.is_empty() {
+                                    self.facts.vars.push((name, last));
+                                }
                             }
                         }
                     }

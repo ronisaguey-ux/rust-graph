@@ -725,6 +725,16 @@ impl<'a> Walker<'a> {
             });
         let Some(name) = name else { return };
         let line = self.line(id);
+        // `int Guard::level() const { … }`: the lexer reads the qualified name
+        // as a call, and the definition's own node never wrote one, so every
+        // out-of-line member definition lost the call (cpp: 108 call rows).
+        if let Some(scoped) = self.child_of_kind(id, "scoped_type_name") {
+            let text = self.text_string(scoped).replace("::", ".");
+            let path = text.trim().trim_start_matches('.').to_string();
+            if !path.is_empty() {
+                self.push_call(path, self.line(scoped));
+            }
+        }
         let params = declarator
             .and_then(|node| self.child_of_kind(node, "parameter_list"))
             .or_else(|| children.iter().copied().find(|&child| self.kind(child) == "parameter_list"))
