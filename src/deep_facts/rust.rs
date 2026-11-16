@@ -498,8 +498,33 @@ impl<'a> Walker<'a> {
             .filter(|&&child| !matches!(self.kind(child), "for" | "&" | "ref" | "mut"))
             .flat_map(|&child| self.rust_pattern_names(child))
             .collect();
+        // `for WorkflowActivationJob { variant } in activation.jobs {`: the
+        // one-pass reader takes the pattern's brace for the body, so it files
+        // three statements on that line — the pattern's type, the binder and the
+        // iterable — and the type was the one fact the record did not have. The
+        // type is a real reference (tree-sitter's `struct_pattern` holds it), so
+        // it and the iterable are written as the separate events that line
+        // carries (000942_workflow_future.rs:399).
+        let line = self.line(id);
+        let iterable = children.get(at + 1).copied();
+        for child in children[..at].iter().copied() {
+            if self.kind(child) != "struct_pattern" {
+                continue;
+            }
+            let mut forms: Vec<String> = Vec::new();
+            if let Some(&head) = self.children(child).first() {
+                forms.push(self.form(head));
+            }
+            if let Some(value) = iterable {
+                forms.push(self.form(value));
+            }
+            for form in forms {
+                if form != "0" {
+                    self.event(&format!("[\"x\",{line},{form}]"));
+                }
+            }
+        }
         if let Some(&value) = children.get(at + 1) {
-            let line = self.line(id);
             self.assignment_parts(targets, value, line, false);
         }
     }

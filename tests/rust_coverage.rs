@@ -188,6 +188,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "a statement where an item cannot go: a merge out of method bodies (001183_stochastics.rs:188)",
         "impl S {\n    fn reset(&mut self) { self.a.clear(); }\n    self.max_deque.clear();\n}\n",
     ),
+    (
+        "for over a struct pattern: the brace is the pattern's (000942_workflow_future.rs:399)",
+        "fn f(jobs: Vec<Job>) {\n    for Job { variant } in jobs {\n        let _ = variant;\n    }\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.
