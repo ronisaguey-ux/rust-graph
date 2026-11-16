@@ -2303,6 +2303,34 @@ impl<'a> Parser<'a> {
         }
         let line = stmt[0].line;
         let rest = &stmt[start + 1..];
+        // `using var ms = new MemoryStream();` and `using Socket s = …` are
+        // using *statements*, not directives, and `using (…)` is a scope. Read
+        // as an import they produced a module nothing could mean
+        // (`varms`, `Socketsocket`) and 294 lost rows on one C# corpus alone.
+        // A directive is a dotted name, an optional `static` or `alias =`,
+        // and nothing else.
+        if self.lang.tag == "CS" && word == "using" {
+            let mut last_ident = false;
+            for token in rest {
+                if self.is_op(token, b";") {
+                    break;
+                }
+                if self.is_op(token, b"(") {
+                    return false;
+                }
+                if token.kind == Kind::Ident && self.raw(token) == b"static" {
+                    continue;
+                }
+                if matches!(token.kind, Kind::Ident | Kind::Str) {
+                    if last_ident {
+                        return false;
+                    }
+                    last_ident = true;
+                } else if matches!(token.kind, Kind::Op) {
+                    last_ident = false;
+                }
+            }
+        }
         let strings: Vec<&Token> = rest.iter().filter(|token| token.kind == Kind::Str).collect();
         if !strings.is_empty() {
             for (index, token) in rest.iter().enumerate() {
@@ -2323,6 +2351,14 @@ impl<'a> Parser<'a> {
         let mut index = 0;
         while let Some(token) = rest.get(index) {
             match token.kind {
+                // `using Test = Xunit.FactAttribute;`: the name in front of
+                // the `=` is the alias, not the module. Read as a break it left
+                // the module as the alias's own name, and every aliased using
+                // in the C# corpus disagreed with the tree that reads it right.
+                Kind::Op if self.lang.tag == "CS" && !module.is_empty() && alias.is_empty() && self.is_op(token, b"=") => {
+                    alias = module.clone();
+                    module.clear();
+                }
                 Kind::Ident if self.raw(token) == b"as" => {
                     alias = self.word_at(rest, index + 1).unwrap_or_default();
                     index += 1;

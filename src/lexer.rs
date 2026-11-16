@@ -550,7 +550,14 @@ impl<'a> Lexer<'a> {
             }
             return token;
         }
-        if byte == b'#' && first_on_line && self.lang.imports == Imports::Include {
+        // `#region License`, `#nullable disable`: a C# preprocessor line is
+        // layout exactly as an include is. Left as tokens it swallowed the
+        // statement that followed it - `#region License … namespace X` came out
+        // as one event on line 1 of nearly every file in the corpus.
+        if byte == b'#'
+            && first_on_line
+            && (self.lang.imports == Imports::Include || self.lang.tag == "CS")
+        {
             self.skip_to_newline();
             return self.token(Kind::Directive, start, line, col);
         }
