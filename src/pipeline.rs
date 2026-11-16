@@ -1653,6 +1653,7 @@ return verdict(Some("symbol"), detail, accepted);
                 if !lines.is_empty()
                     && (is_declaration_line(&lines, call.line)
                         || is_method_declaration_line(&lexer.tag, &lines, call.line)
+                        || is_member_signature_line(&lexer.tag, &lines, call.line, &name)
                         // `error?: (e: any) => void`, `readonly x: T`,
                         // `constructor(...): Base`: a `.d.ts` member declares
                         // a type, and the lexer reads the property word as a
@@ -2580,6 +2581,96 @@ fn is_method_declaration_line(tag: &str, src: &Lines<'_>, line: u32) -> bool {
     // A function-typed return is still a signature: `f(x: unknown): (y:
     // unknown) => y is string;` contains `=>`, and the arrow is not an
     // assignment, so it must not disqualify the line.
+    let without_arrows = rest.replace("=>", ">");
+    rest.starts_with(':') && !without_arrows.contains('=') || rest.starts_with('{')
+}
+
+/// The parameter list the callee writes itself, when something else on the line
+/// opens a parenthesis first: `{ has(o: any): boolean }` behind a union type, and
+/// `setState<K extends keyof import("./t").S>(state)` behind its type arguments.
+/// `is_method_declaration_line` reads the head of the line, so both were calls of
+/// a member the source declares.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_member_signature_line(tag: &str, src: &Lines<'_>, line: u32, name: &str) -> bool {
+    // Only TypeScript writes a member this way: a name, its parameters, then a
+    // `:` and the type.
+    if !matches!(tag, "TS" | "TSX") || name.is_empty() {
+        return false;
+    }
+    let limit = 64;
+    let lines: Vec<&str> = src.lines().skip(line.saturating_sub(1) as usize).take(limit).collect();
+    let Some(first) = lines.first() else {
+        return false;
+    };
+    let text = first.trim_start();
+    let joined: String = lines.iter().map(|l| l.trim_start()).collect::<Vec<_>>().join("\n");
+    let mut at = 0usize;
+    while let Some(found) = text[at..].find(name) {
+        let start = at + found;
+        at = start + name.len();
+        // Only a member position starts a signature. `? foo(x) : bar` is a
+        // ternary, `.foo(x)` is a receiver's call, and neither declares one.
+        let before = text[..start].trim_end();
+        if !(before.is_empty() || before.ends_with('{') || before.ends_with(';') || before.ends_with(',')) {
+            continue;
+        }
+        if is_member_signature_at(&joined, start, name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `name<T>(params): T;` starting at `name_at` in `joined`: a declaration, not a
+/// call. The type-argument list belongs to the name, so the parentheses that
+/// matter are the ones after its closing `>`.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_member_signature_at(joined: &str, name_at: usize, name: &str) -> bool {
+    let bytes = joined.as_bytes();
+    let mut at = name_at + name.len();
+    if bytes.get(at) == Some(&b'<') {
+        let mut angle = 0i32;
+        loop {
+            let Some(&byte) = bytes.get(at) else { return false };
+            match byte {
+                b'<' => angle += 1,
+                b'>' => {
+                    angle -= 1;
+                    if angle == 0 {
+                        at += 1;
+                        break;
+                    }
+                }
+                b';' | b'}' => return false,
+                _ => {}
+            }
+            at += 1;
+        }
+    }
+    if bytes.get(at) != Some(&b'(') {
+        return false;
+    }
+    let mut depth = 0i32;
+    let mut close = None;
+    for index in at..bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            b';' if depth == 0 => break,
+            _ => {}
+        }
+    }
+    let Some(close) = close else { return false };
+    let rest: String =
+        joined[close + 1..].trim_start().chars().take_while(|&ch| ch != ';' && ch != '\n').collect();
+    let rest = rest.trim();
+    // A function-typed return writes `=>`, which is not an assignment.
     let without_arrows = rest.replace("=>", ">");
     rest.starts_with(':') && !without_arrows.contains('=') || rest.starts_with('{')
 }

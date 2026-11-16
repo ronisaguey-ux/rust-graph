@@ -130,6 +130,31 @@ const COVERAGE: &[(&str, &str)] = &[
 /// Constructs the reader does not cover yet, with the exact disagreement.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[];
 
+/// Rows that need the source in hand: the guard excuses them by reading the
+/// line the fact sits on, so they can only be compared through `loses_in`.
+const LINE_ROWS: &[(&str, &str)] = &[
+    (
+        "a member signature whose line is opened by another group: has(o: any) in a union type",
+        "export declare function f(\n    state: (new (...args: any[]) => unknown) | { has(o: any): boolean },\n    receiver: unknown,\n): boolean;\n",
+    ),
+    (
+        "a generic method signature whose type argument calls import(): setState<K extends keyof import(…).S>",
+        "declare class Chart {\n    setState<K extends keyof import(\"./types\").State>(state: import(\"./types\").State, callback?: () => void): void;\n}\n",
+    ),
+];
+
+#[test]
+fn a_line_that_declares_a_member_is_not_a_call() {
+    let mut failed: Vec<String> = Vec::new();
+    for (name, source) in LINE_ROWS {
+        let verdict = pipeline::loses_in(&lexer_facts(source), &deep_facts(source), source);
+        if verdict.lost() {
+            failed.push(format!("{name}: {verdict:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "the TS reader falls back on {} row(s):\n{}", failed.len(), failed.join("\n"));
+}
+
 
 #[test]
 fn every_claimed_typescript_construct_reads_the_same_on_both_paths() {
