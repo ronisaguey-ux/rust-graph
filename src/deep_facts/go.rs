@@ -1542,6 +1542,11 @@ impl<'a> Walker<'a> {
         match kind {
             "import_declaration" if self.kinds.family == Family::Go => self.go_import(id),
             "import_declaration" if self.kinds.family == Family::Java => self.java_import(id),
+            // C# writes `using System.Collections.Generic;`, `using static
+            // System.Math;` and `using Alias = Some.Type;`. Every one of them
+            // was invisible: nothing matched `using_directive`, so a corpus of
+            // 22k files lost its imports on almost every file.
+            "using_directive" | "global_using_directive" => self.cs_using(id),
             "import_statement" | "import_from_statement" => {
                 if self.is_js() {
                     self.js_import(id);
@@ -1604,6 +1609,34 @@ impl<'a> Walker<'a> {
                 .unwrap_or_else(|| module.rsplit('/').next().unwrap_or(&module).to_string());
             self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
         }
+    }
+
+    /// `using System.Collections.Generic;` and its two variants.
+    ///
+    /// The lexer reads the same line and files the last segment as the alias
+    /// when no `as`-style name is spelled, so the alias is written here the same
+    /// way: the records have to mean the same thing for the guard to keep the
+    /// tree.
+    pub(crate) fn cs_using(&mut self, id: u32) {
+        let line = self.line(id);
+        let raw = self.text_string(id);
+        let text = raw.trim().trim_end_matches(';').trim();
+        let text = text.strip_prefix("global ").unwrap_or(text).trim();
+        let text = text.strip_prefix("using ").unwrap_or(text).trim();
+        let text = text.strip_prefix("static ").unwrap_or(text).trim();
+        let (alias, module) = match text.split_once('=') {
+            Some((alias, module)) => (alias.trim().to_string(), module.trim().to_string()),
+            None => (String::new(), text.to_string()),
+        };
+        if module.is_empty() {
+            return;
+        }
+        let alias = if alias.is_empty() {
+            module.rsplit('.').next().unwrap_or("").to_string()
+        } else {
+            alias
+        };
+        self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
     }
 
     /// `import java.util.List;` binds the last segment; `import java.io.*;`
