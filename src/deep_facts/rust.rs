@@ -202,6 +202,18 @@ impl<'a> Walker<'a> {
                 }
                 true
             }
+            // `sched_to_start_impl!(scheduled_time);` where an item goes: an item
+            // carries no statement event, so the line the one-pass reader writes
+            // as the macro's name and its argument words had no event at all
+            // (000965_mod.rs:2721).
+            "macro_invocation_item" => {
+                let line = self.line(id);
+                let value = self.rust_macro(id);
+                if value != "0" {
+                    self.event(&format!("[\"x\",{line},{value}]"));
+                }
+                true
+            }
             "let_declaration" => {
                 self.rust_let(id);
                 true

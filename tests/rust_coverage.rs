@@ -208,6 +208,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "a multi-line literal: a field on its own line after an if let (000930_worker.rs:488)",
         "fn f(ctx: C) -> S {\n    S {\n        a: 1,\n        b: match ctx.v() {\n            0 => 2,\n            _ => 3,\n        },\n        c: ctx.sticky(),\n    }\n}\n",
     ),
+    (
+        "a macro item where an item goes (000965_mod.rs:2721)",
+        "impl S {\n    sched_to_start_impl!(scheduled_time);\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.
