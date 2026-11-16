@@ -692,7 +692,7 @@ impl<'a> Parser<'a> {
             let raw = self.raw(&last);
             if raw != b")"
                 && raw != b">"
-                && !(self.lang.tag == "RS" && raw == b">>")
+                && !(matches!(self.lang.tag, "RS" | "TS" | "TSX") && raw == b">>")
                 && raw != b"]"
                 && raw != b"}"
             {
