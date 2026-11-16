@@ -262,15 +262,20 @@ rust_graph_deep::grammar! { KOTLIN {
     _qualified_name: _name ("." (_name | "*"))*,
 
     modifiers: _modifier+,
-    _modifier: annotation | _modifier_word,
+    _modifier: annotation [LINE_END] | _modifier_word,
     _modifier_word:
         "public" | "private" | "protected" | "internal" | "abstract" | "final" | "open"
         | "sealed" | "data" | "value" | "inner" | "override" | "lateinit" | "const" | "suspend"
         | "inline" | "infix" | "operator" | "tailrec" | "external" | "annotation"
         | "vararg" | "noinline" | "crossinline" | "reified" | "expect" | "actual"
         | "dynamic" | "init" | "delegate",
-    annotation: "@" _annotation_target _qualified_name [annotation_arguments],
-    _annotation_target: [_name ":"],
+    annotation: "@" (&(_annotation_target) _annotation_target _qualified_name [annotation_arguments] | _qualified_name [annotation_arguments]),
+    /// A use-site target (`@file:`, `@get:`) is a name and a colon; nothing else
+    /// is one. It is guarded by a lookahead at the start of the alternative the
+    /// way C#'s `[return: ...]` is, because the optional form `[_name ":"]` took
+    /// `Service` in `@Service` as a target and then failed on the missing colon,
+    /// which cost every annotated declaration in the language.
+    _annotation_target: _name ":",
 
     // ---- declarations ----
 
@@ -959,6 +964,30 @@ mod tests {
     #[test]
     fn kotlin_malformed_fixtures_keep_the_root_and_report_inside_it() {
         fixtures::malformed("kotlin", &KOTLIN, MALFORMED);
+    }
+
+    #[test]
+    /// An annotation carries no statement end: `@Service` on its own line is
+    /// still the modifier of the declaration under it, and the use-site target
+    /// is only a target when a colon follows the name. `[_name ":"]` took
+    /// `Service` as a target and then failed on a colon that was never there,
+    /// which cost every annotated declaration in the language — 6 error nodes
+    /// and no class symbol for `@Service class S`.
+    #[test]
+    fn kotlin_annotations_parse_in_every_form() {
+        let rows = [
+            "class S {\n    fun read(): String = \"x\"\n}\n",
+            "@Service class S {\n    fun read(): String = \"x\"\n}\n",
+            "@Service\nclass S {\n    fun read(): String = \"x\"\n}\n",
+            "@Service\n@JvmStatic\nclass S {\n    fun read(): String = \"x\"\n}\n",
+            "@Service\n\nclass S {\n    fun read(): String = \"x\"\n}\n",
+            "class S {\n    @Transactional(readOnly = true)\n    fun read(): String = \"x\"\n}\n",
+            "@file:JvmName(\"X\")\nclass S\n",
+            "class S {\n    @get:JvmName(\"x\")\n    val a = 1\n}\n",
+        ];
+        for source in rows {
+            assert!(fixtures::clean(&KOTLIN, source), "{source:?}");
+        }
     }
 
     #[test]
