@@ -669,7 +669,22 @@ impl<'a> Lexer<'a> {
                     _ => 3,
                 }
             } else {
-                2
+                // A char literal's payload is one UTF-8 scalar, so its width is
+                // the lead byte's, not one byte: `'\u{2020}'` written literally is
+                // five bytes and a fixed width of two ended the literal before
+                // its quote, which left the character to be read as a name
+                // (001440:545, `const FOOTNOTE_MARKS: &[char]`).
+                let lead = self.peek(1);
+                let len = if lead >= 0xf0 {
+                    4
+                } else if lead >= 0xe0 {
+                    3
+                } else if lead >= 0xc0 {
+                    2
+                } else {
+                    1
+                };
+                1 + len
             };
             if self.peek(width) == b'\'' {
                 self.pos += width + 1;

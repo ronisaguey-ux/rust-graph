@@ -181,6 +181,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn f(client: H) {\n    client\n        .borrow()?\n        .core\n        .set(1);\n}\n",
     ),
     (
+        "char literals: an escaped scalar and a multi-byte one (001440:545)",
+        "fn f() -> usize {\n    let marks = &['*', '\\u{2020}', '†', '§'];\n    marks.len()\n}\n",
+    ),
+    (
         "a class binding: the variant itself, a call chain, try and parentheses",
         "fn f(m: Msg) {\n    let v = Value::Object(m);\n    let text = Value::Object(m).to_string();\n    let u = Value::Object(m)?;\n    let w = (Value::Object(m));\n}\n",
     ),
