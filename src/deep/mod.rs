@@ -73,6 +73,7 @@ pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
         "kt" | "kts" => Some(&batch_a::kotlin::KOTLIN),
         "scala" | "sc" => Some(&batch_b::scala::SCALA),
         "swift" => Some(&batch_b::swift::SWIFT),
+        "m" => Some(&batch_c::objc::OBJC),
         _ => None,
     }
 }

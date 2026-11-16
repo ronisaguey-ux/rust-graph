@@ -16,7 +16,7 @@ impl<'a> Walker<'a> {
     /// The runtime's language name for a C-family grammar. The grammar, not the
     /// lexer tag, is what decides: `CPP` is C++ here and nothing else.
     pub(crate) fn is_c(&self) -> bool {
-        matches!(self.language.name, "c" | "cpp")
+        matches!(self.language.name, "c" | "cpp" | "objc")
     }
 
     /// The C-family walk arm: the nodes whose name is not a child of a `Def`
