@@ -2424,13 +2424,22 @@ fn dotted_piece(text: &str) -> bool {
             }
             // `lambda x: f(x)`: the parameters and body form the lambda value.
             "lambda" | "lambda_parameter" | "lambda_star_parameter" | "lambda_parameters" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| {
+                        !self.is_layout(child)
+                            && !matches!(self.kind(child), "lambda" | ":" | "," | "=" | "*" | "**" | "/")
+                    })
+                    .collect();
                 let mut parts = Vec::new();
-                for child in self.children(id) {
-                    if self.is_layout(child) || matches!(self.kind(child), "lambda" | ":" | "," | "=" | "*" | "**" | "/") {
-                        continue;
-                    }
+                for (at, &child) in items.iter().enumerate() {
                     let value = self.form(child);
-                    if value != "0" {
+                    // `lambda x: ""` and `lambda: 0`: a body that is a literal
+                    // is the constant 0 and it is still the lambda's value.
+                    // Dropping every 0 left the parameter as the whole form, so
+                    // calendar's `_months.insert(0, lambda x: "")` lost the body.
+                    if value != "0" || at + 1 == items.len() {
                         parts.push(value);
                     }
                 }
