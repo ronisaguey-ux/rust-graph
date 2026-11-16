@@ -106,7 +106,7 @@ Known gaps (1):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (32):
+Covered (36):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
@@ -140,6 +140,10 @@ Covered (32):
 - a let-else whose else block diverges
 - a member chain across lines through the ? operator
 - a class binding: the variant itself, a call chain, try and parentheses
+- a statement where an item cannot go: a merge out of method bodies (001183_stochastics.rs:188)
+- for over a struct pattern: the brace is the pattern's (000942_workflow_future.rs:399)
+- a multi-line literal: a field on its own line after an if let (000930_worker.rs:488)
+- a macro item where an item goes (000965_mod.rs:2721)
 
 Known gaps (0):
 
