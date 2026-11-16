@@ -572,6 +572,15 @@ impl<'a> Walker<'a> {
                 pending.push((child, false));
             }
         }
+        // Objective-C headers declare their methods where the grammar has no
+        // node to hold them: `- (void)runBenchmark;` comes back as a macro call
+        // or nothing at all, so the line carried no event and every declaration
+        // in every header was a loss. The lexer reads the line's words - `void`
+        // in a return type is `0`, a pointer type contributes its name - and
+        // that is what the line says, so it is read from the line.
+        if self.facts.tag == "OBJC" {
+            self.objc_method_lines();
+        }
         // The lexer's `lines` is the line of its EOF token, which is one past
         // the last line break: `"a\n"` is two lines to it.
         let line = self.line_starts.len() as u32;
@@ -1505,6 +1514,85 @@ impl<'a> Walker<'a> {
     /// `true` for Kotlin: it is the only grammar here whose imports table
     /// carries the package clause, and the walk needs to know before it reads
     /// `property_declaration`, which Swift also uses.
+    /// The ObjC method declarations the CST could not hold: a line that opens
+    /// with `-` or `+` and is a declaration (no body) is read as `x` with its
+    /// words, and only where no other reader wrote an event.
+    fn objc_method_lines(&mut self) {
+        let mut taken: Vec<u32> = Vec::new();
+        for symbol in &self.facts.symbols {
+            let text = &symbol.events;
+            for marker in ["[\"x\",", "[\"a\","] {
+                let mut at = 0;
+                while let Some(found) = text[at..].find(marker) {
+                    let start = at + found + marker.len();
+                    let digits: String = text[start..].chars().take_while(|ch| ch.is_ascii_digit()).collect();
+                    if let Ok(line) = digits.parse::<u32>() {
+                        taken.push(line);
+                    }
+                    at = start;
+                }
+            }
+        }
+        let count = self.line_starts.len();
+        for index in 0..count {
+            let start = self.line_starts[index] as usize;
+            let end = self.line_starts.get(index + 1).map(|&at| at as usize).unwrap_or(self.src.len());
+            let line = index as u32 + 1;
+            if taken.contains(&line) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&self.src[start..end]);
+            let trimmed = text.trim();
+            let mut chars = trimmed.chars();
+            let sign = match chars.next() {
+                Some(ch @ ('-' | '+')) => ch,
+                _ => continue,
+            };
+            let _ = sign;
+            match chars.next() {
+                Some(' ') | Some('(') => {}
+                _ => continue,
+            }
+            if !trimmed.ends_with(';') {
+                continue;
+            }
+            let mut words: Vec<String> = Vec::new();
+            let mut word = String::new();
+            for ch in trimmed.chars() {
+                if ch.is_alphanumeric() || ch == '_' {
+                    word.push(ch);
+                } else if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            if !word.is_empty() {
+                words.push(word);
+            }
+            if words.len() < 2 {
+                continue;
+            }
+            let mut parts: Vec<String> = Vec::new();
+            let mut after_selector = false;
+            for word in &words {
+                if word == "void" && !after_selector {
+                    parts.push("0".to_string());
+                    continue;
+                }
+                if word == "void" {
+                    parts.push("0".to_string());
+                    continue;
+                }
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, word);
+                form.push(']');
+                parts.push(form);
+                after_selector = true;
+            }
+            let value = format!("[\"m\",[{}]]", parts.join(","));
+            self.lexer_event(b'x', line, &[], &value, false);
+        }
+    }
+
     pub(crate) fn is_kotlin(&self) -> bool {
         self.kinds.imports.iter().any(|kind| *kind == "package_header")
     }
