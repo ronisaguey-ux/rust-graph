@@ -104,6 +104,50 @@ release/musl binary):
 spelling the CST used to write, so nothing had to be re-pinned for it; the
 existing `tests/deep_facts.rs` rows still pass.
 
+## A trait object names its own types — **closed 2026-11-15**
+
+**The question.** `&dyn Fn(ElId, ElId) -> Vec<ElId>` is a type, and a type in a
+closure's parameter list reaches both readers as part of the closure's value.
+The lexer wrote every name in it — `Fn`, `ElId`, `Vec` — and the CST wrote only
+`dyn`: `function_trait`, the node the grammar builds for `Fn(…) -> T`, had no
+form, so it formed as the constant and the names inside it left the record. The
+file was then blamed for names the CST had dropped.
+
+**The reproduction.** One line, `/tmp/rgrepro1/a.rs`:
+
+```rust
+fn f() {
+    let stacked = |under: &dyn Fn(ElId, ElId) -> Vec<ElId>| { d() };
+}
+```
+
+The lexer wrote `m:[n:under,n:dyn,n:Fn.Vec,n:ElId]`, the CST
+`m:[n:under,m:[n:dyn]]`.
+
+**The reading that lost, with its number.** Leaving `function_trait` unread:
+rust **36** files and 39 losses of 1,816, six of them closures whose parameter is
+a `dyn Fn`.
+
+**The reading that won.** A `function_trait` forms as the merge of its children,
+the same shape `dynamic_type` already gives its bounds. One arm in
+`src/deep_facts/rust.rs`; the node is only ever built by Rust's type grammar, so
+no other language can reach it.
+
+**Measured, on the four corpora, before and after** (`tools/loss_count.py`,
+release/musl binary):
+
+| corpus | before | after |
+| --- | ---: | ---: |
+| js | 5 / 1854 (7 losses) | 5 / 1854 (7) |
+| ts | 36 / 2000 (19) | 36 / 2000 (19) |
+| python | 8 / 568 (8) | 8 / 568 (8) |
+| rust | 36 / 1816 (39) | **28 / 1816 (31)** |
+
+**Closed by** the `function_trait` arm, in the commit that carries this section.
+The argument list of the trait (`Fn(ElId, ElId)`) still forms as the constant, so
+a name that appears *only* in the argument list is not yet in the record; nothing
+in the corpus asks for it, and saying so here is cheaper than guessing.
+
 ## Still open
 
 The codes, counts and owning modules are regenerated into

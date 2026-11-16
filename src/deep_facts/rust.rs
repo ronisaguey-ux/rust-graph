@@ -698,6 +698,16 @@ impl<'a> Walker<'a> {
                 }
                 Some(format!("[\"m\",[{}]]", parts.join(",")))
             }
+            // `dyn Fn(usize) -> bool`, `impl Fn(&mut Value)`: the trait names a
+            // type and its parameters name types, and the lexer writes all of
+            // them — `Fn`, `usize`, `bool`. With no arm here the node formed as
+            // the constant and every one of those names left the record, so a
+            // closure whose parameter is a `dyn Fn(..)` was blamed for names the
+            // CST had dropped.
+            "function_trait" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                Some(if items.is_empty() { "0".to_string() } else { self.merge_form(&items) })
+            }
             "let_declaration" => {
                 let mut parts = Vec::new();
                 let children = self.children(id);
