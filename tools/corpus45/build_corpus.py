@@ -106,6 +106,13 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
         ("yykit", "https://github.com/ibireme/YYKit", "master", ""),
         ("reactiveobjc", "https://github.com/ReactiveCocoa/ReactiveObjC", "master", ""),
         ("afnetworking", "https://github.com/AFNetworking/AFNetworking", "master", "AFNetworking"),
+        # Two repos capped the language at 66 files. These four are the
+        # standard Objective-C application libraries (a HUD, a reactive
+        # runtime, an image loader, a UI toolkit) and take it past 100.
+        ("mbprogresshud", "https://github.com/jdg/MBProgressHUD", "master", ""),
+        ("reactiveobjc", "https://github.com/ReactiveCocoa/ReactiveObjC", "master", "ReactiveObjC"),
+        ("sdwebimage", "https://github.com/SDWebImage/SDWebImage", "master", "SDWebImage"),
+        ("yykit", "https://github.com/ibireme/YYKit", "master", "YYKit"),
     ]),
     "php": ([".php"], [
         ("php-src", "https://github.com/php/php-src", "master", "ext"),
