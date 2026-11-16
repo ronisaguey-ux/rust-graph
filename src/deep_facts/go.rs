@@ -3107,6 +3107,13 @@ impl<'a> Walker<'a> {
                 out.push(',');
             }
             first = false;
+            // `ArgumentNotNull(value, nameof(value))`: `nameof(…)` is a call to
+            // the lexer wherever it is written, and only an initialiser was
+            // read for it - every guard clause in the C# corpus lost it.
+            if kind == "nameof_expression" {
+                let line = self.line(child);
+                self.push_call("nameof".to_string(), line);
+            }
             // Go and Java do not use `form`: an argument that is itself a call
             // (`path.Join(os.Getenv(..))`) would come back as `0`.
             let value = if ellipsis {
