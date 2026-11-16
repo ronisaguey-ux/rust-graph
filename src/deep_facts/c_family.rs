@@ -110,8 +110,26 @@ impl<'a> Walker<'a> {
                 let mut inits = Vec::new();
                 self.c_initializers(id, &mut inits);
                 if !inits.is_empty() {
-                    for (name, node, line) in inits {
+                    // `char *a=0, *b=0, *c=0;`: the lexer unpacks the declarator
+                    // list and keeps the later names as elements of the first
+                    // binding's value - `t:[0,n:b,n:c]` - so writing one
+                    // assignment per declarator left the first one unequal on
+                    // every multi-declarator statement in the corpus.
+                    let first = inits[0].clone();
+                    if inits.len() == 1 {
+                        let (name, node, line) = first;
                         self.assignment_parts(vec![name], node, line, false);
+                    } else {
+                        let (name, node, line) = first;
+                        let mut parts = vec![self.form(node)];
+                        for (other, _, _) in &inits[1..] {
+                            let mut form = "[\"n\",".to_string();
+                            push_string(&mut form, other);
+                            form.push(']');
+                            parts.push(form);
+                        }
+                        let value = format!("[\"t\",[{}]]", parts.join(","));
+                        self.lexer_event(b'a', line, &[name], &value, false);
                     }
                 } else if form != "0" {
                     let line = self.line(id);
@@ -158,6 +176,14 @@ impl<'a> Walker<'a> {
         for child in self.children(id) {
             match self.kind(child) {
                 "declaration_specifiers" => continue,
+                // `static const uint32_t k = 235;` with a type the grammar does
+                // not know becomes a `specified_user_declaration` inside the
+                // statement, so the declarator and its initialiser were never
+                // seen and the line lost its assignment.
+                "specified_user_declaration" => {
+                    self.c_initializers(child, out);
+                    continue;
+                }
                 "direct_declarator" => {
                     pending = self.declarator_of(child);
                     continue;
@@ -168,7 +194,11 @@ impl<'a> Walker<'a> {
                 continue;
             }
             if let Some(name) = pending.take() {
-                let line = self.line(id);
+                // The lexer files the assignment on the line the initialiser is
+                // written on: `static const uint32_t\n  k2 = 235;` is line 2
+                // there, and the declaration's own first line wrote an event
+                // nothing could pair (38 rows of the C corpus).
+                let line = self.line(child);
                 out.push((name, child, line));
             }
         }
