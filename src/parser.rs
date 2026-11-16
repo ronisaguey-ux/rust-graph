@@ -2229,6 +2229,15 @@ impl<'a> Parser<'a> {
             self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
             return true;
         };
+        // `webidl ??= require('internal/crypto/webidl')`: a conditional or
+        // compound assignment updates a value the program already has, so it
+        // creates no binding and the target does not name the module. Only `=`
+        // initializes one; the CST records the module without an alias here
+        // (measured: node's webcrypto.js).
+        if !self.is_op(&stmt[equal], b"=") {
+            self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
+            return true;
+        }
         let targets = &stmt[..equal];
         // `require('npmlog').level = 'warn'` writes a property of the module:
         // the target IS the require call, so `level` is not a binding and the

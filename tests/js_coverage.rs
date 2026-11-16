@@ -121,6 +121,14 @@ const COVERAGE: &[(&str, &str)] = &[
         "export { a as b } from './m';\nexport * as api from './n';\nconst is = require('./is');\nconst { x, y: z } = require('./xy');\nconst get = require('./get');\n",
     ),
     (
+        "a require returned from a getter body inside an object literal",
+        "const api = mergeExports(resolve, {\n  get X() {\n    return require('./X');\n  },\n});\n",
+    ),
+    (
+        "a require behind a conditional or compound assignment",
+        "let m;\nm ??= require('./m');\nm ||= require('./n');\n",
+    ),
+    (
         "generators and yield",
         "function* gen(xs) {\n  for (const x of xs) {\n    yield x;\n  }\n}\n",
     ),
