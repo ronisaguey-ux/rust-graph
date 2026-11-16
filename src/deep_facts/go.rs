@@ -166,7 +166,29 @@ impl<'a> Walker<'a> {
             return true;
         }
         self.assignment_parts(vec![target], value, line, false);
+        // `new P { Name = new S(name, false) }`: the outer creation is the
+        // value, and each creation inside the initialiser is a call of its own.
+        // Read as part of the value's form they were never recorded.
+        let mut nested = Vec::new();
+        for child in self.children(value) {
+            self.c_calls_in_pub(child, &mut nested);
+        }
+        for call in nested {
+            self.form(call);
+        }
         true
+    }
+
+    /// Every call inside `id`, for readers that own the node in another file.
+    pub(crate) fn c_calls_in_pub(&self, id: u32, out: &mut Vec<u32>) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "call_expression" | "invocation_expression" | "object_creation" | "object_creation_expression"
+                | "method_invocation" => out.push(child),
+                "lambda_expression" | "class_specifier" | "function_definition" | "compound_statement" | "block" => {}
+                _ => self.c_calls_in_pub(child, out),
+            }
+        }
     }
 
     /// `var Constructor = CreateParameterizedConstructor(t);`: the lexer files
@@ -3013,7 +3035,8 @@ impl<'a> Walker<'a> {
             // call is named by the member alone. Read through the default arm
             // it had no name at all, so the call the lexer records was missing.
             "implicit_member_expression" => (self.member_name(callee), "0".to_string()),
-            "attribute" | "member_expression" | "member_access_expression" | "member_access" | "navigation_expression" => {
+            "attribute" | "member_expression" | "member_access_expression" | "member_access"
+            | "conditional_member_access" | "navigation_expression" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
                 let object = children.first().copied();
@@ -3232,7 +3255,9 @@ impl<'a> Walker<'a> {
             // `JObject.Parse`: the C# grammar spells a member access with two
             // name leaves, and read as a leaf the whole receiver vanished -
             // every call through a type in the corpus lost its dotted name.
-            "attribute" | "member_expression" | "member_access" => {
+            // `_reader?.Close()` - the null-conditional member access names the
+            // same path as a plain one.
+            "attribute" | "member_expression" | "member_access" | "conditional_member_access" => {
                 let children = self.children(id);
                 let name = self.member_name(id);
                 let base = children.first().map(|&child| self.path_of(child)).unwrap_or_default();

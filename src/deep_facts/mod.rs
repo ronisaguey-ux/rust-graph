@@ -819,6 +819,73 @@ impl<'a> Walker<'a> {
         if self.is_c() && self.enter_c(id) {
             return;
         }
+        // `public abstract T Create(Type objectType);` in an interface or an
+        // abstract class has no body: the grammar calls it a declaration and
+        // the lexer reads a call, so every abstract member of the corpus lost
+        // one. Read before the definition table claims the node.
+        if kind == "method_declaration"
+            && self.kinds.calls.contains(&"object_creation_expression")
+            && !self.has_kind(id, &["block"])
+        {
+            let children = self.children(id);
+            let name = children
+                .iter()
+                .copied()
+                .take_while(|&child| !matches!(self.kind(child), "parameter_list" | "formal_parameters"))
+                .filter(|&child| self.kind(child) == "identifier")
+                .last()
+                .map(|node| self.text_string(node));
+            if let Some(name) = name {
+                let line = self.line(id);
+                let index = self.push_call(name, line);
+                // The line is an `x` event whose last element is that call,
+                // with every parameter read as one merge of its words:
+                // `m:[n:public,n:abstract,n:T,c(0;[m:[n:Type,n:objectType]])]`.
+                let mut parts: Vec<String> = Vec::new();
+                for child in &children {
+                    if matches!(self.kind(*child), "parameter_list" | "formal_parameters") {
+                        break;
+                    }
+                    for word in self.c_words_of(*child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &word);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                }
+                let mut args: Vec<String> = Vec::new();
+                if let Some(list) = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "parameter_list" | "formal_parameters"))
+                {
+                    for parameter in self.children(list) {
+                        let words = self.c_words_of(parameter);
+                        if words.is_empty() {
+                            continue;
+                        }
+                        let inner: Vec<String> = words
+                            .iter()
+                            .map(|word| {
+                                let mut form = String::from("[\"n\",");
+                                push_string(&mut form, word);
+                                form.push(']');
+                                form
+                            })
+                            .collect();
+                        args.push(format!("[\"m\",[{}]]", inner.join(",")));
+                    }
+                }
+                let call = format!("[\"c\",{index},0,[{}]]", args.join(","));
+                if parts.is_empty() {
+                    parts.push(call);
+                } else {
+                    parts.push(call);
+                }
+                let value = format!("[\"m\",[{}]]", parts.join(","));
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
+        }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
             self.open_definition(id, def);
             return;
