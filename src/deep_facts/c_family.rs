@@ -79,6 +79,14 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            // `__attribute__((__may_alias__))`, `__attribute__((visibility("hidden")))`:
+            // the lexer reads the attribute as a call of the token and nothing
+            // read the node, so every attributed typedef and prototype in musl
+            // lost a call.
+            "attribute" => {
+                let line = self.line(id);
+                self.push_call("__attribute__".to_string(), line);
+            }
             "namespace_definition" => self.c_namespace(id),
             // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
             // grammar gives it a declaration node, and nothing read it.
