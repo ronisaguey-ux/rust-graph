@@ -234,7 +234,7 @@ const KT_DEFS: &[Def] = &[
     Def { kind: "function_declaration", name: &["function_head"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 const KT_CALLS: &[&str] = &["call_expression"];
-const KT_IMPORTS: &[&str] = &["import_header"];
+const KT_IMPORTS: &[&str] = &["import_header", "package_header"];
 
 const SC_DEFS: &[Def] = &[
     Def { kind: "class_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },

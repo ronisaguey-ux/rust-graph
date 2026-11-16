@@ -1547,6 +1547,12 @@ impl<'a> Walker<'a> {
             // was invisible: nothing matched `using_directive`, so a corpus of
             // 22k files lost its imports on almost every file.
             "using_directive" | "global_using_directive" => self.cs_using(id),
+            // `import org.gradle.api.Project` and `import io.ktor.http as kt`:
+            // the Kotlin grammar gives every one its own node, nothing matched
+            // it, and 2539 files of the kotlin corpus lost their import - most
+            // of them lost nothing else.
+            "import_header" => self.kt_import(id),
+            "package_header" => self.kt_package(id),
             "import_statement" | "import_from_statement" => {
                 if self.is_js() {
                     self.js_import(id);
@@ -1674,6 +1680,63 @@ impl<'a> Walker<'a> {
             }
             index += 1;
         }
+    }
+
+    /// `import a.b.C` and `import a.b.C as D`: one module, and the alias the
+    /// lexer files — the name after `as`, or the last segment when none is
+    /// spelled.
+    pub(crate) fn kt_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut parts: Vec<String> = Vec::new();
+        let mut alias: Option<String> = None;
+        let mut after_as = false;
+        for child in self.children(id) {
+            let kind = self.kind(child);
+            if kind == "as" {
+                after_as = true;
+                continue;
+            }
+            if !matches!(kind, "identifier") && !self.kinds.soft.contains(&kind) {
+                continue;
+            }
+            let text = self.text_string(child);
+            if after_as {
+                alias = Some(text);
+            } else {
+                parts.push(text);
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        let module = parts.join(".");
+        // `import a.b.*`: a star import binds no name, and the lexer files it
+        // with an empty alias rather than the last segment.
+        let star = self.text_string(id).trim_end().ends_with('*');
+        let alias = alias.unwrap_or_else(|| if star { String::new() } else { parts.last().cloned().unwrap_or_default() });
+        let kind = if star { IMPORT_STAR } else { IMPORT_MODULE };
+        self.facts.imports.push(Import { line, module, alias, kind, ..Import::default() });
+    }
+
+    /// `package a.b`: the lexer files the clause as one event whose value is the
+    /// keyword and the dotted name; nothing wrote it, and a Kotlin file with a
+    /// package clause lost the first line of most of them.
+    pub(crate) fn kt_package(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut parts: Vec<String> = Vec::new();
+        for child in self.children(id) {
+            let kind = self.kind(child);
+            if matches!(kind, "identifier") || self.kinds.soft.contains(&kind) {
+                parts.push(self.text_string(child));
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        let mut text = format!("[\"x\",{line},[\"m\",[[\"n\",\"package\"],[\"n\",");
+        push_string(&mut text, &parts.join("."));
+        text.push_str("]]]]");
+        self.event(&text);
     }
 
     /// The bindings of a `from ... import` clause, in order. `from m import
