@@ -230,6 +230,71 @@ impl<'a> Walker<'a> {
                 return false;
             }
             "namespace_definition" => self.c_namespace(id),
+            // `robj *bitroarCreate(void);`: a pointer return whose type the
+            // grammar does not know is a `user_pointer_declaration`, and only
+            // the declaration path read it - it never filed the call, so every
+            // redis-style prototype on an unknown type lost it (10 files).
+            "user_pointer_declaration" => {
+                if self.child_of_kind(id, "parameter_list").is_some() {
+                    if let Some(name) = self
+                        .children(id)
+                        .into_iter()
+                        .find(|&child| self.kind(child) == "identifier")
+                    {
+                        let name = self.text_string(name);
+                        if !name.is_empty() {
+                            let line = self.line(id);
+                            let index = self.push_call(name.clone(), line);
+                            // The line is `m:[n:robj,c(0;[0])]` to the lexer.
+                            let text = self.text_string(id);
+                            let mut names: Vec<String> = Vec::new();
+                            let mut rest = text.trim_start();
+                            while let Some(word) = leading_word(rest) {
+                                if word == name {
+                                    break;
+                                }
+                                if word != "void" {
+                                    names.push(word.to_string());
+                                }
+                                rest = rest[word.len()..].trim_start();
+                            }
+                            let mut args: Vec<String> = Vec::new();
+                            if let Some(list) = self.child_of_kind(id, "parameter_list") {
+                                let mut group: Vec<String> = Vec::new();
+                                for child in self.children(list) {
+                                    if self.kind(child) == "," {
+                                        args.push(self.c_param_form(&group));
+                                        group.clear();
+                                        continue;
+                                    }
+                                    group.extend(self.c_words_of(child));
+                                }
+                                args.push(self.c_param_form(&group));
+                            }
+                            let args: Vec<String> =
+                                args.into_iter().filter(|arg| !arg.is_empty()).collect();
+                            let call = format!("[\"c\",{index},0,[{}]]", args.join(","));
+                            let mut parts: Vec<String> = names
+                                .iter()
+                                .map(|name| {
+                                    let mut part = String::from("[\"n\",");
+                                    push_string(&mut part, name);
+                                    part.push(']');
+                                    part
+                                })
+                                .collect();
+                            parts.push(call);
+                            self.lexer_event(
+                                b'x',
+                                line,
+                                &[],
+                                &format!("[\"m\",[{}]]", parts.join(",")),
+                                false,
+                            );
+                        }
+                    }
+                }
+            }
             // `return (void *)a_cas((volatile int *)p, (int)t, (int)s);`: the
             // call sits behind a cast and nothing descended into that node, so
             // every cast-receiver call in musl lost its call (3 shapes, 8 rows).
@@ -839,6 +904,18 @@ impl<'a> Walker<'a> {
         let Some(last) = group.last() else { return String::new() };
         if last == "..." || (group.len() == 1 && last == "void") {
             return "0".to_string();
+        }
+        if group.len() > 1 {
+            let parts: Vec<String> = group
+                .iter()
+                .map(|word| {
+                    let mut part = String::from("[\"n\",");
+                    push_string(&mut part, word);
+                    part.push(']');
+                    part
+                })
+                .collect();
+            return format!("[\"m\",[{}]]", parts.join(","));
         }
         let mut form = String::from("[\"n\",");
         push_string(&mut form, last);
