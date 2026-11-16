@@ -978,7 +978,11 @@ impl<'a> Walker<'a> {
             // Swift writes its attributes with the same shape under another
             // name: `@inline(never)`, `@_spi(Formatting)`, `@_semantics(…)`.
             // The lexer reads each as a call of its name.
-            "attribute" if self.kinds.family == Family::Plain => {
+            // Swift and Scala write attributes with this node; Python's `attribute`
+            // (a dotted name like `asyncio.open_connection`) is the same kind, so an
+            // unguarded arm pushed a call named after the receiver - the python fixture
+            // async_worker.py reported deep-only calls asyncio|7 and item|37.
+            "attribute" if matches!(self.language.name, "swift" | "scala") => {
                 if let Some(node) = self.children(id).into_iter().find(|&child| matches!(self.kind(child), "identifier")) {
                     let name = self.text_string(node);
                     let line = self.line(id);
