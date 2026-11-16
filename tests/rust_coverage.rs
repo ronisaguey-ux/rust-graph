@@ -181,6 +181,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn f(client: H) {\n    client\n        .borrow()?\n        .core\n        .set(1);\n}\n",
     ),
     (
+        "a block that opens with a use names nothing (001538:189)",
+        "fn f(b: &[u8]) -> String {\n    let d = {\n        use sha2::Digest;\n        let mut h = New::new();\n        h.update(b);\n        finish(h)\n    };\n    d\n}\n",
+    ),
+    (
         "char literals: an escaped scalar and a multi-byte one (001440:545)",
         "fn f() -> usize {\n    let marks = &['*', '\\u{2020}', '†', '§'];\n    marks.len()\n}\n",
     ),
