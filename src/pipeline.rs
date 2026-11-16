@@ -2953,6 +2953,13 @@ fn is_pattern_call(src: &Lines<'_>, name: &str, line: u32) -> bool {
             if nested.starts_with('=') && !nested.starts_with("==") && text[..start].contains("let") {
                 return true;
             }
+            // `Ok(helper.map(|Helper(external)| external))`: the list the lexer
+            // read as arguments is a closure's parameter pattern, and the `|`
+            // that follows it closes the parameter list. A pattern binds; it
+            // does not call.
+            if tail.starts_with('|') && !tail.starts_with("||") && closure_parameter(text, start) {
+                return true;
+            }
         } else {
             // The pattern's own bracket closes on a later line, so the words
             // that follow it are not on this line either.
@@ -2963,6 +2970,33 @@ fn is_pattern_call(src: &Lines<'_>, name: &str, line: u32) -> bool {
         from = start;
     }
     wide_pattern(src, line, name)
+}
+
+/// Whether `name` sits inside a closure's parameter list: `|Helper(x)|`. The
+/// `|` that closes the list is read by the caller, so this reads back from it:
+/// the pipe that opens the list must not follow a value (`a | f(x)` is bitwise
+/// or), and only parameter-list words may sit between it and the name.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn closure_parameter(text: &str, name_at: usize) -> bool {
+    let Some(open) = text[..name_at].rfind('|') else {
+        return false;
+    };
+    let before = text[..open].trim_end();
+    // `||` is an empty parameter list, which has no name inside it, and a pipe
+    // after a value is the operator.
+    let starts_list = match before.chars().next_back() {
+        None => true,
+        Some(ch) => matches!(ch, '(' | '[' | '{' | ',' | '=' | '&' | '>'),
+    } || before.ends_with("move")
+        || before.ends_with("async")
+        || before.ends_with("return");
+    // Between the opener and the name there are only other parameters: a word,
+    // a comma, a reference marker, a space — never a `)`, which would mean the
+    // pattern is inside a call instead.
+    starts_list
+        && text[open + 1..name_at]
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | ',' | '&' | ' ' | '\t'))
 }
 
 /// The same question for a pattern whose tail is not on the call's own line: a

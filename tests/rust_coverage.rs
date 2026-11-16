@@ -308,3 +308,20 @@ fn every_known_rust_gap_still_fails() {
         assert!(verdict.lost(), "{name} reads cleanly now — move it up to COVERAGE ({why})");
     }
 }
+
+/// A closure's parameter list is a pattern, not a call (`000965_mod.rs:438`,
+/// `helper.map(|Helper(external)| external)`). The one-pass reader writes
+/// `Helper(external)` as a call; the source says it is a parameter, so the
+/// guard needs the line — this uses the `loses_in` entry point, which has the
+/// source, rather than the coverage table, which only has the two records.
+#[test]
+fn a_closure_parameter_pattern_is_not_a_call() {
+    let source = "fn f(h: H) {\n    Ok(h.map(|Helper(external)| external))\n}\n";
+    let verdict = pipeline::loses_in(&lexer_facts(source), &deep_facts(source), source);
+    assert!(!verdict.lost(), "{verdict:?}");
+    assert_eq!(verdict.accepted().positional_calls, 1);
+    // The same words outside a parameter list are still a call.
+    let other = "fn f(a: A, b: B, c: C) {\n    let v = a | b(x) | c;\n}\n";
+    let verdict = pipeline::loses_in(&lexer_facts(other), &deep_facts(other), other);
+    assert_eq!(verdict.accepted().positional_calls, 0, "b(x) between pipes is a call, not a pattern");
+}
