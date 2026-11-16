@@ -223,7 +223,7 @@ const CS_DEFS: &[Def] = &[
     Def { kind: "delegate_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
     Def { kind: "local_function_statement", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
-const CS_CALLS: &[&str] = &["invocation_expression"];
+const CS_CALLS: &[&str] = &["invocation_expression", "object_creation_expression", "object_creation"];
 const CS_IMPORTS: &[&str] = &["using_directive"];
 
 const KT_DEFS: &[Def] = &[
@@ -857,9 +857,27 @@ impl<'a> Walker<'a> {
             // as an expression statement and names it `get` / `set`. Nothing
             // read `accessor_declaration`, so a property lost one event per
             // accessor — the largest single C# cluster left.
+            // `get;` / `set;`: the notifier token is the value — a keyword leaf
+            // carries no expression child, so the arm writes the name itself.
             "accessor_declaration" if self.child_of_kind(id, "accessor_body").is_none() => {
-                self.expression_statement(id)
+                let name = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&child| !self.is_layout(child))
+                    .map(|child| self.kind(child).to_string())
+                    .or_else(|| self.children(id).first().map(|&child| self.kind(child).to_string()))
+                    .unwrap_or_default();
+                if !name.is_empty() {
+                    let line = self.line(id);
+                    let mut value = "[\"n\",".to_string();
+                    push_string(&mut value, &name);
+                    value.push(']');
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
             }
+            // `public string Key { get; set; }`: the header is a statement to
+            // the lexer, and the accessors are its own statements.
+            "property_declaration" => self.java_header_event(id),
             "expression_statement" => self.expression_statement(id),
             // Scala's `def f(): T = expr` writes the body as a `def_body` whose
             // child is the expression itself. Nothing read that node, so a call

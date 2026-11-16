@@ -448,7 +448,7 @@ impl<'a> Walker<'a> {
     pub(crate) fn decl_callee(&self, id: u32) -> u32 {
         let children = self.children(id);
         let kind = self.kind(id);
-        if kind == "object_creation_expression" {
+        if kind == "object_creation_expression" || kind == "object_creation" {
             return children
                 .iter()
                 .copied()
@@ -1898,7 +1898,7 @@ impl<'a> Walker<'a> {
             // `field_expression` is Rust's spelling of the same path; without
             // this arm `self.skipped_groups == 0` read both sides as the
             // constant and the name left the record.
-            "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression" | "meta_property"
+            "attribute" | "member_expression" | "member_access_expression" | "member_access" | "subscript" | "subscript_expression" | "field_expression" | "meta_property"
             // `Ordering::Acquire` in an argument list is a path, not a constant.
             | "scoped_identifier" | "scoped_type_identifier"
             // Kotlin's `user.title` in a `"${user.title}"` hole.
@@ -2535,7 +2535,7 @@ impl<'a> Walker<'a> {
         // `TaintAnalyzer(a, b(), c).run()` the argument `b()` is recorded
         // between the two — and the path keeps the name the source spells.
         let mut receiver_call = None;
-        if matches!(self.kind(callee), "attribute" | "member_expression") {
+        if matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access") {
             if let Some(&object) = self.children(callee).first() {
                 if self.named_call(object) {
                     // `new URL(x).toString()`, `A().b()`, `A().b().c()`: a
@@ -2616,7 +2616,7 @@ impl<'a> Walker<'a> {
                     None => (String::new(), "0".to_string()),
                 }
             }
-            "attribute" | "member_expression" => {
+            "attribute" | "member_expression" | "member_access_expression" | "member_access" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
                 let object = children.first().copied();
