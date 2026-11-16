@@ -1933,7 +1933,7 @@ impl<'a> Walker<'a> {
                 None => "0".to_string(),
             },
             "not_operator" | "unary_operator" | "unary_expression" | "await" | "await_expression" | "yield" | "yield_expression"
-            | "typeof" | "void" | "non_null_expression" | "as_expression" | "type_assertion" | "delete_expression" => {
+            | "typeof" | "void" | "non_null_expression" | "as_expression" | "satisfies_expression" | "type_assertion" | "delete_expression" => {
                 match self.expression_child(id) {
                     Some(child) => {
                         let inner = self.form(child);
@@ -2745,7 +2745,7 @@ impl<'a> Walker<'a> {
                 base
             }
             "parenthesized_expression" => self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default(),
-            "as_expression" | "type_assertion" | "non_null_expression" => {
+            "as_expression" | "satisfies_expression" | "type_assertion" | "non_null_expression" => {
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
             // A call has no name of its own: `f().x` names `.x`.

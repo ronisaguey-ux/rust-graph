@@ -60,11 +60,14 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
         ("kubernetes", "https://github.com/kubernetes/kubernetes", "master", "pkg"),
     ]),
     "c": ([".c", ".h"], [
-        ("musl", "https://github.com/bminor/musl", "master", "src"),
+        ("musl", "https://github.com/kraj/musl", "master", "src"),
         ("redis", "https://github.com/redis/redis", "unstable", "src"),
     ]),
     "cpp": ([".cpp", ".cc", ".hpp", ".hh"], [
-        ("fmt", "https://github.com/fmtlib/fmt", "master", "include"),
+        ("googletest", "https://github.com/google/googletest", "main", ""),
+        ("json", "https://github.com/nlohmann/json", "develop", "include"),
+        ("leveldb", "https://github.com/google/leveldb", "main", ""),
+        ("curl", "https://github.com/curl/curl", "master", "lib"),
         ("json", "https://github.com/nlohmann/json", "develop", "include"),
     ]),
     "csharp": ([".cs"], [
@@ -97,6 +100,8 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
     ]),
     "objective-c": ([".m", ".h"], [
         ("cocoalumberjack", "https://github.com/CocoaLumberjack/CocoaLumberjack", "master", "Sources"),
+        ("sdwebimage", "https://github.com/SDWebImage/SDWebImage", "master", ""),
+        ("reactiveobjc", "https://github.com/ReactiveCocoa/ReactiveObjC", "master", ""),
         ("afnetworking", "https://github.com/AFNetworking/AFNetworking", "master", "AFNetworking"),
     ]),
     "php": ([".php"], [
@@ -145,10 +150,12 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
     ]),
     "clojure": ([".clj", ".cljs"], [
         ("clojure", "https://github.com/clojure/clojure", "master", "src"),
+        ("clojurescript", "https://github.com/clojure/clojurescript", "master", "src/main/cljs"),
         ("ring", "https://github.com/ring-clojure/ring", "master", "ring-core/src"),
     ]),
     "elm": ([".elm"], [
-        ("core", "https://github.com/elm/core", "master", "src"),
+        ("core", "https://github.com/elm/core", "master", ""),
+        ("elm-test", "https://github.com/elm-explorations/test", "master", ""),
         ("elm-ui", "https://github.com/mdgriffith/elm-ui", "master", "src"),
     ]),
     "solidity": ([".sol"], [
@@ -160,15 +167,21 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
         ("dbt", "https://github.com/dbt-labs/dbt-core", "main", "tests"),
     ]),
     "bash": ([".sh", ".bash"], [
-        ("bash", "https://github.com/bminor/bash", "master", "examples"),
+        ("kubernetes", "https://github.com/kubernetes/kubernetes", "master", "hack"),
+        ("docker", "https://github.com/moby/moby", "master", "hack"),
         ("ohmyzsh", "https://github.com/ohmyzsh/ohmyzsh", "master", "plugins"),
+        ("nvm", "https://github.com/nvm-sh/nvm", "master", ""),
+        ("shellcheck", "https://github.com/koalaman/shellcheck", "master", "shellcheck"),
     ]),
     "powershell": ([".ps1", ".psm1"], [
-        ("powershell", "https://github.com/PowerShell/PowerShell", "master", "src"),
-        ("psscriptanalyzer", "https://github.com/PowerShell/PSScriptAnalyzer", "master", "Rules"),
+        ("powershell", "https://github.com/PowerShell/PowerShell", "master", ""),
+        ("psscriptanalyzer", "https://github.com/PowerShell/PSScriptAnalyzer", "main", "Rules"),
+        ("winutil", "https://github.com/ChrisTitusTech/winutil", "main", ""),
+        ("scoop", "https://github.com/ScoopInstaller/Scoop", "master", "lib"),
+        ("poshgit", "https://github.com/dahlbyk/posh-git", "master", ""),
     ]),
     "assembly": ([".s", ".S", ".asm"], [
-        ("musl", "https://github.com/bminor/musl", "master", "src"),
+        ("musl", "https://github.com/kraj/musl", "master", "src"),
         ("glibc", "https://github.com/bminor/glibc", "master", "sysdeps"),
     ]),
     "nim": ([".nim"], [
@@ -182,6 +195,7 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
     "d": ([".d"], [
         ("phobos", "https://github.com/dlang/phobos", "master", "std"),
         ("vibe", "https://github.com/vibe-org/vibe.d", "master", "source"),
+        ("dmd", "https://github.com/dlang/dmd", "master", "compiler/src"),
     ]),
     "zig": ([".zig"], [
         ("zig", "https://github.com/ziglang/zig", "master", "lib"),
@@ -197,7 +211,8 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
     ]),
     "cobol": ([".cob", ".cbl"], [
         ("gnucobol", "https://github.com/OCamlPro/gnucobol", "master", "tests"),
-        ("cobol85", "https://github.com/uwol/proleap-cobol-parser", "master", "src/test"),
+        ("gnucobol", "https://github.com/OCamlPro/gnucobol", "master", "tests"),
+        ("gnucobol-tests", "https://github.com/OCamlPro/gnucobol", "master", "tests/testsuite"),
     ]),
     "matlab": ([".m"], [
         ("octave", "https://github.com/gnu-octave/octave", "default", "scripts"),
@@ -210,6 +225,7 @@ SPEC: dict[str, tuple[list[str], list[tuple[str, str, str, str]]]] = {
     "awk": ([".awk"], [
         ("one-true-awk", "https://github.com/onetrueawk/awk", "master", ""),
         ("gawk-tests", "https://github.com/gawk-mirrors/gawk", "master", "test"),
+        ("gawk", "https://git.savannah.gnu.org/git/gawk.git", "master", "test"),
     ]),
     "visual-basic": ([".vb"], [
         ("runtime-samples", "https://github.com/dotnet/samples", "main", "visualbasic"),
