@@ -130,6 +130,20 @@ fn export_type_star_reexports_a_module() {
 }
 
 #[test]
+fn a_declaration_file_exports_an_anonymous_default_function() {
+    // `export default function (): T;` has no name and no body: neither
+    // `function_declaration` (which requires a name) nor `function_expression`
+    // (which requires a body) accepts it, and declaration files are full of it.
+    assert!(clean("export default function (): {\n    localeError: E;\n};\n", &TYPESCRIPT));
+    assert!(clean("export default function () {}\nexport default async function* (x: number) {}\n", &TYPESCRIPT));
+    // A named default export is still a declaration with a name.
+    assert_eq!(
+        named("export default function f(): void;\n", &TYPESCRIPT),
+        "(program (export_statement export default (function_declaration function identifier (formal_parameters) (type_annotation_return void))))"
+    );
+}
+
+#[test]
 fn line_ends_end_statements_where_asi_does() {
     assert_eq!(
         named("a\n++b\nlet x = 1\n[1, 2].map(f)\nreturn\n", &JAVASCRIPT),

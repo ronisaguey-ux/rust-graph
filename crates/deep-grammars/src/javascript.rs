@@ -380,7 +380,12 @@ rust_graph_deep::grammar! { TYPESCRIPT {
     export_statement: decorator* "export" (
         "*" ["as" _module_export_name] "from" STRING [import_attribute] [_semi]
         | export_clause ["from" STRING [import_attribute]] [_semi]
-        | "default" (&("interface" | "abstract" | "enum") _declaration | &(["async"] "function" ["*"] _name) function_declaration | _expression [_semi])
+        | "default" (
+            &("interface" | "abstract" | "enum") _declaration
+            | &(["async"] "function" ["*"] _name) function_declaration
+            | &(["async"] "function" ["*"] _signature) default_function_declaration
+            | _expression [_semi]
+        )
         | &("type" "*") "type" "*" ["as" _module_export_name] "from" STRING [import_attribute] [_semi]
         | &("type" export_clause) "type" export_clause ["from" STRING] [_semi]
         | "=" _expression [_semi]
@@ -394,6 +399,11 @@ rust_graph_deep::grammar! { TYPESCRIPT {
     // ---- declarations ----
 
     function_declaration: ["async"] "function" ["*"] _name _signature [statement_block | ";"],
+    /// A default-exported function with no name. Only this position allows it, and
+    /// in a declaration file it has no body: `export default function (): T;`. A
+    /// bare `function () {}` statement is not a declaration, so the rule stays
+    /// out of `_declaration`.
+    default_function_declaration: ["async"] "function" ["*"] _signature [statement_block | ";"],
     class_declaration: decorator* ["abstract"] "class" _name [type_parameters] [LINE_END] [class_heritage] class_body,
     class_heritage: "extends" _expression@member [type_arguments] [implements_clause] | implements_clause,
     implements_clause: "implements" (_type % ","),
