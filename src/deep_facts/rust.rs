@@ -708,6 +708,14 @@ impl<'a> Walker<'a> {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 Some(if items.is_empty() { "0".to_string() } else { self.merge_form(&items) })
             }
+            // `PhantomData::<RT>`, `None::<Vec<Entry>>`: a path with a turbofish
+            // and nothing called. The turbofish names a type; the value is the
+            // path in front of it, which the lexer writes as a name. With no arm
+            // here the node formed as the constant and the name left the record.
+            "generic_function" => {
+                let head = self.children(id).into_iter().find(|&child| !matches!(self.kind(child), "type_arguments" | "::"))?;
+                Some(self.form(head))
+            }
             "let_declaration" => {
                 let mut parts = Vec::new();
                 let children = self.children(id);
@@ -1242,10 +1250,32 @@ impl<'a> Walker<'a> {
                 Some(if base.is_empty() { format!(".{name}") } else { format!("{base}.{name}") })
             }
             // `u32::from` is `u32.from`, the lexer's spelling of a path.
-            "scoped_identifier" | "scoped_type_identifier" => Some(self.text_string(id).replace("::", ".")),
+            "scoped_identifier" | "scoped_type_identifier" => {
+                Some(self.rust_turbofish_path(id).unwrap_or_else(|| self.text_string(id).replace("::", ".")))
+            }
             "call_expression" | "macro_invocation" => Some(String::new()),
             "struct_expression" => self.children(id).first().map(|&name| self.path_of(name)),
             "generic_function" => self.children(id).into_iter().find(|&child| self.kind(child) != "type_arguments").map(|child| self.path_of(child)),
+            _ => None,
+        }
+    }
+
+    /// The path of a scoped name with a turbofish before its last segment, or
+    /// `None` when it has none and the source text already is the path.
+    ///
+    /// `Option::<T>::None` names `Option.None`: the turbofish is a type, not a
+    /// segment, and the lexer steps over it. Spelled off the source text the
+    /// path was `Option.<T>.None`, a name no reader of the value writes, so
+    /// every variant picked through a turbofish read as a name the CST lost.
+    fn rust_turbofish_path(&self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "scoped_identifier" | "scoped_type_identifier" => {
+                let children = self.children(id);
+                let base = self.rust_turbofish_path(*children.first()?)?;
+                let name = children.iter().rev().find_map(|&child| self.leaf_name(child))?;
+                Some(if base.is_empty() { name } else { format!("{base}.{name}") })
+            }
+            "generic_function" => self.children(id).first().map(|&head| self.path_of(head)),
             _ => None,
         }
     }
