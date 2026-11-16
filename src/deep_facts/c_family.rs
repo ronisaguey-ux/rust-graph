@@ -87,6 +87,12 @@ impl<'a> Walker<'a> {
                 let line = self.line(id);
                 self.push_call("__attribute__".to_string(), line);
             }
+            // `@selector(run:)`: the lexer files a call of `selector`, and the
+            // node was never read.
+            "selector_expression" => {
+                let line = self.line(id);
+                self.push_call("selector".to_string(), line);
+            }
             // `@property (nonatomic, strong) UILabel *label;`: the lexer reads
             // `property` as a call of that name, and the node was never read -
             // 155 one-loss files on the Objective-C corpus.
@@ -144,6 +150,23 @@ impl<'a> Walker<'a> {
                 // constant in musl lost its line.
                 let mut inits = Vec::new();
                 self.c_initializers(id, &mut inits);
+                // `lua_pushnil(L);` - one argument, and C's most vexing parse
+                // makes the grammar call it a declaration: a plain type name
+                // with a parenthesised declarator. The lexer reads a call, so
+                // every one-argument call statement in the corpus lost it.
+                if !self.c_has_kind(id, "compound_statement")
+                    && self.c_has_kind(id, "parenthesized_declarator")
+                    && !self.c_has_kind(id, "parameter_list")
+                    && !self.c_has_kind(id, "initializer_list")
+                    && inits.is_empty()
+                {
+                    let text = self.text_string(id);
+                    if let Some(word) = leading_word(text.trim_start()) {
+                        let line = self.line(id);
+                        self.push_call(word.to_string(), line);
+                    }
+                    return true;
+                }
                 // `int (*close)(FILE *);` - a function pointer. The lexer reads
                 // the type word and the parenthesised list as a call of that
                 // type, with the pointer's own name as its argument, and keeps
