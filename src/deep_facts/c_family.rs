@@ -241,39 +241,23 @@ impl<'a> Walker<'a> {
             // there is one), so the CST writes the same event instead of
             // dropping the statement as layout.
             "declaration_statement" | "declaration" => {
-                // `typedef struct { … } Foo;`: the type has no name of its own,
-                // and the lexer writes the declarator's name on the closing
-                // line - `n:Foo` - which no reader wrote.
-                let mut unnamed_body = false;
-                let mut pending = vec![id];
-                while let Some(node) = pending.pop() {
-                    match self.kind(node) {
-                        "struct_or_union_specifier" | "struct_specifier" | "enum_specifier" => {
-                            let body = self.child_of_kind(node, "struct_body").is_some()
-                                || self.child_of_kind(node, "field_declaration_list").is_some()
-                                || self.child_of_kind(node, "enumerator_list").is_some();
-                            if body && self.child_of_kind(node, "identifier").is_none() {
-                                unnamed_body = true;
-                            }
-                        }
-                        _ => pending.extend(self.children(node)),
-                    }
-                }
-                if unnamed_body {
-                    if let Some(declarator) = self
-                        .children(id)
-                        .into_iter()
-                        .find(|&node| self.kind(node) == "direct_declarator")
-                    {
-                        if let Some(name_node) = self.child_of_kind(declarator, "identifier") {
-                            let name = self.text_string(name_node);
-                            if !name.is_empty() {
-                                let line = self.line(name_node);
-                                let mut value = String::from("[\"n\",");
-                                push_string(&mut value, &name);
-                                value.push(']');
-                                self.lexer_event(b'x', line, &[], &value, false);
-                            }
+                // `typedef struct { … } Foo;` and `typedef struct aeApiState {
+                // … } aeApiState;`: the lexer writes the declarator's name on
+                // the closing line (`n:Foo`) and no reader wrote it for either
+                // form.
+                if let Some(declarator) = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&node| self.kind(node) == "direct_declarator")
+                {
+                    if let Some(name_node) = self.child_of_kind(declarator, "identifier") {
+                        let name = self.text_string(name_node);
+                        if !name.is_empty() {
+                            let line = self.line(name_node);
+                            let mut value = String::from("[\"n\",");
+                            push_string(&mut value, &name);
+                            value.push(']');
+                            self.lexer_event(b'x', line, &[], &value, false);
                         }
                     }
                 }
