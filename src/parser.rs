@@ -3075,6 +3075,41 @@ impl<'a> Parser<'a> {
         {
             start -= 2;
         }
+        // `export const g: (i: number) => number = (i: number): number => i`:
+        // the annotation is a function type, so the token before the `=` is its
+        // return type and the walk back over `name : T` pairs cannot reach the
+        // name — `=>` is not a separator. The name is whatever the annotation's
+        // own colon follows.
+        if matches!(self.lang.tag, "TS" | "TSX") {
+            let mut depth = 0i32;
+            let mut angle = 0i32;
+            let mut colon = None;
+            let mut arrow = false;
+            for (index, token) in toks[..equal].iter().enumerate() {
+                if token.kind != Kind::Op {
+                    continue;
+                }
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    b"<" if depth == 0 => angle += 1,
+                    b">" if depth == 0 => angle = (angle - 1).max(0),
+                    b":" if depth == 0 && angle == 0 && colon.is_none() => colon = Some(index),
+                    b"=>" if depth == 0 && angle == 0 => {
+                        arrow = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if arrow {
+                if let Some(colon) = colon {
+                    if let Some(named) = toks[..colon].iter().rposition(|token| token.kind == Kind::Ident) {
+                        start = named;
+                    }
+                }
+            }
+        }
         let annotated = self.lang.tag != "LUA" && toks[start..equal].iter().any(|token| self.is_op(token, b":"));
         let end = if annotated { start + 1 } else { equal };
         let (name, owner, _) = self.name_chain(&toks[..end], start);

@@ -141,6 +141,10 @@ const LINE_ROWS: &[(&str, &str)] = &[
         "a generic method signature whose type argument calls import(): setState<K extends keyof import(…).S>",
         "declare class Chart {\n    setState<K extends keyof import(\"./types\").State>(state: import(\"./types\").State, callback?: () => void): void;\n}\n",
     ),
+    (
+        "an annotated arrow whose annotation is a function type: the name is before the colon",
+        "export const getCodePoint: (input: string, index: number) => number = (\n    input: string,\n    index: number,\n): number => input.codePointAt(index)!;\n",
+    ),
 ];
 
 #[test]
