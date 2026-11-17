@@ -3818,9 +3818,11 @@ fn parse_source_untimed(bytes: &[u8], path: &str, language: &'static Language) -
     }
     // `deep_facts::lang_for` is keyed by the lexer tag; TSX shares TS's tag but
     // not its grammar, so the suffix decides between them.
-    // `--deep` may force a language whose record `auto` would not choose; the
-    // eligibility list differs, the parse does not.
-    let requested = if mode == PathMode::Deep { deep_facts::lang_for_forced } else { deep_facts::lang_for };
+    // `--deep` and `--compare` may force a language whose record `auto` would
+    // not choose: the eligibility list differs, the parse does not. `compare`
+    // is the measurement and must weigh every language this build can parse,
+    // or it reports zeros for a language whose table exists but is not `auto`.
+    let requested = if matches!(mode, PathMode::Deep | PathMode::Compare) { deep_facts::lang_for_forced } else { deep_facts::lang_for };
     let lang = match requested(language.tag) {
         Some(Lang::TypeScript) if path.ends_with(".tsx") => Some(Lang::Tsx),
         other => other,
