@@ -420,9 +420,10 @@ rust_graph_deep::grammar! { KOTLIN {
 
     parenthesized_expression: "(" _expression ")",
     arguments: "(" (_argument %? ",") ")",
+    /// `g(*array)`, `listOf(*contentTypes)`: the star spreads an array into the
+    /// parameters, so it is part of the argument - not a multiplication, not a
+    /// name of its own. Without a rule the star was an ERROR inside the list.
     _argument: &(_name "=") named_argument | spread_argument | _expression,
-    /// `g(*array)`: the star spreads an array into the parameters, so it is part
-    /// of the argument, not a multiplication and not a name of its own.
     spread_argument: STAR _expression,
     named_argument: _name "=" _expression,
     annotation_arguments: "(" (_annotation_argument %? ",") ")",

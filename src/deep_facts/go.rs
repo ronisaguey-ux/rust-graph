@@ -3422,7 +3422,7 @@ fn dotted_piece(text: &str) -> bool {
             }
             // `f(*args, **kwargs)`: Python spells the double splat its own way,
             // and the one-pass lexer reads the name under it.
-            "spread_element" | "rest_pattern" | "list_splat" | "list_splat_pattern" | "dictionary_splat" => match self.expression_child(id) {
+            "spread_element" | "spread_argument" | "rest_pattern" | "list_splat" | "list_splat_pattern" | "dictionary_splat" => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
             },
