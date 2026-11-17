@@ -1,0 +1,198 @@
+{
+  "c": {
+    "files": 3316,
+    "mean_ms": 0.242,
+    "p50_ms": 0.025,
+    "p95_ms": 0.881,
+    "p99_ms": 3.449,
+    "max_ms": 53.579,
+    "largest": {
+      "path": "ScalarPropsData.h",
+      "bytes": 2573474,
+      "nodes": 796892,
+      "ms": 53.579
+    }
+  },
+  "cpp": {
+    "files": 249,
+    "mean_ms": 0.544,
+    "p50_ms": 0.154,
+    "p95_ms": 2.324,
+    "p99_ms": 6.638,
+    "max_ms": 16.219,
+    "largest": {
+      "path": "json_v3_10_5.hpp",
+      "bytes": 804148,
+      "nodes": 128062,
+      "ms": 16.219
+    }
+  },
+  "csharp": {
+    "files": 21976,
+    "mean_ms": 0.319,
+    "p50_ms": 0.093,
+    "p95_ms": 1.118,
+    "p99_ms": 3.224,
+    "max_ms": 219.226,
+    "largest": {
+      "path": "TestData.g.cs",
+      "bytes": 9905223,
+      "nodes": 3103581,
+      "ms": 219.226
+    }
+  },
+  "go": {
+    "files": 15407,
+    "mean_ms": 0.272,
+    "p50_ms": 0.081,
+    "p95_ms": 0.949,
+    "p99_ms": 2.769,
+    "max_ms": 82.223,
+    "largest": {
+      "path": "opGen.go",
+      "bytes": 4462905,
+      "nodes": 935057,
+      "ms": 71.518
+    }
+  },
+  "java": {
+    "files": 4766,
+    "mean_ms": 0.179,
+    "p50_ms": 0.063,
+    "p95_ms": 0.715,
+    "p99_ms": 1.746,
+    "max_ms": 6.69,
+    "largest": {
+      "path": "GB18030.java",
+      "bytes": 756552,
+      "nodes": 44063,
+      "ms": 6.157
+    }
+  },
+  "javascript": {
+    "files": 3878,
+    "mean_ms": 0.529,
+    "p50_ms": 0.055,
+    "p95_ms": 0.815,
+    "p99_ms": 6.246,
+    "max_ms": 415.828,
+    "largest": {
+      "path": "001118_typescript.js",
+      "bytes": 9112572,
+      "nodes": 1931979,
+      "ms": 284.387
+    }
+  },
+  "json": {
+    "files": 846,
+    "mean_ms": 5.833,
+    "p50_ms": 0.025,
+    "p95_ms": 0.337,
+    "p99_ms": 2.819,
+    "max_ms": 1987.449,
+    "largest": {
+      "path": "graph.json",
+      "bytes": 96801586,
+      "nodes": 25790716,
+      "ms": 1987.449
+    }
+  },
+  "kotlin": {
+    "files": 8044,
+    "mean_ms": 0.112,
+    "p50_ms": 0.038,
+    "p95_ms": 0.411,
+    "p99_ms": 1.152,
+    "max_ms": 18.89,
+    "largest": {
+      "path": "_Arrays.kt",
+      "bytes": 985805,
+      "nodes": 170153,
+      "ms": 18.89
+    }
+  },
+  "objc": {
+    "files": 199,
+    "mean_ms": 0.152,
+    "p50_ms": 0.051,
+    "p95_ms": 0.647,
+    "p99_ms": 2.466,
+    "max_ms": 3.439,
+    "largest": {
+      "path": "YYTextView.m",
+      "bytes": 154707,
+      "nodes": 32492,
+      "ms": 2.466
+    }
+  },
+  "python": {
+    "files": 572,
+    "mean_ms": 0.423,
+    "p50_ms": 0.174,
+    "p95_ms": 1.673,
+    "p99_ms": 2.961,
+    "max_ms": 4.921,
+    "largest": {
+      "path": "000520_topics.py",
+      "bytes": 805508,
+      "nodes": 17100,
+      "ms": 4.685
+    }
+  },
+  "rust": {
+    "files": 1816,
+    "mean_ms": 0.369,
+    "p50_ms": 0.189,
+    "p95_ms": 1.078,
+    "p99_ms": 3.506,
+    "max_ms": 14.714,
+    "largest": {
+      "path": "001161_exec_engine.rs",
+      "bytes": 765691,
+      "nodes": 197780,
+      "ms": 14.714
+    }
+  },
+  "scala": {
+    "files": 739,
+    "mean_ms": 0.158,
+    "p50_ms": 0.06,
+    "p95_ms": 0.586,
+    "p99_ms": 1.464,
+    "max_ms": 2.697,
+    "largest": {
+      "path": "Vector.scala",
+      "bytes": 99064,
+      "nodes": 34839,
+      "ms": 2.697
+    }
+  },
+  "swift": {
+    "files": 1620,
+    "mean_ms": 0.18,
+    "p50_ms": 0.056,
+    "p95_ms": 0.692,
+    "p99_ms": 1.565,
+    "max_ms": 6.655,
+    "largest": {
+      "path": "Codable.swift",
+      "bytes": 275786,
+      "nodes": 36457,
+      "ms": 4.395
+    }
+  },
+  "typescript": {
+    "files": 2000,
+    "mean_ms": 0.105,
+    "p50_ms": 0.014,
+    "p95_ms": 0.351,
+    "p99_ms": 1.578,
+    "max_ms": 9.993,
+    "largest": {
+      "path": "000941_method-types.d.ts",
+      "bytes": 788649,
+      "nodes": 86508,
+      "ms": 6.117
+    }
+  }
+}
