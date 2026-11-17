@@ -4069,6 +4069,19 @@ impl<'a> Parser<'a> {
                     }
                     index -= 1;
                 }
+                // `byte[] keyBytes = new byte[n]`: an empty bracket straight
+                // after a name is Java's array type suffix, not a subscript —
+                // the path starts at the declarator that follows it. Read
+                // across it, the type was pasted onto the target
+                // (`bytekeyBytes`, `longLONG_ARRAY_NOT_SUPPORTED`), the one
+                // java shape the CST never writes: 612 rows over 265 files.
+                if self.lang.tag == "JAVA"
+                    && toks.get(index + 1).is_some_and(|token| self.is_op(token, b"]"))
+                    && index > 0
+                    && toks[index - 1].kind == Kind::Ident
+                {
+                    break;
+                }
                 start = index;
                 continue;
             }
