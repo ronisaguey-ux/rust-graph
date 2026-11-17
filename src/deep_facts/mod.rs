@@ -1030,22 +1030,97 @@ impl<'a> Walker<'a> {
             // unguarded arm pushed a call named after the receiver - the python fixture
             // async_worker.py reported deep-only calls asyncio|7 and item|37.
             "attribute" if matches!(self.language.name, "swift" | "scala") => {
+                // The run of attributes on a line is one event, written by the
+                // `declaration_modifiers` arm below; a second one here would be
+                // an unpaired row.
+                if self.consumed.contains(&id) {
+                    return;
+                }
                 if let Some(node) = self.children(id).into_iter().find(|&child| matches!(self.kind(child), "identifier")) {
                     let name = self.text_string(node);
                     let line = self.line(id);
-                    let index = self.push_call(name, line);
+                    let index = self.push_call(name.clone(), line);
                     // The line is an `x` event whose value is that call, with
                     // the attribute's own arguments - `c(0;[n:never])`.
-                    if let Some(list) = self
+                    let list = self
                         .children(id)
                         .into_iter()
                         .find(|&child| matches!(self.kind(child), "attribute_arguments" | "annotation_arguments"))
-                    {
-                        if self.children(list).iter().any(|&child| !self.is_layout(child)) {
+                        .filter(|&list| self.children(list).iter().any(|&child| !self.is_layout(child)));
+                    match list {
+                        Some(list) => {
                             let args = self.arguments(list);
                             self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
                         }
+                        // `@inlinable` alone on its line: the lexer writes the
+                        // attribute as a bare name, since there is no argument
+                        // list to make it a call. Writing nothing for it lost
+                        // the `inlinable` line on 20 swift files (157 rows, the
+                        // largest event cluster left in the swift dump).
+                        None => {
+                            let mut value = String::from("[\"n\",");
+                            push_string(&mut value, &name);
+                            value.push(']');
+                            self.event(&format!("[\"x\",{line},{value}]"));
+                        }
                     }
+                }
+            }
+            // `@inlinable @_transparent public func f()`: the lexer writes the
+            // attributes of one line as a single event - the bare ones as names,
+            // each one with arguments as a call - while this walk read a node at
+            // a time. A run of two wrote two events where the lexer had one, and
+            // a bare `@inlinable` wrote nothing at all: 157 rows on 20 files,
+            // the largest event cluster left in the swift dump.
+            "declaration_modifiers" if self.language.name == "swift" => {
+                let mut lines: Vec<(u32, Vec<u32>)> = Vec::new();
+                for child in self.children(id) {
+                    if self.kind(child) != "attribute" {
+                        continue;
+                    }
+                    let line = self.line(child);
+                    match lines.iter_mut().find(|(at, _)| *at == line) {
+                        Some((_, run)) => run.push(child),
+                        None => lines.push((line, vec![child])),
+                    }
+                }
+                for (line, run) in lines {
+                    let mut parts: Vec<String> = Vec::new();
+                    for attribute in run {
+                        self.consumed.push(attribute);
+                        let Some(node) = self
+                            .children(attribute)
+                            .into_iter()
+                            .find(|&child| self.kind(child) == "identifier")
+                        else {
+                            continue;
+                        };
+                        let name = self.text_string(node);
+                        let arguments = self
+                            .children(attribute)
+                            .into_iter()
+                            .find(|&child| matches!(self.kind(child), "attribute_arguments" | "annotation_arguments"))
+                            .filter(|&list| self.children(list).iter().any(|&child| !self.is_layout(child)));
+                        match arguments {
+                            Some(list) => {
+                                let args = self.arguments(list);
+                                let index = self.push_call(name, line);
+                                parts.push(format!("[\"c\",{index},0,{args}]"));
+                            }
+                            None => {
+                                let mut part = String::from("[\"n\",");
+                                push_string(&mut part, &name);
+                                part.push(']');
+                                parts.push(part);
+                            }
+                        }
+                    }
+                    let value = match parts.len() {
+                        0 => continue,
+                        1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+                        _ => format!("[\"m\",[{}]]", parts.join(",")),
+                    };
+                    self.event(&format!("[\"x\",{line},{value}]"));
                 }
             }
             "annotation" if self.kinds.family == Family::Plain => {
