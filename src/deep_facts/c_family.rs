@@ -396,7 +396,8 @@ impl<'a> Walker<'a> {
                     // declaration, and this arm wrote nothing for it, so the
                     // binding the lexer reads was lost (c corpus, 4 files).
                     let mut inits = Vec::new();
-                    self.c_user_initializer(id, &mut inits);
+                    let statement = self.statement_lines.get(&id).copied();
+                    self.c_user_initializer(id, statement, &mut inits);
                     if let Some((name, node, line)) = inits.first().cloned() {
                         self.assignment_parts(vec![name], node, line, false);
                     } else {
@@ -427,6 +428,15 @@ impl<'a> Walker<'a> {
                     .find(|&child| self.kind(child) == "identifier")
                 {
                     self.macro_prefix = Some(self.text_string(first));
+                }
+                // The macro invocation has no `;` of its own, so the lexer's
+                // statement opens on the macro's line and the declaration that
+                // follows it is filed there, not on its own line.
+                let line = self.line(id);
+                for child in self.children(id) {
+                    if matches!(self.kind(child), "declaration_statement" | "declaration") {
+                        self.statement_lines.insert(child, line);
+                    }
                 }
             }
             // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
@@ -635,7 +645,8 @@ impl<'a> Walker<'a> {
                 // form wrote an `x` it never wrote, so every initialised
                 // constant in musl lost its line.
                 let mut inits = Vec::new();
-                self.c_initializers(id, &mut inits);
+                let statement = self.statement_lines.get(&id).copied();
+                self.c_initializers(id, statement, &mut inits);
                 // `lua_pushnil(L);` - one argument, and C's most vexing parse
                 // makes the grammar call it a declaration: a plain type name
                 // with a parenthesised declarator. The lexer reads a call, so
@@ -1109,7 +1120,7 @@ impl<'a> Walker<'a> {
 
     /// `(name, value node, line)` for each declarator of a declaration that has
     /// an initializer, in source order.
-    fn c_initializers(&mut self, id: u32, out: &mut Vec<(String, u32, u32)>) {
+    fn c_initializers(&mut self, id: u32, statement: Option<u32>, out: &mut Vec<(String, u32, u32)>) {
         let mut pending: Option<String> = None;
         for child in self.children(id) {
             match self.kind(child) {
@@ -1119,7 +1130,7 @@ impl<'a> Walker<'a> {
                 // statement, so the declarator and its initialiser were never
                 // seen and the line lost its assignment.
                 "specified_user_declaration" => {
-                    self.c_initializers(child, out);
+                    self.c_initializers(child, statement, out);
                     continue;
                 }
                 // `size_t n = CHUNK_SIZE(self);` and `TString *g = NULL;` are
@@ -1129,7 +1140,7 @@ impl<'a> Walker<'a> {
                 // and its value were never read and the declaration wrote only
                 // the words form (c corpus, 40 rows).
                 "bare_user_declaration" | "user_pointer_declaration" => {
-                    self.c_user_initializer(child, out);
+                    self.c_user_initializer(child, statement, out);
                     continue;
                 }
                 "direct_declarator" => {
@@ -1151,11 +1162,7 @@ impl<'a> Walker<'a> {
                 continue;
             }
             if let Some(name) = pending.take() {
-                // The lexer files the assignment on the line the initialiser is
-                // written on: `static const uint32_t\n  k2 = 235;` is line 2
-                // there, and the declaration's own first line wrote an event
-                // nothing could pair (38 rows of the C corpus).
-                let line = self.line(child);
+                let line = statement.unwrap_or_else(|| self.line(child));
                 out.push((name, child, line));
             }
         }
@@ -1166,7 +1173,7 @@ impl<'a> Walker<'a> {
     /// the first identifier and the initialiser is the node after the `=`.
     /// A declarator written as a bare identifier is not a `direct_declarator`,
     /// so the binding was never read.
-    fn c_user_initializer(&mut self, id: u32, out: &mut Vec<(String, u32, u32)>) {
+    fn c_user_initializer(&mut self, id: u32, statement: Option<u32>, out: &mut Vec<(String, u32, u32)>) {
         let kids = self.children(id);
         let Some(name_at) = kids.iter().position(|&child| self.kind(child) == "identifier") else { return };
         let name = self.text_string(kids[name_at]);
@@ -1175,7 +1182,7 @@ impl<'a> Walker<'a> {
         if self.is_layout(value) {
             return;
         }
-        let line = self.line(value);
+        let line = statement.unwrap_or_else(|| self.line(value));
         out.push((name, value, line));
     }
 
