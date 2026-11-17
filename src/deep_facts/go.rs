@@ -2261,6 +2261,43 @@ fn dotted_piece(text: &str) -> bool {
             return out;
         }
         match kind {
+            // `(unsigned short)(port & 0xffff)` and
+            // `sizeof(struct sockaddr_in6)`: the one-pass reader writes the
+            // type words in front of the operand as the value, and the CST
+            // formed the constant `0` - every cast or sizeof in a value
+            // position disagreed, the C corpus's third-largest cluster. The
+            // operand follows the type words, so a cast names both and the
+            // words the lexer read are covered.
+            "cast_expression" | "user_cast_expression" | "sizeof_expression" if self.is_c() => {
+                let mut parts: Vec<String> = Vec::new();
+                let children = self.children(id);
+                for (at, &child) in children.iter().enumerate() {
+                    let child_kind = self.kind(child);
+                    if matches!(child_kind, "cast_type" | "sizeof_operand" | "user_cast_head") {
+                        for word in self.c_words_of(child) {
+                            let mut form = String::from("[\"n\",");
+                            push_string(&mut form, &word);
+                            form.push(']');
+                            parts.push(form);
+                        }
+                        continue;
+                    }
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    if at + 1 == children.len() {
+                        let form = self.form(child);
+                        if form != "0" {
+                            parts.push(form);
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             // `return { type, value, line }`: a shorthand property whose name
             // is a keyword in another position carries that keyword's kind, so
             // it read as a leaf and the property vanished from the value.
