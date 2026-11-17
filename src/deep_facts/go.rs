@@ -292,12 +292,19 @@ impl<'a> Walker<'a> {
 
     /// `a, b := f()`, `x = y`, `xs[i] += 1`.
     pub(crate) fn go_assign(&mut self, id: u32) {
+        let Some((targets, value, line, weak)) = self.go_assign_parts(id) else { return };
+        self.lexer_event(b'a', line, &targets, &value, weak);
+    }
+
+    /// The targets, value, line and strength of `a, b := f()`, without writing
+    /// the event: a header merges the value with the block it opens.
+    fn go_assign_parts(&mut self, id: u32) -> Option<(Vec<String>, String, u32, bool)> {
         let children = self.children(id);
         let split = children.iter().position(|&child| {
             self.node(child).first_child == NONE
                 && matches!(self.text_string(child).as_str(), "=" | ":=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=")
         });
-        let Some(at) = split else { return };
+        let at = split?;
         let operator = self.text_string(children[at]);
         let targets: Vec<String> = children[..at]
             .iter()
@@ -312,7 +319,7 @@ impl<'a> Walker<'a> {
         let value = self.decl_values(&children[at + 1..]);
         let line = self.line(id);
         let weak = !matches!(operator.as_str(), "=" | ":=");
-        self.lexer_event(b'a', line, &targets, &value, weak);
+        Some((targets, value, line, weak))
     }
 
 
@@ -350,38 +357,43 @@ impl<'a> Walker<'a> {
     /// lexer writes before the body is written here, one event each, and a
     /// branch marker for the body.
     pub(crate) fn go_header(&mut self, id: u32) {
-        for child in self.children(id) {
-            if self.is_layout(child) {
-                continue;
-            }
-            let kind = self.kind(child);
-            if matches!(kind, "block" | "else_clause" | "literal_value" | "field_declaration_list") {
-                continue;
-            }
+        let children = self.children(id);
+        // The lexer keeps a statement open across `{ … }`, so the statement
+        // that opens the block carries every name and call of the body too:
+        // `for i := 0; i < n; i++ { x = y }` wants `m:[n:i,m:[n:x,n:y]]` for
+        // the post. The part before the block is merged with the body's value.
+        let body = children
+            .iter()
+            .copied()
+            .find(|&child| self.kind(child) == "block")
+            .map(|block| self.decl_value(block))
+            .filter(|value| !value.is_empty() && value != "0");
+        let parts: Vec<u32> = children
+            .into_iter()
+            .filter(|&child| !self.is_layout(child))
+            .filter(|&child| !matches!(self.kind(child), "block" | "else_clause" | "literal_value" | "field_declaration_list"))
+            .collect();
+        let last = parts.len().checked_sub(1);
+        for (at, &child) in parts.iter().enumerate() {
+            let tail = if Some(at) == last { body.as_deref() } else { None };
             // `for i := 0; i < n; i++ {`: the lexer ends a statement at every
             // `;`, so the init is an `a`, the condition an `x` and the post an
             // `x`. Read as one header value they were a single `x` the record
             // never wrote.
-            if kind == "for_clause" {
-                for part in self.children(child) {
-                    if self.is_layout(part) || self.kind(part) == ";" {
-                        continue;
-                    }
-                    if self.go_statement(part) {
-                        continue;
-                    }
-                    let value = self.decl_value(part);
-                    let line = self.line(part);
-                    self.lexer_event(b'x', line, &[], &value, false);
+            if self.kind(child) == "for_clause" {
+                let clause: Vec<u32> = self
+                    .children(child)
+                    .into_iter()
+                    .filter(|&part| !self.is_layout(part) && self.kind(part) != ";")
+                    .collect();
+                let end = clause.len().checked_sub(1);
+                for (at, &part) in clause.iter().enumerate() {
+                    let tail = if Some(at) == end { tail } else { None };
+                    self.go_header_part(part, tail);
                 }
                 continue;
             }
-            if self.go_statement(child) {
-                continue;
-            }
-            let value = self.decl_value(child);
-            let line = self.line(child);
-            self.lexer_event(b'x', line, &[], &value, false);
+            self.go_header_part(child, tail);
         }
         // `switch v := f(x); v {` and `if v := f(x); p(v) {`: the lexer writes
         // one condition event over the whole header as well, and a value that
@@ -391,6 +403,31 @@ impl<'a> Walker<'a> {
             self.lexer_event(b'x', line, &[], &value, false);
         }
         self.event("[\"b\"]");
+    }
+
+    /// One part of a header, with the value of the block it opens when it is
+    /// the part the block hangs from.
+    fn go_header_part(&mut self, id: u32, tail: Option<&str>) {
+        let kind = self.kind(id);
+        // A statement that opens a block carries the block's value too: the
+        // lexer keeps the statement open across `{ ... }`, so the record writes
+        // one merge of the two.
+        if matches!(kind, "short_var_declaration" | "assignment_statement") {
+            let Some((targets, value, line, weak)) = self.go_assign_parts(id) else { return };
+            let value = match tail {
+                Some(tail) => format!("[\"m\",[{value},{tail}]]"),
+                None => value,
+            };
+            self.lexer_event(b'a', line, &targets, &value, weak);
+            return;
+        }
+        let value = self.decl_value(id);
+        let line = self.line(id);
+        let value = match tail {
+            Some(tail) => format!("[\"m\",[{value},{tail}]]"),
+            None => value,
+        };
+        self.lexer_event(b'x', line, &[], &value, false);
     }
 
     /// The header's values as one expression, or `None` when there is nothing
