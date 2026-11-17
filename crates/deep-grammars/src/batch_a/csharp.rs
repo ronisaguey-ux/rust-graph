@@ -367,7 +367,15 @@ rust_graph_deep::grammar! { CSHARP {
         postfix "::" _type_name => alias_qualified_type,
         postfix dimensions => array_type,
     },
-    _type_head: _type_name | _predefined_type | tuple_type,
+    // `delegate* unmanaged<void*, void*, int> callback`: a function pointer type —
+    // the shape every interop binding writes — had no rule at all, so each one
+    // was an ERROR in the member that held it (119 corpus files). The calling
+    // convention is a name (`unmanaged`, `managed`) with an optional ABI
+    // (`unmanaged[Cdecl]`), and `delegate*<int, void>` writes none.
+    _type_head: _type_name | _predefined_type | tuple_type | function_pointer_type,
+    function_pointer_type: "delegate" "*" [function_pointer_convention] type_arguments,
+    function_pointer_convention: (KW_UNMANAGED | IDENT) [abi_specifier],
+    abi_specifier: "[" _name "]",
     _predefined_type:
         "bool" | "byte" | "sbyte" | "short" | "ushort" | "int" | "uint" | "long" | "ulong"
         | "char" | "float" | "double" | "decimal" | "object" | "string" | "void",
