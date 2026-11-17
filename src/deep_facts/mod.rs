@@ -1355,8 +1355,41 @@ impl<'a> Walker<'a> {
                 }
             }
             "annotation" if self.kinds.family == Family::Plain => {
-                if let Some(node) = self.children(id).into_iter().find(|&child| matches!(self.kind(child), "identifier")) {
-                    let name = self.text_string(node);
+                // `@kotlin.jvm.JvmName("x")`: a qualified annotation is a run of
+                // identifier children, and the first one alone is `kotlin`. The
+                // lexer records the whole path as the call, so every qualified
+                // annotation in the corpus lost its call (`call
+                // kotlin.jvm.JvmName`, 18 rows of the kotlin dump).
+                let mut parts: Vec<String> = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    match self.kind(child) {
+                        "identifier" | "simple_identifier" => parts.push(self.text_string(child)),
+                        // `@get:Option(…)`, `@file:JvmName(…)`: the use-site
+                        // target is a keyword leaf in front of the name, not
+                        // part of it. Breaking on it wrote no call at all, so
+                        // every `@get:`-targeted annotation lost the call the
+                        // lexer files (20 files of the kotlin corpus).
+                        "get" | "set" | "field" | "param" | "property" | "receiver" | "file" | "delegate" if parts.is_empty() => {}
+                        _ => break,
+                    }
+                }
+                if !parts.is_empty() {
+                    let name = parts.join(".");
+                    // The event names the call the way the lexer writes any
+                    // dotted call: the receiver in the path slot and the last
+                    // segment as the callee — `@kotlin.jvm.JvmName("y")` is
+                    // `c(n:kotlin.jvm;[0])`, not a call with an empty receiver.
+                    let receiver = if parts.len() > 1 {
+                        let mut text = "[\"n\",".to_string();
+                        push_string(&mut text, &parts[..parts.len() - 1].join("."));
+                        text.push(']');
+                        text
+                    } else {
+                        "0".to_string()
+                    };
                     let line = self.line(id);
                     let index = self.push_call(name, line);
                     // The lexer files the annotation's own arguments as an
@@ -1365,7 +1398,7 @@ impl<'a> Walker<'a> {
                     if let Some(list) = self.children(id).into_iter().find(|&child| self.kind(child) == "annotation_arguments") {
                         if self.children(list).iter().any(|&child| !self.is_layout(child)) {
                             let args = self.arguments(list);
-                            self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
+                            self.event(&format!("[\"x\",{line},[\"c\",{index},{receiver},{args}]]"));
                         }
                     }
                 }
