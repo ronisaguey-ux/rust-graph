@@ -379,7 +379,16 @@ rust_graph_deep::grammar! { CSHARP {
     formal_parameters: "(" (parameter %? ",") ")",
     parameter: [attributes] ["this" | "ref" | "out" | "in" | "params" | "scoped"] _type ["?"] _name ["=" _expression@assign],
     arguments: "(" (_argument %? ",") ")",
-    _argument: &(("ref" | "out" | "in") _type _name) out_declaration | ("ref" | "out" | "in") _expression | _expression,
+    // `f(timeout: 5, default)` and `new Foo(reader, path: null)`: a named
+    // argument is `name ":" value`, and only the attribute grammar knew the
+    // form. Without it every call that names an argument was an ERROR, and the
+    // whole enclosing method went with it.
+    _argument:
+        &(_name ":") named_argument
+        | &(("ref" | "out" | "in") _type _name) out_declaration
+        | ("ref" | "out" | "in") _expression
+        | _expression,
+    named_argument: _name ":" _expression,
     out_declaration: ("ref" | "out" | "in") _type _name,
 
     // ---- statements ----
