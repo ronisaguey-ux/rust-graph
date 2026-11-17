@@ -2229,6 +2229,14 @@ fn dotted_piece(text: &str) -> bool {
                 return out;
             }
         }
+        // `(socklen_t)ss_size`: a cast is the type's words and the operand's
+        // value to the one-pass reader, and the shared fallbacks below read
+        // the node as its first child, which is the type alone.
+        if self.is_c() {
+            if let Some(out) = self.c_cast_form(id) {
+                return out;
+            }
+        }
         if self.kinds.calls.contains(&kind) {
             // `repositories { mavenCentral() }`: the Kotlin DSL idiom, a call
             // whose only argument is a lambda. The lexer files the line as the
