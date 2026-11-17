@@ -2267,6 +2267,9 @@ fn dotted_piece(text: &str) -> bool {
             if let Some(out) = self.c_cast_form(id) {
                 return out;
             }
+            if let Some(out) = self.c_designated_form(id) {
+                return out;
+            }
         }
         if self.kinds.calls.contains(&kind) {
             // `repositories { mavenCentral() }`: the Kotlin DSL idiom, a call

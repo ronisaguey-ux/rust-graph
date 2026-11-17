@@ -1437,8 +1437,17 @@ impl<'a> Walker<'a> {
     /// of names, and writing the constant 0 for each element made every
     /// initialised table of function pointers disagree with the lexer, which
     /// reads the name (c corpus, 125 rows).
-    fn c_initializer_elements(&mut self, node: u32) -> Vec<String> {
-        let kids: Vec<u32> = self.children(node).into_iter().filter(|&child| self.kind(child) != ",").collect();
+    pub(crate) fn c_initializer_elements(&mut self, node: u32) -> Vec<String> {
+        // `{ 1, 2 }` is its elements alone: the braces are punctuation the
+        // lexer never writes as a value, and reading them as two more elements
+        // put a constant at each end of every brace list in the corpus
+        // (`{ .a = x, .b = y, .c = 0 }` was five elements: three names the
+        // readers wrote and two zeros neither of them did).
+        let kids: Vec<u32> = self
+            .children(node)
+            .into_iter()
+            .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "," | "{" | "}"))
+            .collect();
         kids.into_iter()
             .map(|child| {
                 if self.kind(child) == "initializer_list" {
@@ -1448,6 +1457,65 @@ impl<'a> Walker<'a> {
                 }
             })
             .collect()
+    }
+
+    /// `.field = value` inside a brace list. The one-pass reader writes the
+    /// field name and, when the value is one it writes, the value beside it in
+    /// one merge: `.getExpireMeta = getMyItemExpireMeta` reads as
+    /// `m:[n:getExpireMeta,n:getMyItemExpireMeta]`. A value it writes nothing
+    /// for — a plain number, or an operator over numbers — leaves the name
+    /// alone, so `.itemsAddrAreOdd = 0` reads as `n:itemsAddrAreOdd`. A char, a
+    /// string or a parenthesised expression is the constant `0` it does write,
+    /// and keeps both halves. None of this was read here, so every designated
+    /// initializer in the corpus was a run of constants.
+    pub(crate) fn c_designated_form(&mut self, id: u32) -> Option<String> {
+        if self.kind(id) == "initializer_list" {
+            let parts = self.c_initializer_elements(id);
+            return Some(if parts.is_empty() {
+                "0".to_string()
+            } else {
+                format!("[\"m\",[{}]]", parts.join(","))
+            });
+        }
+        if self.kind(id) != "designated_field" {
+            return None;
+        }
+        let kids: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .filter(|&child| !self.is_layout(child) && self.kind(child) != "=")
+            .collect();
+        let key_node = *kids.iter().find(|&&child| self.kind(child) == "identifier")?;
+        let key = self.text_string(key_node);
+        if key.is_empty() {
+            return None;
+        }
+        let mut name = "[\"n\",".to_string();
+        push_string(&mut name, &key);
+        name.push(']');
+        let Some(&value) = kids.iter().find(|&&child| child != key_node) else { return Some(name) };
+        let form = self.form(value);
+        if form == "0" && !self.c_writes_a_constant(value) {
+            return Some(name);
+        }
+        Some(format!("[\"m\",[{},{}]]", name, form))
+    }
+
+    /// Whether the one-pass reader writes the constant `0` for this value: a
+    /// char or string literal and a parenthesised expression do, while a
+    /// number — or an operator over numbers — writes nothing at all.
+    fn c_writes_a_constant(&self, id: u32) -> bool {
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            if matches!(
+                self.kind(node),
+                "string" | "char_literal" | "parenthesized_expression" | "initializer_list"
+            ) {
+                return true;
+            }
+            stack.extend(self.children(node));
+        }
+        false
     }
 
     /// `int x = 0;`, `Square box = Square(4);`, `std::string name_;`: the
@@ -1585,5 +1653,50 @@ fn leading_word(text: &str) -> Option<&str> {
         None
     } else {
         Some(&text[..end])
+    }
+}
+
+#[cfg(test)]
+mod designated_initializer_tests {
+    use super::*;
+    use crate::deep_integration::{self, Lang};
+
+    fn module_events(source: &str) -> String {
+        let tree = deep_integration::parse_file(source.as_bytes(), Lang::C).expect("a C tree");
+        let facts = extract(source.as_bytes(), &tree, Lang::C);
+        facts
+            .symbols
+            .iter()
+            .find(|symbol| symbol.kind == KIND_MODULE)
+            .map(|symbol| symbol.events.clone())
+            .unwrap_or_default()
+    }
+
+    /// `.x = y` is the field and its value in one merge: the one-pass reader
+    /// writes both, and reading the field as a constant lost every designated
+    /// initializer in the corpus.
+    #[test]
+    fn a_designated_field_keeps_its_name_and_value() {
+        let events = module_events("struct S { int x; };\nstruct S s = { .x = y };\n");
+        assert!(events.contains("[\"m\",[[\"n\",\"x\"],[\"n\",\"y\"]]]"), "{events}");
+    }
+
+    /// A number is a value the one-pass reader writes nothing for, so the
+    /// element is the field name alone — `.x = 0` may not become a pair with a
+    /// constant the reader never wrote.
+    #[test]
+    fn a_constant_designated_field_is_the_name_alone() {
+        let events = module_events("struct S { int x; };\nstruct S s = { .x = 0 };\n");
+        assert!(events.contains("[\"n\",\"x\"]"), "{events}");
+        assert!(!events.contains("[[\"n\",\"x\"],0]"), "{events}");
+    }
+
+    /// The braces around a brace list are punctuation, not two more elements:
+    /// counting them put a constant at each end of every table.
+    #[test]
+    fn a_brace_list_is_its_elements_without_the_braces() {
+        let events = module_events("int t[2] = { 1, 2 };\n");
+        assert!(events.contains("[\"m\",[0,0]]"), "{events}");
+        assert!(!events.contains("[\"m\",[0,0,0,0]]"), "{events}");
     }
 }
