@@ -288,7 +288,10 @@ rust_graph_deep::grammar! { KOTLIN {
     /// way C#'s `[return: ...]` is, because the optional form `[_name ":"]` took
     /// `Service` in `@Service` as a target and then failed on the missing colon,
     /// which cost every annotated declaration in the language.
-    _annotation_target: _name ":",
+    /// `@file:`, `@get:`, `@param:`: a use-site target is a word and a colon.
+    /// `file` is a keyword token of its own (it is the one target that annotates
+    /// the file rather than a declaration), so it is spelled out here.
+    _annotation_target: (_name | KW_FILE) ":",
 
     // ---- declarations ----
 
@@ -479,13 +482,13 @@ rust_graph_deep::grammar! { KOTLIN {
         // `InternalAPI::class`: the class literal's word is the keyword
         // `class` and it is a node of its own, not a callable reference.
         postfix "::" "class" => class_literal,
-        postfix "::" _reference_name => callable_reference,
+        postfix "::" _name => callable_reference,
         postfix BANG_BANG => not_null_expression,
     },
 
     /// `parse(::load)`: `::name` with nothing in front is a reference to a
     /// top-level callable, and as no primary it could not be an argument.
-    absolute_reference: "::" _callable_name,
+    absolute_reference: "::" _reference_name,
     /// `this@toASCIITable`, `super@Outer`: a label on `this` or `super` names the
     /// enclosing lambda or class. Read as a bare `this` the label could not
     /// follow it, so every qualified labeled receiver recovered.
@@ -556,10 +559,6 @@ rust_graph_deep::grammar! { KOTLIN {
     /// read the name and colon.
     function_parameters: "(" (_function_parameter %? ",") ")",
     _function_parameter: &(_name ":") _name ":" _type | _type,
-    /// What may follow `::`: a name, or the `class` keyword a class literal
-    /// names. Kept out of `_name`, which is also what an expression starts
-    /// with, so a bare `class` cannot be read as a value.
-
     /// The name after `::`. `class` is the one a callable reference takes that
     /// is not a name anywhere else (`Foo::class` in an annotation), so it is
     /// added here rather than to `_name`, where it would start a declaration.
