@@ -2101,6 +2101,12 @@ fn dotted_piece(text: &str) -> bool {
                 "modifiers" => {
                     for modifier in self.children(child) {
                         if self.kind(modifier) == "annotation" {
+                            // An annotation above the declaration is its own
+                            // event; only the ones written on the head's line
+                            // belong to the run of words the lexer reads.
+                            if self.line(modifier) < line {
+                                continue;
+                            }
                             let word =
                                 self.children(modifier).into_iter().find(|&leaf| self.kind(leaf) == "identifier");
                             if let Some(word) = word {
@@ -2155,8 +2161,18 @@ fn dotted_piece(text: &str) -> bool {
     /// `val a = 1`, `private val b: Int = 2`: the declared name and the value,
     /// as the assignment the lexer files.
     pub(crate) fn kt_property(&mut self, id: u32) {
-        let line = self.line(id);
         let children = self.children(id);
+        // `@Deprecated(…)` written on its own line is an event of its own - the
+        // lexer files it as the annotation's call - and the declaration starts
+        // on the line of its head. Measured from the node's start, every
+        // annotated property claimed the annotation's line and lost the
+        // declaration the lexer writes under the head.
+        let line = children
+            .iter()
+            .copied()
+            .find(|&child| matches!(self.kind(child), "property_head" | "val" | "var"))
+            .map(|child| self.line(child))
+            .unwrap_or_else(|| self.line(id));
         let name = children
             .iter()
             .copied()
@@ -3052,6 +3068,19 @@ fn dotted_piece(text: &str) -> bool {
                     0 => "0".to_string(),
                     1 => parts.remove(0),
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `a to listOf(1)`: Kotlin's infix call is a value with two operands
+            // and a name between them. Read through the default arm only the
+            // first operand was formed, so a call written on the right of `to`,
+            // `until`, `downTo` or any user infix function was never recorded -
+            // every map entry built with `to` lost its value's call.
+            "infix_expression" if self.is_kotlin() => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.merge_form(&items)
                 }
             }
             // `UnsafeCell<State>`, `Vec<Entry>`: a generic type holds the base
