@@ -14,6 +14,15 @@ const MODIFIERS: [&str; 34] = [
     "virtual", "override", "inline", "extern", "sealed", "open", "data", "partial", "local", "declare", "readonly",
     "unsafe", "pure", "external", "view", "payable", "friend", "rec", "impure", "elemental", "recursive", "shared", "module",
 ];
+/// A word Java writes in front of a member and binds nothing.
+fn java_modifier(word: &str) -> bool {
+    matches!(
+        word,
+        "public" | "private" | "protected" | "static" | "final" | "abstract" | "native" | "synchronized"
+            | "transient" | "volatile" | "strictfp" | "default"
+    )
+}
+
 const CONTROL: [&str; 24] = [
     "if", "elif", "elsif", "elseif", "else", "for", "foreach", "while", "until", "unless", "switch", "match", "try",
     "catch", "except", "finally", "rescue", "ensure", "do", "loop", "when", "with", "select", "repeat",
@@ -3746,9 +3755,78 @@ impl<'a> Parser<'a> {
             let augmented = self.raw(&stmt[equal]) != b"=" && !matches!(self.raw(&stmt[equal]), b":=" | b"<-");
             self.note_class(&stmt[..equal], &stmt[equal + 1..]);
             self.assignment(&stmt[..equal], &stmt[equal + 1..], line, augmented);
-        } else {
+        } else if !(self.lang.tag == "JAVA" && self.java_declares_only(stmt)) {
             self.expression_event("x", stmt);
         }
+    }
+
+    /// A Java member that declares and assigns nothing: a signature with no
+    /// body (`V apply(K key);`, `public abstract void doIt();`, a `native` or an
+    /// interface method), the modifier that opens an initializer block
+    /// (`static {`), and an annotation written on its own line. The CST writes
+    /// no event for any of them — a declaration is not an assignment — so
+    /// reading each as an expression invented `x` events the other reader never
+    /// had: 4,961 events over 1,204 files, the largest java cluster in the
+    /// shape table.
+    fn java_declares_only(&self, stmt: &[Token]) -> bool {
+        let Some(first) = stmt.first() else { return false };
+        let word = |token: &Token| if token.kind == Kind::Ident { Some(self.text(token)) } else { None };
+        // A type declaration is a value, and the CST writes one for it:
+        // `public abstract class A {` is not this rule.
+        if stmt.iter().any(|token| {
+            matches!(word(token).as_deref(), Some("class" | "interface" | "enum" | "record"))
+        }) {
+            return false;
+        }
+        // `new X(...)` is a value even when no name takes it.
+        if stmt.iter().any(|token| word(token).as_deref() == Some("new")) {
+            return false;
+        }
+        // `static {` arrives as the modifier alone, the brace having opened the
+        // block this statement is the head of.
+        if stmt.len() == 1 && word(first).as_deref().is_some_and(java_modifier) {
+            return true;
+        }
+        // `@Override` on a line of its own declares nothing the runtime assigns.
+        if first.kind == Kind::Op && self.raw(first) == b"@" {
+            return true;
+        }
+        // `void f() throws IOException`: the throws clause follows the params.
+        let end = stmt
+            .iter()
+            .position(|token| word(token).as_deref() == Some("throws"))
+            .unwrap_or(stmt.len());
+        if end == 0 || !stmt.get(end - 1).is_some_and(|token| self.is_op(token, b")")) {
+            return false;
+        }
+        let Some(open) = (0..end).find(|index| self.is_op(&stmt[*index], b"(")) else {
+            return false;
+        };
+        // `V apply(` has the return type and the name in front of the parameter
+        // list; `go(` has only the name and is a call.
+        if open < 2 || stmt[open - 1].kind != Kind::Ident {
+            return false;
+        }
+        // A receiver makes it a call: `System.out.println(x)`, `this.go(x)`.
+        if stmt[..open].iter().any(|token| self.is_op(token, b".")) {
+            return false;
+        }
+        // The head before the name states a type, so every word in it is a
+        // modifier, a primitive or a type name — never a value.
+        stmt[..open - 1].iter().all(|token| match token.kind {
+            Kind::Ident => {
+                let word = self.text(token);
+                java_modifier(&word)
+                    || matches!(
+                        word.as_str(),
+                        "int" | "long" | "short" | "byte" | "char" | "boolean" | "float" | "double" | "void"
+                            | "extends" | "super"
+                    )
+                    || word.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+            }
+            Kind::Op => matches!(self.raw(token), b"<" | b">" | b"[" | b"]" | b"," | b"?"),
+            _ => false,
+        })
     }
 
     /// `repo = new Repo()` and `repo = Repo()` say what `repo.find` means.
