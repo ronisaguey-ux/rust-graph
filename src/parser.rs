@@ -3001,6 +3001,17 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        // `struct group *getgrent() { … }`: in C, C++ and Objective-C a
+        // definition whose return type is a struct or a class is a function,
+        // not a struct with a body. Read as a class, the function's statements
+        // belonged to a symbol the CST never writes — every event inside it
+        // landed on the module and had to be paired against the whole file
+        // (121 events on 68 musl files).
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && toks.get(at + 1..).is_some_and(|rest| rest.iter().any(|token| self.is_op(token, b"(")))
+        {
+            return None;
+        }
         let mut name = self.word_at(toks, at)?;
         // `impl tonic::client::X {`: a path names its type by its last segment.
         // Taking the first one opened a class called `tonic`, a symbol the CST
