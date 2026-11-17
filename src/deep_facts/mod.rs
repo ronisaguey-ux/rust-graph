@@ -1333,7 +1333,7 @@ impl<'a> Walker<'a> {
             // an expression and files an `x` event for it, so the CST does too.
             // The module symbol is emitted only when it has events, so losing
             // the event for a module-level `pass` dropped the whole symbol.
-            "pass_statement" | "break_statement" | "continue_statement" => {
+            "pass_statement" | "break_statement" | "continue_statement" | "goto_statement" => {
                 let line = self.line(id);
                 // The node's text carries the statement terminator: a JS
                 // `break;` was written as the name `break;` while the lexer
