@@ -4238,9 +4238,11 @@ impl<'a> Parser<'a> {
             let (start, close) = self.group_at(inner, 0)?;
             if close + 1 == inner.len() {
                 inner = &inner[start..close];
-            } else {
-                return None;
             }
+            // `(a, b), c = xs`: the group is one element of a longer list, not
+            // the list itself, so it is split below like any other element.
+            // Returning here dropped the whole statement's targets and the
+            // fall-through named only the last element.
         } else if !inner.iter().any(|token| self.is_op(token, b",")) {
             return None;
         }
@@ -4298,9 +4300,15 @@ impl<'a> Parser<'a> {
             Some(at) => &lhs[at + 1..],
             None => lhs,
         };
-        if target.first().is_some_and(|t| self.is_op(t, b"{") || self.is_op(t, b"[")) {
-            if let Some(nested) = self.unpack_targets(target) {
-                return nested;
+        if target.first().is_some_and(|t| self.is_op(t, b"{") || self.is_op(t, b"[") || self.is_op(t, b"(")) {
+            // Only a group that is the whole element is a nested pattern
+            // (`(a, b), c = xs`). `(x or y)[k] = v` is a subscript whose
+            // receiver is a group; recursing into it never shrank the slice.
+            let spans = matches!(self.group_at(target, 0), Some((_, close)) if close + 1 == target.len());
+            if spans {
+                if let Some(nested) = self.unpack_targets(target) {
+                    return nested;
+                }
             }
         }
         let bound = self.target_path(target);
