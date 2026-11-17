@@ -4010,6 +4010,19 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         "JAVA" => &[
             "new", "if", "while", "for", "switch", "return", "throw", "synchronized", "assert", "try", "catch", "instanceof",
         ],
+        // C#: the operator words are spellings, not callees. `unchecked(a + b)`,
+        // `default(DateTime)`, `nameof(x)`, `checked(n)` and `typeof(T)` put a
+        // keyword in front of a group, and the one-pass reader read the keyword
+        // as a callee; the CST writes the operator, so it names none of them.
+        // The statement headers (`using (var f = ...)`, `lock (gate)`,
+        // `switch (k)`, `when (p)`) are the same shape and are not calls either.
+        // `new`, `this` and `base` stay out: they head a target-typed
+        // construction or a chained constructor, which is a real call.
+        "CS" => &[
+            "if", "for", "foreach", "while", "do", "switch", "case", "catch", "when", "using", "lock", "fixed",
+            "unsafe", "is", "as", "in", "out", "ref", "params", "default", "checked", "unchecked", "nameof",
+            "typeof", "sizeof", "stackalloc", "return", "throw", "yield", "await", "else", "try", "finally",
+        ],
         // C, C++ and Objective-C: a type word is never a callee. `int
         // (*flush)(struct _rio *);` and `((int (*)(void *, void *))cmp)(…)`
         // put a type in front of a group, and the one-pass reader read each as
