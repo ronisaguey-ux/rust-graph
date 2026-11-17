@@ -1095,6 +1095,26 @@ impl<'a> Walker<'a> {
                 } else {
                     self.kt_property(id);
                 }
+                // `public bool VerifyParent { get; set; } = true;`: the tail
+                // after the accessors is an initialiser the lexer reads as an
+                // expression statement of its own, and nothing read it, so the
+                // line carried a header event and no value (C# corpus: 9 files).
+                if self.facts.tag == "CS" {
+                    let tail = self.children(id).into_iter().find(|&child| self.kind(child) == "property_tail");
+                    let value = tail
+                        .map(|tail| self.children(tail))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .rev()
+                        .find(|&child| !self.is_layout(child) && self.kind(child) != "=");
+                    if let Some(value) = value {
+                        let line = self.line(value);
+                        let form = self.form(value);
+                        if form != "0" {
+                            self.event(&format!("[\"x\",{line},{form}]"));
+                        }
+                    }
+                }
             }
             // `rootProject.name = "demo"` in a .kts script: the grammar keeps
             // the line as one flat node, nothing read it, and every Gradle
