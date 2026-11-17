@@ -4179,15 +4179,30 @@ impl<'a> Parser<'a> {
         true
     }
 
+    /// The words that introduce a binding, per language. A word is stripped
+    /// from a target list only where the language has it as a keyword: in
+    /// Python `var, callback = self.untraced.pop()` binds two names, and
+    /// stripping `var` there lost the first target. `val` belongs to
+    /// Kotlin/Scala alone, so `val[i] = x` in JS stays a subscript assignment.
+    fn decl_word(tag: &str, word: &str) -> bool {
+        match tag {
+            "JS" | "TS" | "JSX" | "TSX" | "GO" | "CS" | "NIM" | "ZIG" | "SWIFT" | "DART" => {
+                matches!(word, "const" | "let" | "var")
+            }
+            "KT" | "SCALA" => matches!(word, "const" | "val" | "var"),
+            "PAS" | "GROOVY" => matches!(word, "const" | "var"),
+            "RS" => matches!(word, "const" | "let" | "mut"),
+            "PL" | "RB" => matches!(word, "my" | "our" | "local"),
+            "SH" => matches!(word, "local"),
+            _ => false,
+        }
+    }
+
     fn unpack_targets(&self, toks: &[Token]) -> Option<Vec<String>> {
         let mut inner = toks;
         let class_field = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
-        let kotlin_scala = matches!(self.lang.tag, "KT" | "SCALA");
         while let Some(word) = self.word_at(inner, 0) {
-            // `val` is only a declaration keyword in Kotlin/Scala; in JS/TS/etc.
-            // `val[i] = x` is a subscript assignment to `val`, not destructuring `[i]`.
-            let declaration = matches!(word.as_str(), "const" | "let" | "var" | "my" | "our" | "local" | "mut")
-                || (kotlin_scala && word == "val");
+            let declaration = Self::decl_word(self.lang.tag, &word);
             // `static [entityKind] = "x"`: a class-field modifier is not the
             // binding. Stripped, the computed key is the target, which is what
             // the CST names; left in, the lexer named the field `static`.
