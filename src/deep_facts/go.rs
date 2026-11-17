@@ -3457,6 +3457,16 @@ fn dotted_piece(text: &str) -> bool {
                 out.push(']');
                 out
             }
+            // Kotlin's one-pass reader has no keyword table either, so
+            // `enableSsl = false` files `n:false` and `x = null` files `n:null`
+            // while the CST wrote the constant 0 - every boolean and null
+            // initialiser on a line the lexer reads as a statement disagreed.
+            "true" | "false" | "null" if self.is_kotlin() => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
             // JavaScript reads `null` and `undefined` as names too: there is no
             // keyword table on the lexer's side, so `obj.__proto__ = null`
             // records `n:null` while the CST wrote the constant 0.
