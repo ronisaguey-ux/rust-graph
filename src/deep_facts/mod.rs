@@ -1305,6 +1305,26 @@ impl<'a> Walker<'a> {
             "decorator" => {
                 if !self.is_js() {
                     self.expression_statement(id);
+                } else {
+                    // `@ValidatorConstraint({ name: 'isKnown' })`: the
+                    // decorator's own call is a call the lexer records
+                    // (`call ValidatorConstraint line 491`), and skipping the
+                    // node dropped it from the record, so a spec file that
+                    // decorates a class inside a callback fell back. Only the
+                    // call is read: a decorator read as a whole expression
+                    // statement wrote an assignment of `dec` on its line,
+                    // which is not what the source says.
+                    if let Some(call) = self
+                        .children(id)
+                        .into_iter()
+                        .find(|&child| self.kinds.calls.contains(&self.kind(child)))
+                    {
+                        let line = self.line(id);
+                        let value = self.form(call);
+                        if value != "0" {
+                            self.event(&format!("[\"x\",{line},{value}]"));
+                        }
+                    }
                 }
             }
             // `raise E(x) from c(y)`, `assert a(v), b(v)`, `del xs[k(v)]`:
