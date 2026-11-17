@@ -930,7 +930,9 @@ impl<'a> Walker<'a> {
         // read its body, so every call in one was missing from the CST record
         // (C# corpus: 59 files). The body is the member's last expression child;
         // `form` records its calls without writing an event the line already has.
-        if kind == "expression_bodied_member" || (kind == "method_declaration" && !self.has_kind(id, &["block"])) {
+        if self.facts.tag == "CS"
+            && (kind == "expression_bodied_member" || (kind == "method_declaration" && !self.has_kind(id, &["block"])))
+        {
             if let Some(body) = self.cs_expression_body(id) {
                 self.form(body);
             }
