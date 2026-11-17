@@ -202,9 +202,9 @@ impl<'a> Walker<'a> {
                                 Some(at) => {
                                     let mut form = String::from("[\"k\",");
                                     push_string(&mut form, item[..at].trim());
-                                    form.push_str("]:[\"n\",");
+                                    form.push_str(",[\"n\",");
                                     push_string(&mut form, item[at + 1..].trim());
-                                    form.push(']');
+                                    form.push_str("]]");
                                     attributes.push(form);
                                 }
                                 None => {
