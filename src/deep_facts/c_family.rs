@@ -870,7 +870,15 @@ impl<'a> Walker<'a> {
     /// and nothing here read the node at all, so every initialiser or
     /// assignment whose value is a cast was written as the constant 0.
     pub(crate) fn c_cast_form(&mut self, id: u32) -> Option<String> {
-        if !matches!(self.kind(id), "cast_expression" | "user_cast_expression") {
+        // `(long[]){CLAMP(s), ns}`: a compound literal is a cast-like head and
+        // one brace list, and the list is where its calls live. Read as a cast,
+        // the type words come first and each element is a value, which is what
+        // the one-pass reader writes; read as nothing, the CLAMP call inside
+        // went missing (2 files of the C corpus).
+        if !matches!(
+            self.kind(id),
+            "cast_expression" | "user_cast_expression" | "compound_literal_expression"
+        ) {
             return None;
         }
         let children = self.children(id);
