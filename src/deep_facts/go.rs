@@ -1372,7 +1372,7 @@ impl<'a> Walker<'a> {
             // target bound only when the grammar called it a pattern. Without
             // it the event lost its targets and the lexer's `a ["a","b"]` had
             // no counterpart.
-            | "tuple_expression" | "expression_list" => self.children(id).into_iter().filter_map(|child| self.unpacked_name(child)).collect(),
+            | "tuple_expression" | "expression_list" => self.children(id).into_iter().flat_map(|child| self.unpacked_names(child)).collect(),
             // `(fd, path) = mkstemp()`: the Python grammar keeps a parenthesised
             // target list as a `parenthesized_expression` with one child per
             // name, so it fell to the path arm below and bound only the first.
@@ -1381,7 +1381,7 @@ impl<'a> Walker<'a> {
                 if inner.len() == 1 {
                     self.assignment_targets(inner[0])
                 } else {
-                    inner.into_iter().filter_map(|child| self.unpacked_name(child)).collect()
+                    inner.into_iter().flat_map(|child| self.unpacked_names(child)).collect()
                 }
             }
             // The left side of a Python multi-target assignment (`a, b = g(x),
@@ -1428,13 +1428,31 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// One name of an unpacking target list. `head, *rest = xs` binds `rest`
-    /// too: the star is how the list is split, not a different kind of binder.
-    fn unpacked_name(&self, id: u32) -> Option<String> {
+    /// Every name of one element of an unpacking target list. `head, *rest =
+    /// xs` binds `rest` too — the star is how the list is split, not a
+    /// different kind of binder — and `typ, [data] = xs` binds both, so an
+    /// element that is itself a group contributes every name it holds instead
+    /// of one path its node does not have. Read through `value_path` alone the
+    /// group named nothing and the statement's target list lost a binder.
+    fn unpacked_names(&self, id: u32) -> Vec<String> {
+        // The star is how the list is split, not a different kind of binder,
+        // so `*rest` names `rest` and `*_` names `_`.
         if self.kind(id) == "list_splat" {
-            return self.children(id).into_iter().find_map(|child| self.value_path(child));
+            return self.children(id).into_iter().filter_map(|child| self.value_path(child)).collect();
         }
-        self.value_path(id)
+        match self.kind(id) {
+            "pattern_list"
+            | "tuple_pattern"
+            | "list_pattern"
+            | "array_pattern"
+            | "object_pattern"
+            | "parenthesized_expression"
+            | "tuple"
+            | "list"
+            | "array"
+            | "object" => self.assignment_targets(id),
+            _ => self.value_path(id).into_iter().collect(),
+        }
     }
 
     pub(crate) fn assignment_event(&mut self, targets: Vec<String>, value: u32, line: u32, augmented: bool) {
