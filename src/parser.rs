@@ -1352,10 +1352,17 @@ impl<'a> Parser<'a> {
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
             self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
-        } else if self.lang.tag == "RS" && self.head_word(&stmt).is_some_and(|word| word == "extern") {
+        } else if self.head_word(&stmt).is_some_and(|word| word == "extern")
+            && (self.lang.tag == "RS"
+                || (matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+                    && stmt.get(1).is_some_and(|token| token.kind == Kind::Str)))
+        {
             // `extern "C" {`: a block header, and the CST writes no event for it.
             // The lexer's `m:[n:extern,0]` was a fact the CST never had, and
-            // every extern block lost its file (8 corpus files).
+            // every extern block lost its file (8 corpus files). The C family
+            // reads a `.h` holding `namespace` as CPP, and the C++ grammar's
+            // linkage_specification writes nothing either, so the guarded
+            // headers lost the same event (19 rows on the croaring corpus).
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
