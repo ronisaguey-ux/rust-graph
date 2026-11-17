@@ -1024,9 +1024,19 @@ impl<'a> Walker<'a> {
                             .map(|&child| self.text_string(child))
                     });
                     match (assigned, target) {
-                        (Some(_), Some(name)) => {
+                        (Some(at), Some(name)) => {
+                            // `private bool _inheritance = true;`: the value is
+                            // the initialiser's own form, not the constant 0.
+                            // Written as 0, every field whose initialiser names
+                            // a constant (`true`, `null`, a named item) lost its
+                            // line to "the CST wrote the value as the constant 0"
+                            // (C# corpus: every `= true` field and property).
                             let line = self.line(id);
-                            self.lexer_event(b'a', line, &[name], "0", false);
+                            let value = children
+                                .get(at + 1)
+                                .map(|&child| self.form(child))
+                                .unwrap_or_else(|| "0".to_string());
+                            self.lexer_event(b'a', line, &[name], &value, false);
                         }
                         _ => {
                             self.decl_statement(id);
