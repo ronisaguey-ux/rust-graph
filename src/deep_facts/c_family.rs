@@ -380,11 +380,12 @@ impl<'a> Walker<'a> {
             // names, so the event is read off the node with the lexer's own
             // specifier list.
             "specified_macro_item" => {
-                let words: Vec<String> = self
-                    .c_words_of(id)
-                    .into_iter()
-                    .filter(|word| !crate::expr::C_SPECIFIERS.contains(&word.as_str()))
-                    .collect();
+                // Every name on the line, storage class and pointer qualifier
+                // included: the comparison asks only that the row cover the
+                // reader's names, and the words form of the declaration under
+                // this node starts at the type, so the macro in front of it is
+                // what was missing.
+                let words: Vec<String> = self.c_words_of(id);
                 if !words.is_empty() {
                     let line = self.line(id);
                     let parts: Vec<String> = words
@@ -1887,13 +1888,15 @@ mod designated_initializer_tests {
     }
 
     /// A visibility macro between the storage class and the type is one of the
-    /// line's names: the one-pass reader drops `extern` and `volatile` and
-    /// keeps `hidden` and the type.
+    /// line's names: the words form of the declaration under this node starts
+    /// at the type, so `hidden` was the name the record never had.
     #[test]
     fn a_macro_between_the_class_and_the_type_is_a_name() {
         let events = module_events("extern hidden FILE *volatile __stdin_used;\n");
         assert!(
-            events.contains("[\"m\",[[\"n\",\"hidden\"],[\"n\",\"FILE\"],[\"n\",\"__stdin_used\"]]]"),
+            events.contains(
+                "[\"m\",[[\"n\",\"extern\"],[\"n\",\"hidden\"],[\"n\",\"FILE\"],[\"n\",\"volatile\"],[\"n\",\"__stdin_used\"]]]"
+            ),
             "{events}"
         );
     }
