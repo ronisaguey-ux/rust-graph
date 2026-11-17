@@ -277,6 +277,13 @@ rust_graph_deep::grammar! { C {
         &(user_type_name _member_declarator_list ";") user_struct_declaration
         | &(declaration_specifiers _struct_declarator "," _struct_declarator)
             declaration_specifiers (_struct_declarator % ",") ";"
+        // `int lock[1];`: the name is the declarator, and the alternative
+        // below (which allows a typedef name after the specifiers) took the
+        // name for the type, so its `[1]` had no declarator to attach to and
+        // every array member of a keyword type left an error node behind. The
+        // predicate reads the declarator first and only then commits.
+        | &(declaration_specifiers _struct_declarator (";" | ","))
+            declaration_specifiers (_struct_declarator % ",") ";"
         | declaration_specifiers [user_type_name] (_struct_declarator % ",") ";"
         | macro_field,
     /// `PyObject *weakreflist;`: a typedef name and its declarators. A struct
