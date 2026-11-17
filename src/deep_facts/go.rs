@@ -2517,7 +2517,32 @@ fn dotted_piece(text: &str) -> bool {
             return out;
         }
         match kind {
-            // `(unsigned short)(port & 0xffff)` and
+            // `object : Base()`: an anonymous object is the name `object`
+            // merged with its supertype constructor's call, which is how the
+            // lexer writes it. Nothing read the node, so the value was the
+            // constant 0 and the constructor call was lost with it.
+            "object_expression" if self.is_kotlin() => {
+                let mut parts: Vec<String> = vec![String::from("[\"n\",\"object\"]")];
+                if let Some(list) = self.child_of_kind(id, "supertypes") {
+                    for child in self.children(list) {
+                        if self.is_layout(child) {
+                            continue;
+                        }
+                        let part = self.form(child);
+                        if part != "0" {
+                            parts.push(part);
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `object : Base()`, `class C : Base()`: a supertype constructor is
+            // a call of its type's name with its own arguments.
+            "superclass_constructor" if self.is_kotlin() => self.call_form(id),
             // `sizeof(struct sockaddr_in6)`: the one-pass reader writes the
             // type words in front of the operand as the value, and the CST
             // formed the constant `0` - every cast or sizeof in a value
