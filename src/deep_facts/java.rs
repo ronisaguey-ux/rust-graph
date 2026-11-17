@@ -275,6 +275,35 @@ impl<'a> Walker<'a> {
             ) {
                 continue;
             }
+            // `if (c) return y;`, `while (p) break;`, `for (…) go(i);`: the
+            // body is a statement of its own — the lexer writes the header's
+            // value and the body's events as two things — and folded into the
+            // header's value it became one merge that put every body event on
+            // the header's line (return/throw/break and the merged `for` body,
+            // 1,376 losses with no event on a line both readers can mean).
+            // Only the statement kinds the walk never otherwise reads are read
+            // here: a nested `if`/`for`/`while` is a node of its own and
+            // `java_enter` reaches it, so reading it here would write its events
+            // twice.
+            if matches!(
+                kind,
+                "expression_statement"
+                    | "local_variable_declaration"
+                    | "field_declaration"
+                    | "constant_declaration"
+                    | "return_statement"
+                    | "throw_statement"
+                    | "assert_statement"
+                    | "break_statement"
+                    | "continue_statement"
+                    | "yield_statement"
+                    | "labeled_statement"
+                    | "synchronized_statement"
+                    | "try_statement"
+            ) {
+                self.java_statement(child);
+                continue;
+            }
             let value = self.decl_value(child);
             if !value.is_empty() && value != "0" {
                 parts.push(value);
