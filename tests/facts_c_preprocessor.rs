@@ -85,6 +85,12 @@ const COVERAGE: &[(&str, &str, Lang, &str)] = &[
         "#include <stdio.h>\n#include \"settings.h\"\n#pragma once\n\nint print_count(int n) {\n    return printf(\"%d\", n);\n}\n",
     ),
     (
+        "a linkage header inside a C++ guard",
+        "cpp",
+        Lang::Cpp,
+        "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\nint api_version(void);\nint api_open(const char *path);\n\n#ifdef __cplusplus\n}\n#endif\n",
+    ),
+    (
         "a call written inside a continued macro body",
         "c",
         Lang::C,
@@ -95,13 +101,6 @@ const COVERAGE: &[(&str, &str, Lang, &str)] = &[
 /// Shapes that still disagree, with the exact disagreement. A row here must
 /// still lose: closing one without moving it up fails the suite.
 const KNOWN_GAPS: &[(&str, &str, Lang, &str, &str)] = &[
-    (
-        "a prototype read as a call by the lexer",
-        "cpp",
-        Lang::Cpp,
-        "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\nint api_version(void);\nint api_open(const char *path);\n\n#ifdef __cplusplus\n}\n#endif\n",
-        "`int api_version(void);` declares and calls nothing; the lexer reads the header as a call to `api_version` (call api_version line 5 in `<module>`), so the CST, which is right, still looks like it lost one",
-    ),
     (
         "a method header read as a call by the lexer",
         "cpp",
