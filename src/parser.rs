@@ -545,6 +545,16 @@ impl<'a> Parser<'a> {
         self.end_statement();
     }
 
+    /// Whether the statement being read is a Go control header, whose clauses
+    /// a `;` separates: `for i := 0; i < n; i++ {`, `if err := f(); err != nil {`.
+    fn go_header_open(&self) -> bool {
+        self.lang.tag == "GO"
+            && self
+                .word_at(&self.stmt, 0)
+                .as_deref()
+                .is_some_and(|word| matches!(word, "for" | "if" | "switch" | "select"))
+    }
+
     fn on_op(&mut self, token: Token) {
         let raw = self.raw(&token);
         if raw.len() != 1 {
@@ -565,7 +575,13 @@ impl<'a> Parser<'a> {
             }
             b'{' => self.on_open_brace(token),
             b'}' => self.on_close_brace(token),
-            b';' if self.brackets.is_empty() => {
+            // Go writes a control header without parentheses - `for i := 0;
+            // i < n; i++ {`, `if err := f(); err != nil {` - so a `;` inside
+            // one separates clauses and is not a statement end. Ending the
+            // statement there wrote the init as an event of its own and left
+            // the body brace to be read as a composite literal, which folded
+            // every statement of the body into one value.
+            b';' if self.brackets.is_empty() && !self.go_header_open() => {
                 self.declaring = false;
                 self.end_statement();
             }
@@ -955,6 +971,19 @@ impl<'a> Parser<'a> {
         }
         if last.kind == Kind::Ident && !BLOCK_WORDS.contains(&self.raw(&last)) && self.field_key_ahead() {
             return false;
+        }
+        // Go writes a control header without parentheses: `for i := 0; i < n; i++ {`,
+        // `if err := f(); err != nil {`, `switch v := f(x); v {`. The `:=` made the
+        // last test below read the brace as a composite literal, so the whole body
+        // merged into one value and every statement in it lost its own event.
+        if self.lang.tag == "GO"
+            && self
+                .word_at(&self.stmt, 0)
+                .as_deref()
+                .is_some_and(|word| matches!(word, "for" | "if" | "switch" | "select"))
+            && self.stmt.iter().any(|token| self.is_op(token, b";"))
+        {
+            return true;
         }
         if last.kind == Kind::Op {
             let raw = self.raw(&last);
