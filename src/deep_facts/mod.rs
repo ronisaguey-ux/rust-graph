@@ -1228,7 +1228,17 @@ impl<'a> Walker<'a> {
                 if matches!(self.facts.tag.as_str(), "C" | "CPP" | "OBJC") =>
             {
                 let children = self.children(id);
-                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
+                // `binstats[huge_idx].nactive += mul * hpdata_get(ps);` is an
+                // augmented assignment, a different token from `=`, and the arm
+                // only looked for the plain one: the statement wrote no event
+                // and the call in its value was never formed, so every `+=` on
+                // a field in the C corpus lost both (c corpus, 12 files).
+                const AUGMENTED: &[&str] = &["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">="];
+                let found = children
+                    .iter()
+                    .position(|&child| self.kind(child) == "=" || AUGMENTED.contains(&self.kind(child)));
+                if let Some(at) = found {
+                    let weak = self.kind(children[at]) != "=";
                     let target = children[..at]
                         .iter()
                         .rev()
@@ -1281,7 +1291,7 @@ impl<'a> Walker<'a> {
                                 }
                             }
                             let line = self.line(id);
-                            self.lexer_event(b'a', line, &[name.clone()], &form, false);
+                            self.lexer_event(b'a', line, &[name.clone()], &form, weak);
                             if self.kind(value) == "call_expression" {
                                 let path = self.decl_path(value);
                                 let last = path.rsplit('.').next().unwrap_or("").to_string();
