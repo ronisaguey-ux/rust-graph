@@ -630,23 +630,7 @@ impl<'a> Walker<'a> {
                         // a brace list of brace lists is a merge of merges, one
                         // inner merge per row - counting only the outer children
                         // flattened the whole table to eight zeros.
-                        let parts: Vec<String> = self
-                            .children(node)
-                            .into_iter()
-                            .filter(|&child| self.kind(child) != ",")
-                            .map(|child| {
-                                if self.kind(child) == "initializer_list" {
-                                    let inner = self
-                                        .children(child)
-                                        .into_iter()
-                                        .filter(|&item| self.kind(item) != ",")
-                                        .count();
-                                    format!("[\"m\",[{}]]", vec!["0"; inner].join(","))
-                                } else {
-                                    "0".to_string()
-                                }
-                            })
-                            .collect();
+                        let parts = self.c_initializer_elements(node);
                         let value = format!("[\"m\",[{}]]", parts.join(","));
                         self.lexer_event(b'a', line, &[name], &value, false);
                     } else if inits.len() == 1 {
@@ -1219,6 +1203,25 @@ impl<'a> Walker<'a> {
         let index = self.add_symbol(name.clone(), String::new(), KIND_CLASS, line, Vec::new());
         let symbol = self.frame().symbol;
         self.stack.push(Frame { node: id, symbol, class: name, receiver: String::new(), container: true, defines: Some(index) });
+    }
+
+    /// A brace initialiser's value: one part per element, each the element's
+    /// own value. `int K[64] = { 0, 0, … }` is a row of constants and stays
+    /// one; `ehooks_default_extent_hooks = { ehooks_default_alloc, … }` is a row
+    /// of names, and writing the constant 0 for each element made every
+    /// initialised table of function pointers disagree with the lexer, which
+    /// reads the name (c corpus, 125 rows).
+    fn c_initializer_elements(&mut self, node: u32) -> Vec<String> {
+        let kids: Vec<u32> = self.children(node).into_iter().filter(|&child| self.kind(child) != ",").collect();
+        kids.into_iter()
+            .map(|child| {
+                if self.kind(child) == "initializer_list" {
+                    format!("[\"m\",[{}]]", self.c_initializer_elements(child).join(","))
+                } else {
+                    self.form(child)
+                }
+            })
+            .collect()
     }
 
     /// `int x = 0;`, `Square box = Square(4);`, `std::string name_;`: the
