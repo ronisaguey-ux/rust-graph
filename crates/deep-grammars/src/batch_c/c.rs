@@ -224,7 +224,12 @@ rust_graph_deep::grammar! { C {
     user_type_name: IDENT,
     _init_declarator: _declarator attribute* ["=" _initializer],
     _initializer: designated_field | designated_index | _expression@assign | initializer_list,
-    initializer_list: "{" (_initializer %? ",") "}",
+    /// The separator is optional because a macro element can carry its own
+    /// comma: `A(1)` and `A(2)` on consecutive lines are two elements when `A`
+    /// expands to `{ ... },`, which is how the Arm libm tables are written. A
+    /// trailing comma is still accepted.
+    initializer_list: "{" [_initializer_list_items] "}",
+    _initializer_list_items: (_initializer ","?)+,
     /// C99 `.name = value` inside an initializer list.
     designated_field: "." IDENT "=" _initializer,
     /// C99 `[index] = value` inside an initializer list.
