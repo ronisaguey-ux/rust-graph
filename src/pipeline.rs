@@ -1597,6 +1597,19 @@ return verdict(Some("import"), detail, accepted);
             accepted.invented_symbols += 1;
             continue;
         }
+        // `import a.b.*` then `class S(r: R) {`: the statement reader keeps the
+        // import line open, because a trailing `*` can open a multiplication,
+        // and reads the class as the import's continuation - the class was
+        // filed as a *function* named after its constructor's call. The source
+        // line declares a class of that name and no function, so the tree is
+        // right to have none. `actual constructor()` gets the same treatment:
+        // `constructor` is a keyword and never a name.
+        if kt_keyword_symbol(&lexer.tag, &symbol.name)
+            || (!lines.is_empty() && kt_class_only_line(&lines, symbol.line, &symbol.name))
+        {
+            accepted.invented_symbols += 1;
+            continue;
+        }
         // `mod tests { fn f() }`: the CST spells the symbol `tests.f` because the
         // module is its owner; the one-pass lexer files it under `f`. Same
         // definition, two spellings, so a dotted suffix counts.
@@ -4070,6 +4083,37 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         _ => &["if", "for", "while", "return", "switch", "function", "func", "fn", "def"],
     };
     keywords.contains(&name)
+}
+
+/// Kotlin's declaration keywords are never the name of a definition the
+/// tree could write: `class S actual constructor()` reads as a symbol called
+/// `constructor` and `companion object` as one called `companion`.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn kt_keyword_symbol(tag: &str, name: &str) -> bool {
+    tag == "KT" && matches!(name, "constructor" | "init" | "companion" | "object")
+}
+
+/// `public expect class BaseTest() {` on this line and no `fun BaseTest`:
+/// the only definition the source writes there is the class.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn kt_class_only_line(src: &Lines<'_>, line: u32, name: &str) -> bool {
+    let Some(text) = src.get(line) else { return false };
+    if text.contains(&format!("fun {name}")) || text.contains(&format!("fun{name}")) {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(at) = text[from..].find("class") {
+        let after = &text[from + at + "class".len()..];
+        let after = after.trim_start();
+        if after.starts_with(name) {
+            let rest = &after[name.len()..];
+            if !rest.starts_with(|ch: char| ch.is_alphanumeric() || ch == '_') {
+                return true;
+            }
+        }
+        from += at + "class".len();
+    }
+    false
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
