@@ -361,7 +361,10 @@ rust_graph_deep::grammar! { CSHARP {
     conversion_operator_declaration: [attributes] [modifiers] ("implicit" | "explicit") "operator" _type formal_parameters (block | "=>" _expression ";"),
     _operator_token: PLUS | MINUS | STAR | SLASH | PERCENT | AMP | PIPE | CARET | BANG | TILDE | EQ | NE | LT | GT | LE | GE | INCREMENT | DECREMENT | "true" | "false",
     field_declaration: [attributes] [modifiers] _type _variable_declarator ("," _variable_declarator)* ";",
-    _variable_declarator: _name ["=" _ref_expression],
+    // `bool[] values = { true, false };`: a declaration may initialise from a bare
+    // array initialiser, which is not an expression, so the declarator held no
+    // form for one and every such declaration was one ERROR.
+    _variable_declarator: _name ["=" (_ref_expression | array_initializer)],
 
     // ---- types ----
 
