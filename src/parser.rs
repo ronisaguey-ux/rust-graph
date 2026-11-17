@@ -1955,6 +1955,21 @@ impl<'a> Parser<'a> {
 
     /// The slices between the top-level commas of a token run: `a, f(b, c)`
     /// is two parts, `[a, b]` and `f(x, y)` are one each.
+    /// `void (f) (int x)`: a declaration whose declared name is parenthesised,
+    /// so the macro over that name cannot expand. It starts with the type, and
+    /// the parenthesised name is followed by the parameter list.
+    fn parenthesised_declarator(&self, stmt: &[Token]) -> bool {
+        if stmt.first().is_none_or(|token| token.kind != Kind::Ident) {
+            return false;
+        }
+        stmt.windows(4).any(|window| {
+            self.is_op(&window[0], b"(")
+                && window[1].kind == Kind::Ident
+                && self.is_op(&window[2], b")")
+                && self.is_op(&window[3], b"(")
+        })
+    }
+
     /// `int i = 0, cnt;` and `size_t size=0, nmem=0;`: a C declarator list
     /// declares one name per declarator, so the initialiser ends at the first
     /// top-level comma. Read as one value the lexer joined the next declarator
@@ -3768,6 +3783,16 @@ impl<'a> Parser<'a> {
                 }
                 return;
             }
+        }
+        // `LUALIB_API void (luaL_setn) (lua_State *L, int t, int n);`: the
+        // declared name is parenthesised so the macro over it cannot expand,
+        // which is a declaration header and carries no value. Read as one, the
+        // lexer wrote the name on its own line and the CST wrote the call
+        // group, and every lua header lost the declaration (54 rows). A
+        // parenthesised callee (`(f)(x);`) opens with the `(`; this one opens
+        // with the type, so only a declaration head reaches it.
+        if self.lang.tag == "C" && self.parenthesised_declarator(stmt) {
+            return;
         }
         if let Some(equal) = self.top_level_assign(stmt) {
             let augmented = self.raw(&stmt[equal]) != b"=" && !matches!(self.raw(&stmt[equal]), b":=" | b"<-");
