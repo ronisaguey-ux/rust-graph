@@ -290,6 +290,11 @@ rust_graph_deep::grammar! { C {
         &(user_type_name _member_declarator_list ";") user_struct_declaration
         | &(declaration_specifiers _struct_declarator "," _struct_declarator)
             declaration_specifiers (_struct_declarator % ",") ";"
+        // `char buf[64];`: the optional typedef name below claims `buf` and
+        // then the array suffix has nowhere to go, so every single array member
+        // of a keyword type was an error node. With an array suffix in the
+        // third token there is no typedef name to claim.
+        | &(declaration_specifiers IDENT array_suffix) declaration_specifiers _struct_declarator ("," _struct_declarator)* ";"
         | declaration_specifiers [user_type_name] (_struct_declarator % ",") ";"
         | macro_field,
     /// `PyObject *weakreflist;`: a typedef name and its declarators. A struct
