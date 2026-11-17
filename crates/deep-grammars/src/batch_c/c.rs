@@ -18,7 +18,7 @@
 //!   is `macro_field`; the predicate above it claims every name that does have
 //!   a declarator, so the two cannot be confused.
 //!
-//! Not modelled: `_Generic`, compound literals, K&R parameter declarations, a
+//! Not modelled: `_Generic`, K&R parameter declarations, a
 //! pointer declarator of a typedef name inside a function body (it reads as a
 //! multiplication, which is the older and still legal reading), and operator
 //! spelling other than the punctuation forms. Everything listed here as
@@ -338,7 +338,10 @@ rust_graph_deep::grammar! { C {
     /// the type of a function pointer, so `sizeof(int (*)(void))` parses.
     _type_abstract_declarator:
         pointer+ [parenthesized_abstract] abstract_suffix*
-        | parenthesized_abstract abstract_suffix*,
+        | parenthesized_abstract abstract_suffix*
+        // `(int[]){1, 2}` and `sizeof(int[4])`: an array or function suffix with
+        // no pointer in front of it.
+        | abstract_suffix+,
 
     compound_statement: "{" _statement* "}",
 
@@ -405,7 +408,10 @@ rust_graph_deep::grammar! { C {
     },
 
     _primary:
-        &(cast_type) cast_expression
+        // A C99 compound literal is a cast type followed by a brace; the cast
+        // above it keeps `(int) x` and this keeps `(int[]){1, 2}` apart.
+        &(cast_type initializer_list) compound_literal
+        | &(cast_type) cast_expression
         | &(user_cast_head (IDENT | NUMBER | STR | CHAR_LITERAL)) user_cast_expression
         | sizeof_expression
         | alignof_expression
@@ -426,6 +432,9 @@ rust_graph_deep::grammar! { C {
     user_cast_head: "(" user_type_name ")",
 
     cast_type: "(" _cast_type_body ")",
+    /// C99 `(struct s){ .a = 1 }`, `(int[]){1, 2}`: a type in parentheses and
+    /// the braces that make it a value rather than a cast.
+    compound_literal: cast_type initializer_list,
     /// `(int *)`, `(struct s *)` and `(Foo *)`: a keyword type or a typedef name.
     _cast_type_body: type_name | _user_cast_type,
     /// A cast to a typedef name only counts when a `*` or a `(...)` follows it:
