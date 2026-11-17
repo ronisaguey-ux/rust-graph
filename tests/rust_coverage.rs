@@ -216,6 +216,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "a rest pattern in a struct pattern is not a value (000985_activity_tasks.rs:437)",
         "fn a() {\n    assert_matches!(r, ActivityTask { variant: Some(x), .. });\n}\n",
     ),
+    (
+        "a block expression inside a let-chain condition is a value (000928_runtime.rs:255)",
+        "fn f(options: O) {\n    if let Some(v) = unsafe { options.a.as_ref() }\n        && let Some(v) = unsafe { v.b.as_ref() }\n    {\n        use_it(v);\n    }\n    let runtime = Runtime { core };\n}\n",
+    ),
 ];
 
 /// Forms the reader does not cover yet, with the exact disagreement.

@@ -721,6 +721,20 @@ impl<'a> Parser<'a> {
                     if matches!(self.raw(first), b"if" | b"while" | b"else") && self.rust_let_pattern_open() {
                         return false;
                     }
+                    // `if let Some(v) = unsafe { … } && let Some(v) = unsafe { … } {`:
+                    // a block expression inside a condition. Opened as the body,
+                    // its `}` ended the statement, so the second link of the chain
+                    // started a statement of its own and the body brace after it
+                    // was read as a value: everything down to the end of the
+                    // function merged into one event (000928_runtime.rs:255).
+                    // The block's text is a value of the condition, not the body.
+                    if self
+                        .stmt
+                        .last()
+                        .is_some_and(|token| token.kind == Kind::Ident && matches!(self.raw(token), b"unsafe" | b"const"))
+                    {
+                        return false;
+                    }
                     return true;
                 }
             }
