@@ -472,6 +472,12 @@ struct Walker<'a> {
     /// `hidden void f(void);`: the macro that opened the declaration, read by
     /// the item's own node and spent on the declaration inside it.
     macro_prefix: Option<String>,
+    /// The line a declaration's statement starts on, by declaration node: the
+    /// lexer opens a statement at the first token after the previous `;`, so
+    /// `TEST_END` and `seq_define(…)` — macro invocations with no `;` of their
+    /// own — put the declaration that follows them on the macro's line while
+    /// the declaration's own line is the later one (c corpus, 6 files).
+    statement_lines: std::collections::HashMap<u32, u32>,
     /// The form text a call node already produced, by node id. A block value is
     /// read twice — once for the value the assignment carries, once when the
     /// walk reaches the statements inside it — and the second read pushed a
@@ -552,6 +558,7 @@ impl<'a> Walker<'a> {
             bound: Vec::new(),
             consumed: Vec::new(),
             macro_prefix: None,
+            statement_lines: std::collections::HashMap::new(),
             call_texts: std::collections::HashMap::new(),
         }
     }
