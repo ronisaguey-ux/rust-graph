@@ -346,6 +346,7 @@ rust_graph_deep::grammar! { C {
         | continue_statement
         | goto_statement
         | labeled_statement
+        | empty_statement
         | static_assert_statement
         | asm_statement
         | declaration_statement
@@ -369,6 +370,10 @@ rust_graph_deep::grammar! { C {
     continue_statement: "continue" ";",
     goto_statement: "goto" (IDENT | "*" _expression) ";",
     labeled_statement: IDENT ":" _statement,
+    /// A body that is nothing: `while ((r=read())==-1);`, `for (; *p; p++);`.
+    /// The null statement is an empty expression statement; it is also what
+    /// follows a label when the label has no work of its own: `case 1: ;`.
+    empty_statement: ";",
     expression_statement: _expression ";",
 
     _expression: precedence _primary {
