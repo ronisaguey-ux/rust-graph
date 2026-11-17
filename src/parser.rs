@@ -4508,7 +4508,9 @@ impl<'a> Parser<'a> {
                 // across it, the type was pasted onto the target
                 // (`bytekeyBytes`, `longLONG_ARRAY_NOT_SUPPORTED`), the one
                 // java shape the CST never writes: 612 rows over 265 files.
-                if self.lang.tag == "JAVA"
+                // C# spells an array type the same way, and pasted it on
+                // (`byte[] bytes = Encoding.GetBytes(s)` bound `bytebytes`).
+                if matches!(self.lang.tag, "JAVA" | "CS")
                     && toks.get(index + 1).is_some_and(|token| self.is_op(token, b"]"))
                     && index > 0
                     && toks[index - 1].kind == Kind::Ident
