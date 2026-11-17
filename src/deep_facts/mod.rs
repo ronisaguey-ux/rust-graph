@@ -1634,7 +1634,13 @@ impl<'a> Walker<'a> {
                 if let Some(body) = body {
                     let line = self.line(body);
                     let value = self.form(body);
-                    self.event(&format!("[\"r\",{line},{value}]"));
+                    // A property's accessor is an assignment to the lexer — it
+                    // files the body on that line as an `x` event — while a
+                    // function's expression body is its `r` value. Written as
+                    // `r` the getter's line found no partner, so every property
+                    // whose getter stood before another member lost its value
+                    // (`get() = keys.length` in a class with more members).
+                    self.event(&format!("[\"x\",{line},{value}]"));
                 }
             }
             "return_statement" => self.return_statement(id),
