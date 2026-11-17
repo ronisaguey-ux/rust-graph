@@ -754,6 +754,100 @@ impl<'a> Walker<'a> {
         if record_only { String::new() } else { text }
     }
 
+    /// The value a C# lambda writes into the statement that holds it: its
+    /// body's value, with every call in that body recorded. An empty block, or
+    /// a body that writes nothing, is `0` - which is what the one-pass reader
+    /// writes for `() => { }`.
+    pub(crate) fn cs_lambda_value(&mut self, id: u32) -> String {
+        let Some(body) = self.children(id).into_iter().rev().find(|&child| !self.is_layout(child)) else {
+            return "0".to_string();
+        };
+        if self.kind(body) != "block" {
+            return self.form(body);
+        }
+        let mut parts: Vec<String> = Vec::new();
+        for statement in self.children(body) {
+            if self.is_layout(statement) {
+                continue;
+            }
+            let value = self.form(statement);
+            if !value.is_empty() {
+                parts.push(value);
+            }
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
+    /// The value a C# generic invocation writes: the callee's name, then each
+    /// type argument's name, then the arguments' value, merged. Every call
+    /// inside the arguments is recorded on the way, because it is part of the
+    /// same statement to the one-pass reader.
+    pub(crate) fn cs_generic_invocation(&mut self, id: u32) -> String {
+        let children = self.children(id);
+        let mut parts: Vec<String> = Vec::new();
+        for (index, &child) in children.iter().enumerate() {
+            let kind = self.kind(child);
+            if index == 0 {
+                let path = self.path_of(child);
+                if !path.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    parts.push(out);
+                }
+                continue;
+            }
+            if kind == "type_arguments" {
+                for arg in self.children(child) {
+                    if self.is_layout(arg) {
+                        continue;
+                    }
+                    let path = self.path_of(arg);
+                    if path.is_empty() {
+                        continue;
+                    }
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    parts.push(out);
+                }
+                continue;
+            }
+            if matches!(kind, "arguments" | "argument_list") {
+                let mut items: Vec<String> = Vec::new();
+                for arg in self.children(child) {
+                    if self.is_layout(arg) {
+                        continue;
+                    }
+                    items.push(self.form(arg));
+                }
+                let value = match items.len() {
+                    0 => continue,
+                    1 => items.pop().unwrap_or_else(|| "0".to_string()),
+                    _ => format!("[\"t\",[{}]]", items.join(",")),
+                };
+                parts.push(value);
+                continue;
+            }
+            if self.is_layout(child) {
+                continue;
+            }
+            let value = self.form(child);
+            if !value.is_empty() && value != "0" {
+                parts.push(value);
+            }
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
     /// One call, at the line its callee is written on, named the way the source
     /// spells it. Returns its index in the symbol's call table, which is what
     /// the flow form's `["c",id,...]` names.
@@ -2561,6 +2655,20 @@ fn dotted_piece(text: &str) -> bool {
             // `object : Base()`, `class C : Base()`: a supertype constructor is
             // a call of its type's name with its own arguments.
             "superclass_constructor" if self.is_kotlin() => self.call_form(id),
+            // `Assert.Throws<T>(() => reader.Read())`: the one-pass reader
+            // writes a generic invocation as the callee's name, the type
+            // argument's name and the arguments' value - never as a call of its
+            // own - and a call inside the arguments belongs to the same
+            // statement. Read as a member access the tree wrote the name alone
+            // and dropped every lambda argument (636 rows, the largest C#
+            // cluster left after the attributes).
+            "generic_invocation" => return self.cs_generic_invocation(id),
+            // `() => reader.Read()` as an argument: the one-pass reader files
+            // the body's value in the statement and records the call inside
+            // it. The tree kept the lambda node and nothing read its body, so
+            // every lambda argument lost what it contains.
+            "lambda_expression" if self.language.name == "csharp" => return self.cs_lambda_value(id),
+            // `(unsigned short)(port & 0xffff)` and
             // `sizeof(struct sockaddr_in6)`: the one-pass reader writes the
             // type words in front of the operand as the value, and the CST
             // formed the constant `0` - every cast or sizeof in a value
