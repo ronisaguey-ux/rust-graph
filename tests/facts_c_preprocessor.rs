@@ -84,18 +84,17 @@ const COVERAGE: &[(&str, &str, Lang, &str)] = &[
         Lang::C,
         "#include <stdio.h>\n#include \"settings.h\"\n#pragma once\n\nint print_count(int n) {\n    return printf(\"%d\", n);\n}\n",
     ),
+    (
+        "a call written inside a continued macro body",
+        "c",
+        Lang::C,
+        "#define LOG(fmt, ...) \\\n    do { \\\n        report(fmt, ##__VA_ARGS__); \\\n    } while (0)\n\nvoid emit(int value) {\n    LOG(\"%d\", value);\n}\n",
+    ),
 ];
 
 /// Shapes that still disagree, with the exact disagreement. A row here must
 /// still lose: closing one without moving it up fails the suite.
 const KNOWN_GAPS: &[(&str, &str, Lang, &str, &str)] = &[
-    (
-        "a call written inside a macro body",
-        "c",
-        Lang::C,
-        "#define LOG(fmt, ...) \\\n    do { \\\n        report(fmt, ##__VA_ARGS__); \\\n    } while (0)\n\nvoid emit(int value) {\n    LOG(\"%d\", value);\n}\n",
-        "the lexer walks the macro definition as code and reads `report` as a call on line 3; the grammar treats the directive as layout, so the CST has no node to read it from (call report line 3 in `<module>`)",
-    ),
     (
         "a prototype read as a call by the lexer",
         "cpp",
