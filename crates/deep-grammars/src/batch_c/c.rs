@@ -310,7 +310,12 @@ rust_graph_deep::grammar! { C {
     _direct_base: IDENT | parenthesized_declarator,
     parenthesized_declarator: "(" _declarator ")",
     _declarator_suffix: array_suffix | parameter_list,
-    array_suffix: "[" [_expression] "]",
+    /// C99 parameter arrays carry qualifiers: `pmatch[restrict]`,
+    /// `buf[static 16]`, `p[const]`. A bare `[_expression]` could not parse
+    /// one, so `int regexec(..., regmatch_t pmatch[restrict], ...)` recovered,
+    /// and every call in the body below the prototype was lost.
+    array_suffix: "[" _array_qualifier* [_expression] "]",
+    _array_qualifier: "static" | "const" | "restrict" | "volatile",
     parameter_list: "(" (_parameter % ",") ")",
     _parameter:
         declaration_specifiers [user_type_name] [_declarator_or_abstract]
