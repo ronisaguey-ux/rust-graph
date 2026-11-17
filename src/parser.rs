@@ -118,6 +118,11 @@ pub struct Parser<'a> {
     conditional_type_open: bool,
     /// The statement after such a `}` writes no fact: it is the type's tail.
     suppress_event: bool,
+    /// The frame a `typedef struct { … } Name;` body opened, as the stack depth
+    /// that frame has. The `}` closes the body and the name after it is the
+    /// declarator the C++ grammar files inside the declaration on the header's
+    /// line, so the tail writes no event of its own.
+    typedef_block: Option<usize>,
 }
 
 pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
@@ -137,6 +142,7 @@ pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
         declaring: false,
         conditional_type_open: false,
         suppress_event: false,
+        typedef_block: None,
     };
     parser.run()
 }
@@ -704,7 +710,16 @@ impl<'a> Parser<'a> {
         self.end_statement();
         self.settle_branch(None);
         let conditional = std::mem::take(&mut self.conditional_type_open);
+        let depth = self.frames.len();
         self.close_block();
+        // `typedef struct art_s { … } art_t;`: the closing `}` ends the body and
+        // `art_t` is the declarator, which the C++ grammar files inside the
+        // declaration on the header's line. Written on the closing line it was
+        // a name the CST never had there (roaring.h, art.h, art.c).
+        if self.typedef_block == Some(depth) && self.frames.len() < depth {
+            self.typedef_block = None;
+            self.suppress_event = true;
+        }
         // `… extends { onmessage: any } ? T : typeof undici.M;`: what follows
         // the object type is the rest of the type, and a type writes no fact.
         if conditional {
@@ -1404,11 +1419,16 @@ impl<'a> Parser<'a> {
         } else if self.head_word(&stmt).is_some_and(|word| CONTROL.contains(&word.as_str())) {
             self.open_control(&stmt, start_col);
         } else {
+            let typedef_block = matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+                && self.head_word(&stmt).as_deref() == Some("typedef");
             self.statement(&stmt);
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
             self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+            if typedef_block {
+                self.typedef_block = Some(self.frames.len());
+            }
         }
         stmt.clear();
         self.stmt = stmt;
