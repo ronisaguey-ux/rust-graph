@@ -157,6 +157,7 @@ rust_graph_deep::grammar! { C {
         | &(declaration_specifiers IDENT _qualified_tail) specified_macro_item
         | &(IDENT parameter_list "{") implicit_function
         | &(user_type_name "*") user_pointer_declaration
+        | &(user_type_name _function_pointer_name) user_pointer_declaration
         | declaration_statement
         | static_assert_statement
         | asm_statement
@@ -190,6 +191,7 @@ rust_graph_deep::grammar! { C {
         | &(user_type_name _declarator "{") bare_user_function_definition
         | &(IDENT parameter_list "{") implicit_function
         | &(user_type_name "*") user_pointer_declaration
+        | &(user_type_name _function_pointer_name) user_pointer_declaration
         | declaration_statement
         | static_assert_statement,
     /// A definition whose return type is supplied by the macro above it:
@@ -197,17 +199,33 @@ rust_graph_deep::grammar! { C {
     implicit_function: IDENT parameter_list compound_statement,
 
     declaration_statement:
-        &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
+        &(declaration_specifiers pointer* parenthesized_pointer) function_pointer_declaration
+        | &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
         | &("typedef" user_type_name _declarator) typedef_user_declaration
         | &(user_type_name IDENT) bare_user_declaration
         | _default_declaration,
+    /// `void (*RedisModule_Log)(...) REDISMODULE_ATTR;`: a declarator that is a
+    /// parenthesized function pointer and a macro where the declaration ends.
+    /// The parentheses are what make the trailing macro unambiguous, so this
+    /// reading is claimed only for that shape.
+    function_pointer_declaration:
+        declaration_specifiers _function_pointer_init ("," _function_pointer_init)* ";",
+    _function_pointer_init:
+        pointer* parenthesized_pointer _declarator_suffix* attribute* [trailing_macro]
+        ["=" _initializer],
     /// `static const Foo *f(void);`: a keyword-qualified typedef name.
     specified_user_declaration: declaration_specifiers user_type_name (_init_declarator % ",") ";",
     /// `buffer *buffer_new(int size);`: a typedef name and a pointer declarator.
     /// Only file scope accepts this: inside a function `x * y;` must stay a
     /// multiplication.
     user_pointer_declaration: user_type_name _pointer_named_declarator ("," _pointer_named_declarator)* ";",
-    _pointer_named_declarator: pointer* IDENT _declarator_suffix* attribute* ["=" _initializer],
+    /// `RedisModuleKey *(*OpenKey)(void) ATTR;`: the pointer belongs to a
+    /// parenthesized declarator, not to a plain name.
+    _pointer_named_declarator:
+        &(pointer* parenthesized_declarator)
+            pointer* parenthesized_declarator _declarator_suffix* attribute* [trailing_macro]
+                ["=" _initializer]
+        | pointer* IDENT _declarator_suffix* attribute* ["=" _initializer],
     /// `typedef Foo (*handler)(void);`: a typedef whose type is a typedef name.
     typedef_user_declaration: "typedef" user_type_name _init_declarator ("," _init_declarator)* ";",
     /// `Foo x;`: a typedef name and a named declarator. It never starts with a
@@ -309,6 +327,11 @@ rust_graph_deep::grammar! { C {
     direct_declarator: _direct_base _declarator_suffix*,
     _direct_base: IDENT | parenthesized_declarator,
     parenthesized_declarator: "(" _declarator ")",
+    /// `size_t (*Length)(void) ATTR;`: a parenthesized pointer declarator. The
+    /// `*` inside the parentheses is what separates this from a macro call
+    /// `M(x);` at file scope.
+    _function_pointer_name: parenthesized_pointer _declarator_suffix*,
+    parenthesized_pointer: "(" pointer+ direct_declarator ")",
     _declarator_suffix: array_suffix | parameter_list,
     array_suffix: "[" [_expression] "]",
     parameter_list: "(" (_parameter % ",") ")",
@@ -726,6 +749,19 @@ mod kinds {
                 ("designated_field", ".x = 0"),
                 ("designated_index", "[1] = 7"),
                 ("sequence_expression", "left = input, right = input + 1"),
+            ],
+        ),
+        (
+            "c_function_pointer_declarators.c",
+            &[
+                (
+                    "function_pointer_declaration",
+                    "void (*log_emit)(struct emitter *, const char *) NO_RETURN_ATTR;",
+                ),
+                (
+                    "user_pointer_declaration",
+                    "key_t *(*key_open)(struct ctx *, const char *) PLUGIN_ATTR;",
+                ),
             ],
         ),
         (
