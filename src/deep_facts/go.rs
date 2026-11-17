@@ -3702,6 +3702,20 @@ fn dotted_piece(text: &str) -> bool {
                 targ = Some(format!("[{inner}]"));
             }
         }
+        // `new Product { ExpiryDate = new DateTime(2000, 9, 28) }`: an object
+        // initialiser is not an argument list, so nothing walked its items and
+        // every call written inside one was lost - `DateTime` alone cost 58
+        // files. Each item's value is a value of its own, and a lambda among
+        // them keeps its own reading, which `c_calls_in_pub` already honours.
+        let mut nested = Vec::new();
+        for child in children.iter().copied() {
+            if matches!(self.kind(child), "object_initializer" | "array_initializer" | "collection_initializer") {
+                self.c_calls_in_pub(child, &mut nested);
+            }
+        }
+        for call in nested {
+            self.form(call);
+        }
         let index = self.push_call(path, line);
         let mut out = format!("[\"c\",{index},{receiver},");
         match args {
