@@ -1022,6 +1022,17 @@ impl<'a> Walker<'a> {
                     self.kt_property(id);
                 }
             }
+            // `fun f() = listOf(x)`: Kotlin's expression body is the
+            // function's value, and the lexer reads the call on that line as
+            // the line's expression. Nothing in the walk read `function_body`,
+            // so every expression-bodied function lost its call - the largest
+            // Kotlin cluster left in the ktor corpus. A block body keeps its
+            // own statements.
+            "function_body" => {
+                if self.child_of_kind(id, "block").is_none() {
+                    self.expression_statement(id);
+                }
+            }
             // `rootProject.name = "demo"` in a .kts script: the grammar keeps
             // the line as one flat node, nothing read it, and every Gradle
             // script in the corpus lost its assignments (rootProject.name,
