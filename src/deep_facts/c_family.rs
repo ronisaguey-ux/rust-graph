@@ -1791,6 +1791,17 @@ impl<'a> Walker<'a> {
                     .unwrap_or_default();
                 Some(if base.is_empty() { format!(".{name}") } else { format!("{base}.{name}") })
             }
+            // `mh->db[mh->num_dbs].dbid`: a subscript is transparent in a
+            // path — the lexer cuts the bracket off the target it reads, so
+            // `suite[0].children` names `suite.children` — and the receiver's
+            // path continues through it. Read as a leaf it named `.dbid`.
+            "subscript_expression" | "subscript" | "index_expression" => {
+                let object = self.children(id).into_iter().next()?;
+                self.c_path(object).or_else(|| {
+                    let path = self.path_of(object);
+                    (!path.is_empty()).then_some(path)
+                })
+            }
             "plain_type_name" | "user_type_name" => {
                 let child = self.children(id).into_iter().next()?;
                 let path = self.path_of(child);
