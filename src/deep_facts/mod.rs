@@ -2258,37 +2258,112 @@ impl<'a> Walker<'a> {
             if !declaration.trim_end().ends_with(';') {
                 continue;
             }
-            let mut words: Vec<String> = Vec::new();
+            // A parenthesised type is a name only while it stays one word:
+            // `(UIControlState)state` is two names, and the one-pass reader
+            // flattens it, but `(nullable UIImage *)image` is a call over the
+            // words inside the parens. Read as one flat word list, every
+            // nullability-qualified parameter disagreed with the lexer and took
+            // its whole file down with it.
+            let mut pieces: Vec<(bool, Vec<String>)> = Vec::new();
             let mut word = String::new();
+            let mut depth = 0usize;
+            let mut group: Vec<String> = Vec::new();
+            // A block-typed parameter is a callee to the one-pass reader: it
+            // writes an anonymous call for `success:(void (^)(…))success`, and
+            // although the guard excuses the call as an artefact, the choice
+            // between the two records weighs it. Without it every header that
+            // takes a completion block lost the file to the lexer on count.
+            let mut blocks = 0usize;
+            let mut caret = false;
             for ch in declaration.chars() {
                 if ch.is_alphanumeric() || ch == '_' {
                     word.push(ch);
-                } else if !word.is_empty() {
-                    words.push(std::mem::take(&mut word));
+                    continue;
+                }
+                // A nested paren is where the lexer stops reading the outer
+                // group: `(nullable void (^)(NSURLRequest *request))` is one
+                // merge of `nullable` and `void`, and the block's own parameters
+                // are not part of it. Words past the first nested '(' are
+                // therefore dropped, not folded in.
+                if !word.is_empty() {
+                    let done = std::mem::take(&mut word);
+                    if depth == 1 {
+                        group.push(done);
+                    } else if depth == 0 {
+                        pieces.push((false, vec![done]));
+                    }
+                }
+                match ch {
+                    '(' => {
+                        depth += 1;
+                        if depth == 1 {
+                            group.clear();
+                            caret = false;
+                        }
+                    }
+                    '^' => {
+                        if depth > 0 {
+                            caret = true;
+                        }
+                    }
+                    ')' => {
+                        if depth == 1 {
+                            if caret {
+                                blocks += 1;
+                            }
+                            pieces.push((true, std::mem::take(&mut group)));
+                        }
+                        depth = depth.saturating_sub(1);
+                    }
+                    _ => {}
                 }
             }
             if !word.is_empty() {
-                words.push(word);
+                if depth == 1 {
+                    group.push(word);
+                } else if depth == 0 {
+                    pieces.push((false, vec![word]));
+                }
             }
-            if words.len() < 2 {
+            if depth > 0 && !group.is_empty() {
+                pieces.push((true, group));
+            }
+            let words: usize = pieces.iter().map(|(_, names)| names.len()).sum();
+            if words < 2 {
                 continue;
             }
-            let mut parts: Vec<String> = Vec::new();
-            let mut after_selector = false;
-            for word in &words {
-                if word == "void" && !after_selector {
-                    parts.push("0".to_string());
-                    continue;
-                }
-                if word == "void" {
-                    parts.push("0".to_string());
-                    continue;
-                }
+            let name_form = |text: &str| {
                 let mut form = String::from("[\"n\",");
-                push_string(&mut form, word);
+                push_string(&mut form, text);
                 form.push(']');
-                parts.push(form);
-                after_selector = true;
+                form
+            };
+            let mut parts: Vec<String> = Vec::new();
+            for (is_group, names) in &pieces {
+                if *is_group && names.len() > 1 {
+                    let inner: Vec<String> = names
+                        .iter()
+                        .map(|name| {
+                            if name == "void" {
+                                "0".to_string()
+                            } else {
+                                name_form(name)
+                            }
+                        })
+                        .collect();
+                    parts.push(format!("[\"m\",[{}]]", inner.join(",")));
+                    continue;
+                }
+                for name in names {
+                    if name == "void" {
+                        parts.push("0".to_string());
+                        continue;
+                    }
+                    parts.push(name_form(name));
+                }
+            }
+            for _ in 0..blocks {
+                self.push_call(".call".to_string(), line);
             }
             let value = format!("[\"m\",[{}]]", parts.join(","));
             self.lexer_event(b'x', line, &[], &value, false);
