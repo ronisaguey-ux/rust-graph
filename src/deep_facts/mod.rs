@@ -967,6 +967,13 @@ impl<'a> Walker<'a> {
                 self.lexer_event(b'x', line, &[], &value, false);
             }
         }
+        // `public delegate object ObjectConstructor<T>(params object[] args);`:
+        // a delegate declaration is one header statement to the one-pass
+        // reader, and the definition table claims the node before any arm can
+        // read it, so every delegate declaration lost its line.
+        if kind == "delegate_declaration" {
+            self.java_header_event(id);
+        }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
             self.open_definition(id, def);
             return;
