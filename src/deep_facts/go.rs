@@ -979,7 +979,7 @@ impl<'a> Walker<'a> {
     pub(crate) fn decl_call(&mut self, id: u32) -> usize {
         let callee = self.decl_callee(id);
         let path = self.decl_path(callee);
-        let line = self.line(callee);
+        let line = self.call_line(callee, id);
         self.push_call(path, line)
     }
 
