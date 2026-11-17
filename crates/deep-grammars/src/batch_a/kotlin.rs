@@ -482,12 +482,18 @@ rust_graph_deep::grammar! { KOTLIN {
     _type: precedence _type_head {
         postfix "?" => nullable_type,
         postfix type_arguments => generic_type,
+        // `Engine.Configuration.() -> Unit`: the receiver is the type parsed so
+        // far, so a qualified receiver costs no lookahead and no second rule.
+        postfix "." function_parameters "->" _type => qualified_receiver_function_type,
         postfix "." _name => qualified_type,
     },
     _type_head: &(receiver_function_type) receiver_function_type | _name | function_type,
     function_type: function_parameters "->" _type,
     /// A function type with a receiver: `Config.() -> Unit`, the parameter that
-    /// makes `config { }` work.
+    /// makes `config { }` work. A qualified receiver
+    /// (`JettyApplicationEngineBase.Configuration.() -> Unit`, how every
+    /// engine's `configure` parameter is spelled) is the postfix row in `_type`
+    /// below, where the receiver is already a type.
     receiver_function_type: _name ["?"] "." function_parameters "->" _type,
     function_parameters: "(" (_type %? ",") ")",
 
