@@ -411,9 +411,10 @@ rust_graph_deep::grammar! { C {
     },
 
     _primary:
-        // A C99 compound literal is a cast type followed by a brace; the cast
-        // above it keeps `(int) x` and this keeps `(int[]){1, 2}` apart.
-        &(cast_type initializer_list) compound_literal
+        // A C99 compound literal is a type followed by a brace; the cast below
+        // keeps `(int) x` apart, and only a compound literal may name a typedef
+        // with no declarator around it: `(Foo){ .x = 0 }`.
+        &(_compound_type initializer_list) compound_literal
         | &(cast_type) cast_expression
         | &(user_cast_head (IDENT | NUMBER | STR | CHAR_LITERAL)) user_cast_expression
         | sizeof_expression
@@ -435,9 +436,12 @@ rust_graph_deep::grammar! { C {
     user_cast_head: "(" user_type_name ")",
 
     cast_type: "(" _cast_type_body ")",
-    /// C99 `(struct s){ .a = 1 }`, `(int[]){1, 2}`: a type in parentheses and
-    /// the braces that make it a value rather than a cast.
-    compound_literal: cast_type initializer_list,
+    /// C99 `(struct s){ .a = 1 }`, `(int[]){1, 2}`, `(Foo){ .x = 0 }`: a type in
+    /// parentheses and the braces that make it a value rather than a cast.
+    compound_literal: _compound_type initializer_list,
+    /// The type of a compound literal: a keyword type, or a bare typedef name,
+    /// which only a following brace makes a type rather than an expression.
+    _compound_type: cast_type | user_cast_head,
     /// `(int *)`, `(struct s *)` and `(Foo *)`: a keyword type or a typedef name.
     _cast_type_body: type_name | _user_cast_type,
     /// A cast to a typedef name only counts when a `*` or a `(...)` follows it:
