@@ -881,8 +881,14 @@ impl<'a> Walker<'a> {
                 // another position. A blanket rule for keyword leaves also
                 // picked up `catch` in `try {…} catch (e)`, so the list stays
                 // explicit.
+                // The rest of the grammar's `_name` set: every word the grammar
+                // accepts where a name can be bound has to be a binder here too,
+                // or `const protected = [...]`, `const { global } = x` and
+                // `const unique = new SafeSet()` bind nothing at all.
                 "is" | "as" | "satisfies" | "get" | "set" | "static" | "async" | "readonly" | "declare" | "type"
-                | "from" | "of" | "module" | "keyof" => {
+                | "from" | "of" | "module" | "keyof" | "unique" | "namespace" | "interface" | "abstract"
+                | "public" | "private" | "protected" | "implements" | "infer" | "asserts" | "override"
+                | "accessor" | "global" => {
                     out.push(self.text_string(node))
                 }
                 _ => {
