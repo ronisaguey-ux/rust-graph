@@ -126,3 +126,27 @@ fn a_c_declarator_list_reads_the_same_on_both_paths() {
     }
     assert!(failed.is_empty(), "a declarator list disagreed in {} file(s):\n{}", failed.len(), failed.join("\n"));
 }
+
+/// `void (f) (int x);` declares `f` and writes no value: the parentheses around
+/// the name exist so a macro over that name cannot expand it, which is the lua
+/// headers' whole style (`LUALIB_API void (luaL_setn) (lua_State *L, ...)`).
+/// The lexer used to write the name as the line's value, and the CST wrote the
+/// parameter list as a call, so every declaration in those headers lost a row.
+#[test]
+fn a_parenthesised_declarator_writes_no_value() {
+    let mut failed: Vec<String> = Vec::new();
+    for source in [
+        "void (f) (int x);\n",
+        "LUALIB_API void (luaL_setn) (lua_State *L, int t, int n);\n",
+        "void kvstoreEmpty(kvstore *kvs, void(callback)(dict*));\n",
+    ] {
+        let language = langs::by_content("c", source.as_bytes()).expect("a C row");
+        let lexer = parser::parse(source.as_bytes(), language);
+        let deep = read(source, Lang::C);
+        let verdict = pipeline::loses(&lexer, &deep);
+        if verdict.lost() {
+            failed.push(format!("{source:?}: {verdict:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "a parenthesised declarator lost {} line(s):\n{}", failed.len(), failed.join("\n"));
+}
