@@ -156,6 +156,9 @@ rust_graph_deep::grammar! { SWIFT {
         KW_VAR = "var",
         KW_WHERE = "where",
         KW_WHILE = "while",
+        KW_UNSAFE = "unsafe",
+        KW_AVAILABLE = "#available",
+        KW_UNAVAILABLE = "#unavailable",
 
         /// Declaration modifiers: names everywhere but where a declaration starts.
         KW_PUBLIC = "public",
@@ -175,6 +178,19 @@ rust_graph_deep::grammar! { SWIFT {
         KW_CONVENIENCE = "convenience",
         KW_DYNAMIC = "dynamic",
         KW_INDIRECT = "indirect",
+        /// The ownership and isolation modifiers Swift 5.9 and 6 write in front
+        /// of a declaration: `consuming func`, `borrowing func`,
+        /// `nonisolated func`, `package var`, `distributed actor`.
+        KW_CONSUMING = "consuming",
+        KW_BORROWING = "borrowing",
+        KW_SENDING = "sending",
+        KW_NONISOLATED = "nonisolated",
+        KW_DISTRIBUTED = "distributed",
+        KW_PACKAGE = "package",
+        /// Their underscored spellings, which the standard library still uses.
+        KW_OWNED = "__owned",
+        KW_SHARED = "__shared",
+        KW_CONSUMING_U = "__consuming",
 
         SEMI = ";",
         COMMA = ",",
@@ -227,6 +243,16 @@ rust_graph_deep::grammar! { SWIFT {
         /// A `<` written right against the name before it: `Foo<Bar>`, not
         /// `a < b`. The grammar reads it only where a type list can open.
         GENERIC_LT = "<generic",
+        /// The masking operators: `a &* b`, `x &+ 1`, `mask &<<= 4`. Swift
+        /// spells them as one operator, and read as `&` then `*` the second
+        /// half is not a binary operator at all.
+        AMP_STAR = "&*",
+        AMP_PLUS = "&+",
+        AMP_MINUS = "&-",
+        AMP_SHL = "&<<",
+        AMP_SHR = "&>>",
+        AMP_SHL_EQ = "&<<=",
+        AMP_SHR_EQ = "&>>=",
     }
 
     program: _statement*,
@@ -244,8 +270,8 @@ rust_graph_deep::grammar! { SWIFT {
         | &([declaration_modifiers] ("let" | "var")) property_declaration
         | &("deinit") deinitializer_declaration
         | &([declaration_modifiers] "import") import_declaration
-        | &("typealias") typealias_declaration
-        | &("associatedtype") associated_type_declaration
+        | &([declaration_modifiers] "typealias") typealias_declaration
+        | &([declaration_modifiers] "associatedtype") associated_type_declaration
         | &(_name ":") labeled_statement
         | if_statement
         | guard_statement
@@ -269,12 +295,14 @@ rust_graph_deep::grammar! { SWIFT {
         "public" | "private" | "fileprivate" | "internal" | "open" | "final" | "static"
         | "override" | "mutating" | "nonmutating" | "lazy" | "weak" | "unowned" | "required"
         | "convenience" | "dynamic" | "indirect"
+        | "__consuming" | "__owned" | "__shared" | "consuming" | "borrowing"
+        | "sending" | "nonisolated" | "distributed" | "package"
         | "private" setter_arguments
         | "fileprivate" setter_arguments
         | "internal" setter_arguments,
     /// `private(set)` and friends: the setter is narrower than the getter.
     setter_arguments: "(" "set" ")",
-    attribute: "@" _name [attribute_arguments],
+    attribute: "@" (_name | "unsafe") [attribute_arguments],
     /// An attribute's parentheses do not hold an expression list. available
     /// writes a platform beside a bare version and a trailing star
     /// (SwiftStdlib 6.0, star), _specialize writes a where constraint, and
@@ -284,8 +312,8 @@ rust_graph_deep::grammar! { SWIFT {
     /// `message: "…"` is a labeled argument like any other, so it reuses the
     /// call's own rule: the record reads a keyword there, and a second rule
     /// would have to be taught to.
-    _attribute_argument: &(_argument_label ":") labeled_argument | _attribute_word_run,
-    _attribute_word_run: _attribute_word+,
+    _attribute_argument: _attribute_piece+,
+    _attribute_piece: &(_argument_label ":") labeled_argument | _attribute_word,
     _attribute_word: STAR | COLON | AMP | DOT | ARROW | EQ
         | "self" | "where"
         | IDENT | NUMBER | FLOAT | STRING,
@@ -293,7 +321,7 @@ rust_graph_deep::grammar! { SWIFT {
     /// _exported import Foundation and testable import X put an attribute in
     /// front of the import, so the declaration shares the modifier prefix.
     import_declaration: [declaration_modifiers] "import" ["class" | "struct" | "enum" | "protocol" | "func" | "var" | "let" | "typealias"] _name ("." _name)*,
-    typealias_declaration: "typealias" _name [generic_parameters] "=" _type,
+    typealias_declaration: [declaration_modifiers] "typealias" _name [generic_parameters] "=" _type [where_clause],
 
     class_declaration: [declaration_modifiers] "class" _name [generic_parameters] [inheritance_clause] [where_clause] type_body,
     struct_declaration: [declaration_modifiers] "struct" _name [generic_parameters] [inheritance_clause] [where_clause] type_body,
@@ -307,13 +335,24 @@ rust_graph_deep::grammar! { SWIFT {
     type_body: "{" _type_member* "}",
     _type_member: enum_case_declaration | _statement,
     enum_case_declaration: "case" (_enum_case % ","),
-    _enum_case: _name [enum_case_values],
+    /// `case rax = 0`: a raw value, written where the associated values of
+    /// `case kind(Int)` would be.
+    _enum_case: _name [enum_case_values] ["=" _expression@assign],
     enum_case_values: "(" (_enum_case_value %? ",") ")",
     _enum_case_value: &(_name ":") labeled_enum_case_value | _type,
     labeled_enum_case_value: _name ":" _type,
-    associated_type_declaration: "associatedtype" _name [":" _type] [where_clause],
+    associated_type_declaration: [declaration_modifiers] "associatedtype" _name [":" _type] [where_clause],
 
-    function_declaration: [declaration_modifiers] "func" _name [generic_parameters] parameter_clause ["async"] ["throws" | "rethrows"] ["->" _type] [where_clause] [(block | ";")],
+    function_declaration: [declaration_modifiers] "func" _declared_name [generic_parameters] parameter_clause ["async"] ["throws" | "rethrows"] ["->" _type] [where_clause] [(block | ";")],
+    /// An operator is a declaration name: `static func +(lhs:rhs:)`,
+    /// `static func <=(lhs:rhs:)`. The grammar has no way to declare a custom
+    /// operator, so this is the fixed set the standard library uses.
+    _declared_name: _name | _operator_name,
+    _operator_name:
+        "+" | "-" | "*" | "/" | "%" | "=" | "==" | "!=" | "<=" | ">="
+        | "<" | ">" | "&&" | "||" | "!" | "&" | "|" | "^" | "~" | "<<"
+        | "??" | "&*" | "&+" | "&-"
+        | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | "&<<=" | "&>>=",
     initializer_declaration: [declaration_modifiers] "init" ["?" | "!"] parameter_clause ["async"] ["throws"] [where_clause] (block | ";"),
     deinitializer_declaration: "deinit" block,
     subscript_declaration: [declaration_modifiers] "subscript" parameter_clause "->" _type (block | ";"),
@@ -347,7 +386,10 @@ rust_graph_deep::grammar! { SWIFT {
     _for_owner: "let" | "var",
     labeled_statement: _name ":" _statement,
     _condition_list: _condition ("," _condition)*,
-    _condition: binding_condition | case_condition | _expression@nilco,
+    _condition: availability_condition | binding_condition | case_condition | _expression@nilco,
+    /// `guard #available(SwiftStdlib 6.2, *) else`: a condition whose argument
+    /// list is a platform and a version, the same shape an attribute reads.
+    availability_condition: ("#available" | "#unavailable") attribute_arguments,
     /// `if let x = ...`, `guard var y = ...`: a binding, where the keyword tells
     /// it from a plain condition.
     binding_condition: ("let" | "var") condition_binding,
@@ -383,10 +425,16 @@ rust_graph_deep::grammar! { SWIFT {
 
     // ---- expressions ----
 
+    /// `guard unsafe _p != nil`, `let v = unsafe load()`: Swift 6 marks a call
+    /// that steps outside the language's safety rules. The word is a prefix,
+    /// not a value, so the expression under it is the value.
     _expression: precedence _primary {
-        assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" => assignment,
+        assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">="
+            | "&<<=" | "&>>=" => assignment,
         cond: postfix "?" _expression ":" _expression@assign => ternary,
         closure: postfix closure => trailing_closure,
+        // `guard unsafe _p != nil`: the marker is read before an operator can
+        // join, because a condition enters the table above the arithmetic.
         nilco: left "??" => nil_coalescing,
         or: left "||" => binary,
         and: left "&&" => binary,
@@ -397,10 +445,11 @@ rust_graph_deep::grammar! { SWIFT {
         bor: left "|" => binary,
         xor: left "^" => binary,
         band: left "&" => binary,
-        shift: left "<<" | GT_JOINED ">" => binary,
-        add: left "+" | "-" => binary,
-        mul: left "*" | "/" | "%" => binary,
+        shift: left "<<" | GT_JOINED ">" | "&<<" | "&>>" => binary,
+        add: left "+" | "-" | "&+" | "&-" => binary,
+        mul: left "*" | "/" | "%" | "&*" => binary,
         try: prefix "try" ["?" | "!"] => try_expression,
+        unsafe_guard: prefix "unsafe" => prefix_expression,
         await: prefix "await" => await_expression,
         unary: prefix "-" | "+" | "!" | "~" | "&" => prefix_expression,
         postfix "!" => force_unwrap,
@@ -431,7 +480,21 @@ rust_graph_deep::grammar! { SWIFT {
     interpolation: INTERP_OPEN _expression INTERP_CLOSE,
 
     _name: IDENT,
-    _property: IDENT | "self" | "init" | "default" | "class",
+    /// A member name after a dot may be any keyword: `x.struct`,
+    /// `return .some(offset)`, `case .enum:`. A tuple element is a number:
+    /// `t.0`, `$0.1`.
+    _property: IDENT | NUMBER
+        | "self" | "init" | "default" | "class" | "deinit" | "some" | "any"
+        | "struct" | "enum" | "protocol" | "actor" | "extension" | "typealias"
+        | "associatedtype" | "func" | "var" | "let" | "import" | "case"
+        | "where" | "in" | "is" | "as" | "nil" | "true" | "false" | "await"
+        | "async" | "try" | "throw" | "do" | "switch" | "return" | "repeat"
+        | "guard" | "if" | "else" | "while" | "break" | "continue" | "inout"
+        | "indirect" | "static" | "override" | "final" | "open" | "public"
+        | "private" | "internal" | "fileprivate" | "mutating" | "lazy" | "weak"
+        | "unowned" | "required" | "convenience" | "dynamic" | "consuming"
+        | "borrowing" | "sending" | "nonisolated" | "distributed" | "package"
+        | "unsafe",
     parenthesized_expression: "(" (_paren_item %? ",") ")",
     _paren_item: readonly_item | _expression@assign,
     /// `let value` inside a tuple pattern: a binding with no initialiser.
@@ -446,7 +509,10 @@ rust_graph_deep::grammar! { SWIFT {
         | "super" | "static" | "private" | "public" | "init" | "subscript" | "typealias",
     labeled_argument: _argument_label ":" _argument_value,
     _argument_value: ("let" | "var") _name | _expression@assign,
-    subscript: "[" (_argument %? ",") "]",
+    subscript: "[" (_subscript_item %? ",") "]",
+    /// `c[...]`, `c[..<i]`, `c[i...]`: one end of a range may be left out,
+    /// and the half-written range is the only argument.
+    _subscript_item: _argument | "..." | "..<" _expression@assign,
     /// An array or dictionary literal: one node kind, because `[a: b]` and
     /// `[a, b]` are told apart by a `:` inside the brackets, which the DSL's
     /// group rule cannot look for before it opens the group.
@@ -475,18 +541,29 @@ rust_graph_deep::grammar! { SWIFT {
 
     // ---- types ----
 
-    _type: [_type_attribute] _type_shape ["async"] ["throws"] ["->" _type],
+    _type: [_type_attribute] _type_shape ["&" _type] ["async"] [throws_clause] ["->" _type],
+    /// `throws` and the typed form `throws(E)`.
+    throws_clause: "throws" [throws_type],
+    throws_type: "(" _type ")",
     /// A type attribute carries no arguments: `@escaping (Data) -> Void`'s
     /// parentheses are the function type, not an argument list.
     _type_attribute: "@" _name,
     _type_shape: [_type_modifier] _type_atom _type_suffix*,
-    _type_modifier: "some" | "any" | "inout",
+    /// `~Copyable`, `~Escapable`: a noncopyable constraint is written in front
+    /// of the type it constrains.
+    _type_modifier: "some" | "any" | "inout" | "~" | "borrowing" | "consuming"
+        | "__owned" | "__shared",
     _type_atom: _name | collection_type | tuple_type,
     _type_suffix: "?" | "!" | "." _name | type_arguments,
     /// `[Int]` or `[String: Int]`: one rule, like the literal.
     collection_type: "[" _type [":" _type] "]",
-    tuple_type: "(" (_type %? ",") ")",
-    type_arguments: _generic_open (_type %? ",") _gt,
+    tuple_type: "(" (_tuple_element %? ",") ")",
+    _tuple_element: &(_name ":") labeled_tuple_element | _type,
+    labeled_tuple_element: _name ":" _type,
+    type_arguments: _generic_open (_type_argument %? ",") _gt,
+    /// `_InlineArray<256, UInt8>`: Swift 6 writes an integer literal where a
+    /// generic argument goes, and a literal is not a type.
+    _type_argument: NUMBER | _type,
 } }
 
 /// One token at the cursor.
@@ -530,12 +607,23 @@ pub fn lex(c: &mut Cursor) -> Kind {
             IDENT
         }
         b'#' if is_word_start(c.peek_at(1)) => {
+            // `#available(...)` and `#unavailable(...)` are conditions, not
+            // names: the whole run is one token so the grammar can open a
+            // condition on it. Every other `#word` stays an identifier, which
+            // is what the directives (`#if`, `#error`) already were.
+            let start = c.rest();
             c.bump();
             c.eat_while(is_word_byte);
-            IDENT
+            let taken = start.len() - c.rest().len();
+            keyword(&start[..taken])
         }
         b'0'..=b'9' => number(c),
-        b'.' if c.peek_at(1).is_ascii_digit() && !c.starts_with(b"..") => number(c),
+        // `.5` is a literal only where a value can start. After a name, a
+        // close bracket or another digit it is a member access: `t.1` and
+        // `$0.1` are tuple elements, and the number reader swallowed the dot.
+        b'.' if c.peek_at(1).is_ascii_digit()
+            && !c.starts_with(b"..")
+            && !(is_word_byte(c.behind(1)) || matches!(c.behind(1), b')' | b']' | b'}')) => number(c),
         b'@' => {
             c.bump();
             AT
@@ -612,6 +700,9 @@ fn keyword(text: &[u8]) -> Kind {
         b"var" => KW_VAR,
         b"where" => KW_WHERE,
         b"while" => KW_WHILE,
+        b"unsafe" => KW_UNSAFE,
+        b"#available" => KW_AVAILABLE,
+        b"#unavailable" => KW_UNAVAILABLE,
         b"public" => KW_PUBLIC,
         b"private" => KW_PRIVATE,
         b"fileprivate" => KW_FILEPRIVATE,
@@ -629,6 +720,15 @@ fn keyword(text: &[u8]) -> Kind {
         b"convenience" => KW_CONVENIENCE,
         b"dynamic" => KW_DYNAMIC,
         b"indirect" => KW_INDIRECT,
+        b"consuming" => KW_CONSUMING,
+        b"borrowing" => KW_BORROWING,
+        b"sending" => KW_SENDING,
+        b"nonisolated" => KW_NONISOLATED,
+        b"distributed" => KW_DISTRIBUTED,
+        b"package" => KW_PACKAGE,
+        b"__owned" => KW_OWNED,
+        b"__shared" => KW_SHARED,
+        b"__consuming" => KW_CONSUMING_U,
         _ => IDENT,
     }
 }
@@ -1158,6 +1258,24 @@ mod tests {
 }
 
 fn operator(c: &mut Cursor) -> Kind {
+    // `&` opens seven operators that the three-byte match below cannot see:
+    // `&<<=` is four bytes and `&*` must not read as `&` then `*`.
+    if c.peek() == b'&' {
+        for (text, kind) in [
+            (&b"&<<="[..], AMP_SHL_EQ),
+            (&b"&>>="[..], AMP_SHR_EQ),
+            (&b"&<<"[..], AMP_SHL),
+            (&b"&>>"[..], AMP_SHR),
+            (&b"&*"[..], AMP_STAR),
+            (&b"&+"[..], AMP_PLUS),
+            (&b"&-"[..], AMP_MINUS),
+        ] {
+            if c.starts_with(text) {
+                c.bump_n(text.len());
+                return kind;
+            }
+        }
+    }
     let (a, b, d) = (c.peek(), c.peek_at(1), c.peek_at(2));
     let (kind, width) = match (a, b, d) {
         (b'<', _, _) if is_word_byte(c.behind(1)) && !matches!(b, b'=' | b'<') => (GENERIC_LT, 1),
