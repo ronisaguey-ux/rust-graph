@@ -1215,6 +1215,14 @@ impl<'a> Walker<'a> {
                     };
                     self.lexer_event(b'x', line, &[], &value, false);
                 }
+                // `get => GetItem(index);`: an expression-bodied accessor's
+                // body is an expression statement to the lexer, and its calls
+                // were never read (C# corpus: 20 files).
+                if self.facts.tag == "CS" {
+                    if let Some(body) = self.cs_expression_body(id) {
+                        self.form(body);
+                    }
+                }
             }
             // `public string Key { get; set; }`: the header is a statement to
             // the lexer, and the accessors are its own statements.
@@ -2032,6 +2040,7 @@ impl<'a> Walker<'a> {
                         | "nullable_type" | "array_type" | "qualified_type" | "builtin_type"
                         | "formal_parameters" | "parameter_list" | "type_parameters"
                         | "type_parameter_constraints" | "block" | ";"
+                        | "get" | "set" | "init" | "add" | "remove"
                 )
         })
     }
