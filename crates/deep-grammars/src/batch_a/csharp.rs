@@ -351,7 +351,7 @@ rust_graph_deep::grammar! { CSHARP {
     operator_declaration: [attributes] [modifiers] ["implicit" | "explicit"] _type "operator" _operator_token formal_parameters (block | "=>" _expression ";"),
     _operator_token: PLUS | MINUS | STAR | SLASH | PERCENT | AMP | PIPE | CARET | BANG | TILDE | EQ | NE | LT | GT | LE | GE | INCREMENT | DECREMENT | "true" | "false",
     field_declaration: [attributes] [modifiers] _type _variable_declarator ("," _variable_declarator)* ";",
-    _variable_declarator: _name ["=" _expression@assign],
+    _variable_declarator: _name ["=" _ref_expression],
 
     // ---- types ----
 
@@ -455,7 +455,7 @@ rust_graph_deep::grammar! { CSHARP {
     unsafe_statement: "unsafe" block,
     fixed_statement: "fixed" fixed_header _statement,
     fixed_header: "(" [_local_modifiers] _type _name "=" _expression ")",
-    return_statement: "return" [_expression] ";",
+    return_statement: "return" [_ref_expression] ";",
     throw_statement: "throw" [_expression] ";",
     break_statement: "break" ";",
     continue_statement: "continue" ";",
@@ -527,7 +527,14 @@ rust_graph_deep::grammar! { CSHARP {
     cast_type: "(" _type ")",
     cast_expression: cast_type _expression@unary,
     _cast_operand: _literal | _name | "this" | "base" | "new" | "typeof" | "sizeof" | "!" | "~",
-    _lambda_body: block | _expression,
+    // `ref x` is an expression that may only stand where a value is stored or
+    // returned: `ref int a = ref b;`, `return ref x;`, `=> ref x`. Written as a
+    // prefix operator of the expression table it collided with an argument's
+    // `ref x` (a call's argument and a value position start the same way), so
+    // the prefix is read here, at the three places that take one, and a ref
+    // local and a ref return stop being one ERROR each.
+    _ref_expression: ["ref"] _expression,
+    _lambda_body: block | _ref_expression,
     object_creation: "new" _type [arguments] [object_initializer],
     implicit_creation: "new" arguments [object_initializer],
     implicit_array_creation: "new" array_specifier+ [array_initializer],
