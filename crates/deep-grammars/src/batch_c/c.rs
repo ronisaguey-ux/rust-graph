@@ -199,6 +199,10 @@ rust_graph_deep::grammar! { C {
     declaration_statement:
         &(declaration_specifiers user_type_name ("*" | IDENT)) specified_user_declaration
         | &("typedef" user_type_name _declarator) typedef_user_declaration
+        // `FILE _f, *f = __fopen_rb_ca(…);`: a typedef-qualified list where a
+        // later declarator carries the pointer. The bare form matches its head
+        // and then cannot read the star, so this reading is offered first.
+        | &(user_type_name IDENT "," pointer) user_list_pointer_declaration
         | &(user_type_name IDENT) bare_user_declaration
         | _default_declaration,
     /// `static const Foo *f(void);`: a keyword-qualified typedef name.
@@ -210,10 +214,16 @@ rust_graph_deep::grammar! { C {
     _pointer_named_declarator: pointer* IDENT _declarator_suffix* attribute* ["=" _initializer],
     /// `typedef Foo (*handler)(void);`: a typedef whose type is a typedef name.
     typedef_user_declaration: "typedef" user_type_name _init_declarator ("," _init_declarator)* ";",
+    /// `FILE _f, *f = fopen(…);`: the same list with a pointer on a later
+    /// declarator. A pointer directly after the type name stays the older
+    /// reading (a multiplication inside a function), which is why the head of
+    /// this list must be a plain name.
+    user_list_pointer_declaration:
+        user_type_name _named_init_declarator ("," pointer* IDENT _declarator_suffix* attribute* ["=" _initializer])* "," pointer* IDENT _declarator_suffix* attribute* ["=" _initializer] ";",
     /// `Foo x;`: a typedef name and a named declarator. It never starts with a
     /// `*`, so `x * y;` in a function stays a multiplication.
     bare_user_declaration: user_type_name _named_init_declarator ("," _named_init_declarator)* ";",
-    _named_init_declarator: pointer* IDENT _declarator_suffix* attribute* ["=" _initializer],
+    _named_init_declarator: IDENT _declarator_suffix* attribute* ["=" _initializer],
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     /// A typedef name where a type specifier is expected.
     user_type_name: IDENT,
