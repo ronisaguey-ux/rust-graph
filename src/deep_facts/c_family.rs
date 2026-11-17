@@ -606,6 +606,11 @@ impl<'a> Walker<'a> {
                             push_string(&mut args, &name);
                             args.push_str("]]");
                         }
+                        // An empty argument list is still a list: `["c",3,0,]` is not JSON,
+                        // and a prototype with no readable declarator name has one.
+                        if args.is_empty() {
+                            args.push_str("[]");
+                        }
                         let call = format!("[\"c\",{index},0,{args}]");
                         let value = if names.is_empty() {
                             call
