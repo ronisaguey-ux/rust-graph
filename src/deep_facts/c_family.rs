@@ -1400,6 +1400,48 @@ impl<'a> Walker<'a> {
             self.lexer_event(b'x', line, &[], &value, false);
             macro_members.push(child);
         }
+        // `int (*configure)(void *priv, int reconfigure);`: a field that is a
+        // function pointer is the declared name applied, so the one-pass reader
+        // writes a call with that name as its argument — `c(0;[n:configure])` —
+        // and the member walk wrote the header's words instead. Every such
+        // field in redis's `connection.h`-style vtables lost its line.
+        let mut pointer_lines: Vec<u32> = Vec::new();
+        for child in self.children(body) {
+            // The declarator is a direct child of the body, or one level down
+            // inside a `direct_declarator`: `int (*compress)(…)` and
+            // `connection* (*conn_create)(…)` are spelled the two ways.
+            let mut paren = self
+                .children(child)
+                .into_iter()
+                .find(|&node| self.kind(node) == "parenthesized_declarator");
+            if paren.is_none() {
+                if let Some(declarator) = self
+                    .children(child)
+                    .into_iter()
+                    .find(|&node| self.kind(node) == "direct_declarator")
+                {
+                    paren = self
+                        .children(declarator)
+                        .into_iter()
+                        .find(|&node| self.kind(node) == "parenthesized_declarator");
+                }
+            }
+            let Some(paren) = paren else { continue };
+            let Some(name) = self.declarator_of(paren) else { continue };
+            if name.is_empty() {
+                continue;
+            }
+            let line = self.line(child);
+            let index = self.push_call(name.clone(), line);
+            let mut arg = String::from("[\"n\",");
+            push_string(&mut arg, &name);
+            arg.push(']');
+            let value = format!("[\"c\",{index},0,[{}]]", arg);
+            self.lexer_event(b'x', line, &[], &value, false);
+            // The line is that call alone: the type words the header walk
+            // would write are not part of the value the lexer reads.
+            pointer_lines.push(line);
+        }
         let mut by_line: std::collections::BTreeMap<u32, Vec<String>> = std::collections::BTreeMap::new();
         let mut stack = vec![body];
         while let Some(node) = stack.pop() {
@@ -1431,6 +1473,9 @@ impl<'a> Walker<'a> {
             }
         }
         for (line, names) in by_line {
+            if pointer_lines.contains(&line) {
+                continue;
+            }
             let mut value = "[\"m\",[".to_string();
             for (index, name) in names.iter().enumerate() {
                 if index > 0 {
@@ -1714,6 +1759,16 @@ mod designated_initializer_tests {
         let events = module_events("struct S { int x; };\nstruct S s = { .x = 0 };\n");
         assert!(events.contains("[\"n\",\"x\"]"), "{events}");
         assert!(!events.contains("[[\"n\",\"x\"],0]"), "{events}");
+    }
+
+    /// `int (*configure)(void *priv, int reconfigure);`: a struct field that is
+    /// a function pointer is the declared name applied to the one-pass reader,
+    /// and the member walk wrote the header's words instead.
+    #[test]
+    fn a_function_pointer_member_is_a_call_of_its_name() {
+        let events = module_events("struct T {\n    int (*configure)(int a);\n};\n");
+        assert!(events.contains("[[\"n\",\"configure\"]]"), "{events}");
+        assert!(!events.contains("[\"m\",[[\"n\",\"int\"],[\"n\",\"configure\"]]]"), "{events}");
     }
 
     /// `LUA_API int (lua_isuserdata) (lua_State *L, int idx);`: the macro in
