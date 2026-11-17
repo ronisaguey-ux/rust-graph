@@ -464,6 +464,7 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix &(type_arguments arguments) type_arguments arguments => call_expression,
         postfix &(type_arguments lambda_literal) type_arguments lambda_literal => call_expression,
         postfix lambda_literal => call_expression,
+        postfix &(_name "@" lambda_literal) labeled_lambda => call_expression,
         postfix subscript => index_expression,
         postfix "." _name => navigation_expression,
         postfix "?." _name => navigation_expression,
@@ -497,6 +498,11 @@ rust_graph_deep::grammar! { KOTLIN {
     /// (`onClick = {}`). Requiring one item made every empty lambda an ERROR
     /// with a missing child, which took the file's class symbol with it.
     lambda_literal: "{" [lambda_body] "}",
+    /// `requestContext@{ … }`, `run label@{ … }`: a label in front of a lambda
+    /// is part of the lambda. Without the rule the label was read as a name and
+    /// the brace pair could not follow it, so every labeled lambda recovered
+    /// and took the statements inside it with it.
+    labeled_lambda: _name "@" lambda_literal,
     lambda_body: &(_lambda_parameters "->") _lambda_parameters "->" _block_item* | lambda_items,
     lambda_items: _block_item+,
     _lambda_parameters: _lambda_parameter ("," _lambda_parameter)*,
