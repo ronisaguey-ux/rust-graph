@@ -358,6 +358,24 @@ impl<'a> Walker<'a> {
             if matches!(kind, "block" | "else_clause" | "literal_value" | "field_declaration_list") {
                 continue;
             }
+            // `for i := 0; i < n; i++ {`: the lexer ends a statement at every
+            // `;`, so the init is an `a`, the condition an `x` and the post an
+            // `x`. Read as one header value they were a single `x` the record
+            // never wrote.
+            if kind == "for_clause" {
+                for part in self.children(child) {
+                    if self.is_layout(part) || self.kind(part) == ";" {
+                        continue;
+                    }
+                    if self.go_statement(part) {
+                        continue;
+                    }
+                    let value = self.decl_value(part);
+                    let line = self.line(part);
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                continue;
+            }
             if self.go_statement(child) {
                 continue;
             }
