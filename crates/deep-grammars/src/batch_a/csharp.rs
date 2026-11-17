@@ -362,7 +362,11 @@ rust_graph_deep::grammar! { CSHARP {
         "bool" | "byte" | "sbyte" | "short" | "ushort" | "int" | "uint" | "long" | "ulong"
         | "char" | "float" | "double" | "decimal" | "object" | "string" | "void",
     tuple_type: "(" _tuple_element "," _tuple_element ("," _tuple_element)* ")",
-    _tuple_element: _type _name,
+    // `(Type, string)`, `(int count, string name)`: a tuple element's name is
+    // optional, and the element required one, so a tuple type without names was
+    // two ERRORs and `Dictionary<(Type, string), T>` cost its whole file
+    // (C# corpus: 87 files carry a tuple type).
+    _tuple_element: _type [_name],
     dimensions: "[" ("," | _expression)* "]",
     type_arguments: "<" (_type %? ",") _gt,
     _gt: ">" | GT_JOINED,
