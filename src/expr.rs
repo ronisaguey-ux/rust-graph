@@ -1114,6 +1114,41 @@ impl Emit<'_> {
             }
             return;
         }
+        // `new ArrayList<>()`, `new HashMap<K, V>()`: Java's diamond and a
+        // constructor's type arguments sit between the class name and its
+        // argument list. The one-pass reader dropped `new` as noise and then
+        // stopped the chain at `<`, so the value was the class name where the
+        // CST writes a call (java, the largest cluster in the shape table).
+        if word == "new" && matches!(self.lang.tag, "JAVA" | "CS" | "KT" | "SCALA") {
+            let mut at = 1usize;
+            let mut name = String::new();
+            if let Some(first) = self.word(at) {
+                name.push_str(&first);
+                at += 1;
+                while self.op_byte(at) == b'.' {
+                    match self.word(at + 1) {
+                        Some(segment) => {
+                            name.push('.');
+                            name.push_str(&segment);
+                            at += 2;
+                        }
+                        None => break,
+                    }
+                }
+            }
+            if !name.is_empty() && self.op_byte(at) == b'<' {
+                let after = self.skip_balanced(self.pos + at, b"<", b">");
+                if let Some(after) = after.filter(|&after| self.op_byte_at(after) == b'(') {
+                    // The call is stamped where the class name is, the way the
+                    // CST writes it: a type argument list may run over several
+                    // lines and its own line is not the statement's.
+                    let line = self.toks[self.pos + 1].line;
+                    self.pos = after;
+                    self.chain(out, String::new(), name, line);
+                    return;
+                }
+            }
+        }
         // `new Fab;` with no parentheses is still a constructor call: the
         // grammar writes the call, the lexer dropped `new` as layout and left
         // the callee standing as a name. `new.target` is not a call, and a
