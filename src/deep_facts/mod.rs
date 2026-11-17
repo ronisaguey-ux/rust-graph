@@ -1055,6 +1055,25 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            // `@file:OptIn(InternalAPI::class)` before the package header: the
+            // target is `file` and the annotation's name is the identifier
+            // after it, which is the call the lexer reads. Taking the first
+            // identifier named the call `file` and lost `OptIn` in every file
+            // that opted in at file scope.
+            "file_annotation" if self.kinds.family == Family::Plain => {
+                let names: Vec<u32> = self.children(id).into_iter().filter(|&child| self.kind(child) == "identifier").collect();
+                if let Some(&node) = names.last() {
+                    let name = self.text_string(node);
+                    let line = self.line(id);
+                    let index = self.push_call(name, line);
+                    if let Some(list) = self.children(id).into_iter().find(|&child| self.kind(child) == "annotation_arguments") {
+                        if self.children(list).iter().any(|&child| !self.is_layout(child)) {
+                            let args = self.arguments(list);
+                            self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
+                        }
+                    }
+                }
+            }
             "annotation" if self.kinds.family == Family::Plain => {
                 if let Some(node) = self.children(id).into_iter().find(|&child| matches!(self.kind(child), "identifier")) {
                     let name = self.text_string(node);
