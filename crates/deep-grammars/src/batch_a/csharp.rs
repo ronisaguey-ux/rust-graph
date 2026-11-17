@@ -631,7 +631,13 @@ rust_graph_deep::grammar! { CSHARP {
     // an explicit interface implementation names its member with a dotted
     // name, and a property written that way failed to parse at all, so the
     // whole file fell back on one member (104 corpus files).
-    _member_name: _name ("." _member_segment)*,
+    // A member name may also START with a generic interface:
+    // `ICollection<JToken?> IDictionary<string, JToken?>.Values` begins its
+    // name with `IDictionary<...>` because the return type is the
+    // `ICollection`, and that form failed to parse and took the class body
+    // with it. The predicate asks for a dot after the segment, so a generic
+    // method's `Foo<T>(` - no dot - keeps its own `type_parameters`.
+    _member_name: &(_member_segment ".") _member_segment ("." _member_segment)* | _name ("." _member_segment)*,
     // `int IOptions<CacheOptions>.Value { get; }`: an explicit interface
     // implementation may name a generic interface, and a type argument
     // between the dots is not a name, so that member did not parse and took
