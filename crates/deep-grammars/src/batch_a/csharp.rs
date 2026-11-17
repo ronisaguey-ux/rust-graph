@@ -364,7 +364,10 @@ rust_graph_deep::grammar! { CSHARP {
     // `bool[] values = { true, false };`: a declaration may initialise from a bare
     // array initialiser, which is not an expression, so the declarator held no
     // form for one and every such declaration was one ERROR.
-    _variable_declarator: _name ["=" (_ref_expression | array_initializer)],
+    // `fixed byte _buffer[16];`: a fixed-size buffer writes its length after the
+    // name, and the declarator held no form for one, so every buffer field in an
+    // unsafe struct was one ERROR.
+    _variable_declarator: _name [dimensions] ["=" (_ref_expression | array_initializer)],
 
     // ---- types ----
 
