@@ -2340,6 +2340,18 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.tuple_form(&items),
                 }
             }
+            // `[x, y]` and `[k: v]`: the lexer writes a list literal as a tuple
+            // of its elements, and a `key: value` pair as one merge. Read as an
+            // unmapped node the whole literal was the constant 0, so every
+            // array-valued binding lost its value (96 rows of the Slice
+            // validation tests are `[ -9999, -9998, -9997]`).
+            "collection_literal" => {
+                match self.children(id).into_iter().find(|&child| self.kind(child) == "collection_body") {
+                    Some(body) => self.literal_form(body),
+                    None => "0".to_string(),
+                }
+            }
+            "collection_body" => self.literal_form(id),
             "argument_list" | "arguments" | "parenthesized_expression" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 match items.len() {
@@ -2919,6 +2931,41 @@ fn dotted_piece(text: &str) -> bool {
         }
         out.push_str("]]");
         out
+    }
+
+    /// A list literal's elements: one comma-separated group each, and the two
+    /// expressions of a `key: value` pair share a group and form one merge.
+    fn literal_form(&mut self, id: u32) -> String {
+        let mut groups: Vec<Vec<u32>> = Vec::new();
+        let mut group: Vec<u32> = Vec::new();
+        for child in self.children(id) {
+            match self.kind(child) {
+                "," => {
+                    if !group.is_empty() {
+                        groups.push(std::mem::take(&mut group));
+                    }
+                }
+                _ if self.is_layout(child) => {}
+                _ => group.push(child),
+            }
+        }
+        if !group.is_empty() {
+            groups.push(group);
+        }
+        let mut values: Vec<String> = Vec::new();
+        for group in groups {
+            let mut parts: Vec<String> = group.iter().map(|&node| self.form(node)).collect();
+            let value = match parts.len() {
+                0 => continue,
+                1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+                _ => format!("[\"m\",[{}]]", parts.join(",")),
+            };
+            values.push(value);
+        }
+        if values.is_empty() {
+            return "0".to_string();
+        }
+        format!("[\"t\",[{}]]", values.join(","))
     }
 
     pub(crate) fn merge_form(&mut self, items: &[u32]) -> String {
