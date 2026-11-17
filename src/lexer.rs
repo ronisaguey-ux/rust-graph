@@ -119,6 +119,17 @@ impl<'a> Lexer<'a> {
     /// directive is still stamped with the line it is on.
     fn skip_directive(&mut self) {
         while self.pos < self.src.len() {
+            // `#define AE_BARRIER 4 /* With WRITABLE …` with the comment
+            // running on to the next line: the comment is not code, so the
+            // directive does not end inside it and the lines it covers must
+            // not be read as statements. Ending the directive at the first
+            // newline made the lexer read the comment's words as a value
+            // (`m:[n:event,n:already,n:fired…]`) that no CST can have.
+            if self.src[self.pos] == b'/' && self.peek(1) == b'*' {
+                self.pos += 2;
+                self.skip_until(b"*/");
+                continue;
+            }
             if self.src[self.pos] == b'\n' {
                 let mut at = self.pos;
                 let mut slashes = 0;
