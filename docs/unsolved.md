@@ -6,11 +6,13 @@ a question still open says where the disagreement is counted
 (`docs/RUST_CONSTRUCTS.md`) and which module owns it. `docs/PAIRING.md` is the
 design behind the guard; this is the history of the shapes that shaped it.
 
-Current state, 2026-11-16: rust 16 fallbacks of 1,816 files, js 2, ts 34,
-python 7, measured by `tools/phase4_gate.py` (see `docs/MEASURE.md`). The pins in
-`tools/baselines/constructs.json` still record the 2026-11-15 sweep (rust 48, js
-36, ts 41, python 8), so the gate prints `MOVED` for python and rust until
-`tools/construct_report.py --measure` re-pins them.
+Current state, 2026-11-17: js 0 fallbacks of 1,854 files, ts 2 of 2,000, python
+0 of 568, rust 3 of 1,816, measured on the release binary by
+`tools/phase4_gate.py` (see `docs/MEASURE.md`). The construct record and the
+gate pins carry that same sweep, so `phase4_gate.py` and
+`construct_report.py --check` both exit 0 at these numbers. What is left, and
+why none of it is a reader fix a single lane should take, is in
+`docs/fable-handoff.md`.
 
 ## Match arms: a block that belongs to the arm — **closed 2026-11-15**
 
@@ -344,22 +346,28 @@ The codes, counts and owning modules are regenerated into
 `docs/RUST_CONSTRUCTS.md` and `docs/READERS.md` from
 `tools/baselines/constructs.json`; this file does not repeat them, so it cannot
 go stale beside them. The open questions behind those codes are, in the order
-they cost the most rust files (rust rows of the 16 fallbacks measured 2026-11-16,
-in parentheses):
+they cost the most rust files (rust rows of the 3 fallbacks measured 2026-11-17,
+in parentheses; a question with no live rust row keeps the row count it had):
 
 1. **The CST has no node for a call the lexer read**
-   (`CST_MISSING_KIND:call`, 5 rows): a grammar gap, so `src/deep/` and the
-   grammar tables, not the guard.
-2. **Two events on one line that cannot be paired** (`PAIR_AMBIGUOUS:1`, 4
-   rows): the classifier decides the file; the readers have to agree first.
-3. **The lexer invents a name the CST never writes** (`LEX_OVER_EMIT:name`, 4
-   rows): the value reader's merges. The fix belongs in `src/expr.rs`, where both
-   readers' value shapes are decided for every language.
-4. **Grammar recovery over budget** (`CST_DEGRADED:recovery`, 2 rows): error
-   nodes are the CVD parser's recovery, not a reader disagreement, and the
-   threshold is the only knob that is honest here.
-5. **The lexer invents a callee** (`LEX_OVER_EMIT:call`, 1 row): call detection
-   in the same reader; a pattern, a type or a range read as a call.
+   (`CST_MISSING_KIND:call`, 2 rows): a grammar gap, so `src/deep/` and the
+   grammar tables, not the guard. Both rows are the same file twice over: the
+   source repeats a `fn` header line, so the whole block is in recovery and the
+   call inside it has no node to be read from.
+2. **Two events on one line that cannot be paired** (`PAIR_AMBIGUOUS:1`, no rust
+   row today, one ts row): the classifier decides the file; the readers have to
+   agree first.
+3. **The lexer invents a name the CST never writes** (`LEX_OVER_EMIT:name`, 1
+   rust row and 1 ts row): the value reader's merges. The fix belongs in
+   `src/expr.rs`, where both readers' value shapes are decided for every
+   language. The rust row is a `match` keyword inside a `json!` token tree; the
+   ts row is an object literal the CST read as four empty parts.
+4. **Grammar recovery over budget** (`CST_DEGRADED:recovery`, no rust row
+   today): error nodes are the CVD parser's recovery, not a reader
+   disagreement, and the threshold is the only knob that is honest here.
+5. **The lexer invents a callee** (`LEX_OVER_EMIT:call`, no rust row today):
+   call detection in the same reader; a pattern, a type or a range read as a
+   call.
 6. **The two readers disagree about a call's targets**
    (`CST_SHAPE_MISMATCH:targets`, no rust row today): the bucket is named when
    the reason reads "target list differs" (`reason_code` in `src/pipeline.rs`),
@@ -379,11 +387,12 @@ order the C family pays in.
 
 This list is ordered by **rust** cost, and the C family does not pay in that
 order. Measured 2026-11-16 with both readers forced on (C 554 fallbacks of
-1,849 files, Go 5,828 of 12,004). Neither number can be produced in `auto`:
-`lang_for` answers `None` for C and Go, so `auto` sends both to the lexer and
-reports zero fallbacks — the counts come from a throwaway worktree that flips
-`lang_for` for a measurement sweep, and that flip is deliberately not in this
-repository.
+1,849 files, Go 5,828 of 12,004). Re-measured 2026-11-17 through
+`tools/auto_audit.py --lang c|go`, which sets `RG_AUDIT=1` itself — no worktree,
+no `lang_for` flip: C 295 of 2,010 files (544 losses, 137 of them
+`CST_DEGRADED:recovery`), Go 7,015 of 15,612 (12,133 losses). The two sweeps are
+different corpus builds, so the counts are not comparable with each other; the
+table below is the 2026-11-16 one.
 
 | files | code | C | Go |
 |---:|---|---:|---:|
@@ -396,7 +405,7 @@ repository.
 | 174 | `CST_DEGRADED:recovery` | 128 | 46 |
 | 73 | `CST_MISSING_KIND:constant` | 51 | 22 |
 
-`CST_DEGRADED:recovery` is 128 of C's 554 — the second-largest single reason in
-that corpus is grammar recovery, not a reader disagreement, and no current target
-covers it. Reading the table in rust order would spend the next pass on the
-wrong two codes.
+`CST_DEGRADED:recovery` is 128 of C's 554 in that sweep, and 137 of the 295
+measured on 2026-11-17 — grammar recovery, not a reader disagreement, and no
+current target covers it. Reading the table in rust order would spend the next
+pass on the wrong two codes.
