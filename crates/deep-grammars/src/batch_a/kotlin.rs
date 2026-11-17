@@ -472,7 +472,10 @@ rust_graph_deep::grammar! { KOTLIN {
     _string_part: STRING_TEXT | interpolation | SIMPLE_TEMPLATE,
     interpolation: TEMPLATE_OPEN _expression TEMPLATE_CLOSE,
     subscript: "[" _expression ("," _expression)* "]",
-    lambda_literal: "{" lambda_body "}",
+    /// `{}` is a lambda with no body - a no-op extension, an empty receiver
+    /// block - and requiring one item made every empty lambda an ERROR with a
+    /// missing child, which took the file's class symbol with it.
+    lambda_literal: "{" [lambda_body] "}",
     lambda_body: &(_lambda_parameters "->") _lambda_parameters "->" _block_item* | lambda_items,
     lambda_items: _block_item+,
     _lambda_parameters: _lambda_parameter ("," _lambda_parameter)*,
