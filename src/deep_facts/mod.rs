@@ -1212,6 +1212,25 @@ impl<'a> Walker<'a> {
             "public_field_definition" | "field_definition" | "property_signature" if self.is_js() => {
                 self.field(id)
             }
+            // `global_State *g = G(L);` inside a function: the grammar reads an
+            // unknown type and a pointer as a product, so the assignment's
+            // target was a `binary_expression` and `c_path` named nothing -
+            // every macro initialiser on a pointer declaration lost the
+            // binding the lexer makes from the capitalised call on the right.
+            // The product's right operand is the declared name.
+            "assignment_expression"
+                if matches!(self.facts.tag.as_str(), "C" | "CPP" | "OBJC")
+                    && self.c_product_declarator(id).is_some() =>
+            {
+                let (name, value) = self.c_product_declarator(id).unwrap();
+                if self.kind(value) == "call_expression" {
+                    let path = self.decl_path(value);
+                    let last = path.rsplit('.').next().unwrap_or("").to_string();
+                    if !last.is_empty() {
+                        self.facts.vars.push((name, last));
+                    }
+                }
+            }
             // `ts.chunked_encoding = Curl_compareheader(x);`: an assignment
             // to a member is a binding to the lexer - the dotted target is the
             // name and the call's last segment is what it holds - and nothing
