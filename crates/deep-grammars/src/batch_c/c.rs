@@ -806,6 +806,10 @@ mod kinds {
             ],
         ),
         (
+            "c_declarator_pointers.c",
+            &[("bare_user_declaration", "handle_t slot, *open_slot = slot;")],
+        ),
+        (
             "c_designated_initializers.c",
             &[
                 ("designated_field", ".x = 0"),
