@@ -336,6 +336,7 @@ rust_graph_deep::grammar! { C {
 
     _statement:
         compound_statement
+        | empty_statement
         | if_statement
         | switch_statement
         | while_statement
@@ -370,6 +371,10 @@ rust_graph_deep::grammar! { C {
     goto_statement: "goto" (IDENT | "*" _expression) ";",
     labeled_statement: IDENT ":" _statement,
     expression_statement: _expression ";",
+    /// `for (cnt=1; p; cnt++);`: an empty body is one semicolon, and the
+    /// grammar had no statement for it, so every `for (…)` loop whose body is
+    /// empty ended in an error node.
+    empty_statement: ";",
 
     _expression: precedence _primary {
         comma: left "," => sequence_expression,
