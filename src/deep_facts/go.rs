@@ -340,7 +340,27 @@ impl<'a> Walker<'a> {
         let Some(equal) = parts.iter().position(|&child| self.kind(child) == "=") else {
             return self.decl_statement(id);
         };
-        let target = parts.first().and_then(|&name| self.decl_target(name)).into_iter().collect::<Vec<_>>();
+        // `var a, b int = 1, 2`: the spec writes every binding before its type,
+        // and reading only the first name lost the rest of the list. A bare
+        // identifier type (`string`, `int`) is a name node too, so the list ends
+        // at the first identifier that does not follow a comma: `dns string`
+        // binds `dns`, `a, b int` binds both.
+        let mut target = Vec::new();
+        let mut separate = true;
+        for &part in &parts[..equal] {
+            let kind = self.kind(part);
+            if self.is_layout(part) || kind == "," {
+                separate = true;
+                continue;
+            }
+            if kind != "identifier" || !separate {
+                break;
+            }
+            separate = false;
+            if let Some(name) = self.decl_target(part) {
+                target.push(name);
+            }
+        }
         let value = self.decl_values(&parts[equal + 1..]);
         let line = self.line(id);
         self.lexer_event(b'a', line, &target, &value, false);

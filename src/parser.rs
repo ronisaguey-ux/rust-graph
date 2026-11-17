@@ -4633,6 +4633,7 @@ impl<'a> Parser<'a> {
 
     fn unpack_targets(&self, toks: &[Token]) -> Option<Vec<String>> {
         let mut inner = toks;
+        let mut declared = false;
         let class_field = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
         while let Some(word) = self.word_at(inner, 0) {
             let declaration = Self::decl_word(self.lang.tag, &word);
@@ -4647,7 +4648,34 @@ impl<'a> Parser<'a> {
             if !declaration && !modifier {
                 break;
             }
+            if declaration {
+                declared = true;
+            }
             inner = &inner[1..];
+        }
+        // Go writes the binding before its type (`var x int = 1`), so in a
+        // `var`/`const` spec the targets are the identifier list that starts it
+        // and the type is what follows - read as "the last name before `=`" the
+        // lexer named the type (`var _ rest.ShortNamesProvider = &REST{}` bound
+        // `rest.ShortNamesProvider`, `const x string = "s"` bound `string`) and
+        // every typed declaration in the kubernetes corpus was a lost
+        // statement. Java, C and TypeScript put the name last and keep the
+        // fall-through below.
+        if declared && self.lang.tag == "GO" {
+            let mut names = Vec::new();
+            let mut at = 0;
+            while let Some(word) = self.word_at(inner, at) {
+                names.push(word);
+                at += 1;
+                if inner.get(at).is_some_and(|token| self.is_op(token, b",")) {
+                    at += 1;
+                    continue;
+                }
+                break;
+            }
+            if !names.is_empty() {
+                return Some(names);
+            }
         }
         let wrapped = inner.first().is_some_and(|t| self.is_op(t, b"(") || self.is_op(t, b"[") || self.is_op(t, b"{"));
         if wrapped {
