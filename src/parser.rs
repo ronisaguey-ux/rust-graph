@@ -3859,6 +3859,29 @@ impl<'a> Parser<'a> {
         if self.import_of(stmt) {
             return;
         }
+        // `18,17,19,…` and `{ 0x80, 36 },`: a file that is only a table's rows is
+        // a data fragment, not a translation unit - musl includes these in the
+        // brace list that declares the table. The CST reads no statement there,
+        // and read as an expression the whole fragment became one event of
+        // constants that the source never opened (13 c files, 218 rows). A
+        // statement with no word in it cannot declare or bind anything.
+        // The braces of `{ 0x80, 36 },` open a block in this reader, so the
+        // rule is the statement's shape, not the frame it sits in.
+        if self.lang.tag == "C" {
+            let mut numbers = 0usize;
+            let fragment = stmt.iter().all(|token| match token.kind {
+                Kind::Num => {
+                    numbers += 1;
+                    true
+                }
+                Kind::Str => true,
+                Kind::Op => matches!(&self.src[token.start as usize..token.end as usize], b"," | b"{" | b"}" | b"[" | b"]"),
+                _ => false,
+            });
+            if fragment && numbers > 0 {
+                return;
+            }
+        }
         // TypeScript declares types, and a type declaration writes no runtime
         // fact: `type Id = string | number` is not an assignment of `Id`, an
         // `enum` header is not a value, and `namespace NS` names no variable.
