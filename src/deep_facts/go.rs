@@ -3860,8 +3860,12 @@ fn dotted_piece(text: &str) -> bool {
             // `ParametersBuilder().apply { … }.build()`: a chain broken over
             // lines is one navigation expression that starts on the first
             // line, and the lexer files the call on the line its member name
-            // is written. Kotlin spells the member access `navigation_expression`.
-            "attribute" | "member_expression" | "navigation_expression" => {
+            // is written. Kotlin spells the member access `navigation_expression`
+            // and C# spells it `member_access`: a chain written over several
+            // lines - `RemoteExecutor.Invoke(x,\n  new Options { .. })
+            // .DisposeAsync();` - was dated to the receiver's first line, and the
+            // one-pass reader dates a call to its name (84 files).
+            "attribute" | "member_expression" | "navigation_expression" | "member_access" => {
                 let children = self.children(callee);
                 if let Some(&name) = children.iter().rev().find(|&&child| {
                     self.node(child).first_child == NONE && !self.is_layout(child)
