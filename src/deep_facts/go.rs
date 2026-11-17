@@ -3756,7 +3756,11 @@ fn dotted_piece(text: &str) -> bool {
     /// start would say the line of `path`.
     pub(crate) fn call_line(&self, callee: u32, call: u32) -> u32 {
         match self.kind(callee) {
-            "attribute" | "member_expression" => {
+            // `ParametersBuilder().apply { … }.build()`: a chain broken over
+            // lines is one navigation expression that starts on the first
+            // line, and the lexer files the call on the line its member name
+            // is written. Kotlin spells the member access `navigation_expression`.
+            "attribute" | "member_expression" | "navigation_expression" => {
                 let children = self.children(callee);
                 if let Some(&name) = children.iter().rev().find(|&&child| {
                     self.node(child).first_child == NONE && !self.is_layout(child)
