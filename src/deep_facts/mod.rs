@@ -998,9 +998,27 @@ impl<'a> Walker<'a> {
                             .map(|&child| self.text_string(child))
                     });
                     match (assigned, target) {
-                        (Some(_), Some(name)) => {
+                        (Some(at), Some(name)) => {
+                            // `const string AuthenticationInstant =
+                            // ClaimTypeNamespace + "/authenticationinstant"`:
+                            // the lexer writes the initialiser's own value - a
+                            // merge of the name and the constant - and the arm
+                            // wrote the constant 0 for every initialised field,
+                            // so each one in the corpus lost its event.
+                            let form = children
+                                .get(at + 1)
+                                .copied()
+                                .map(|node| self.form(node))
+                                .filter(|form| !form.is_empty() && form != "0");
                             let line = self.line(id);
-                            self.lexer_event(b'a', line, &[name], "0", false);
+                            match form {
+                                Some(form) => {
+                                    self.lexer_event(b'a', line, &[name], &form, false);
+                                }
+                                None => {
+                                    self.lexer_event(b'a', line, &[name], "0", false);
+                                }
+                            }
                         }
                         _ => {
                             self.decl_statement(id);
