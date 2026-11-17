@@ -481,8 +481,11 @@ rust_graph_deep::grammar! { KOTLIN {
     receiver_function_type: _name ["?"] "." function_parameters "->" _type,
     function_parameters: "(" (_type %? ",") ")",
 
+    /// `Foo::class`, `this::class`: a class literal names a keyword, and
+    /// `class` was not a name this rule accepted, so every annotation written
+    /// `@OptIn(X::class)` fell into error recovery.
     _name:
-        IDENT | "abstract" | "actual" | "annotation" | "by" | "companion" | "const"
+        IDENT | "class" | "abstract" | "actual" | "annotation" | "by" | "companion" | "const"
         | "constructor" | "context" | "crossinline" | "data" | "delegate" | "dynamic" | "enum"
         | "expect" | "external" | "field" | "final" | "get" | "infix" | "init" | "inline"
         | "inner" | "internal" | "lateinit" | "noinline" | "open" | "operator" | "out"
