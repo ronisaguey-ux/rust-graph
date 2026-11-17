@@ -530,7 +530,15 @@ impl<'a> Walker<'a> {
                 // loss per `this`, `return this;` and `new X(this)` alike
                 // (1,046 losses, the largest java cluster left after the
                 // declarations).
-                let name: &[u8] = if text == b"this" { b"self" } else { text };
+                // A Go method receiver is written with its own name, so a bare
+                // `p` in a condition is the receiver; `decl_path` already spells
+                // it `self` and the lexer does too, so the leaf has to agree.
+                let receiver = self.frame().receiver.as_str();
+                let name: &[u8] = if text == b"this" || (!receiver.is_empty() && text == receiver.as_bytes()) {
+                    b"self"
+                } else {
+                    text
+                };
                 let mut out = "[\"n\",".to_string();
                 push_string(&mut out, &String::from_utf8_lossy(name));
                 out.push(']');
