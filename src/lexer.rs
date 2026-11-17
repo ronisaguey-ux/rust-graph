@@ -108,6 +108,36 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// A directive ends at a newline that is not escaped. A `\` before the
+    /// newline continues the same directive, so a multi-line `#define` is one
+    /// directive and its body is text for the macro, not statements. The
+    /// grammar drops a directive as trivia; stopping at the first newline made
+    /// the lexer read every continuation line as code and file the calls in it,
+    /// which no CST can have because the node does not exist.
+    ///
+    /// The counter moves with the position, so a token after a multi-line
+    /// directive is still stamped with the line it is on.
+    fn skip_directive(&mut self) {
+        while self.pos < self.src.len() {
+            if self.src[self.pos] == b'\n' {
+                let mut at = self.pos;
+                let mut slashes = 0;
+                while at > 0 && self.src[at - 1] == b'\\' {
+                    slashes += 1;
+                    at -= 1;
+                }
+                if slashes % 2 == 1 {
+                    self.pos += 1;
+                    self.line += 1;
+                    self.line_start = self.pos;
+                    continue;
+                }
+                break;
+            }
+            self.pos += 1;
+        }
+    }
+
     fn newline(&mut self) {
         self.pos += 1;
         self.line += 1;
@@ -566,7 +596,7 @@ impl<'a> Lexer<'a> {
             && first_on_line
             && (self.lang.imports == Imports::Include || self.lang.tag == "CS")
         {
-            self.skip_to_newline();
+            self.skip_directive();
             return self.token(Kind::Directive, start, line, col);
         }
         if self.lang.sigils && matches!(byte, b'$' | b'@') {
