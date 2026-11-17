@@ -3137,7 +3137,9 @@ fn dotted_piece(text: &str) -> bool {
             // value, and a call written in the subscript is a fact of its own.
             // With no arm the node formed the constant 0 and the call in the
             // index was lost on every `xs[f(..)]` in the corpus.
-            "index_expression" => {
+            // Swift, Go and the rest spell an indexed access differently; this
+            // arm is the Kotlin node only.
+            "index_expression" if self.is_kotlin() => {
                 let children = self.children(id);
                 for child in &children {
                     if self.kind(*child) != "subscript" {
