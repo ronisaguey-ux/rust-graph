@@ -573,6 +573,19 @@ impl<'a> Walker<'a> {
                 .map(|list| self.arguments(list))
                 .unwrap_or_else(|| "[]".to_string());
             let callee = self.decl_callee(id);
+            // `reflect.New(typ).Elem()`: the call the lexer records is the one
+            // the arguments belong to, `reflect.New(typ)`, and `.Elem()` is the
+            // receiver of the next one. Written from the outside the value was
+            // the outer call with no argument, so the record's `typ` had nothing
+            // to pair with.
+            if self.kind(callee) == "selector_expression" {
+                if let Some(&base) = self.children(callee).first() {
+                    if self.kind(base) == "call_expression" {
+                        self.record_receiver_calls(callee);
+                        return self.decl_value(base);
+                    }
+                }
+            }
             // `ts.Listener.Addr().String()`: the receiver is a call of its own,
             // and the lexer records it as one. Reading only the outer call lost
             // every chained call in Go (57 of the 96 remaining fallbacks on
