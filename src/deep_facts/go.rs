@@ -2313,6 +2313,21 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            // Swift's `x = .trap`: the value is the member name with no
+            // receiver, which is exactly what the lexer reads. Unmapped it
+            // formed as the constant 0, so the value of every implicit-member
+            // expression was lost.
+            "implicit_member_expression" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
             // `(0, _createSvgIcon.default)(...)`: the comma idiom every
             // transpiler emits is a sequence expression, and it was forming as
             // the constant 0, so every CommonJS `exports.default = ...` in the
@@ -3155,7 +3170,11 @@ fn dotted_piece(text: &str) -> bool {
         let kind = self.kind(id);
         let children = self.children(id);
         if !path.is_empty() && !path.starts_with('.') {
-            if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression") {
+            if matches!(
+                kind,
+                "attribute" | "member_expression" | "navigation_expression" | "subscript" | "subscript_expression"
+                    | "field_expression"
+            ) {
                 if let Some(&object) = children.first() {
                     // A receiver can be any expression; nothing is recorded for a
                     // plain name, so this costs a walk and never a wrong fact.
@@ -3300,7 +3319,10 @@ fn dotted_piece(text: &str) -> bool {
             // every call through a type in the corpus lost its dotted name.
             // `_reader?.Close()` - the null-conditional member access names the
             // same path as a plain one.
-            "attribute" | "member_expression" | "member_access" | "conditional_member_access" => {
+            "attribute" | "member_expression" | "member_access" | "conditional_member_access"
+            // Swift's spelling of the same path: `c.b = .trap`'s target read as
+            // the empty string, so the assignment lost its target entirely.
+            | "navigation_expression" => {
                 let children = self.children(id);
                 let name = self.member_name(id);
                 let base = children.first().map(|&child| self.path_of(child)).unwrap_or_default();
@@ -3352,7 +3374,10 @@ fn dotted_piece(text: &str) -> bool {
             return Some(name);
         }
         match self.kind(id) {
-            "identifier" | "attribute" | "member_expression" | "subscript" | "subscript_expression" | "this" => {
+            // `navigation_expression` is Swift's member access: read as a leaf it
+            // had no name, so `c.b = .trap` lost its target.
+            "identifier" | "attribute" | "member_expression" | "navigation_expression" | "subscript"
+            | "subscript_expression" | "this" => {
                 let path = self.path_of(id);
                 (!path.is_empty()).then_some(path)
             }
