@@ -641,9 +641,18 @@ impl<'a> Parser<'a> {
                 }
             }
             let macro_body = self.macro_rules_head();
+            // `{ 0x80, 36 },` in a table header that is `#include`d inside a
+            // declaration (musl's locale and ctype tables): at file scope C
+            // has no compound statement, so the braces are a row of an
+            // initialiser list and write no fact. Read as a block, the lexer
+            // filed one tuple per row and the CST had nothing to match — 99
+            // rows in gb18030utf.h alone, and the same shape in every table.
+            let table_row = self.lang.tag == "C"
+                && self.stmt.is_empty()
+                && self.top().kind == FrameKind::Module;
             let before = self.frames.len();
             self.open_block();
-            if (type_body || macro_body) && self.frames.len() > before {
+            if (type_body || macro_body || table_row) && self.frames.len() > before {
                 self.frames[before].type_only = true;
             }
             if conditional {
