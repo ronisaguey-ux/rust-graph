@@ -40,6 +40,16 @@ const RS_NOISE: [&str; 20] = [
     "await", "yield", "async", "in", "as", "if", "else", "for", "while", "loop", "return", "let", "const", "mut",
     "ref", "unsafe", "pub", "move", "try", "use",
 ];
+/// C's scalar type keywords. A type names a type, never a function: `(int
+/// (*)(void *))p` is a cast of `p` and applying it calls whatever `p` holds,
+/// and `(float)(x)` is a cast too. The lexer read the keyword in front of the
+/// parentheses as a callee and invented a function called `int` that the CST,
+/// which writes a cast, never writes (8 files of the C corpus - the largest
+/// call cluster there).
+const C_TYPE_WORDS: [&str; 11] = [
+    "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool", "_Complex",
+];
+
 const NAMED_ARGS_WITH_COLON: [&str; 5] = ["RB", "CR", "SWIFT", "DART", "EX"];
 
 pub fn lexeme(src: &[u8], token: &Token, lang: &Language) -> String {
@@ -1571,6 +1581,13 @@ impl Emit<'_> {
                 // `CFUNCTYPE().call` - a method no source spells, which the
                 // CST never writes and the resolver would tie to any method
                 // that happens to be named `call`.
+                // A type keyword in front of the parentheses is a cast, not a
+                // callee: `((int (*)(void *))p)(p)` applies the value the cast
+                // produced. Named after the keyword the application read as a
+                // call of `int`, a function no source spells.
+                if matches!(self.lang.tag, "C" | "CPP" | "OBJC") && C_TYPE_WORDS.contains(&path.as_str()) {
+                    path.clear();
+                }
                 let applied = path.is_empty();
                 let (receiver, mut target) = self.split_receiver(&value, &path);
                 if target.starts_with('.') {
