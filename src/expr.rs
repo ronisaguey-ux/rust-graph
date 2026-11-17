@@ -286,6 +286,12 @@ impl Emit<'_> {
         let mut calls_after_pattern = calls_at_start;
         let mut guard_seen = false;
         let mut in_let = false;
+        // `T { a, .. }`: the rest pattern names no value, and the CST writes
+        // none. The generic empty-item rule at the end of this function pushes
+        // a constant `0` for an item that produced nothing, which is right for
+        // an absent operand and wrong for a rest — that `0` was the whole of
+        // `assert_matches!(r, ActivityTask { variant: Some(x), .. })`.
+        let mut rest_only = false;
         while let Some(token) = self.tok(0) {
             let kind = token.kind;
             if self.lang.tag == "RS" && kind == Kind::Ident && self.word(0).as_deref() == Some("if") {
@@ -735,6 +741,21 @@ impl Emit<'_> {
                             in_let = false;
                             self.pos += 1;
                         }
+                        // A brace group's `..` is a rest pattern, never a
+                        // prefix range: there is no bound to read and nothing
+                        // for the value to hold.
+                        b'.' if self.lang.tag == "RS"
+                            && close == b'}'
+                            && self.is_op(0, b".")
+                            && self.is_op(1, b".")
+                            && !matches!(
+                                self.tok(2).map(|token| token.kind),
+                                Some(Kind::Ident | Kind::Num)
+                            ) =>
+                        {
+                            self.pos += 2;
+                            rest_only = true;
+                        }
                         _ => self.pos += 1,
                     }
                 }
@@ -751,6 +772,7 @@ impl Emit<'_> {
             }
         }
         match count {
+            0 if rest_only => {}
             0 => out.push('0'),
             1 => {}
             _ => {
