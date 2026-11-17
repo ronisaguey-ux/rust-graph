@@ -367,7 +367,8 @@ rust_graph_deep::grammar! { C {
         | static_assert_statement
         | asm_statement
         | declaration_statement
-        | expression_statement,
+        | expression_statement
+        | empty_statement,
 
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
     switch_statement: "switch" parenthesized_expression switch_body,
@@ -388,6 +389,10 @@ rust_graph_deep::grammar! { C {
     goto_statement: "goto" (IDENT | "*" _expression) ";",
     labeled_statement: IDENT ":" _statement,
     expression_statement: _expression ";",
+    /// `break;;`: a stray semicolon is an empty statement, and without one the
+    /// case that follows it was an error node — every `break;;` in lua's json
+    /// reader lost the line after it.
+    empty_statement: ";",
 
     _expression: precedence _primary {
         comma: left "," => sequence_expression,
