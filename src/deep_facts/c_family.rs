@@ -480,7 +480,12 @@ impl<'a> Walker<'a> {
                                     let kids = self.children(bare);
                                     let at = kids.iter().rposition(|&node| self.kind(node) == "identifier")?;
                                     Some(self.text_string(kids[at]))
-                                }),
+                                })
+                                // `LUA_API lua_State *(lua_newstate) (lua_Alloc f,
+                                // void *ud);`: the declarator is parenthesised, so
+                                // the name hangs off a `parenthesized_declarator`
+                                // and neither lookup above reaches it.
+                                .or_else(|| self.declarator_name(id)),
                         ) {
                             let name = name_node;
                             if !name.is_empty() {
@@ -489,14 +494,24 @@ impl<'a> Walker<'a> {
                                 let mut names: Vec<String> =
                                     forced.clone().map(|prefix| vec![prefix]).unwrap_or_default();
                                 let mut rest = text.trim_start();
+                                let mut named = false;
                                 while let Some(word) = leading_word(rest) {
                                     if word == name {
+                                        named = true;
                                         break;
                                     }
                                     if word != "void" {
                                         names.push(word.to_string());
                                     }
                                     rest = rest[word.len()..].trim_start();
+                                }
+                                // `LUA_API int (lua_gettop) (lua_State *L);`: the
+                                // declarator is parenthesised, so the words before
+                                // the name end at a `(` and the name is never one of
+                                // them. The lexer reads that name off the line, so
+                                // the declaration lists it beside its type.
+                                if !named && !names.iter().any(|word| word == &name) {
+                                    names.push(name.clone());
                                 }
                                 let mut args: Vec<String> = Vec::new();
                                 let mut group: Vec<String> = Vec::new();
