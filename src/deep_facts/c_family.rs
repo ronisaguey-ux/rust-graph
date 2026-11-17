@@ -668,22 +668,16 @@ impl<'a> Walker<'a> {
                         // a brace list of brace lists is a merge of merges, one
                         // inner merge per row - counting only the outer children
                         // flattened the whole table to eight zeros.
+                        // Only the values are counted: the braces of the list
+                        // are children too, and counting them wrote two extra
+                        // zeros per row (`{ { 0, 0, 0 } }` became five), so
+                        // every numeric table in the corpus disagreed with the
+                        // lexer by exactly its punctuation.
                         let parts: Vec<String> = self
                             .children(node)
                             .into_iter()
-                            .filter(|&child| self.kind(child) != ",")
-                            .map(|child| {
-                                if self.kind(child) == "initializer_list" {
-                                    let inner = self
-                                        .children(child)
-                                        .into_iter()
-                                        .filter(|&item| self.kind(item) != ",")
-                                        .count();
-                                    format!("[\"m\",[{}]]", vec!["0"; inner].join(","))
-                                } else {
-                                    "0".to_string()
-                                }
-                            })
+                            .filter(|&child| !matches!(self.kind(child), "," | "{" | "}" | "[" | "]"))
+                            .map(|child| self.list_element_form(child))
                             .collect();
                         let value = format!("[\"m\",[{}]]", parts.join(","));
                         self.lexer_event(b'a', line, &[name], &value, false);
@@ -843,6 +837,41 @@ impl<'a> Walker<'a> {
             _ => return false,
         }
         true
+    }
+
+    /// One element of a brace list, as the lexer writes it: the names the
+    /// element spells as ONE merge (`{ INT, UINT }` is `m:[n:INT,n:UINT]`), or
+    /// the constant `0` when it spells no name. A row of a table is a merge of
+    /// its own elements, so `{ { A, B }, { C, D } }` keeps its two rows.
+    ///
+    /// Counting the elements and writing zeros instead cost every state table in
+    /// musl: `static const unsigned char states[]['z'-'A'+1] = { S('d') = INT,
+    /// … }` wrote six hundred zeros where the lexer wrote the designators' and
+    /// values' names, and no row of the table could pair.
+    fn list_element_form(&self, node: u32) -> String {
+        if self.kind(node) == "initializer_list" {
+            let parts: Vec<String> = self
+                .children(node)
+                .into_iter()
+                .filter(|&item| !matches!(self.kind(item), "," | "{" | "}" | "[" | "]"))
+                .map(|item| self.list_element_form(item))
+                .collect();
+            return format!("[\"m\",[{}]]", parts.join(","));
+        }
+        let words = self.c_words_of(node);
+        if words.is_empty() {
+            return "0".to_string();
+        }
+        let forms: Vec<String> = words
+            .iter()
+            .map(|word| {
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, word);
+                form.push(']');
+                form
+            })
+            .collect();
+        format!("[\"m\",[{}]]", forms.join(","))
     }
 
     /// `(name, value node, line)` for each declarator of a declaration that has
