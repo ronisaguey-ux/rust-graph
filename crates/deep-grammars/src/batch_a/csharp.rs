@@ -327,7 +327,11 @@ rust_graph_deep::grammar! { CSHARP {
     property_declaration: [attributes] [modifiers] _type _member_name property_body [property_tail],
     property_tail: "=" _expression@assign ";" | ";",
     property_body: "{" accessor_declaration* "}",
-    accessor_declaration: [attributes] [modifiers] ("get" | "set" | "init" | "add" | "remove") (block | ";"),
+    // `set => _f = value;`: an accessor may be expression-bodied, and only a
+    // block or a bare `;` was in the rule, so every arrow accessor was one
+    // ERROR (C# corpus: an accessor with a body on the same line as its
+    // property is the common style in the runtime's own sources).
+    accessor_declaration: [attributes] [modifiers] ("get" | "set" | "init" | "add" | "remove") (block | ";" | "=>" _expression ";"),
     indexer_declaration: [attributes] [modifiers] _type "this" indexer_parameters property_body [property_tail],
     indexer_parameters: "[" (parameter %? ",") "]",
     event_declaration: [attributes] [modifiers] "event" _type _member_name event_tail,
