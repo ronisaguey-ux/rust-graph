@@ -1213,6 +1213,22 @@ impl<'a> Walker<'a> {
             // child is the expression itself. Nothing read that node, so a call
             // in an expression-bodied def never reached the record.
             "def_body" => self.expression_statement(id),
+            // `fun f() = foo()` and `get() = foo()`: Kotlin wraps the body in
+            // a `function_body` (or writes it straight onto an `accessor`), and
+            // the expression after the `=` was read by no arm, so the call
+            // written in it stayed in the tree and out of the record. The block
+            // form is a child of its own and is walked anyway.
+            "function_body" | "accessor" if self.is_kotlin() => {
+                let body = self.children(id).into_iter().rev().find(|&child| {
+                    !matches!(
+                        self.kind(child),
+                        "block" | "=" | "get" | "set" | "modifiers" | "accessor_parameters"
+                    )
+                });
+                if let Some(body) = body {
+                    self.form(body);
+                }
+            }
             "return_statement" => self.return_statement(id),
             "variable_declarator" if self.is_js() => self.declarator(id),
             "assignment_expression" if self.is_js() => self.assignment_definition(id),
