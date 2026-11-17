@@ -749,10 +749,32 @@ mod kinds {
     /// `(fixture, first node of this kind, exact text it spans)`.
     const FIXTURES: &[(&str, &[(&str, &str)])] = &[
         (
+            "c_array_parameters.c",
+            &[
+                ("array_suffix", "[restrict]"),
+                ("parameter_list", "(char *const names[restrict], int count[static 4], long sizes[const 8])"),
+            ],
+        ),
+        (
             "c_attributes.c",
             &[
                 ("attribute", "__attribute__((noreturn))"),
                 ("function_definition", "__attribute__((always_inline)) static inline int twice(int value) {\n    return value + value;\n}"),
+            ],
+        ),
+        (
+            "c_compound_literals.c",
+            &[
+                ("compound_literal_expression", "(struct pair){ s, ns }"),
+                ("initializer_list", "{ s, ns }"),
+                ("designated_field", ".s = s"),
+            ],
+        ),
+        (
+            "c_declarator_labels.c",
+            &[
+                ("asm_label", "__asm__(\"$4\")"),
+                ("asm_label_arguments", "(\"$4\")"),
             ],
         ),
         (
@@ -794,6 +816,36 @@ mod kinds {
             &[
                 ("macro_qualified_item", "EXPORT int public_entry(int argc, char **argv);"),
                 ("specified_macro_item", "static EXPORT int hidden_entry(void) {\n    return 0;\n}"),
+            ],
+        ),
+        (
+            "c_macro_type_arguments.c",
+            &[
+                ("type_name", "const char *"),
+                ("call_expression", "va_arg(ap, const char *)"),
+            ],
+        ),
+        (
+            "c_nested_designators.c",
+            &[
+                ("designated_field", ".value.sec = 1"),
+                ("initializer_list", "{ .value.sec = 1, .value.usec = 2, .value.opts[1] = 3 }"),
+            ],
+        ),
+        (
+            "c_null_statement.c",
+            &[
+                ("empty_statement", ";"),
+                ("while_statement", "while ((r = read_one()) == -1);"),
+            ],
+        ),
+        (
+            "c_struct_members.c",
+            &[
+                ("array_suffix", "[]"),
+                ("compound_statement", "{
+    return op->cmd + op->path[0] + op->fd;
+}"),
             ],
         ),
         (
