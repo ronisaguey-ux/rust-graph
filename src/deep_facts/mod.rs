@@ -787,7 +787,16 @@ impl<'a> Walker<'a> {
             }
             return !self.kinds.soft.contains(&self.kind(id));
         }
-        !(text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'"' || text[0] == b'\'')
+        // A backtick opens a literal too: Go's raw string starts with one, and
+        // read as punctuation every raw-string argument left the call's value
+        // (`regexp.MustCompile(\`^ip\`)` became `c(name;[])` while the lexer
+        // wrote `c(name;[0])`), so every file whose only calls take a raw
+        // string fell back.
+        !(text[0].is_ascii_alphanumeric()
+            || text[0] == b'_'
+            || text[0] == b'"'
+            || text[0] == b'\''
+            || text[0] == b'`')
     }
 
     // -- frames and symbols -------------------------------------------------
