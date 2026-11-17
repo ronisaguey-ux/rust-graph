@@ -395,7 +395,9 @@ rust_graph_deep::grammar! { C {
     },
 
     _primary:
-        &(cast_type) cast_expression
+        &(cast_type "{") compound_literal_expression
+        | &(user_cast_head "{") compound_literal_expression
+        | &(cast_type) cast_expression
         | &(user_cast_head (IDENT | NUMBER | STR | CHAR_LITERAL)) user_cast_expression
         | sizeof_expression
         | alignof_expression
@@ -414,6 +416,10 @@ rust_graph_deep::grammar! { C {
     /// stays a multiplication.
     user_cast_expression: user_cast_head _expression@unary,
     user_cast_head: "(" user_type_name ")",
+    /// C99 compound literal: `(pthread_attr_t){0}`, `&(struct iovec){ .len = n }`.
+    /// The type is either a keyword type (`struct s`, `int`) or a typedef name,
+    /// and the `{` after the `)` is what tells it from a cast or a parenthesis.
+    compound_literal_expression: cast_type initializer_list | user_cast_head initializer_list,
 
     cast_type: "(" _cast_type_body ")",
     /// `(int *)`, `(struct s *)` and `(Foo *)`: a keyword type or a typedef name.
