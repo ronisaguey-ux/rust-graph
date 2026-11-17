@@ -836,6 +836,15 @@ impl<'a> Walker<'a> {
                     pending = self.declarator_of(child);
                     continue;
                 }
+                // A pointer belongs to the declarator that follows it, not to
+                // the previous one: in char *a, **b; the two pointers of b
+                // were read as a's initialiser, so the first name was written
+                // as an assignment holding a pointer and every later name was
+                // dropped from the record.
+                "pointer" => {
+                    pending = None;
+                    continue;
+                }
                 _ => {}
             }
             if self.is_layout(child) {
