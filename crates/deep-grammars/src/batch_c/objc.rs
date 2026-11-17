@@ -163,6 +163,12 @@ rust_graph_deep::grammar! { OBJC {
         | objc_class_declaration
         | objc_import
         | &(IDENT arguments) macro_call_statement
+        // `FOUNDATION_EXPORT double IQKeyboardManagerSwiftVersionNumber;`:
+        // an export macro in front of a declaration is one statement to the
+        // one-pass reader - the macro's name, then the type and the name it
+        // declares - and with no rule the macro was the whole item and the
+        // declaration under it was recovered.
+        | &(IDENT declaration_specifiers _declarator) export_macro_declaration
         | declaration_statement
         // `NS_ASSUME_NONNULL_BEGIN`, and every other bare macro that stands as
         // an item of its own: without this alternative the item reached the
@@ -180,6 +186,10 @@ rust_graph_deep::grammar! { OBJC {
     /// an optional `;` and one alternative covers both shapes - two alternatives
     /// would be indistinguishable at `IDENT "("`.
     macro_call_statement: IDENT arguments [";"],
+    /// `FOUNDATION_EXPORT double VersionNumber;`: an export or visibility
+    /// macro in front of a declaration. The macro is a name to the one-pass
+    /// reader and the declaration follows it on the same line.
+    export_macro_declaration: IDENT declaration_specifiers (_init_declarator % ",") ";",
     /// `NS_ASSUME_NONNULL_BEGIN` on a line of its own: a bare macro with no
     /// arguments and no semicolon, which every modern Apple header opens and
     /// closes with. Nothing else at file scope is a single name, so the guard

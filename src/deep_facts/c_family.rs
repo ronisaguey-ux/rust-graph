@@ -117,6 +117,59 @@ impl<'a> Walker<'a> {
                 let value = format!("[\"m\",[{}]]", parts.join(","));
                 self.lexer_event(b'x', line, &[], &value, false);
             }
+            // `NS_ASSUME_NONNULL_BEGIN`, `NS_ASSUME_NONNULL_END': a bare macro
+            // standing as an item of its own is one name to the one-pass reader,
+            // and nothing read the node, so every modern Apple header lost the
+            // two lines it opens and closes with (35 of the corpus's events).
+            "bare_macro_item" => {
+                if let Some(node) = self.child_of_kind(id, "identifier") {
+                    let name = self.text_string(node);
+                    let line = self.line(id);
+                    let mut value = String::from("[\"n\",");
+                    push_string(&mut value, &name);
+                    value.push(']');
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+            }
+            // `FOUNDATION_EXPORT double VersionNumber;`: the export macro is a
+            // name to the one-pass reader and the declaration follows it on the
+            // same line, so the line is one merge. Nothing read the node, and
+            // every export banner in the corpus lost its declaration.
+            "export_macro_declaration" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                for child in self.children(id) {
+                    for name in self.c_words_of(child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &name);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                }
+                if !parts.is_empty() {
+                    let value = format!("[\"m\",[{}]]", parts.join(","));
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+            }
+            // `@protocol DDLogger;`: a forward declaration names the protocol in
+            // one line, and the lexer files it as a merge of the word and the
+            // name - no arm read the node, so the line was lost.
+            "objc_forward_declaration" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, "protocol");
+                form.push(']');
+                parts.push(form);
+                for name in self.c_words_of(id) {
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, &name);
+                    form.push(']');
+                    parts.push(form);
+                }
+                let value = format!("[\"m\",[{}]]", parts.join(","));
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
             // `ShaderDesignerWindowController *windowController;` in an ivar
             // block is a declaration statement to the lexer.
             "ivar_declaration" => {
