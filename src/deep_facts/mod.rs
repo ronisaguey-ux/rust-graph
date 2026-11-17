@@ -964,6 +964,13 @@ impl<'a> Walker<'a> {
             // function's value and no statement arm holds it, so the calls
             // written in one were never read - every expression-bodied Kotlin
             // function lost its call.
+            // `init { … }`: the one-pass reader files the keyword as a
+            // statement of its own (`n:init`) and nothing wrote the line, so
+            // every class with an initialiser block lost one event.
+            "init_block" if self.is_kotlin() => {
+                let line = self.line(id);
+                self.event(&format!("[\"x\",{line},[\"n\",\"init\"]]"));
+            }
             "function_body" if self.is_kotlin() => {
                 let children = self.children(id);
                 if children.iter().any(|&child| self.kind(child) == "=") {
