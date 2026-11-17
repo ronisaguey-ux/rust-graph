@@ -412,8 +412,15 @@ rust_graph_deep::grammar! { CPP {
     range_for_statement: "for" range_for_header _statement,
     range_for_header: "(" _range_for_declaration ":" _expression ")",
     _range_for_declaration: declaration_specifiers _declarator | plain_type_name _declarator,
-    _for_init: &(declaration_specifiers) _for_declaration | _expression,
+    /// `for (uint32_t i = 1; i < n; i++)`: see the C grammar's `_for_init` —
+    /// a typedef name declares the loop's variable, and the header's init read
+    /// as an expression was two names in a row, which is an error node on every
+    /// bitset loop of the croaring corpus (46 rows in one header alone).
+    _for_init: &(declaration_specifiers) _for_declaration
+        | &(user_type_name IDENT) _for_user_declaration
+        | _expression,
     _for_declaration: declaration_specifiers (_init_declarator % ","),
+    _for_user_declaration: user_type_name (_init_declarator % ","),
     parenthesized_expression: "(" _expression ")",
     return_statement: "return" [_expression] ";",
     break_statement: "break" ";",
