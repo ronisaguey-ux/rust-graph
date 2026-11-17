@@ -1093,7 +1093,7 @@ impl<'a> Walker<'a> {
             // the lexer keeps the last one it read, so the later value replaces
             // the earlier.
             if let Some(last) = out.last_mut() {
-                let line = statement.unwrap_or_else(|| self.line(child));
+                let line = statement.unwrap_or_else(|| self.line(id));
                 last.1 = child;
                 last.2 = line;
             }
@@ -1110,11 +1110,22 @@ impl<'a> Walker<'a> {
         let Some(name_at) = kids.iter().position(|&child| self.kind(child) == "identifier") else { return };
         let name = self.text_string(kids[name_at]);
         let Some(equal) = kids.iter().skip(name_at).position(|&child| self.kind(child) == "=") else { return };
-        let Some(&value) = kids.get(name_at + equal + 1) else { return };
+        // A preprocessor conditional gives the declaration two juxtaposed
+        // values (`bool have_dss = #ifdef X true #else false #endif;`); the
+        // lexer keeps the last one it read, so the last one wins here too.
+        let values: Vec<u32> = kids[name_at + equal + 1..]
+            .iter()
+            .copied()
+            .filter(|&child| !self.is_layout(child))
+            .collect();
+        let Some(&value) = values.last() else { return };
         if self.is_layout(value) {
             return;
         }
-        let line = statement.unwrap_or_else(|| self.line(value));
+        // With both branches of a conditional present the value sits on the
+        // line of whichever branch survived, while the lexer's statement opened
+        // at the declaration: several values means the statement's own line.
+        let line = statement.unwrap_or_else(|| if values.len() > 1 { self.line(id) } else { self.line(value) });
         out.push((name, value, line));
     }
 
