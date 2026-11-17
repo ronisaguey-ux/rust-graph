@@ -1213,6 +1213,12 @@ impl<'a> Walker<'a> {
             // child is the expression itself. Nothing read that node, so a call
             // in an expression-bodied def never reached the record.
             "def_body" => self.expression_statement(id),
+            // Kotlin's `fun f(): T = expr` writes the body as a
+            // `function_body` whose child is the expression itself; a block
+            // body is the other alternative. Nothing read that node, so the
+            // lexer's return event had no counterpart and every
+            // expression-bodied function lost the call it returns.
+            "function_body" if self.facts.tag == "KT" => self.function_body(id),
             "return_statement" => self.return_statement(id),
             "variable_declarator" if self.is_js() => self.declarator(id),
             "assignment_expression" if self.is_js() => self.assignment_definition(id),
@@ -1958,6 +1964,22 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+    }
+
+    /// `fun f(): T = expr`: an expression body is this function's return
+    /// value, which the lexer writes as an `r` event. A block body states its
+    /// own statements, so it is not read again here.
+    fn function_body(&mut self, id: u32) {
+        let Some(body) = self
+            .children(id)
+            .into_iter()
+            .find(|&child| !self.is_layout(child) && !matches!(self.kind(child), "block" | "statement_block"))
+        else {
+            return;
+        };
+        let line = self.line(body);
+        let value = self.form(body);
+        self.event(&format!("[\"r\",{line},{value}]"));
     }
 
     /// The name a definition node carries, if any.
