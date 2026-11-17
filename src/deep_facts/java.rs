@@ -248,6 +248,16 @@ impl<'a> Walker<'a> {
             .filter(|&&child| !self.is_layout(child))
             .filter_map(|&child| self.decl_target(child))
             .collect();
+        // `path = new UnixPath(rp);`: an assignment constructs a class for the
+        // name it writes exactly as a declaration does, and the one-pass reader
+        // records the binding there. Read only out of declarations, every
+        // reassignment in the corpus was a binding the CST did not have (java:
+        // 358 files, `var path = UnixPath`).
+        if let Some(class) = children[at + 1..].first().and_then(|&value| self.constructed_class(value)) {
+            if let Some(target) = targets.first() {
+                self.facts.vars.push((target.clone(), class));
+            }
+        }
         let value = self.decl_values(&children[at + 1..]);
         let line = self.line(id);
         self.lexer_event(b'a', line, &targets, &value, operator != "=");
