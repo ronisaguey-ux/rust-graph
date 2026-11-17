@@ -615,6 +615,31 @@ impl<'a> Parser<'a> {
             && self.stmt.get(1).is_some_and(|token| self.is_op(token, b"!"))
     }
 
+    /// `enum urlreject {` in C and C++: the body holds enumerators, which are
+    /// declarations, and the CST writes one event for the whole enumerator
+    /// list on the header line. Read as statements, every initialised
+    /// enumerator (`REJECT_NADA = 2,`) became an assignment the CST never
+    /// wrote, and the trailing comma swallowed the enumerators that follow it.
+    fn c_enum_body(&self) -> bool {
+        if !matches!(self.lang.tag, "C" | "CPP" | "OBJC") {
+            return false;
+        }
+        let mut depth = 0i32;
+        for (index, token) in self.stmt.iter().enumerate() {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" => depth += 1,
+                    b")" | b"]" => depth -= 1,
+                    _ => {}
+                }
+            }
+            if depth == 0 && self.word_at(&self.stmt, index).as_deref() == Some("enum") {
+                return true;
+            }
+        }
+        false
+    }
+
     fn on_open_brace(&mut self, token: Token) {
         let opens_block = self.uses_braces() && self.is_block();
         if opens_block {
@@ -628,7 +653,8 @@ impl<'a> Parser<'a> {
                 || (self.lang.tag == "RS" && {
                     let index = self.skip_modifiers(&self.stmt);
                     self.word_at(&self.stmt, index).is_some_and(|w| matches!(w.as_str(), "struct" | "enum" | "union"))
-                });
+                })
+                || self.c_enum_body();
             // The header is a declaration and a type: `declare var M: typeof
             // globalThis extends`. Only the declarator is a name the CST writes;
             // `globalThis` and `extends` are type text here, and writing them
