@@ -2840,6 +2840,17 @@ fn dotted_piece(text: &str) -> bool {
             // it. The tree kept the lambda node and nothing read its body, so
             // every lambda argument lost what it contains.
             "lambda_expression" if self.language.name == "csharp" => return self.cs_lambda_value(id),
+
+            // `InternalAPI::class`: the one-pass reader spells a class literal
+            // as the dotted path `InternalAPI.class`, so the literal is that
+            // name. Formed as the constant 0 it made the argument of every
+            // `@OptIn(X::class)` disagree with the lexer's.
+            "class_literal" if self.is_kotlin() => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.decl_path(id));
+                out.push(']');
+                out
+            }
             // `(unsigned short)(port & 0xffff)` and
             // `sizeof(struct sockaddr_in6)`: the one-pass reader writes the
             // type words in front of the operand as the value, and the CST
