@@ -332,7 +332,12 @@ rust_graph_deep::grammar! { CSHARP {
     // block and the `;`, so every property with one failed to parse and took the
     // whole file's record with it.
     accessor_declaration: [attributes] [modifiers] ("get" | "set" | "init" | "add" | "remove") (block | "=>" _expression ";" | ";"),
-    indexer_declaration: [attributes] [modifiers] _type "this" indexer_parameters property_body [property_tail],
+    // `set => _f = value;` is the same rule's third alternative: the arrow body
+    // is a value, and a rule that knew only the block and the `;` made every
+    // arrow accessor one ERROR.
+    // `public object this[int i] => GetItem(i);`: an indexer may be
+    // expression-bodied, and only the accessor form was in the rule.
+    indexer_declaration: [attributes] [modifiers] _type "this" indexer_parameters (property_body [property_tail] | "=>" _expression ";"),
     indexer_parameters: "[" (parameter %? ",") "]",
     event_declaration: [attributes] [modifiers] "event" _type _member_name event_tail,
     event_tail: event_accessors | ";" | "=" _expression ";",
