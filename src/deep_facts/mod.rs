@@ -986,9 +986,27 @@ impl<'a> Walker<'a> {
                             .map(|&child| self.text_string(child))
                     });
                     match (assigned, target) {
-                        (Some(_), Some(name)) => {
+                        (Some(at), Some(name)) => {
+                            // The initialiser is the value: `public bool Flag =
+                            // false;` is `a [Flag] n:false` to the lexer, and
+                            // writing the constant `0` for every field but a
+                            // call left each such field a disagreement. A
+                            // keyword literal is a name to the one-pass reader.
+                            let kind = self
+                                .children(id)
+                                .get(at + 1)
+                                .map(|&child| self.kind(child))
+                                .unwrap_or("");
+                            let form = match kind {
+                                "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
+                                "" => "0".to_string(),
+                                _ => {
+                                    let child = self.children(id)[at + 1];
+                                    self.form(child)
+                                }
+                            };
                             let line = self.line(id);
-                            self.lexer_event(b'a', line, &[name], "0", false);
+                            self.lexer_event(b'a', line, &[name], &form, false);
                         }
                         _ => {
                             self.decl_statement(id);
