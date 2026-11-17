@@ -1665,7 +1665,10 @@ return verdict(Some("symbol"), detail, accepted);
                 // `match self.tok(i) { Some(t) => ... }`: the lexer reads the
                 // arm's pattern as a call, and a pattern is not a call. The
                 // source line says so — the name, its argument list, then `=>`.
-                if !lines.is_empty() && is_positional_call(&lines, &macro_lines, &name, call.line) {
+                if !lines.is_empty()
+                    && (is_positional_call(&lines, &macro_lines, &name, call.line)
+                        || (lexer.tag == "CS" && is_csharp_attribute(&lines, call.line)))
+                {
                     accepted.positional_calls += 1;
                     continue;
                 }
@@ -1864,6 +1867,7 @@ fn uncovered(
         }
         if macro_lines.get(event.line.saturating_sub(1) as usize).copied().unwrap_or(false)
             || is_attribute_call(lines, event.line)
+            || (lexer.tag == "CS" && is_csharp_attribute(lines, event.line))
             || is_declaration_line(lines, event.line)
             || is_method_declaration_line(&lexer.tag, lines, event.line)
             || is_type_property_line(lines, event.line)
@@ -2255,6 +2259,21 @@ fn is_attribute_call(src: &Lines<'_>, line: u32) -> bool {
             attribute && text.contains(']')
         })
         .unwrap_or(false)
+}
+
+/// `[Fact]`, `[MethodImpl(MethodImplOptions.AggressiveInlining)]`: C# spells an
+/// attribute with a bare bracket, and no statement in the language begins with
+/// `[`. The tokens inside one are an annotation, so the one-pass reader's call
+/// on the attribute's name is not a fact about the source.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_csharp_attribute(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
+        return false;
+    };
+    let text = text.trim_start();
+    // `[` alone is a collection expression continued from the line above, and
+    // `[]`/`[0]` are indexers: an attribute starts with a name.
+    text.starts_with('[') && text[1..].trim_start().starts_with(|ch: char| ch.is_alphanumeric() || ch == '_')
 }
 
 /// Whether this line opens a declaration: `pub fn`, `struct`, `enum`, `def`,
