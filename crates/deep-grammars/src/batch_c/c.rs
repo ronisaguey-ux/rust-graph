@@ -450,7 +450,11 @@ rust_graph_deep::grammar! { C {
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     alignof_expression: "_Alignof" cast_type,
     arguments: "(" (_argument %? ",") ")",
-    _argument: _expression@assign,
+    /// `va_arg(ap, const char *)`, `offsetof(struct s, tail)`: the second
+    /// argument of these macros is a type, not a value. A type name always
+    /// starts with a declaration specifier keyword, so the choice is decided on
+    /// the first token and no expression is ever read as one.
+    _argument: &(type_name) type_name | _expression@assign,
     subscript: "[" _expression "]",
 } }
 
