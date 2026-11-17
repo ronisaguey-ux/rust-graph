@@ -4046,6 +4046,7 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         // callee. The tree writes the entries' calls and cannot name `when`.
         "KT" => &[
             "if", "when", "while", "for", "do", "else", "try", "catch", "finally", "return", "throw", "is", "as", "in",
+        ],
         // C#: the operator words are spellings, not callees. `unchecked(a + b)`,
         // `default(DateTime)`, `nameof(x)`, `checked(n)` and `typeof(T)` put a
         // keyword in front of a group, and the one-pass reader read the keyword
