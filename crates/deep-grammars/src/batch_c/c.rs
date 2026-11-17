@@ -318,7 +318,18 @@ rust_graph_deep::grammar! { C {
     _enumerator: IDENT ["=" _expression@assign],
 
     _declarator: pointer* direct_declarator,
-    pointer: "*" _pointer_qualifier*,
+    /// `uint64_t *CROARING_CBITSET_RESTRICT array;`: a qualifier spelled as a
+    /// macro (`#define CROARING_CBITSET_RESTRICT restrict`) sits between the
+    /// star and the declarator's name. The predicate is the whole decision and
+    /// it opens the alternative, the only place the DSL allows one: `*name)`
+    /// keeps the plain form, so a declarator's name is never eaten as a
+    /// qualifier. 23 error nodes in one croaring header alone, and every
+    /// function that takes one of its pointers.
+    pointer:
+        &("*" IDENT IDENT) star_macro_pointer
+        | "*" _pointer_qualifier*,
+    star_macro_pointer: "*" _pointer_qualifier* macro_qualifier,
+    macro_qualifier: IDENT,
     _pointer_qualifier: "const" | "volatile" | "restrict",
     direct_declarator: _direct_base _declarator_suffix*,
     _direct_base: IDENT | parenthesized_declarator,

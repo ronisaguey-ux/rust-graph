@@ -336,7 +336,15 @@ rust_graph_deep::grammar! { CPP {
     // ---- types and declarators ----
 
     _declarator: pointer* direct_declarator,
-    pointer: ("*" | "&" | "&&") _pointer_qualifier*,
+    /// `uint64_t *CROARING_CBITSET_RESTRICT array;`: a qualifier spelled as a
+    /// macro sits between the star and the name, and the predicate that decides
+    /// it opens the alternative (the DSL allows one nowhere else). `*name)`
+    /// keeps the plain form, so the declarator's name is never eaten.
+    pointer:
+        &("*" IDENT IDENT) star_macro_pointer
+        | ("*" | "&" | "&&") _pointer_qualifier*,
+    star_macro_pointer: "*" _pointer_qualifier* macro_qualifier,
+    macro_qualifier: IDENT,
     _pointer_qualifier: "const" | "volatile",
     direct_declarator: _direct_base _declarator_suffix*,
     _direct_base: IDENT | parenthesized_declarator,
