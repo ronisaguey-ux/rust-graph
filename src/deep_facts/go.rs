@@ -926,18 +926,23 @@ impl<'a> Walker<'a> {
     pub(crate) fn record_receiver_calls(&mut self, callee: u32) {
         let mut node = callee;
         for _ in 0..8 {
-            if !matches!(self.kind(node), "selector_expression" | "member_expression" | "field_access") {
-                return;
+            match self.kind(node) {
+                // `reflect.New(t).Elem().Interface()`: the receiver of a call is
+                // a call of its own, and the chain continues through its callee -
+                // the walk stopped at that call before, so the innermost call
+                // kept no row while the lexer wrote one.
+                "call_expression" | "method_invocation" | "object_creation_expression" => {
+                    self.decl_call(node);
+                    node = self.decl_callee(node);
+                }
+                "selector_expression" | "member_expression" | "field_access" => {
+                    let Some(object) = self.children(node).into_iter().find(|&child| !self.is_layout(child)) else {
+                        return;
+                    };
+                    node = object;
+                }
+                _ => return,
             }
-            let Some(object) = self.children(node).into_iter().find(|&child| !self.is_layout(child)) else {
-                return;
-            };
-            if matches!(self.kind(object), "call_expression" | "method_invocation") {
-                self.decl_call(object);
-                node = object;
-                continue;
-            }
-            node = object;
         }
     }
 
