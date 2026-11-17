@@ -4750,6 +4750,42 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The declarators of a Go `var`/`const` statement, each reduced to its
+    /// binder: `var W int = 1` binds `W`, `const lo, hi = 3, 70` binds both.
+    fn go_declarators(&self, targets: &[Token]) -> Option<Vec<Token>> {
+        if self.lang.tag != "GO" {
+            return None;
+        }
+        let head = targets.first()?;
+        if head.kind != Kind::Ident || !matches!(self.raw(head), b"var" | b"const") {
+            return None;
+        }
+        let inner = &targets[1..];
+        let mut picked: Vec<Token> = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0usize;
+        for (index, token) in inner.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" | b"{" => depth += 1,
+                b")" | b"]" | b"}" => depth -= 1,
+                b"," if depth == 0 => {
+                    if let Some(name) = inner[start..index].iter().find(|token| token.kind == Kind::Ident) {
+                        picked.push(name.clone());
+                    }
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        if let Some(name) = inner[start..].iter().find(|token| token.kind == Kind::Ident) {
+            picked.push(name.clone());
+        }
+        (!picked.is_empty()).then_some(picked)
+    }
+
     fn unpack_targets(&self, toks: &[Token]) -> Option<Vec<String>> {
         let mut inner = toks;
         let class_field = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
@@ -4897,6 +4933,15 @@ impl<'a> Parser<'a> {
             if let Some(token) = targets.iter().rev().find(|token| token.kind == Kind::Ident) {
                 line = token.line;
             }
+        }
+        // `var W int = 1`, `const timeout time.Duration = 5s`: Go writes the
+        // type between the binder and the `=`, and the path reader named the
+        // type (`int`) instead of the binder. The binder is the first name of
+        // each declarator.
+        let go_decl: Vec<Token>;
+        if let Some(names) = self.go_declarators(targets) {
+            go_decl = names;
+            targets = &go_decl;
         }
         if matches!(self.lang.tag, "RS" | "TS" | "TSX") {
             let mut depth = 0i32;
