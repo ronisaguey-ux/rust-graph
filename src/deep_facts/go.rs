@@ -527,6 +527,44 @@ impl<'a> Walker<'a> {
             let line = self.line(id);
             self.push_call("nameof".to_string(), line);
         }
+        // `new int[n]`, `new byte[len]`: an array creation states a type and
+        // the sizes it is made with, and it calls nothing. Written as an
+        // anonymous call (the callee is a primitive, the size is a
+        // `dimensions_expr` and not an `arguments`) the value named nothing at
+        // all, so the type the one-pass reader keeps had no counterpart in the
+        // record (java: 152 files, `n:int` against `c(0;[])`).
+        if kind == "object_creation_expression"
+            && self
+                .children(id)
+                .iter()
+                .any(|&child| self.kind(child) == "dimensions_expr")
+        {
+            let mut parts = Vec::new();
+            for child in self.children(id) {
+                let child_kind = self.kind(child);
+                if child_kind == "dimensions_expr" {
+                    let value = self.decl_value(child);
+                    if !value.is_empty() && value != "0" {
+                        parts.push(value);
+                    }
+                    continue;
+                }
+                if let Some(name) = self.leaf_name(child) {
+                    if name == "new" {
+                        continue;
+                    }
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+            }
+            return match parts.len() {
+                0 => "0".to_string(),
+                1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+                _ => format!("[\"m\",[{}]]", parts.join(",")),
+            };
+        }
         if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression") {
             let index = self.decl_call(id);
             let args = self
