@@ -1046,6 +1046,17 @@ impl<'a> Walker<'a> {
                 }
                 self.cs_declared_vars(id);
             }
+            // `using var tempListener = new MeterListener();`: a using
+            // declaration is a local declaration to the lexer - it binds the
+            // name to the creation and files the line as a statement - and no
+            // arm read the node, so every using declaration lost its `var`
+            // (C# corpus: 14 files).
+            "using_declaration" => {
+                if !self.cs_field_assignment(id) {
+                    self.field_initializer_calls(id);
+                }
+                self.cs_declared_vars(id);
+            }
             // `size_t n = strlen(s);`: a declaration with an initializer is one
             // statement to the lexer, and the call in it is a fact. C, C++ and
             // Objective-C declare this way on nearly every line, so nothing
