@@ -437,7 +437,12 @@ rust_graph_deep::grammar! { SCALA {
     _type: by_name_type | _type_atom _type_suffix*,
     by_name_type: "=>" _type,
     _type_suffix: type_arguments | "*" | "=>" _type | "with" _type | "&" _type | "|" _type,
-    _type_atom: _name | tuple_type,
+    _type_atom: _name | tuple_type | singleton_type,
+    /// `def addOne(elem: A): this.type`: a method that returns its own object
+    /// is typed by the singleton `this.type`, which starts with a keyword and
+    /// so could not be a `_name`. Every such signature was a parse error, and
+    /// 79 files of the scala corpus write one.
+    singleton_type: "this" "." "type",
     tuple_type: "(" (_type %? ",") ")",
     type_arguments: "[" (_type %? ",") "]",
 } }
