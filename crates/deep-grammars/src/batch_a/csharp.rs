@@ -480,8 +480,9 @@ rust_graph_deep::grammar! { CSHARP {
     _pattern_designator: "var" _name | _name,
     try_statement: "try" block catch_clause* [finally_clause],
     catch_clause: "catch" [catch_declaration] ["when" parenthesized_expression] block,
-    // `catch (ArgumentException) { }`: the type alone catches every instance of
-    // it, and the required name turned the whole try block into an ERROR.
+    // `catch (ArgumentException) { }` and `catch (FormatException) when (p)`: the
+    // type alone catches every instance of it, and the required name turned the
+    // whole try block into an ERROR on the clause.
     catch_declaration: "(" [_local_modifiers] _type [_name] ")",
     finally_clause: "finally" block,
     using_statement: "using" using_header _statement,
