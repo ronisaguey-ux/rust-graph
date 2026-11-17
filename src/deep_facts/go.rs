@@ -365,6 +365,27 @@ impl<'a> Walker<'a> {
                 self.facts.vars.push((targets[0].clone(), class));
             }
         }
+        // `verifyString := func(s string) { … }`: the one-pass lexer opens a
+        // function symbol for the name a literal is bound to, because a `func(`
+        // that follows a binder reads as a definition to it. The tree keeps
+        // only the literal, so the name was the one fact every Go file with a
+        // callback lost — 1,162 symbol losses, one per file.
+        if let [target] = targets.as_slice() {
+            let literal = children[at + 1..]
+                .iter()
+                .copied()
+                .find(|&child| self.kind(child) == "func_literal");
+            if let Some(literal) = literal {
+                let params = self
+                    .child_of_kind(literal, "parameter_list")
+                    .map(|list| self.params(literal, list))
+                    .unwrap_or_default();
+                if !target.is_empty() && target != "self" {
+                    let line = self.line(id);
+                    self.add_symbol(target.clone(), String::new(), KIND_FUNCTION, line, params);
+                }
+            }
+        }
         let value = self.decl_values(&children[at + 1..]);
         let line = self.line(id);
         let weak = !matches!(operator.as_str(), "=" | ":=");
