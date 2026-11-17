@@ -430,7 +430,12 @@ rust_graph_deep::grammar! { SCALA {
 
     // ---- types ----
 
-    _type: _type_atom _type_suffix*,
+    /// `def f(x: => Int)`: a by-name parameter's type is an arrow in front of
+    /// the type, which is the same `=>` a function type writes after it. Read
+    /// only as a suffix, `x: => Int` had no atom to suffix and the parameter
+    /// list was a parse error (189 error lines over 40 files).
+    _type: by_name_type | _type_atom _type_suffix*,
+    by_name_type: "=>" _type,
     _type_suffix: type_arguments | "*" | "=>" _type | "with" _type | "&" _type | "|" _type,
     _type_atom: _name | tuple_type,
     tuple_type: "(" (_type %? ",") ")",
