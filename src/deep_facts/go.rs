@@ -2721,6 +2721,30 @@ fn dotted_piece(text: &str) -> bool {
             return out;
         }
         match kind {
+            // `Foo::class`, `Foo::bar`: a callable reference is one dotted name
+            // to the lexer (`n:Foo.class`), and the tree writes the receiver and
+            // the referenced name as two nodes.
+            "callable_reference" if self.is_kotlin() => {
+                let children = self.children(id);
+                let mut text = String::new();
+                for child in children {
+                    if self.is_layout(child) || self.kind(child) == "::" {
+                        continue;
+                    }
+                    if !text.is_empty() {
+                        text.push('.');
+                    }
+                    text.push_str(&self.text_string(child));
+                }
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &text);
+                    out.push(']');
+                    out
+                }
+            }
             // `object : Base()`: an anonymous object is the name `object`
             // merged with its supertype constructor's call, which is how the
             // lexer writes it. Nothing read the node, so the value was the
