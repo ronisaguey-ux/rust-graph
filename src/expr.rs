@@ -1101,7 +1101,12 @@ impl Emit<'_> {
         // argument list. The one-pass reader dropped `new` as noise and then
         // stopped the chain at `<`, so the value was the class name where the
         // CST writes a call (java, the largest cluster in the shape table).
-        if word == "new" && matches!(self.lang.tag, "JAVA" | "CS" | "KT" | "SCALA") {
+        // C# is the same shape and the same fix makes it *worse* (csharp
+        // 14,643 -> 15,031 losing): its CST writes `new List<int>()` as a call
+        // with no callee and no argument, and a call the lexer names then has
+        // no atom in that value to be covered by, where the merge of names it
+        // replaced was excused. That is the C# reader's gap, not this one.
+        if word == "new" && matches!(self.lang.tag, "JAVA" | "KT") {
             let mut at = 1usize;
             let mut name = String::new();
             if let Some(first) = self.word(at) {
