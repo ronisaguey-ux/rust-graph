@@ -1198,6 +1198,27 @@ impl<'a> Walker<'a> {
                 wrote = true;
             }
         }
+        if !wrote {
+            // `18,17,19,…` with no braces at all: musl's ctype tables are bare
+            // number lists spliced into a declaration elsewhere. The lexer reads
+            // the whole region as one tuple on its first line, one constant per
+            // number, and the file lost that line (11 files).
+            let mut numbers = 0usize;
+            let mut stack = vec![id];
+            while let Some(node) = stack.pop() {
+                if self.kind(node) == "number" {
+                    numbers += 1;
+                    continue;
+                }
+                stack.extend(self.children(node));
+            }
+            if numbers > 1 {
+                let zeros: Vec<&str> = vec!["0"; numbers];
+                let value = format!("[\"t\",[{}]]", zeros.join(","));
+                self.lexer_event(b'x', first, &[], &value, false);
+                wrote = true;
+            }
+        }
         wrote
     }
 
