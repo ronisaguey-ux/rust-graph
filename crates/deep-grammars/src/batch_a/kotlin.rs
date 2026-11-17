@@ -485,18 +485,13 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix &("?." function_parameters "->") "?." function_parameters "->" _type => receiver_function_type,
         postfix "." _name => qualified_type,
     },
+    _type_head: _name | function_type | suspend_function_type,
     /// `suspend () -> Unit` and `suspend Config.() -> Unit`: the modifier is
     /// part of the type, so it is a head of its own rather than a modifier of
     /// whatever declares it — `block: suspend () -> Unit` has no function
     /// declaration to hang it on.
     suspend_function_type: "suspend" _type,
-    _type_head: &(function_parameters "->") function_type | _name | suspend_function_type | parenthesized_type,
     function_type: function_parameters "->" _type,
-    /// A type written in parentheses. A function type is the same group
-    /// followed by `->`, so the arrow says which one it is and the group is
-    /// written once; without the bare form, `(() -> Unit)?` and
-    /// `(Int) -> String` inside `List<...>` had no reading at all.
-    parenthesized_type: function_parameters,
     function_parameters: "(" (_type %? ",") ")",
 
     /// The name after `::`. `class` is the one a callable reference takes that
