@@ -35,6 +35,13 @@ const NOT_A_NAME: [&str; 10] = ["return", "sizeof", "new", "function", "throw", 
 const VALUE_FOLLOWS: [&str; 7] = ["return", "import", "export", "const", "let", "var", "type"];
 /// Words after which a `{` opens statements even in expression position, where
 /// the body reads exactly like a shorthand field list.
+/// Words that open a statement in Go. A brace whose first inner word is one of
+/// these is a block: `if x == nil { return }`, `for { break }`.
+const GO_STATEMENT_OPENERS: [&str; 16] = [
+    "break", "case", "const", "continue", "default", "defer", "fallthrough", "for", "go", "goto", "if", "return",
+    "select", "switch", "type", "var",
+];
+
 const BLOCK_WORDS: [&[u8]; 4] = [b"unsafe", b"async", b"move", b"try"];
 /// Tokens a brace's body is read for before it is called a block. A field list
 /// is short; a body past this is not a shape worth more lookahead.
@@ -1058,6 +1065,17 @@ impl<'a> Parser<'a> {
     fn field_key_ahead(&mut self) -> bool {
         if self.peek_word(0).kind != Kind::Ident {
             return false;
+        }
+        // `if name == nil { return }`, `for { break }`: the word behind the brace
+        // opens a statement, and Go has no shorthand field, so a bare word there
+        // is never a key. Read as one, the brace was a value and the statement
+        // behind it merged into the condition.
+        if self.lang.tag == "GO" {
+            let token = self.peek_word(0);
+            let word = self.text(&token);
+            if GO_STATEMENT_OPENERS.contains(&word.as_str()) {
+                return false;
+            }
         }
         let after = self.peek_word(1);
         let field = self.is_op(&after, b":") || self.is_op(&after, b",") || self.is_op(&after, b"}");
