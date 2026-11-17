@@ -575,6 +575,18 @@ impl<'a> Parser<'a> {
             self.stmt.push(token);
             return;
         }
+        // `NS_ASSUME_NONNULL_BEGIN` on its own line, then `@interface …`: an
+        // Objective-C keyword never continues the statement before it, so the
+        // newline in front of it ends that statement. Merged, the one-pass
+        // reader wrote a single value for two lines - the macro and the whole
+        // interface header - which no CST record can pair.
+        if raw[0] == b'@'
+            && self.lang.tag == "OBJC"
+            && self.brackets.is_empty()
+            && self.stmt.last().is_some_and(|last| last.line < token.line)
+        {
+            self.end_statement();
+        }
         match raw[0] {
             b'(' | b'[' => {
                 self.brackets.push(raw[0]);
