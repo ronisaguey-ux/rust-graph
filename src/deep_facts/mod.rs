@@ -1063,6 +1063,18 @@ impl<'a> Walker<'a> {
             // `public static explicit operator BlobHandle(EntityHandle handle)`:
             // a conversion operator is the same header statement to the lexer.
             "conversion_operator_declaration" => self.java_header_event(id),
+            // `public int Foo => Bar();`: an expression-bodied member is the
+            // header's shape plus its value, and nothing read the value, so
+            // every call written in one was lost - the runtime's ref assemblies
+            // and the test data files are almost nothing else.
+            "expression_bodied_member" => {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=>") {
+                    if let Some(&value) = children.get(at + 1) {
+                        self.form(value);
+                    }
+                }
+            }
             "property_declaration" => {
                 if self.kinds.calls.contains(&"object_creation_expression") {
                     self.java_header_event(id);
