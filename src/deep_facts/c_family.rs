@@ -819,6 +819,44 @@ impl<'a> Walker<'a> {
     }
 
 
+    /// `(socklen_t)ss_size`, `(char *)ai->ai_addr + ss_size`: the one-pass
+    /// lexer reads a cast as the type's words followed by the operand's value,
+    /// and nothing here read the node at all, so every initialiser or
+    /// assignment whose value is a cast was written as the constant 0.
+    pub(crate) fn c_cast_form(&mut self, id: u32) -> Option<String> {
+        if !matches!(self.kind(id), "cast_expression" | "user_cast_expression") {
+            return None;
+        }
+        let children = self.children(id);
+        let ty = children
+            .iter()
+            .copied()
+            .find(|&child| matches!(self.kind(child), "cast_type" | "user_cast_head"))?;
+        let operand = children
+            .iter()
+            .copied()
+            .rev()
+            .find(|&child| !self.is_layout(child) && child != ty)?;
+        let words = self.c_words_of(ty);
+        if words.is_empty() {
+            return None;
+        }
+        let name_form = |text: &str| {
+            let mut out = String::from("[\"n\",");
+            push_string(&mut out, text);
+            out.push(']');
+            out
+        };
+        let ty_form = if words.len() == 1 {
+            name_form(&words[0])
+        } else {
+            let parts: Vec<String> = words.iter().map(|word| name_form(word)).collect();
+            format!("[\"m\",[{}]]", parts.join(","))
+        };
+        let operand_form = self.form(operand);
+        Some(format!("[\"m\",[{ty_form},{operand_form}]]"))
+    }
+
     /// The enum body this declaration declares, when the declaration is an
     /// enum's own. A struct's fields are not descended into: their enums are
     /// their own declarations.
