@@ -3596,6 +3596,22 @@ impl<'a> Parser<'a> {
         (at_block && self.uses_braces()).then(|| self.c_style_head(toks)).flatten()
     }
 
+    /// A statement of constants, braces and commas alone: no name, no call,
+    /// no operator that could make it a declaration. Only a file-scope
+    /// initializer fragment reads that way in C, and it states no fact.
+    fn constant_fragment(&self, stmt: &[Token]) -> bool {
+        let mut constants = 0;
+        for token in stmt {
+            match token.kind {
+                Kind::Num | Kind::Str => constants += 1,
+                Kind::Op if matches!(self.raw(token), b"," | b"{" | b"}" | b"(" | b")") => {}
+                Kind::Newline => {}
+                _ => return false,
+            }
+        }
+        constants > 0
+    }
+
     fn simple_statement(&mut self, stmt: &[Token]) {
         if stmt.is_empty() {
             return;
@@ -3621,6 +3637,21 @@ impl<'a> Parser<'a> {
             if after > 0 && after >= stmt.len() {
                 return;
             }
+        }
+        // A C header's data tables are fragments of an initializer, not
+        // statements. musl includes `ctype/alpha.h` inside a declaration
+        // (`static const unsigned char table[] = {` … `};`) and
+        // `locale/gb18030utf.h` inside an initializer list, so the file on its
+        // own is one long run of constants (`alpha.h`: 3,904 of them) or one
+        // run per table row (`{ 0x80, 36 },`). A run with no name and no call
+        // states no fact; the CST, whose translation unit holds declarations,
+        // writes none. Read as a statement it made every table row a loss
+        // (240 events in 34 corpus45/c files, `no event on a line both readers
+        // can mean`). A brace at file scope opens a block frame whose symbol is
+        // still the module, so the module symbol, not the frame kind, is what
+        // says the line is file scope.
+        if self.top().symbol == 0 && matches!(self.lang.tag, "C" | "CPP" | "OBJC") && self.constant_fragment(stmt) {
+            return;
         }
         // `export { a }` and `export * from …` name what leaves the module and
         // carry no value: the lexer read `export` as a name and the braces as a
