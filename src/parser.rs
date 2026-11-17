@@ -2089,6 +2089,33 @@ impl<'a> Parser<'a> {
 
     /// The slices between the top-level commas of a token run: `a, f(b, c)`
     /// is two parts, `[a, b]` and `f(x, y)` are one each.
+    /// `int i = 0, cnt;` and `size_t size=0, nmem=0;`: a C declarator list
+    /// declares one name per declarator, so the initialiser ends at the first
+    /// top-level comma. Read as one value the lexer joined the next declarator
+    /// to the initialiser and wrote a tuple — `t:[0,n:cnt]` — that the CST,
+    /// which writes each declarator's own value, never has (musl mallocng,
+    /// passwd: the "the CST wrote the value as the constant 0" losses).
+    fn c_initialiser<'t>(&self, head: &[Token], value: &'t [Token]) -> &'t [Token] {
+        if self.lang.tag != "C" || !self.c_typed_declarator(head) {
+            return value;
+        }
+        self.top_commas(value).into_iter().next().unwrap_or(value)
+    }
+
+    /// Whether the words before a statement's `=` name a type and a declarator
+    /// rather than an assignment target: `int i`, `size_t size`, `char *p`,
+    /// `struct meta *m`. A target is one name or a path, so two identifiers and
+    /// no member or index operator between them is a declaration (`x.y = 1` and
+    /// `a[i] = 1` are assignments).
+    fn c_typed_declarator(&self, head: &[Token]) -> bool {
+        if head.iter().any(|token| {
+            token.kind == Kind::Op && matches!(self.raw(token), b"." | b"[" | b"]" | b")" | b"->")
+        }) {
+            return false;
+        }
+        head.iter().filter(|token| token.kind == Kind::Ident).count() >= 2
+    }
+
     fn top_commas<'t>(&self, toks: &'t [Token]) -> Vec<&'t [Token]> {
         let mut parts = Vec::new();
         let mut depth = 0i32;
@@ -3930,8 +3957,9 @@ impl<'a> Parser<'a> {
         }
         if let Some(equal) = self.top_level_assign(stmt) {
             let augmented = self.raw(&stmt[equal]) != b"=" && !matches!(self.raw(&stmt[equal]), b":=" | b"<-");
-            self.note_class(&stmt[..equal], &stmt[equal + 1..]);
-            self.assignment(&stmt[..equal], &stmt[equal + 1..], line, augmented);
+            let value = self.c_initialiser(&stmt[..equal], &stmt[equal + 1..]);
+            self.note_class(&stmt[..equal], value);
+            self.assignment(&stmt[..equal], value, line, augmented);
         } else if !(self.lang.tag == "JAVA" && self.java_declares_only(stmt)) {
             self.expression_event("x", stmt);
         }
