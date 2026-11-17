@@ -175,6 +175,8 @@ rust_graph_deep::grammar! { CSHARP {
         KW_WITH = "with",
         KW_VAR = "var",
         KW_NOTNULL = "notnull",
+        /// A pattern negator: `x is not null`. A name everywhere else.
+        KW_NOT = "not",
         KW_UNMANAGED = "unmanaged",
 
         SEMI = ";",
@@ -460,7 +462,16 @@ rust_graph_deep::grammar! { CSHARP {
         xor: left "^" => binary_expression,
         band: left "&" => binary_expression,
         eq: left "==" | "!=" => binary_expression,
-        rel: left "<" | ">" | "<=" | ">=" | "is" | "as" => binary_expression,
+        // `obj is SerializationRecordId other && ...` and `value is not null`: a
+        // type test may name the narrowed binding, and the type word and the
+        // name are two tokens, so the plain binary rule stopped at the name and
+        // turned every pattern test with a declaration into an ERROR. The node
+        // stays a binary expression: the grammar's contract is that a pattern is
+        // an `is` test, and the designation is part of it.
+        rel: postfix "is" ["not"] (_type [_name] | _literal) => binary_expression,
+        // `as` also takes a type, never an expression.
+        postfix "as" _type => binary_expression,
+        left "<" | ">" | "<=" | ">=" => binary_expression,
         shift: left "<<" | GT_JOINED ">" | GT_JOINED GT_JOINED ">" => binary_expression,
         add: left "+" | "-" => binary_expression,
         mul: left "*" | "/" | "%" => binary_expression,
@@ -840,6 +851,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"with" => KW_WITH,
         b"var" => KW_VAR,
         b"notnull" => KW_NOTNULL,
+        b"not" => KW_NOT,
         b"unmanaged" => KW_UNMANAGED,
         _ => IDENT,
     }
