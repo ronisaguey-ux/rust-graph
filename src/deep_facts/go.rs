@@ -2632,27 +2632,29 @@ fn dotted_piece(text: &str) -> bool {
                 })
         };
         let Some(value) = value else {
-            // `val x: String` with its getter on the next line: there is no
-            // initialiser to assign, so nothing was written for the line and
-            // the lexer's header event had no counterpart in the record.
+            // `public val log: Logger`: a typed property with no initialiser is
+            // a declaration whose value is the run of names it read - the
+            // modifiers, `val`, the name and the type's names. Read as an
+            // assignment it wrote nothing at all, and every uninitialised
+            // property in the corpus lost its line.
             if self.is_kotlin() {
+                let ty = children
+                    .iter()
+                    .position(|&child| self.kind(child) == ":")
+                    .and_then(|at| children.get(at + 1).copied())
+                    .filter(|&child| !self.is_layout(child));
+                let attached = children.iter().any(|&child| matches!(self.kind(child), "by" | "accessor"));
+                if let (Some(ty), false) = (ty, attached) {
+                    self.kt_nullable_property(id, &name, ty, line);
+                    return;
+                }
+                // `val x: String` with its getter on the next line: there is no
+                // initialiser to assign, so the lexer's header event has no
+                // counterpart in the record and is written as one.
                 self.java_header_event(id);
             }
             return;
         };
-        // `public val log: Logger`: a typed property with no initialiser is a
-        // declaration whose value is the run of names it read - the modifiers,
-        // `val`, the name and the type's names. Read as an assignment it wrote
-        // nothing at all, and every uninitialised property in the corpus lost
-        // its line (the largest Kotlin event cluster left).
-        let assigned = children.iter().any(|&child| self.kind(child) == "=");
-        let attached = children.iter().any(|&child| matches!(self.kind(child), "by" | "accessor"));
-        if !assigned && !attached {
-            if let Some(ty) = ty {
-                self.kt_nullable_property(id, &name, ty, line);
-                return;
-            }
-        }
         // `val ApplicationRequest.uri: String get() = origin.uri`: the getter is
         // written on the declaration's line, and its expression is the value the
         // lexer files for the property.
@@ -4189,7 +4191,8 @@ fn dotted_piece(text: &str) -> bool {
                     // `assignment_expression` (`@Deprecated("x", level = …)`),
                     // and the lexer files it as the keyword form there too, so
                     // read as a merge it lost the name off every annotation.
-                    || (kind == "assignment_expression" && self.kind(list) == "annotation_arguments"))
+                    || (kind == "assignment_expression"
+                        && (self.is_kotlin() || self.kind(list) == "annotation_arguments")))
             {
                 // `@deprecated("old", since = "2")`: a named argument is the
                 // lexer's keyword form, not the assignment's merge.
