@@ -277,7 +277,14 @@ rust_graph_deep::grammar! { C {
         &(user_type_name _member_declarator_list ";") user_struct_declaration
         | &(declaration_specifiers _struct_declarator "," _struct_declarator)
             declaration_specifiers (_struct_declarator % ",") ";"
-        | declaration_specifiers [user_type_name] (_struct_declarator % ",") ";"
+        // `int a[4];`: the optional typedef name must not swallow the member's
+        // own name, or the suffix after it has nowhere to go. The predicate
+        // above the two forms only accepts a typedef name that really is
+        // followed by a declarator, so `const Foo *x;` still reads `Foo` as the
+        // type and `int a[4];` reads `a` as the declarator.
+        | &(declaration_specifiers user_type_name _struct_declarator)
+            declaration_specifiers user_type_name (_struct_declarator % ",") ";"
+        | declaration_specifiers (_struct_declarator % ",") ";"
         | macro_field,
     /// `PyObject *weakreflist;`: a typedef name and its declarators. A struct
     /// body holds declarations only, so the `x * y;` ambiguity does not exist
@@ -758,6 +765,10 @@ mod kinds {
                 ("macro_qualified_item", "EXPORT int public_entry(int argc, char **argv);"),
                 ("specified_macro_item", "static EXPORT int hidden_entry(void) {\n    return 0;\n}"),
             ],
+        ),
+        (
+            "c_struct_member_array.c",
+            &[("array_suffix", "[4]")],
         ),
         (
             "c_typedef_names.c",
