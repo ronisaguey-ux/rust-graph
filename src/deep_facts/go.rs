@@ -2089,10 +2089,25 @@ fn dotted_piece(text: &str) -> bool {
         // property that has no initialiser (`val x: String`) read as its
         // value, so the line was written as an assignment the lexer never
         // makes instead of the declaration header it does.
-        let value = children
-            .iter()
-            .position(|&child| matches!(self.kind(child), "=" | "by"))
-            .and_then(|at| children.get(at + 1).copied());
+        let value = if self.is_kotlin() {
+            children
+                .iter()
+                .position(|&child| matches!(self.kind(child), "=" | "by"))
+                .and_then(|at| children.get(at + 1).copied())
+        } else {
+            children
+                .iter()
+                .copied()
+                .rev()
+                .find(|&child| {
+                    !matches!(
+                        self.kind(child),
+                        "val" | "var" | "property_head" | "modifiers" | ":" | "=" | "by" | "const" | "lateinit" | "override"
+                            | "private" | "public" | "internal" | "protected" | "type_identifier" | "user_type" | "nullable_type"
+                            | "function_type" | "generic_type" | "unsafe_cast" | "anonymous_function"
+                    )
+                })
+        };
         let Some(value) = value else {
             // `val x: String` with its getter on the next line: there is no
             // initialiser to assign, so nothing was written for the line and
