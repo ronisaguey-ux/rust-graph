@@ -31,11 +31,8 @@
 //! LINQ query syntax (`from x in xs where ... select`) is not modelled; the
 //! method form (`xs.Where(...)`) is. Switch *expressions* are not modelled
 //! (only switch statements); pattern combinators (`and`, `or`, `not`,
-//! property patterns) are reduced to an `is` type/constant test. A bare
-//! `default` literal and `default(T)` are not expressions here: `default` has
-//! to end a switch section's statement list, and the DSL cannot both let it
-//! start an expression statement and stop there. Preprocessor directives are
-//! comments. XML documentation comments are ordinary comments. Local
+//! property patterns) are reduced to an `is` type/constant test. Preprocessor
+//! directives are comments. XML documentation comments are ordinary comments. Local
 //! functions are not modelled (a local declaration shape is tried first and
 //! reports the error inside the block).
 //!
@@ -529,10 +526,16 @@ rust_graph_deep::grammar! { CSHARP {
         | nameof_expression
         | checked_expression
         | _predefined_type
+        | default_expression
         | stackalloc_expression,
     _literal:
         INTEGER | FLOAT | CHAR | STRING | VERBATIM_STRING | INTERPOLATED_STRING | RAW_STRING
         | "true" | "false" | "null",
+    // `default` and `default(T)`: the value of the type's zero state. The word
+    // was left out of the language because it also labels a switch section, and
+    // that label is matched by `switch_section` before any statement is tried,
+    // so the two never meet.
+    default_expression: "default" [parenthesized_type],
     lambda_parameters: "(" (lambda_parameter %? ",") ")",
     lambda_parameter: [attributes] [_local_modifiers] _type _name | _name,
     cast_type: "(" _type ")",
