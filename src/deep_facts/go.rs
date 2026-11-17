@@ -786,6 +786,20 @@ impl<'a> Walker<'a> {
                 (!path.is_empty()).then_some(path)
             }
             "parenthesized_expression" => self.expression_child(id).and_then(|child| self.decl_target(child)),
+            // `*out = *(*T)(unsafe.Pointer(in))`: the lexer writes the
+            // assignment's target as the name under the star, so a deref with
+            // no arm here left every generated `zz_generated.conversion.go`
+            // assignment with an empty target list.
+            "unary_expression" | "unary" => self
+                .children(id)
+                .into_iter()
+                .filter(|&child| !self.is_layout(child) && self.text_string(child) != "*")
+                .find(|&child| {
+                    self.children(id)
+                        .into_iter()
+                        .any(|other| !self.is_layout(other) && self.text_string(other) == "*")
+                })
+                .and_then(|operand| self.decl_target(operand)),
             _ => None,
         }
     }
