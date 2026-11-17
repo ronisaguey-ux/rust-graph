@@ -512,6 +512,19 @@ impl<'a> Parser<'a> {
         {
             return;
         }
+        // `x as` newline `Promise<T> | T;`: the cast's type is on the next
+        // line, and `as` cannot end an expression. Ended here, the type became
+        // a statement of its own and wrote the value `m:[n:Promise,n:T,n:T]`
+        // the CST never writes, because a type is not a value. `satisfies` is
+        // the same operator under another name.
+        if matches!(self.lang.tag, "TS" | "TSX")
+            && self
+                .stmt
+                .last()
+                .is_some_and(|last| last.kind == Kind::Ident && matches!(self.raw(last), b"as" | b"satisfies"))
+        {
+            return;
+        }
         if let Some(last) = self.stmt.last() {
             let continues = self.lang.operator_continues
                 && last.kind == Kind::Op
