@@ -220,8 +220,11 @@ rust_graph_deep::grammar! { C {
     _init_declarator: _declarator attribute* ["=" _initializer],
     _initializer: designated_field | designated_index | _expression@assign | initializer_list,
     initializer_list: "{" (_initializer %? ",") "}",
-    /// C99 `.name = value` inside an initializer list.
-    designated_field: "." IDENT "=" _initializer,
+    /// C99 `.name = value` inside an initializer list, with as many further
+    /// designators as the member's type nests: `.it_value.tv_sec = seconds`
+    /// names a member of a member, and `.a[2].b = 1` mixes both.
+    designated_field: "." IDENT _designator_suffix* "=" _initializer,
+    _designator_suffix: "." IDENT | array_suffix,
     /// C99 `[index] = value` inside an initializer list.
     designated_index: array_suffix "=" _initializer,
 
