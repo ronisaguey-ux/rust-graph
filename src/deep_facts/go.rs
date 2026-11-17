@@ -2774,6 +2774,13 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 self.merge_form(&items)
             }
+            // `x ?? throw new ArgumentNullException(nameof(x))`: a throw
+            // expression is its operand, and the call the lexer reads on that
+            // line is inside it.
+            "throw_expression" => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
             // `f() && let Some(x) = g()`: a let-chain operand of a binary
             // expression. The pattern is a binding, not a value, so the node
             // renders as the expression to the right of `=` — reading the node
