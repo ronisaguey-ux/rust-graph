@@ -925,6 +925,16 @@ impl<'a> Walker<'a> {
                 self.lexer_event(b'x', line, &[], &value, false);
             }
         }
+        // `public int Count => _sb.Length;`, `public string Name => _sb.ToString();`:
+        // an expression-bodied member is one statement to the lexer, and no arm
+        // read its body, so every call in one was missing from the CST record
+        // (C# corpus: 59 files). The body is the member's last expression child;
+        // `form` records its calls without writing an event the line already has.
+        if kind == "expression_bodied_member" || (kind == "method_declaration" && !self.has_kind(id, &["block"])) {
+            if let Some(body) = self.cs_expression_body(id) {
+                self.form(body);
+            }
+        }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
             self.open_definition(id, def);
             return;
@@ -1853,6 +1863,23 @@ impl<'a> Walker<'a> {
         if restored {
             self.stack.pop();
         }
+    }
+
+    /// The expression a member writes after `=>`: the last child that is not
+    /// part of the member's own header (modifiers, type, name, parameter list,
+    /// constraints) and not layout. A member with no body has no such child, so
+    /// `void Run();` yields nothing.
+    pub(crate) fn cs_expression_body(&self, id: u32) -> Option<u32> {
+        self.children(id).into_iter().rev().find(|&child| {
+            !self.is_layout(child)
+                && !matches!(
+                    self.kind(child),
+                    "modifiers" | "identifier" | "predefined_type" | "generic_name" | "generic_type"
+                        | "nullable_type" | "array_type" | "qualified_type" | "builtin_type"
+                        | "formal_parameters" | "parameter_list" | "type_parameters"
+                        | "type_parameter_constraints" | "block" | ";"
+                )
+        })
     }
 
     pub(crate) fn is_kotlin(&self) -> bool {
