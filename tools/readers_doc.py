@@ -51,8 +51,26 @@ PROSE = (
 TUPLE_START = re.compile(r"\(\s*\"((?:[^\"\\]|\\.)*)\"", re.S)
 
 
+ESCAPE = re.compile(r"\\(u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|n|t|r|0|\\)")
+NAMED = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\"}
+
+
 def unescape(text: str) -> str:
-    return text.encode().decode("unicode_escape")
+    """Decode the escapes a Rust literal carries, and leave the rest alone.
+
+    `text.encode().decode("unicode_escape")` reads the whole string as latin-1,
+    so a construct whose prose carries a non-ASCII character — the `…` in
+    `keyof import(…).S` — reached the document as mojibake. Only escapes are
+    decoded here; every other character is copied as the test wrote it.
+    """
+
+    def one(match: re.Match[str]) -> str:
+        brace, wide, narrow = match.group(2), match.group(3), match.group(4)
+        if brace or wide or narrow:
+            return chr(int(brace or wide or narrow, 16))
+        return NAMED[match.group(0)[1]]
+
+    return ESCAPE.sub(one, text)
 
 
 def block(source: str, name: str) -> str | None:

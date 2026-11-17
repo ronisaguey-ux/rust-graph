@@ -11,10 +11,12 @@ test claims is listed here, and every listed construct is claimed by a test.
 
 ## JavaScript — `tests/js_coverage.rs`
 
-Covered (39):
+Covered (41):
 
 - private field holding a function keeps its marker
 - require in a comparison is not an import
+- else arm whose body is a call with a function expression
+- async called with a callback
 - block statement
 - if / else if / else
 - for-in statement
@@ -62,7 +64,7 @@ Known gaps (4):
 
 ## TypeScript — `tests/ts_coverage.rs`
 
-Covered (17):
+Covered (25):
 
 - import-equals: a require declaration is an import, not a call
 - type annotations: variables, parameters, returns and fields
@@ -81,10 +83,20 @@ Covered (17):
 - decorators on a class, a method and a property
 - conditional type on a declaration, object type opened on the next line
 - conditional type on a declaration with comma-separated object type and object fallback
+- a type-parameter list that wraps: an object type inside the list is not the body
+- a heritage clause that wraps: the interface header spans the line break
+- a type operator in front of a group: an extends constraint is not a call
+- type operators in front of a group: a readonly array constraint is not a call
+- type annotations: a generic annotation is cut at its colon, not its commas
+- type arguments: `new` with type arguments is one call, not a merge
+- an arrow with a function-typed parameter keeps its annotated return type whole
+- a generic method signature whose type parameter list wraps in a union
 
-Known gaps (0):
+Known gaps (3):
 
-- none: every construct the table claims reads the same on both paths
+- a member signature whose line is opened by another group: has(o: any) in a union type
+- a generic method signature whose type argument calls import(): setState<K extends keyof import(…).S>
+- an annotated arrow whose annotation is a function type: the name is before the colon
 
 Rows the guard excuses by reading its line (3):
 
@@ -112,14 +124,14 @@ Known gaps (1):
 
 ## Rust — `tests/rust_coverage.rs`
 
-Covered (36):
+Covered (44):
 
 - struct literal: named fields, shorthand and spread
 - struct literal as a call argument
 - match arms: block body, guard, call value and wildcard
 - match guard: `b'/' if c.peek_at(1) == b'/'` (000081_kotlin.rs:513)
 - or-pattern: `LPAREN | LBRACKET | LBRACE` (000081_kotlin.rs:804)
-- binding at: `Some(q @ ('"' | '\''))` (001544_before_edit.rs:476) and `x @ 1..=5`
+- binding at: `Some(q @ ('\"' | '\''))` (001544_before_edit.rs:476) and `x @ 1..=5`
 - range pattern: `0x00..=0x7f` and `0xc2..=0xdf` (000456_cursor.rs:134)
 - async block in value position
 - unsafe block in value position
@@ -145,11 +157,19 @@ Covered (36):
 - a closure whose parameter is a reference pattern
 - a let-else whose else block diverges
 - a member chain across lines through the ? operator
+- a closure whose parameter type is a function type (001452:386)
+- a block that opens with a use names nothing (001538:189)
+- char literals: an escaped scalar and a multi-byte one (001440:545)
 - a class binding: the variant itself, a call chain, try and parentheses
 - a statement where an item cannot go: a merge out of method bodies (001183_stochastics.rs:188)
 - for over a struct pattern: the brace is the pattern's (000942_workflow_future.rs:399)
 - a multi-line literal: a field on its own line after an if let (000930_worker.rs:488)
 - a macro item where an item goes (000965_mod.rs:2721)
+- a rest pattern in a struct pattern is not a value (000985_activity_tasks.rs:437)
+- a chain after a closed control block writes no statement of its own (001659_commit.rs:491)
+- a block a postfix chain keeps is a value, not a body (001556_build_phase.rs:880)
+- a match inside a binary chain is a value of the chain (001556_build_phase.rs:716)
+- a block expression inside a let-chain condition is a value (000928_runtime.rs:255)
 
 Known gaps (0):
 
