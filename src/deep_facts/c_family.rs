@@ -526,6 +526,19 @@ impl<'a> Walker<'a> {
                                 if !named && !names.iter().any(|word| word == &name) {
                                     names.push(name.clone());
                                 }
+                                // `LUA_API lua_Number (lua_tonumber) (lua_State *L,
+                                // int idx);`: the grammar reads the parenthesised
+                                // declarator as a parameter list, so the words
+                                // before the call name the return type and the
+                                // function's own name is inside that list. The
+                                // call keeps the type word, which is the callee
+                                // the lexer files; the name is a value of the
+                                // line all the same.
+                                if let Some(declared) = self.c_paren_declarator_name(id) {
+                                    if !names.iter().any(|word| word == &declared) {
+                                        names.push(declared);
+                                    }
+                                }
                                 let mut args: Vec<String> = Vec::new();
                                 let mut group: Vec<String> = Vec::new();
                                 for child in self.children(list) {
@@ -1153,6 +1166,45 @@ impl<'a> Walker<'a> {
             }
         }
         None
+    }
+
+    /// Every `parameter_list` inside `id`, in source order, not descending
+    /// into a body or an initialiser.
+    fn c_parameter_lists(&self, id: u32, out: &mut Vec<u32>) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "parameter_list" => out.push(child),
+                "compound_statement" | "initializer_list" | "initializer" => {}
+                _ => self.c_parameter_lists(child, out),
+            }
+        }
+    }
+
+    /// `LUA_API lua_Number (lua_tonumber) (lua_State *L, int idx);`: the
+    /// grammar reads the parenthesised declarator as a parameter list of the
+    /// declarator before it, so the declaration carries two lists and the name
+    /// the source gives the function is the single word of the first one. Only
+    /// that shape is claimed here - one list is an ordinary prototype the
+    /// declarator lookups already name.
+    fn c_paren_declarator_name(&self, id: u32) -> Option<String> {
+        let mut lists = Vec::new();
+        self.c_parameter_lists(id, &mut lists);
+        if lists.len() != 2 {
+            return None;
+        }
+        let words = self.c_words_of(lists[0]);
+        match words.as_slice() {
+            [only]
+                if !matches!(
+                    only.as_str(),
+                    "void" | "int" | "char" | "short" | "long" | "float" | "double"
+                        | "signed" | "unsigned" | "const" | "struct" | "union" | "enum"
+                ) =>
+            {
+                Some(only.clone())
+            }
+            _ => None,
+        }
     }
 
     /// Every `struct`/`union`/`enum` specifier inside `id`.
