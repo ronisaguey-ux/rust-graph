@@ -1012,6 +1012,27 @@ impl<'a> Walker<'a> {
                     self.push_call_once(path, line);
                 }
             }
+            // `val x: Int\n        get() = helper()`: an accessor declares the
+            // value its property returns, and nothing read the body when the
+            // accessor stood on a line of its own, so every call in a getter
+            // written that way was lost.
+            "accessor" if self.is_kotlin() => {
+                if self.consumed.contains(&id) {
+                    return;
+                }
+                let children = self.children(id);
+                if children.iter().any(|&child| self.kind(child) == "=") {
+                    if let Some(body) =
+                        children.into_iter().rev().find(|&child| self.kind(child) != "=" && !self.is_layout(child))
+                    {
+                        let value = self.form(body);
+                        if value != "0" {
+                            let line = self.line(id);
+                            self.event(&format!("[\"x\",{line},{value}]"));
+                        }
+                    }
+                }
+            }
             // `companion object Named { … }`: the one-pass reader files the
             // declaration's words - the modifiers, `companion`, `object`, the
             // name and the supertype's name - as a statement, and nothing wrote

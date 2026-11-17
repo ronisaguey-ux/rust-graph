@@ -2190,6 +2190,22 @@ fn dotted_piece(text: &str) -> bool {
         // `val`, the name and the type's names. Read as an assignment it wrote
         // nothing at all, and every uninitialised property in the corpus lost
         // its line (the largest Kotlin event cluster left).
+        // `override val y: Long get() = file.length()`: a property and its
+        // accessor on one line are one assignment to the lexer, whose value is
+        // the accessor's expression. The accessor node is spent here so the
+        // walk does not write a second event for the same line.
+        if let Some(accessor) = children.iter().copied().find(|&child| self.kind(child) == "accessor") {
+            let parts = self.children(accessor);
+            if parts.iter().any(|&part| self.kind(part) == "=") {
+                if let Some(body) =
+                    parts.into_iter().rev().find(|&part| self.kind(part) != "=" && !self.is_layout(part))
+                {
+                    self.consumed.push(accessor);
+                    self.assignment_parts(vec![name.clone()], body, line, false);
+                    return;
+                }
+            }
+        }
         let assigned = children.iter().any(|&child| self.kind(child) == "=");
         let attached = children.iter().any(|&child| matches!(self.kind(child), "by" | "accessor"));
         if !assigned && !attached {
