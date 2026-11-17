@@ -275,3 +275,22 @@ agents and a single pass measures the scheduler as much as the parser (one pass
 on the same binary, same corpus, gave a p95 anywhere from 1.5 ms to 5.8 ms).
 `tools/parse_perf.py --record` pins the numbers; `--check` fails on a 25%
 regression, which is the size of a real slowdown rather than of that noise.
+
+### Per language, not just Rust
+
+`tools/parse_perf.py --by-lang` prices every language the conformance pass
+detects in one sweep, because each row names the language it parsed. The phase-6
+budget is the same 3 ms per file at p95, applied per language rather than to the
+whole sweep: a language whose p95 sits over the line is a parser problem wearing
+a corpus as a disguise, and averaging it against a fast language hides it.
+
+```sh
+python3 tools/parse_perf.py --by-lang --reps 1 --corpus /tmp/opencode/sweep-local
+python3 tools/parse_perf.py --by-lang --check      # 3 ms p95, or 25% over the pin
+python3 tools/parse_perf.py --by-lang --docs       # rewrites docs/parse-budgets.md
+```
+
+Measured 2026-11-17 at `0f638f5` over the local sweep root (65,000 files): the
+worst per-language p95 is C++ at 2.32 ms, and every other language is under
+1.7 ms. `--check` gates a language with fewer than 20 files out of the pass:
+five files have no p95 worth failing a phase on.
