@@ -1210,7 +1210,20 @@ impl<'a> Parser<'a> {
             if self.lang.defs.contains(&word.as_str()) || self.lang.classes.contains(&word.as_str()) {
                 break;
             }
-            if !MODIFIERS.contains(&word.as_str()) {
+            // Kotlin writes `actual fun`, `expect class`, `suspend fun` and
+            // `operator fun`: these words bind nothing and sit where the other
+            // languages put `public`, so the declaration behind them is the
+            // definition the line writes. Left unskipped, the word was taken for
+            // the statement's first word and the function it declares went
+            // unregistered - `actual fun w(): L = f(X)` kept its event on the
+            // module and lost the symbol.
+            let kotlin_modifier = self.lang.tag == "KT"
+                && matches!(
+                    word.as_str(),
+                    "actual" | "expect" | "suspend" | "operator" | "infix" | "tailrec" | "lateinit" | "noinline"
+                        | "crossinline" | "vararg" | "reified" | "annotation"
+                );
+            if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier {
                 break;
             }
             index += 1;
