@@ -382,7 +382,11 @@ rust_graph_deep::grammar! { CSHARP {
     type_arguments: "<" (_type %? ",") _gt,
     _gt: ">" | GT_JOINED,
     formal_parameters: "(" (parameter %? ",") ")",
-    parameter: [attributes] ["this" | "ref" | "out" | "in" | "params" | "scoped"] _type ["?"] _name ["=" _expression@assign],
+    // `scoped ref int d`, `ref readonly int e`: a parameter writes two of these
+    // and the rule allowed one, so every such signature was one ERROR (62 corpus
+    // files write `scoped ref`, 183 `ref readonly`).
+    parameter: [attributes] _parameter_modifier* _type ["?"] _name ["=" _expression@assign],
+    _parameter_modifier: "this" | "ref" | "out" | "in" | "params" | "scoped" | "readonly",
     arguments: "(" (_argument %? ",") ")",
     // `f(timeout: 5, default)` and `new Foo(reader, path: null)`: a named
     // argument is `name ":" value`, and only the attribute grammar knew the
