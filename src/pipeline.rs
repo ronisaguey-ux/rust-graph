@@ -4057,6 +4057,15 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         "KT" => &[
             "if", "for", "while", "return", "switch", "function", "when", "try", "catch", "else", "object",
             "do", "is", "as", "in",
+            // Kotlin's declaration words are not reserved in the lexer's eyes:
+            // `suspend fun f()`, `val x = …` and `internal expect fun g()` all
+            // read as a call of the first word with the rest as its argument.
+            // None of these can name a function in the source, so the CST is
+            // right to have no call there.
+            "suspend", "val", "var", "companion", "init", "constructor", "typealias", "expect", "actual",
+            "where", "by", "sealed", "data", "enum", "annotation", "operator", "infix", "inline", "tailrec",
+            "external", "const", "lateinit", "override", "open", "abstract", "final", "vararg", "reified",
+            "private", "public", "internal", "protected",
         ],
         _ => &["if", "for", "while", "return", "switch", "function", "func", "fn", "def"],
     };
