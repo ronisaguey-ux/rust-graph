@@ -389,10 +389,13 @@ rust_graph_deep::grammar! { OBJC {
     /// `(nullable NSDate *)date`, `(nonnull NSString *)name`: a nullability
     /// qualifier in front of a parameter's type is written on every modern
     /// header, and the type rule had no room for the word.
-    method_type: "(" [nullability] (block_pointer_type | type_name) ")",
+    method_type: "(" [nullability] (&(block_type_name block_caret_group) block_pointer_type | type_name) ")",
     nullability: KW_NULLABLE | KW_NONNULL | KW_NULL_UNSPECIFIED | KW_NULL_RESETTABLE,
     block_pointer_type: block_type_name block_pointer_parameters,
-    block_type_name: plain_type_name | "void" | "id" | pointer+,
+    /// `(RACDisposable * (^)(id s))`: a block's return type may be a class
+    /// name and a pointer, and the rule only took the name - so every block
+    /// parameter that returns an object was an error node.
+    block_type_name: (plain_type_name | "void" | "id") pointer* | pointer+,
     block_pointer_parameters: block_caret_group parameter_list,
     block_caret_group: "(" "^" [declaration_specifiers] ")",
     method_selector: IDENT | _selector_keyword+,
@@ -414,7 +417,12 @@ rust_graph_deep::grammar! { OBJC {
     property_qualifier: KW_IBOUTLET | KW_IBINSPECTABLE,
     _property_type: declaration_specifiers | plain_type_name [_type_arguments],
     property_attributes: "(" (_property_attribute % ",") ")",
-    _property_attribute: IDENT ["=" IDENT],
+    /// `@property (nonatomic, weak, readonly, nullable) id target;`: the
+    /// nullability words are attributes here, and making them tokens for the
+    /// parameter rule turned every such property into an error node.
+    _property_attribute: _property_attribute_name ["=" IDENT],
+    _property_attribute_name:
+        IDENT | KW_NULLABLE | KW_NONNULL | KW_NULL_UNSPECIFIED | KW_NULL_RESETTABLE,
 
     objc_synthesize: "@synthesize" (_synthesized_name % ",") ";",
     _synthesized_name: IDENT ["=" IDENT],
