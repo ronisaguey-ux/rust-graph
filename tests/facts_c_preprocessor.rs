@@ -84,6 +84,12 @@ const COVERAGE: &[(&str, &str, Lang, &str)] = &[
         Lang::C,
         "#include <stdio.h>\n#include \"settings.h\"\n#pragma once\n\nint print_count(int n) {\n    return printf(\"%d\", n);\n}\n",
     ),
+    (
+        "an initializer table whose declaration was copied out of the file",
+        "h",
+        Lang::C,
+        "{ 0x80, 36 },\n{ 0xa5, 2 },\n{ 0xb2, 5 },\n",
+    ),
 ];
 
 /// Shapes that still disagree, with the exact disagreement. A row here must

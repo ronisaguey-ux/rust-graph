@@ -641,9 +641,18 @@ impl<'a> Parser<'a> {
                 }
             }
             let macro_body = self.macro_rules_head();
+            // A brace with no header at file scope is not a block of statements
+            // in the C family. A generated table holds the rows of an
+            // initializer list whose declaration was copied out of the file
+            // (`{ 0x80, 36 },`), and a block frame read every row as an
+            // expression event the CST never writes: 206 events on the 206 rows
+            // of one musl locale header. The rows are data, not statements.
+            let data_body = matches!(self.lang.tag, "C" | "CPP" | "OBJC" | "CS")
+                && self.frames.len() == 1
+                && self.stmt.is_empty();
             let before = self.frames.len();
             self.open_block();
-            if (type_body || macro_body) && self.frames.len() > before {
+            if (type_body || macro_body || data_body) && self.frames.len() > before {
                 self.frames[before].type_only = true;
             }
             if conditional {
