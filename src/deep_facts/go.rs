@@ -736,6 +736,21 @@ impl<'a> Walker<'a> {
                 (!path.is_empty()).then_some(path)
             }
             "parenthesized_expression" => self.expression_child(id).and_then(|child| self.decl_target(child)),
+            // `*out = *in`: a dereference writes through the name it points at,
+            // and the one-pass lexer files that name as the statement's target.
+            // With no arm the CST wrote an empty target list for every `*p = v`
+            // statement - `*out = ...` in each deepcopy and conversion function
+            // of the generated kubernetes files - so the guard read a lost
+            // statement and kept the lexer on the whole file.
+            "unary_expression" | "pointer_expression"
+                if self.children(id).first().map(|&op| self.text_string(op)).as_deref() == Some("*") =>
+            {
+                self.children(id)
+                    .into_iter()
+                    .skip(1)
+                    .find(|&child| !self.is_layout(child))
+                    .and_then(|child| self.decl_target(child))
+            }
             _ => None,
         }
     }
