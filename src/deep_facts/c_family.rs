@@ -357,6 +357,17 @@ impl<'a> Walker<'a> {
             // there is one), so the CST writes the same event instead of
             // dropping the statement as layout.
             "declaration_statement" | "declaration" => {
+                // `typedef enum { A = 0, B } T;`: the C grammar flattens the
+                // enumerators into the body itself, so the shared `enum_body`
+                // arm (which reads `enum_member` nodes) writes nothing for a C
+                // enum. The lexer's model is its own: the words before the
+                // brace, then one assignment to the first member when any
+                // member has an initialiser - or the whole list as one value
+                // when none does - and the declarator's name on its own line.
+                if let Some(body) = self.c_enum_body(id) {
+                    self.c_enum_declaration(id, body);
+                    return true;
+                }
                 // `typedef struct { … } Foo;` and `typedef struct aeApiState {
                 // … } aeApiState;`: the lexer writes the declarator's name on
                 // the closing line (`n:Foo`) and no reader wrote it for either
@@ -805,6 +816,117 @@ impl<'a> Walker<'a> {
             _ => return false,
         }
         true
+    }
+
+
+    /// The enum body this declaration declares, when the declaration is an
+    /// enum's own. A struct's fields are not descended into: their enums are
+    /// their own declarations.
+    fn c_enum_body(&self, id: u32) -> Option<u32> {
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            for child in self.children(node) {
+                match self.kind(child) {
+                    "enum_body" => return Some(child),
+                    "field_declaration_list" | "struct_body" | "compound_statement" => {}
+                    _ => stack.push(child),
+                }
+            }
+        }
+        None
+    }
+
+    /// `typedef enum { A = 0, B } T;`, written the way the one-pass lexer
+    /// reads it.
+    fn c_enum_declaration(&mut self, id: u32, body: u32) {
+        let decl_line = self.line(id);
+        let start = self.node(id).start as usize;
+        let at = self.node(body).start as usize;
+        let header = String::from_utf8_lossy(&self.src[start..at]).to_string();
+        let words: Vec<String> = header
+            .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect();
+        let name_form = |text: &str| {
+            let mut out = String::from("[\"n\",");
+            push_string(&mut out, text);
+            out.push(']');
+            out
+        };
+        // `{ A = 0 , B , C }`: the separators are children too, and the node
+        // after an `=` is that member's initialiser rather than a new member.
+        let mut members: Vec<(String, u32, bool)> = Vec::new();
+        let mut after_eq = false;
+        for child in self.children(body) {
+            let kind = self.kind(child);
+            if matches!(kind, "{" | "}" | ",") {
+                continue;
+            }
+            if kind == "=" {
+                after_eq = true;
+                continue;
+            }
+            if after_eq {
+                if let Some(last) = members.last_mut() {
+                    last.2 = true;
+                }
+                after_eq = false;
+                continue;
+            }
+            if kind == "identifier" {
+                let name = self.text_string(child);
+                let line = self.line(child);
+                members.push((name, line, false));
+            }
+        }
+        let declarator = self
+            .child_of_kind(id, "direct_declarator")
+            .and_then(|node| self.declarator_of(node));
+        if !members.iter().any(|member| member.2) {
+            // `enum { A, B } e;`: one value, the words before the brace, the
+            // enumerators as a list, and the declared name.
+            let mut parts: Vec<String> = words.iter().map(|word| name_form(word)).collect();
+            if !members.is_empty() {
+                let names: Vec<String> = members.iter().map(|member| name_form(&member.0)).collect();
+                parts.push(format!("[\"m\",[{}]]", names.join(",")));
+            }
+            if let Some(name) = &declarator {
+                parts.push(name_form(name));
+            }
+            if !parts.is_empty() {
+                let value = format!("[\"m\",[{}]]", parts.join(","));
+                self.event(&format!("[\"x\",{decl_line},{value}]"));
+            }
+            return;
+        }
+        if !words.is_empty() {
+            let parts: Vec<String> = words.iter().map(|word| name_form(word)).collect();
+            let value = format!("[\"m\",[{}]]", parts.join(","));
+            self.event(&format!("[\"x\",{decl_line},{value}]"));
+        }
+        if let Some((first, line, _)) = members.first() {
+            let value = if members.len() == 1 {
+                "0".to_string()
+            } else {
+                let mut parts = vec!["0".to_string()];
+                for member in &members[1..] {
+                    parts.push(name_form(&member.0));
+                }
+                format!("[\"t\",[{}]]", parts.join(","))
+            };
+            let target = first.clone();
+            let line = *line;
+            self.lexer_event(b'a', line, &[target], &value, false);
+        }
+        if let Some(name) = declarator {
+            let line = self
+                .child_of_kind(id, "direct_declarator")
+                .map(|node| self.line(node))
+                .unwrap_or(decl_line);
+            let value = name_form(&name);
+            self.event(&format!("[\"x\",{line},{value}]"));
+        }
     }
 
     /// `(name, value node, line)` for each declarator of a declaration that has
