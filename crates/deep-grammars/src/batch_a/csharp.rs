@@ -510,9 +510,9 @@ rust_graph_deep::grammar! { CSHARP {
     goto_statement: "goto" ("case" _expression | "default" | _name) ";",
     yield_statement: "yield" ("return" _expression | "break") ";",
     expression_statement: _expression ";",
-    // `return (src, hexMap);` and `(a, b) = (b, a);`: C#'s tuple expression is
-    // the only parenthesised form with commas, and the one-expression rule made
-    // every one of them an ERROR inside the parentheses.
+    // `return (src, hexMap);`, `var pair = (a, b);`, `(a, b) = (b, a);`: C#'s
+    // tuple expression is the only parenthesised form with commas, and the
+    // one-expression rule made every tuple literal in a body an ERROR.
     parenthesized_expression: "(" _expression ("," _expression)* ")",
 
     // ---- expressions ----
