@@ -412,7 +412,16 @@ rust_graph_deep::grammar! { C {
     },
 
     _primary:
-        &(cast_type) cast_expression
+        // `ExpireInfo info = (ExpireInfo){ .now = commandTimeSnapshot(), … };`:
+        // a C99 compound literal. Read as a cast, the `{` had nothing to
+        // attach to and the statement — and the call in it — was recovered
+        // into an error node.
+        &(cast_type initializer_list) compound_literal_expression
+        // `T t = (T){0};`: a typedef name alone is not a `cast_type` — the
+        // grammar only reads one behind a `*` or an argument list — so the
+        // commonest compound literal of all had no rule.
+        | &(user_compound_type initializer_list) user_compound_literal
+        | &(cast_type) cast_expression
         | &(user_cast_head (IDENT | NUMBER | STR | CHAR_LITERAL)) user_cast_expression
         | sizeof_expression
         | alignof_expression
@@ -426,6 +435,11 @@ rust_graph_deep::grammar! { C {
     _member: IDENT,
     string: STR+,
     cast_expression: cast_type _expression@unary,
+    /// `(struct timespec){0}`, `(ExpireInfo){ .now = f() }`.
+    compound_literal_expression: cast_type initializer_list,
+    /// `(T){0}`: a compound literal whose type is a bare typedef name.
+    user_compound_literal: user_compound_type initializer_list,
+    user_compound_type: "(" user_type_name ")",
     /// `(PyCFunction) f`: a cast to a typedef name. It is read as a cast only
     /// when an operand that cannot be a binary operator follows, so `(a) * b`
     /// stays a multiplication.
