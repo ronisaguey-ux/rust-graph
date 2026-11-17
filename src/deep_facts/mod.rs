@@ -1027,7 +1027,7 @@ impl<'a> Walker<'a> {
             // every initialiser block disagreed on its first line.
             "init_block" => {
                 let line = self.line(id);
-                self.event(&format!("[\"x\",{line},[\"n\",\"init\"]"));
+                self.event(&format!("[\"x\",{line},[\"n\",\"init\"]]"));
             }
             // `fun f() = listOf(x)`: Kotlin's expression body is the
             // function's value, and the lexer reads the call on that line as
