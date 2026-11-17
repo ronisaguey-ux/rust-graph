@@ -268,7 +268,7 @@ rust_graph_deep::grammar! { KOTLIN {
         | "sealed" | "data" | "value" | "inner" | "override" | "lateinit" | "const" | "suspend"
         | "inline" | "infix" | "operator" | "tailrec" | "external" | "annotation"
         | "vararg" | "noinline" | "crossinline" | "reified" | "expect" | "actual"
-        | "dynamic" | "init" | "delegate",
+        | "dynamic" | "delegate",
     annotation: "@" (&(_annotation_target) _annotation_target _qualified_name [annotation_arguments] | _qualified_name [annotation_arguments]),
     /// A use-site target (`@file:`, `@get:`) is a name and a colon; nothing else
     /// is one. It is guarded by a lookahead at the start of the alternative the
