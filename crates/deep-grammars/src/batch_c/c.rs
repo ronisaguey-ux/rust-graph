@@ -275,6 +275,8 @@ rust_graph_deep::grammar! { C {
     struct_body: "{" (_struct_declaration | ";")* "}",
     _struct_declaration:
         &(user_type_name _member_declarator_list ";") user_struct_declaration
+        | &(declaration_specifiers _struct_declarator "," _struct_declarator)
+            declaration_specifiers (_struct_declarator % ",") ";"
         | declaration_specifiers [user_type_name] (_struct_declarator % ",") ";"
         | macro_field,
     /// `PyObject *weakreflist;`: a typedef name and its declarators. A struct
