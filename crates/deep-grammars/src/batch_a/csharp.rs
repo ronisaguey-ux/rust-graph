@@ -1049,6 +1049,28 @@ mod tests {
         assert!(fixtures::clean(&CSHARP, "class C { [Obsolete(\"x\")] int P { get => 1; } }"));
     }
 
+    /// Every declaration form the wave-G fixes landed: a ref modifier, a ref
+    /// expression, two parameter modifiers, a function pointer, a `where` per
+    /// type parameter, a conversion operator, a fixed-size buffer, a bare array
+    /// initialiser and a catch clause that names no value.
+    #[test]
+    fn csharp_declaration_forms_parse_cleanly() {
+        for source in [
+            "public ref struct S { public ref int P; }",
+            "public readonly ref struct S { }",
+            "class C { void M() { ref int x = ref y; } int N(ref int x) { return ref x; } }",
+            "class C { void M(scoped ref int a, ref readonly int b) { } }",
+            "unsafe class C { delegate* unmanaged[Cdecl]<int, void> cb; void M(delegate*<int, void> f) { } }",
+            "class C<T, U> where T : class, new() where U : unmanaged { }",
+            "class C { public static implicit operator int(C c) => 0; }",
+            "unsafe struct S { fixed byte b[16]; }",
+            "class C { bool[] t = { true, false }; }",
+            "class C { void M() { try { } catch (FormatException) { } } }",
+        ] {
+            assert!(fixtures::clean(&CSHARP, source), "{source}");
+        }
+    }
+
     #[test]
     fn csharp_lexer_reads_string_forms() {
         let kinds = fixtures::tokens(&CSHARP, "class A { string a = \"x\"; string b = @\"c:\\tmp\"; string c = $\"{a} {b}\"; }");
