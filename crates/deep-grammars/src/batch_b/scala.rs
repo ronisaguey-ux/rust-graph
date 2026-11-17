@@ -401,7 +401,7 @@ rust_graph_deep::grammar! { SCALA {
 
     _type: _type_atom _type_suffix*,
     _type_suffix: type_arguments | "*" | "=>" _type | "with" _type | "&" _type | "|" _type,
-    _type_atom: _name | tuple_type,
+    _type_atom: _qualified_name | tuple_type,
     tuple_type: "(" (_type %? ",") ")",
     type_arguments: "[" (_type %? ",") "]",
 } }
