@@ -260,6 +260,7 @@ rust_graph_deep::grammar! { CPP {
         "typedef" | "extern" | "static" | "auto" | "register" | "inline" | "mutable"
         | "constexpr" | "virtual" | "explicit" | "friend" | "const" | "volatile"
         | "thread_local"
+        | "typename"
         | "__extension__"
         | attribute
         | type_specifier,
