@@ -1260,6 +1260,27 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            // `[MarshalAs(UnmanagedType.LPStr)]`, `[TestCase(1, 2)]`: the
+            // one-pass reader has no idea an attribute section is a
+            // declaration, so it files the attribute's name as a call and the
+            // CST, which reads the attribute as an attribute, had no call to
+            // pair it with - the largest call cluster left in C# (MarshalAs
+            // alone: 111 files). The name is the section's last bare
+            // identifier, so a qualified `[A.B.C]` keeps C, which is the leaf
+            // the comparison pairs on.
+            "attribute" if self.language.name == "csharp" => {
+                let name = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.kind(child) == "identifier")
+                    .last()
+                    .map(|child| self.text_string(child))
+                    .unwrap_or_default();
+                if !name.is_empty() {
+                    let line = self.line(id);
+                    self.push_call(name, line);
+                }
+            }
             "annotation" if self.kinds.family == Family::Plain => {
                 if let Some(node) = self.children(id).into_iter().find(|&child| matches!(self.kind(child), "identifier")) {
                     let name = self.text_string(node);
