@@ -1012,6 +1012,30 @@ impl<'a> Walker<'a> {
                     self.push_call_once(path, line);
                 }
             }
+            // `companion object Named { … }`: the one-pass reader files the
+            // declaration's words - the modifiers, `companion`, `object`, the
+            // name and the supertype's name - as a statement, and nothing wrote
+            // the line, so every companion object in the corpus lost one.
+            "companion_object" if self.is_kotlin() => {
+                let words = self.c_words_of_skipping(id, &["class_body", "arguments", "type_arguments"]);
+                if !words.is_empty() {
+                    let parts: Vec<String> = words
+                        .iter()
+                        .map(|word| {
+                            let mut out = String::from("[\"n\",");
+                            push_string(&mut out, word);
+                            out.push(']');
+                            out
+                        })
+                        .collect();
+                    let value = match parts.len() {
+                        1 => parts[0].clone(),
+                        _ => format!("[\"m\",[{}]]", parts.join(",")),
+                    };
+                    let line = self.line(id);
+                    self.event(&format!("[\"x\",{line},{value}]"));
+                }
+            }
             // `init { … }`: the one-pass reader files the keyword as a
             // statement of its own (`n:init`) and nothing wrote the line, so
             // every class with an initialiser block lost one event.
