@@ -348,6 +348,12 @@ rust_graph_deep::grammar! { C {
         | labeled_statement
         | static_assert_statement
         | asm_statement
+        // `client *replica = listNodeValue(ln);`: a typedef name with a
+        // pointer inside a block is a multiplication unless the statement
+        // binds a value — `x * y = 1;` is not an assignment anyone writes, so
+        // the initialiser is what tells this declaration from the product,
+        // and `x * y;` still reads as one.
+        | &(user_type_name pointer+ IDENT "=") user_pointer_declaration
         | declaration_statement
         | expression_statement,
 
