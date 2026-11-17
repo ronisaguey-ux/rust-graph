@@ -315,7 +315,12 @@ rust_graph_deep::grammar! { C {
     _direct_base: IDENT | parenthesized_declarator,
     parenthesized_declarator: "(" _declarator ")",
     _declarator_suffix: array_suffix | parameter_list,
-    array_suffix: "[" [_expression] "]",
+    /// `int n, char a[restrict]` and `char b[static 4]`: C99 lets an array
+    /// parameter carry type qualifiers and `static` inside its own brackets.
+    /// Read as an expression the qualifier was not one, so the parameter —
+    /// and with it the whole prototype — failed to parse (musl's `regexec`).
+    array_suffix: "[" _array_qualifier* [_expression] "]",
+    _array_qualifier: "static" | "const" | "volatile" | "restrict",
     parameter_list: "(" (_parameter % ",") ")",
     _parameter:
         declaration_specifiers [user_type_name] [_declarator_or_abstract]
@@ -718,6 +723,10 @@ mod kinds {
 
     /// `(fixture, first node of this kind, exact text it spans)`.
     const FIXTURES: &[(&str, &[(&str, &str)])] = &[
+        (
+            "c_array_qualifiers.c",
+            &[("array_suffix", "[restrict]")],
+        ),
         (
             "c_attributes.c",
             &[
