@@ -2006,8 +2006,20 @@ impl<'a> Parser<'a> {
         // `hidden void __synccall(void (*)(void *), void *);`: an annotation
         // macro sits exactly where a type does, so the word before a type word
         // is the declaration's first word.
-        stmt.get(at + 1)
+        if stmt
+            .get(at + 1)
             .is_some_and(|next| next.kind == Kind::Ident && crate::expr::c_declaration_word(&self.text(next)))
+        {
+            return true;
+        }
+        // `size_t art_shrink_to_fit(art_t *art);`: the type is a name the
+        // reader has no keyword for (`size_t`, `ART_ATTR`, a typedef), so the
+        // head is two words in a row. A statement cannot open with two words
+        // unless the first one declares the type, and a declarator's `(` is
+        // already required above, so this is a prototype and not a call: the
+        // declaration writes no value, and reading the declarator as a call
+        // cost the header its file (3 rows on the croaring corpus).
+        stmt.get(at + 1).is_some_and(|next| next.kind == Kind::Ident)
     }
 
     fn brace_statement(&mut self, stmt: &[Token]) {
