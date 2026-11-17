@@ -99,6 +99,7 @@ rust_graph_deep::grammar! { OBJC {
         AT_SYNCHRONIZED = "@synchronized",
         AT_IMPORT = "@import",
         AT_DEFS = "@defs",
+        AT_MACRO = "@macro",
 
         COMMA = ",",
         SEMI = ";",
@@ -382,6 +383,7 @@ rust_graph_deep::grammar! { OBJC {
         &(cast_type) cast_expression
         | sizeof_expression
         | selector_expression
+        | at_macro_expression
         | encode_expression
         | parenthesized_expression
         | block_literal
@@ -414,6 +416,10 @@ rust_graph_deep::grammar! { OBJC {
     sizeof_expression: "sizeof" sizeof_operand,
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     selector_expression: "@selector" selector_arguments,
+    /// `@weakify(self)`, `@keypath(self.enabled)`: a macro that opens with an
+    /// `@word` and takes arguments. The one-pass reader files it as a call of
+    /// the word without the `@`, so the tree has to see a call here.
+    at_macro_expression: AT_MACRO arguments,
     selector_arguments: "(" method_selector ")",
     encode_expression: "@encode" encode_arguments,
     encode_arguments: "(" type_name ")",
@@ -486,7 +492,10 @@ fn at_word(c: &mut Cursor) -> Kind {
         b"synchronized" => AT_SYNCHRONIZED,
         b"import" => AT_IMPORT,
         b"defs" => AT_DEFS,
-        _ => UNKNOWN,
+        // `@weakify(self)`, `@keypath(self.enabled)`, `@onExit { … }`: an
+        // `@word` the grammar has no keyword for is a libextobjc macro. Reading
+        // it as unknown bytes made every file that uses one an error node.
+        _ => AT_MACRO,
     }
 }
 

@@ -162,6 +162,31 @@ impl<'a> Walker<'a> {
                     self.lexer_event(b'a', line, &[names[0].clone()], &value, false);
                 }
             }
+            // `@weakify(self)`, `@keypath(self.enabled)`: an `@word` macro. The
+            // one-pass reader files a call of the word without its `@`, so the
+            // node writes that call and the line's value is the call with the
+            // arguments in it.
+            "at_macro_expression" => {
+                let line = self.line(id);
+                let name = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&child| self.kind(child) == "@macro")
+                    .map(|node| self.text_string(node))
+                    .unwrap_or_default();
+                let name = name.trim_start_matches('@').to_string();
+                if !name.is_empty() {
+                    self.push_call(name, line);
+                }
+                if let Some(list) = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                {
+                    let args = self.arguments(list);
+                    self.event(&format!("[\"x\",{line},{args}]"));
+                }
+            }
             // `@selector(run:)`: the lexer files a call of `selector`, and the
             // node was never read.
             "selector_expression" => {
