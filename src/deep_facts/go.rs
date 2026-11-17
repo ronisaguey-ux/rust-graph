@@ -2437,9 +2437,18 @@ fn dotted_piece(text: &str) -> bool {
         let line = self.line(id);
         let mut names: Vec<String> = Vec::new();
         let mut value: Option<u32> = None;
+        let mut arguments: Option<u32> = None;
+        let mut recovered = false;
         for child in self.children(id) {
             let kind = self.kind(child);
+            if kind == "ERROR" || kind.starts_with("ERROR") || kind.contains("MISSING") {
+                recovered = true;
+            }
             if self.is_layout(child) || kind == "=" {
+                continue;
+            }
+            if kind == "arguments" || kind == "argument_list" {
+                arguments = Some(child);
                 continue;
             }
             if value.is_none() && matches!(kind, "identifier" | "simple_identifier") {
@@ -2449,6 +2458,25 @@ fn dotted_piece(text: &str) -> bool {
             value = Some(child);
         }
         if names.is_empty() {
+            return;
+        }
+        // `include(":shared")`, `apply(plugin = "x")`: a script line that is a
+        // head and its argument list, nothing else, is a call — and the one-pass
+        // reader records it as one, but the arm below only wrote its value, so
+        // every Gradle settings file lost the `include` call to the guard (60 of
+        // 72 fallbacks on a .kts sample, the largest `call … line 1` cluster in
+        // the corpus). Only the plain shape counts: a line with a value of its
+        // own (`… = this == null || isEmpty()`) or one the grammar recovered
+        // (`RoutingContext.()` after a broken typealias) keeps the arm below,
+        // which walks that value and records the calls inside it.
+        if let Some(args) = arguments.filter(|_| value.is_none() && !recovered) {
+            let path = names.join(".");
+            let index = self.push_call(path, line);
+            // The event is the call itself, not an assignment: the one-pass
+            // reader files `include(":x")` as `c(0;[0])` on that line, so a
+            // merge of the name and the argument value paired with nothing.
+            let args_form = self.arguments(args);
+            self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args_form}]]"));
             return;
         }
         match value {
