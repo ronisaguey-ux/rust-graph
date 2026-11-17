@@ -1667,7 +1667,8 @@ return verdict(Some("symbol"), detail, accepted);
                 // source line says so — the name, its argument list, then `=>`.
                 if !lines.is_empty()
                     && (is_positional_call(&lines, &macro_lines, &name, call.line)
-                        || (lexer.tag == "CS" && is_csharp_attribute(&lines, call.line)))
+                        || (lexer.tag == "CS" && is_csharp_attribute(&lines, call.line))
+                        || (lexer.tag == "CS" && is_bracketed_attribute(&lines, &name, call.line)))
                 {
                     accepted.positional_calls += 1;
                     continue;
@@ -2274,6 +2275,17 @@ fn is_csharp_attribute(src: &Lines<'_>, line: u32) -> bool {
     // `[` alone is a collection expression continued from the line above, and
     // `[]`/`[0]` are indexers: an attribute starts with a name.
     text.starts_with('[') && text[1..].trim_start().starts_with(|ch: char| ch.is_alphanumeric() || ch == '_')
+}
+
+/// `void F([MarshalAs(UnmanagedType.Bool)] out bool ok)`: an attribute written
+/// inside a parameter list, where the name follows its bracket on the same line
+/// and no bracket of its own opens it.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_bracketed_attribute(src: &Lines<'_>, name: &str, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
+        return false;
+    };
+    text.match_indices(name).any(|(at, _)| text[..at].trim_end().ends_with('['))
 }
 
 /// Whether this line opens a declaration: `pub fn`, `struct`, `enum`, `def`,
