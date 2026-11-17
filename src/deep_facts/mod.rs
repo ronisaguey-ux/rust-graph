@@ -1236,7 +1236,27 @@ impl<'a> Walker<'a> {
                         .copied();
                     let value = children.get(at + 1).copied();
                     if let (Some(target), Some(value)) = (target, value) {
-                        let name = self.c_path(target).unwrap_or_default();
+                        let mut name = self.c_path(target).unwrap_or_default();
+                        // `bitset_container_t *answer = CAST_bitset(*dst);`
+                        // inside a function body is a declaration, and the
+                        // grammar reads it as a multiplication because C cannot
+                        // tell the two apart without a symbol table. The lexer
+                        // does read a declaration there and binds `answer` to
+                        // the call, so the binding the target names was dropped
+                        // on every crooked-style pointer declaration in the
+                        // corpus (8 files).
+                        if name.is_empty() && self.kind(target) == "binary_expression" {
+                            if let Some(last) = self
+                                .children(target)
+                                .into_iter()
+                                .filter(|&child| !self.is_layout(child))
+                                .next_back()
+                            {
+                                if self.kind(last) == "identifier" {
+                                    name = self.text_string(last);
+                                }
+                            }
+                        }
                         if !name.is_empty() {
                             // Every assignment is an `a` event to the lexer -
                             // `ai->ai_next = ai;` is `a ["prevai.ai_next"] n:ai`
