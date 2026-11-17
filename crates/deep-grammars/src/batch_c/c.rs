@@ -260,8 +260,10 @@ rust_graph_deep::grammar! { C {
     attribute_group: "(" (_attribute_argument %? ",") ")",
     /// An attribute argument is a name with an optional call: `packed`,
     /// `aligned(4)`, `optimize("O2")`. It never starts with `(`, so the group
-    /// above is told apart from a bare list in one token.
-    _attribute_argument: IDENT [arguments],
+    /// above is told apart from a bare list in one token. A qualifier is a name
+    /// here though it is a keyword elsewhere: `__attribute__((const))`.
+    _attribute_argument: _attribute_name [arguments],
+    _attribute_name: IDENT | "const" | "volatile" | "restrict",
 
     type_specifier:
         "void" | "char" | "short" | "int" | "long" | "float" | "double"
