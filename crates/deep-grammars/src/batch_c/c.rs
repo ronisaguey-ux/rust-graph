@@ -334,6 +334,9 @@ rust_graph_deep::grammar! { C {
 
     compound_statement: "{" _statement* "}",
 
+    /// `for (; *l==*r && *l; l++, r++);` and `while (f());`: a body that is only
+    /// a `;` is an empty statement, and the grammar had none, so every one of
+    /// them was recovered as an error.
     _statement:
         compound_statement
         | if_statement
@@ -349,6 +352,7 @@ rust_graph_deep::grammar! { C {
         | static_assert_statement
         | asm_statement
         | declaration_statement
+        | ";"
         | expression_statement,
 
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
