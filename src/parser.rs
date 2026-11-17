@@ -875,10 +875,18 @@ impl<'a> Parser<'a> {
         if matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(&self.stmt) && self.angle_depth() > 0 {
             return false;
         }
-        let ts_return_type_brace = matches!(self.lang.tag, "TS" | "TSX")
-            && last.kind == Kind::Op
-            && matches!(self.raw(&last), b":" | b"&" | b"|")
-            && !self.is_declare_function(&self.stmt);
+        // `[A] extends [B] ? { … } : …` — a brace after the `?` of a conditional
+        // type opens a type literal, never a block, in every TypeScript
+        // statement (there is no ternary whose arms are blocks). Read as a
+        // block, its `}` ended the declaration and the rest of the conditional
+        // chain became a merge on the arm's line (001886_Config.ts:492).
+        let conditional_type_brace =
+            matches!(self.lang.tag, "TS" | "TSX") && last.kind == Kind::Op && self.raw(&last) == b"?";
+        let ts_return_type_brace = conditional_type_brace
+            || (matches!(self.lang.tag, "TS" | "TSX")
+                && last.kind == Kind::Op
+                && matches!(self.raw(&last), b":" | b"&" | b"|")
+                && !self.is_declare_function(&self.stmt));
         if (!ts_return_type_brace && self.has_def_word(&self.stmt)) || self.assigned_class(&self.stmt).is_some() {
             return true;
         }
