@@ -207,7 +207,12 @@ rust_graph_deep::grammar! { C {
     /// Only file scope accepts this: inside a function `x * y;` must stay a
     /// multiplication.
     user_pointer_declaration: user_type_name _pointer_named_declarator ("," _pointer_named_declarator)* ";",
-    _pointer_named_declarator: pointer* IDENT _declarator_suffix* attribute* ["=" _initializer],
+    _pointer_named_declarator: pointer* _named_declarator_head _declarator_suffix* attribute* ["=" _initializer],
+    /// `lua_State *(lua_newstate) (lua_Alloc f, void *ud);`: the declarator is
+    /// parenthesised, so its name sits inside `(…)` and not directly after the
+    /// pointers. The IDENT-only form read the parenthesis as a missing name and
+    /// the whole prototype became an ERROR node.
+    _named_declarator_head: IDENT | parenthesized_declarator,
     /// `typedef Foo (*handler)(void);`: a typedef whose type is a typedef name.
     typedef_user_declaration: "typedef" user_type_name _init_declarator ("," _init_declarator)* ";",
     /// `Foo x;`: a typedef name and a named declarator. It never starts with a
