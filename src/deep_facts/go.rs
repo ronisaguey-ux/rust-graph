@@ -3258,7 +3258,12 @@ fn dotted_piece(text: &str) -> bool {
     /// start would say the line of `path`.
     pub(crate) fn call_line(&self, callee: u32, call: u32) -> u32 {
         match self.kind(callee) {
-            "attribute" | "member_expression" => {
+            // Kotlin spells a member access `navigation_expression`, and a
+            // chain that crosses lines (`g {\n q()\n }.start()`, a `.map { }`
+            // opened on the next line) starts on the line the receiver does.
+            // The lexer stamps the call where the name sits, so reading the
+            // node's own start lost the call: 72 corpus45/kotlin files.
+            "attribute" | "member_expression" | "navigation_expression" => {
                 let children = self.children(callee);
                 if let Some(&name) = children.iter().rev().find(|&&child| {
                     self.node(child).first_child == NONE && !self.is_layout(child)
