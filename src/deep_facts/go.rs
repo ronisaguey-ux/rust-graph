@@ -579,6 +579,17 @@ impl<'a> Walker<'a> {
             };
             return format!("[\"c\",{index},{receiver},{args}]");
         }
+        // C# `[Attr(…)]`: the lexer reads an attribute section as a value with
+        // one element per attribute - a call when the attribute has arguments,
+        // a bare name when it has none - and records every attribute that has
+        // arguments as a call of its dotted name. The tree flattened the whole
+        // section into name words, so every attributed declaration in the
+        // corpus lost the call: `[Obsolete(…)]`, `[DllImport(…)]`,
+        // `[LibraryImport(…)]` and `[DefaultDllImportSearchPaths(…)]` were
+        // 1,081 of the corpus files on their own.
+        if self.language.name == "csharp" && matches!(kind, "attribute_section" | "attribute_list") {
+            return self.csharp_attribute_section(id, false);
+        }
         let mut parts = Vec::new();
         if matches!(
             kind,
@@ -612,6 +623,124 @@ impl<'a> Walker<'a> {
             _ if comma => format!("[\"t\",[{}]]", parts.join(",")),
             _ => format!("[\"m\",[{}]]", parts.join(",")),
         }
+    }
+
+    /// One C# attribute section as the lexer writes it: `["t",[ … ]]` with a
+    /// call per attribute that has arguments and a name per attribute that has
+    /// none. `record_only` writes the calls and no value, which is what a
+    /// second section on one declaration does: the lexer keeps its calls and
+    /// never puts it in the header event.
+    /// Append a C# declaration's attribute list to its header event. Only the
+    /// first section is written; every later one is record-only, because that
+    /// is where the one-pass reader puts it.
+    pub(crate) fn csharp_attributes(&mut self, id: u32, attributed: &mut bool, parts: &mut Vec<String>) {
+        if matches!(self.kind(id), "attribute_section" | "attribute_list") {
+            let value = self.csharp_attribute_section(id, *attributed);
+            *attributed = true;
+            if !value.is_empty() {
+                parts.push(value);
+            }
+            return;
+        }
+        for section in self.children(id) {
+            if matches!(self.kind(section), "attributes" | "attribute_section" | "attribute_list") {
+                self.csharp_attributes(section, attributed, parts);
+            }
+        }
+    }
+
+    pub(crate) fn csharp_attribute_section(&mut self, id: u32, record_only: bool) -> String {
+        if let Some(text) = self.call_texts.get(&id) {
+            return if record_only { String::new() } else { text.clone() };
+        }
+        let mut pieces: Vec<String> = Vec::new();
+        for child in self.children(id) {
+            if self.kind(child) != "attribute" {
+                continue;
+            }
+            // `[return: NotNull]`, `[assembly: X]`: the target is part of the
+            // section, not part of the attribute's name.
+            let mut members = self.children(child);
+            if let Some(at) = members.iter().position(|&node| self.kind(node) == ":") {
+                members = members[(at + 1)..].to_vec();
+            }
+            let list = members.iter().copied().find(|&node| {
+                matches!(self.kind(node), "attribute_arguments" | "arguments" | "argument_list")
+            });
+            let mut words: Vec<String> = Vec::new();
+            for node in members.iter().copied() {
+                if Some(node) == list || matches!(self.kind(node), "." | "(") {
+                    continue;
+                }
+                if let Some(word) = self.leaf_name(node) {
+                    words.push(word);
+                }
+            }
+            let path = words.join(".");
+            let mut items: Vec<u32> = Vec::new();
+            if let Some(list) = list {
+                for node in self.children(list) {
+                    if self.is_layout(node) || matches!(self.kind(node), "(" | ")" | ",") {
+                        continue;
+                    }
+                    items.push(node);
+                }
+            }
+            if items.is_empty() {
+                // `[Obsolete]` is a name to the lexer and never a call.
+                if !record_only && !path.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    pieces.push(out);
+                }
+                continue;
+            }
+            let line = self.line(child);
+            let index = self.push_call(path.clone(), line);
+            let mut args = String::from("[");
+            for (nth, node) in items.iter().copied().enumerate() {
+                if nth > 0 {
+                    args.push(',');
+                }
+                // `Value = "a"`: a named attribute argument is the lexer's
+                // keyword form `["k",name,value]`.
+                let value = if matches!(self.kind(node), "named_attribute_argument" | "named_argument") {
+                    let inner = self.children(node);
+                    let name = inner
+                        .iter()
+                        .copied()
+                        .filter(|&row| self.kind(row) != ":" && self.leaf_name(row).is_some())
+                        .next()
+                        .and_then(|row| self.leaf_name(row))
+                        .unwrap_or_default();
+                    let value = inner.last().copied().map(|row| self.form(row)).unwrap_or_else(|| "0".to_string());
+                    let mut keyed = "[\"k\",".to_string();
+                    push_string(&mut keyed, &name);
+                    keyed.push(',');
+                    keyed.push_str(&value);
+                    keyed.push(']');
+                    keyed
+                } else {
+                    self.form(node)
+                };
+                args.push_str(&value);
+            }
+            args.push(']');
+            let receiver = match path.rsplit_once('.') {
+                Some((head, _)) if !head.is_empty() => {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, head);
+                    out.push(']');
+                    out
+                }
+                _ => "0".to_string(),
+            };
+            pieces.push(format!("[\"c\",{index},{receiver},{args}]"));
+        }
+        let text = if pieces.is_empty() { String::new() } else { format!("[\"t\",[{}]]", pieces.join(",")) };
+        self.call_texts.insert(id, text.clone());
+        if record_only { String::new() } else { text }
     }
 
     /// One call, at the line its callee is written on, named the way the source
