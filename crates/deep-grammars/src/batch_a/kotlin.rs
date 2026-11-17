@@ -193,6 +193,9 @@ rust_graph_deep::grammar! { KOTLIN {
         KW_VALUE = "value",
         KW_VARARG = "vararg",
         KW_WHERE = "where",
+        /// `@file:JvmName("X")`: the target of a file annotation is the one
+        /// place `file` means a keyword instead of a name.
+        KW_FILE = "file",
         /// A line break where Kotlin infers a statement end.
         LINE_END = "line_end",
 
@@ -736,6 +739,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"value" => KW_VALUE,
         b"vararg" => KW_VARARG,
         b"where" => KW_WHERE,
+        b"file" => KW_FILE,
         _ => IDENT,
     }
 }
