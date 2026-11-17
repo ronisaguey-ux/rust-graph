@@ -1262,6 +1262,16 @@ impl<'a> Walker<'a> {
                 }
             }
             "expression_statement" => self.expression_statement(id),
+            // `Assert.Throws<X>(() => new Foo());`: a lambda's expression body
+            // holds a call, and no arm read the node, so every call written in
+            // a lambda passed as an argument was missing from the CST's record
+            // (C# corpus: the largest remaining call cluster, 44 files). A
+            // block body is walked by the generic walk and needs nothing here.
+            "lambda_expression" if self.facts.tag == "CS" => {
+                if let Some(body) = self.cs_expression_body(id) {
+                    self.form(body);
+                }
+            }
             // Scala's `def f(): T = expr` writes the body as a `def_body` whose
             // child is the expression itself. Nothing read that node, so a call
             // in an expression-bodied def never reached the record.
