@@ -2062,6 +2062,87 @@ fn dotted_piece(text: &str) -> bool {
         }
     }
 
+    /// `true` when the type after the `:` carries a `?` anywhere. The lexer's
+    /// Kotlin statement reader stops the type at that `?`, so the property is
+    /// left as a declaration (`x`) rather than the assignment (`a`) an untyped
+    /// or non-nullable property gets.
+    fn kt_type_nullable(&self, id: u32) -> bool {
+        if self.kind(id) == "?" {
+            return true;
+        }
+        self.children(id).into_iter().any(|child| self.kt_type_nullable(child))
+    }
+
+    /// The identifier leaves of a type, in source order, as names:
+    /// `List<String>` is `n:List` then `n:String`, the run of names the lexer
+    /// reads in the type.
+    fn kt_type_names(&self, id: u32, parts: &mut Vec<String>) {
+        if self.node(id).first_child == NONE {
+            if self.kind(id) == "identifier" {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                parts.push(out);
+            }
+            return;
+        }
+        for child in self.children(id) {
+            self.kt_type_names(child, parts);
+        }
+    }
+
+    /// `var x: List<String>? = null`: the modifiers, the name, the type's names
+    /// and a name or call on the right of the `=`, in that order, as the one
+    /// declaration event the lexer files for the statement.
+    fn kt_nullable_property(&mut self, id: u32, name: &str, ty: u32, line: u32) {
+        let mut parts: Vec<String> = Vec::new();
+        for child in self.children(id) {
+            match self.kind(child) {
+                "modifiers" => {
+                    for modifier in self.children(child) {
+                        if self.kind(modifier) == "annotation" {
+                            let word =
+                                self.children(modifier).into_iter().find(|&leaf| self.kind(leaf) == "identifier");
+                            if let Some(word) = word {
+                                let mut out = String::from("[\"n\",");
+                                push_string(&mut out, &self.text_string(word));
+                                out.push(']');
+                                parts.push(out);
+                            }
+                            continue;
+                        }
+                        let value = self.decl_value(modifier);
+                        if !value.is_empty() && value != "0" {
+                            parts.push(value);
+                        }
+                    }
+                }
+                "var" | "val" | ":" | "=" | "by" | "lateinit" | "const" => {}
+                "property_head" => {
+                    let mut out = String::from("[\"n\",");
+                    push_string(&mut out, name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                _ if child == ty => self.kt_type_names(ty, &mut parts),
+                _ => {
+                    let value = self.decl_value(child);
+                    if !value.is_empty() && value != "0" {
+                        parts.push(value);
+                    }
+                }
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        let value = match parts.len() {
+            1 => parts.pop().unwrap_or_default(),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        };
+        self.lexer_event(b'x', line, &[], &value, false);
+    }
+
     /// `val a = 1`, `private val b: Int = 2`: the declared name and the value,
     /// as the assignment the lexer files.
     pub(crate) fn kt_property(&mut self, id: u32) {
@@ -2084,6 +2165,17 @@ fn dotted_piece(text: &str) -> bool {
                     .map(|node| self.text_string(node))
             });
         let Some(name) = name else { return };
+        // `var x: List<String>? = null`: the lexer's type reader ends at the
+        // `?`, so the statement is a declaration, not the assignment an
+        // untyped property is.
+        let ty = children
+            .iter()
+            .position(|&child| self.kind(child) == ":")
+            .and_then(|at| children.get(at + 1).copied());
+        if let Some(ty) = ty.filter(|&ty| self.kt_type_nullable(ty)) {
+            self.kt_nullable_property(id, &name, ty, line);
+            return;
+        }
         let value = children
             .iter()
             .copied()

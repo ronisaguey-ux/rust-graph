@@ -960,6 +960,20 @@ impl<'a> Walker<'a> {
             Family::Plain | Family::Js | Family::Rust => {}
         }
         match kind {
+            // `fun f(): Boolean = p.endsWith("x")`: an expression body is the
+            // function's value and no statement arm holds it, so the calls
+            // written in one were never read - every expression-bodied Kotlin
+            // function lost its call.
+            "function_body" if self.is_kotlin() => {
+                let children = self.children(id);
+                if children.iter().any(|&child| self.kind(child) == "=") {
+                    if let Some(body) =
+                        children.into_iter().find(|&child| self.kind(child) != "=" && !self.is_layout(child))
+                    {
+                        self.form(body);
+                    }
+                }
+            }
             // A field declaration is a statement to the lexer: `private readonly
             // DeserializationTracker _tracker;` is an `x` event over the whole
             // header, and nothing read the node, so every C# field an API
