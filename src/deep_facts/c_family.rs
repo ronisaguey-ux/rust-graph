@@ -453,7 +453,14 @@ impl<'a> Walker<'a> {
                         }
                     }
                 }
-                let forced = self.macro_prefix.take();
+                // `LUA_API lua_State *(lua_newstate) (lua_Alloc f, void *ud);`:
+                // a macro in front of a parenthesised declarator is not part of
+                // the value — the lexer drops it and reads the declaration as
+                // the call of the parenthesised name alone — so the arm for that
+                // declarator below owns the statement. The prefix is still taken
+                // so it cannot leak into the next declaration.
+                let prefix = self.macro_prefix.take();
+                let forced = if self.c_own_parenthesized_declarator(id) { None } else { prefix };
                 if let Some(word) = forced
                     .clone()
                     .or_else(|| leading_word(self.text_string(id).trim_start()).map(str::to_string))
@@ -1064,6 +1071,24 @@ impl<'a> Walker<'a> {
             }
         }
         None
+    }
+
+    /// Whether the declaration's own declarator is parenthesised — `int
+    /// (name)(args)` — rather than a parameter's, which every prototype with a
+    /// function-pointer parameter also has. A macro in front of the first is not
+    /// part of the value the lexer reads; in front of the second it is.
+    fn c_own_parenthesized_declarator(&self, id: u32) -> bool {
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            for child in self.children(node) {
+                match self.kind(child) {
+                    "parenthesized_declarator" => return true,
+                    "parameter_list" | "compound_statement" | "initializer_list" => {}
+                    _ => stack.push(child),
+                }
+            }
+        }
+        false
     }
 
     /// Whether any descendant of `id` is of `kind`.
@@ -1689,6 +1714,25 @@ mod designated_initializer_tests {
         let events = module_events("struct S { int x; };\nstruct S s = { .x = 0 };\n");
         assert!(events.contains("[\"n\",\"x\"]"), "{events}");
         assert!(!events.contains("[[\"n\",\"x\"],0]"), "{events}");
+    }
+
+    /// `LUA_API int (lua_isuserdata) (lua_State *L, int idx);`: the macro in
+    /// front of a parenthesised declarator is not part of the value — the
+    /// one-pass reader drops it and reads the declaration as the call alone.
+    #[test]
+    fn a_macro_before_a_parenthesised_declarator_is_not_a_value() {
+        let events = module_events("LUA_API int (lua_isuserdata) (int idx);\n");
+        assert!(events.contains("[\"c\",0,0,[[\"n\",\"lua_isuserdata\"]]]"), "{events}");
+        assert!(!events.contains("LUA_API"), "{events}");
+    }
+
+    /// The same macro in front of a prototype whose *parameter* is the
+    /// parenthesised one stays: the one-pass reader keeps it as the line's
+    /// first name.
+    #[test]
+    fn a_macro_before_a_pointer_parameter_stays_a_name() {
+        let events = module_events("JEMALLOC_EXPORT int cb(void *(calloc_cb)(int, int));\n");
+        assert!(events.contains("JEMALLOC_EXPORT"), "{events}");
     }
 
     /// The braces around a brace list are punctuation, not two more elements:
