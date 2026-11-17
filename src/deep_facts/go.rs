@@ -2491,6 +2491,16 @@ fn dotted_piece(text: &str) -> bool {
             }
             return self.call_form(id);
         }
+        // `val on = false`: the lexer writes a boolean or `null` literal as the
+        // name it spells, and the tree keeps the word as its own leaf kind. Read
+        // through the default arm the value was the constant 0, so every
+        // property initialised to `false` disagreed with the lexer.
+        if self.is_kotlin() && matches!(kind, "true" | "false" | "null") {
+            let mut out = "[\"n\",".to_string();
+            push_string(&mut out, kind);
+            out.push(']');
+            return out;
+        }
         // Python has no boolean keyword in this grammar, but the lexer reads
         // `True`, `False` and `None` as names, so they are names here too.
         if matches!(kind, "True" | "False" | "None") {
