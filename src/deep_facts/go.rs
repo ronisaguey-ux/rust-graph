@@ -2474,7 +2474,7 @@ fn dotted_piece(text: &str) -> bool {
                 self.java_header_event(id);
             }
             return;
-        let Some(value) = value else { return };
+        };
         // `val ApplicationRequest.uri: String get() = origin.uri`: the getter is
         // written on the declaration's line, and its expression is the value the
         // lexer files for the property.

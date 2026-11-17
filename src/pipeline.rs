@@ -4010,6 +4010,12 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         "JAVA" => &[
             "new", "if", "while", "for", "switch", "return", "throw", "synchronized", "assert", "try", "catch", "instanceof",
         ],
+        // `val x = when (this) { … }`: the header of a control form is a
+        // keyword and a group, and the one-pass reader names the keyword a
+        // callee. The tree writes the entries' calls and cannot name `when`.
+        "KT" => &[
+            "if", "when", "while", "for", "do", "else", "try", "catch", "finally", "return", "throw", "is", "as", "in",
+        ],
         // C, C++ and Objective-C: a type word is never a callee. `int
         // (*flush)(struct _rio *);` and `((int (*)(void *, void *))cmp)(…)`
         // put a type in front of a group, and the one-pass reader read each as
