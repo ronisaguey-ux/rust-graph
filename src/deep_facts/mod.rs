@@ -857,6 +857,22 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// Every call inside a lambda body, block or expression, at any depth. The
+    /// shared `c_calls_in_pub` stops at a block and at a nested lambda because a
+    /// C/C++ lambda body is entered on its own walk; a C# lambda is not, so its
+    /// block has to be read here or not at all.
+    pub(crate) fn lambda_calls(&self, id: u32, out: &mut Vec<u32>) {
+        for child in self.children(id) {
+            if matches!(
+                self.kind(child),
+                "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression"
+            ) {
+                out.push(child);
+            }
+            self.lambda_calls(child, out);
+        }
+    }
+
     pub(crate) fn push_call(&mut self, path: String, line: u32) -> usize {
         let symbol = self.frame().symbol;
         let calls = &mut self.facts.symbols[symbol].calls;
@@ -1335,6 +1351,20 @@ impl<'a> Walker<'a> {
                 for child in self.children(id) {
                     self.c_calls_in_pub(child, &mut calls);
                 }
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            // `Assert.Throws(null, () => G(1))` and `Export(def, () => part.Get())`:
+            // a lambda passed as an argument is the whole content of that
+            // argument, and the expression reader gives a lambda no form, so
+            // every call written inside one stayed in the tree and out of the
+            // call table. They are calls all the same — the cast arm below has
+            // the same shape of gap — so they are read here, and only the call
+            // table is written: a lambda has no value of its own to compare.
+            "lambda_expression" if self.language.name == "csharp" => {
+                let mut calls = Vec::new();
+                self.lambda_calls(id, &mut calls);
                 for call in calls {
                     self.form(call);
                 }
