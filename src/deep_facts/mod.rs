@@ -1016,6 +1016,20 @@ impl<'a> Walker<'a> {
             // arguments are expressions, and no arm read them, so every call
             // written there was lost.
             "constructor_delegation" if self.is_kotlin() => {
+                // `constructor(…) : this(…)` delegates with a call the lexer
+                // names after the receiver it reads - `self` for `this` - and
+                // only the arguments were read here, so every secondary
+                // constructor whose parameter list wraps before the `: this(`
+                // lost the call itself. `super(…)` is named as written.
+                let name = self
+                    .children(id)
+                    .into_iter()
+                    .map(|child| self.kind(child).to_string())
+                    .find(|kind| matches!(kind.as_str(), "this" | "super"))
+                    .map(|kind| if kind == "this" { "self".to_string() } else { kind })
+                    .unwrap_or_else(|| "self".to_string());
+                let line = self.line(id);
+                self.push_call(name, line);
                 for child in self.children(id) {
                     if matches!(self.kind(child), "arguments" | "argument_list") {
                         self.form(child);
