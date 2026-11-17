@@ -1221,7 +1221,21 @@ impl<'a> Walker<'a> {
                 if matches!(self.facts.tag.as_str(), "C" | "CPP" | "OBJC") =>
             {
                 let children = self.children(id);
-                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
+                // `msg->msg_controllen += CMSG_SPACE(sizeof tvts);`: an
+                // augmented assignment binds its member to the call it adds,
+                // exactly as `=` does, and the one-pass reader records that
+                // binding. Only `=` was recognised, so musl's recvmsg lost it.
+                // The event is still written for `=` alone: the lexer's own
+                // event for an augmented assignment is a shape this arm does
+                // not model.
+                let operator = children.iter().position(|&child| {
+                    matches!(
+                        self.kind(child),
+                        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "|=" | "^="
+                    )
+                });
+                if let Some(at) = operator {
+                    let plain = self.kind(children[at]) == "=";
                     let target = children[..at]
                         .iter()
                         .rev()
@@ -1254,7 +1268,9 @@ impl<'a> Walker<'a> {
                                 }
                             }
                             let line = self.line(id);
-                            self.lexer_event(b'a', line, &[name.clone()], &form, false);
+                            if plain {
+                                self.lexer_event(b'a', line, &[name.clone()], &form, false);
+                            }
                             if self.kind(value) == "call_expression" {
                                 let path = self.decl_path(value);
                                 let last = path.rsplit('.').next().unwrap_or("").to_string();
