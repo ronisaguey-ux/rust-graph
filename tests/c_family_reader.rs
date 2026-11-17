@@ -100,3 +100,29 @@ fn every_family_language_reads_its_own_declaration_and_call() {
     }
     assert!(failed.is_empty(), "the shared reader lost a declaration or a call:\n{}", failed.join("\n"));
 }
+
+/// `int i = 0, cnt;` declares two names: one initialised, one not. The lexer
+/// read the comma as a comma operator and gave `i` the value `t:[0,n:cnt]`,
+/// which is the next declarator and not part of the initialiser. The CST
+/// writes `i` with `0` and nothing for the untouched name, so the two records
+/// disagreed on five corpus files (musl mallocng and passwd) for a statement
+/// both readers read correctly.
+#[test]
+fn a_c_declarator_list_reads_the_same_on_both_paths() {
+    let mut failed: Vec<String> = Vec::new();
+    for source in [
+        "int i = 0, cnt;\n",
+        "size_t size=0, nmem=0;\n",
+        "char *p = 0, *q;\n",
+        "unsigned long a = 0, b = 0;\n",
+    ] {
+        let language = langs::by_content("c", source.as_bytes()).expect("a C row");
+        let lexer = parser::parse(source.as_bytes(), language);
+        let deep = read(source, Lang::C);
+        let verdict = pipeline::loses(&lexer, &deep);
+        if verdict.lost() {
+            failed.push(format!("{source:?}: {verdict:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "a declarator list disagreed in {} file(s):\n{}", failed.len(), failed.join("\n"));
+}
