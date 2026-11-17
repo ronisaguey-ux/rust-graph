@@ -291,7 +291,12 @@ rust_graph_deep::grammar! { CSHARP {
     delegate_declaration: [attributes] [modifiers] "delegate" _type _name [type_parameters] formal_parameters [type_parameter_constraints] ";",
 
     base_list: ":" _type ("," _type)*,
-    type_parameter_constraints: "where" type_parameter_constraint ("," type_parameter_constraint)*,
+    // `where T1 : notnull where T2 : notnull`: a generic type with two
+    // constrained parameters writes a clause each, and the rule took one
+    // clause and then a comma list, so the second clause failed and took the
+    // whole class body with it - every two-constraint generic type in the
+    // corpus. A clause may also be repeated on a method.
+    type_parameter_constraints: "where" type_parameter_constraint ("," type_parameter_constraint | "where" type_parameter_constraint)*,
     type_parameter_constraint: _name ":" _constraint_item ("," _constraint_item)*,
     _constraint_item: "class" | "struct" | KW_NOTNULL | KW_UNMANAGED | new_constraint | _type,
     new_constraint: "new" empty_arguments,
