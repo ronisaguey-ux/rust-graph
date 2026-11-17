@@ -449,7 +449,10 @@ rust_graph_deep::grammar! { C {
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     alignof_expression: "_Alignof" cast_type,
     arguments: "(" (_argument %? ",") ")",
-    _argument: _expression@assign,
+    // A macro argument is an assignment expression, or a type the macro will
+    // splice into a cast: `_IOR('T', 0x14, char[96])`. No expression starts
+    // with a type keyword, so the two cannot be confused.
+    _argument: _expression@assign | type_name,
     subscript: "[" _expression "]",
 } }
 
