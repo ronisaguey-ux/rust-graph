@@ -281,6 +281,7 @@ pub const LANGUAGES: &[Language] = &[
         member_calls: true,
         tag: "JAVA",
         extensions: &["java"],
+        classes: &["class", "interface", "enum", "record"],
         global_names: true,
         imports: Imports::Path,
         import_words: &["import"],
