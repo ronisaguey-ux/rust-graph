@@ -367,6 +367,11 @@ rust_graph_deep::grammar! { C {
         | continue_statement
         | goto_statement
         | labeled_statement
+        // A case label may sit inside any block of the switch body, not only
+        // directly in it: iconv.c folds three encodings together with
+        // `if (0) { case UTF_32BE: … }` so one run of code serves all three.
+        | &("case" _expression@assign ":") case_statement
+        | &("default" ":") default_statement
         | static_assert_statement
         | asm_statement
         | declaration_statement
@@ -377,7 +382,9 @@ rust_graph_deep::grammar! { C {
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
     switch_statement: "switch" parenthesized_expression switch_body,
     switch_body: "{" _switch_item* "}",
-    _switch_item: case_statement | default_statement | _statement,
+    // A case label is one of `_statement`'s own forms now, so the body needs no
+    // separate list: `case 1: …` and `default: …` are statements in any block.
+    _switch_item: _statement,
     case_statement: "case" _expression@assign ":" _statement*,
     default_statement: "default" ":" _statement*,
     while_statement: "while" parenthesized_expression _statement,
