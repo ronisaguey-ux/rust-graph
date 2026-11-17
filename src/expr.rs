@@ -60,6 +60,14 @@ const C_TYPE_WORDS: [&str; 15] = [
     "volatile", "restrict", "struct",
 ];
 
+/// Whether a word opens a C declaration: a storage class or a type
+/// specifier. `int __cxa_atexit(void (*)(void *), void *);` and `static double
+/// pzero(double), qzero(double);` open with one, and the one-pass reader wrote
+/// the declarator as a call.
+pub(crate) fn c_declaration_word(word: &str) -> bool {
+    C_SPECIFIERS.contains(&word) || C_TYPE_WORDS.contains(&word) || matches!(word, "enum" | "union" | "_Atomic")
+}
+
 pub fn lexeme(src: &[u8], token: &Token, lang: &Language) -> String {
     let text = String::from_utf8_lossy(&src[token.start as usize..token.end as usize]);
     if lang.case_insensitive {

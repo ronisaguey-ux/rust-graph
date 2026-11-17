@@ -1864,6 +1864,18 @@ impl<'a> Parser<'a> {
             self.stmt.clear();
             return;
         }
+        // A C declaration is not a statement: `int __cxa_atexit(void (*)(void
+        // *), void *);` names a function and calls nothing, `static double
+        // pzero(double), qzero(double);` names two, and the one-pass reader
+        // wrote every declarator as a call. `__attribute__((...))` contents
+        // were calls too (`visibility("protected")`, `alloc_size(1)`). The CST
+        // writes no value for a declaration, so nothing the lexer read out of
+        // one is a fact the record should keep (18 corpus files).
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC") && self.c_declaration() {
+            self.brackets.clear();
+            self.stmt.clear();
+            return;
+        }
         // `pub(super) fn parse_with(..) -> (Workspace, Outcome)` is a
         // declaration header, not a statement: the block it opens is the same
         // symbol, and the header carries no value the CST records.
@@ -1889,6 +1901,59 @@ impl<'a> Parser<'a> {
         let mut stmt = stmt;
         stmt.clear();
         self.stmt = stmt;
+    }
+
+    /// Whether the statement in hand is a C declaration: a type or storage
+    /// class opens it (after any `__attribute__((...))`), it carries a
+    /// declarator's parenthesis, and it has no initializer and no body.
+    fn c_declaration(&self) -> bool {
+        let stmt = &self.stmt;
+        if stmt.is_empty() {
+            return false;
+        }
+        // `int x = f();` is a declaration whose value the CST writes, and its
+        // call is real: only a declaration with nothing to initialise is one
+        // the reader should keep nothing from. A body means a definition.
+        if stmt.iter().any(|token| self.is_op(token, b"=") || self.is_op(token, b"{")) {
+            return false;
+        }
+        if !stmt.iter().any(|token| self.is_op(token, b"(")) {
+            return false;
+        }
+        let mut at = 0;
+        // `__attribute__((__visibility__("hidden"))) int f(void);`: an
+        // attribute is part of the declaration it precedes, not a value of it.
+        while at < stmt.len()
+            && stmt[at].kind == Kind::Ident
+            && matches!(self.raw(&stmt[at]), b"__attribute__" | b"__attribute")
+        {
+            let mut depth = 0i32;
+            at += 1;
+            while at < stmt.len() {
+                if self.is_op(&stmt[at], b"(") {
+                    depth += 1;
+                } else if self.is_op(&stmt[at], b")") {
+                    depth -= 1;
+                    if depth <= 0 {
+                        at += 1;
+                        break;
+                    }
+                }
+                at += 1;
+            }
+        }
+        let Some(head) = stmt.get(at) else { return false };
+        if head.kind != Kind::Ident {
+            return false;
+        }
+        if crate::expr::c_declaration_word(&self.text(head)) {
+            return true;
+        }
+        // `hidden void __synccall(void (*)(void *), void *);`: an annotation
+        // macro sits exactly where a type does, so the word before a type word
+        // is the declaration's first word.
+        stmt.get(at + 1)
+            .is_some_and(|next| next.kind == Kind::Ident && crate::expr::c_declaration_word(&self.text(next)))
     }
 
     fn brace_statement(&mut self, stmt: &[Token]) {
