@@ -1768,7 +1768,12 @@ impl<'a> Parser<'a> {
         // no event. A decorator sharing its line with a declaration is not
         // caught here: that statement carries the class/function keyword and is
         // read normally.
-        if matches!(self.lang.tag, "TS" | "TSX")
+        // Kotlin's `@Test` / `@Suppress("x")` reads the same way: an
+        // annotation is not a value, and the CST writes no event for it. The
+        // one-pass lexer wrote the annotation's name as a fact on 806 corpus
+        // files. A `@JvmStatic fun f()` shares its line with the declaration
+        // keyword, so it is still read as the declaration it decorates.
+        if matches!(self.lang.tag, "TS" | "TSX" | "KT")
             && self.stmt.len() > 1
             && self.is_op(&self.stmt[0], b"@")
             && !self.stmt.iter().any(|token| {
@@ -1778,6 +1783,8 @@ impl<'a> Parser<'a> {
                         b"class" | b"function" | b"interface" | b"enum" | b"namespace"
                             | b"module" | b"let" | b"const" | b"var" | b"export" | b"declare"
                             | b"abstract" | b"async"
+                            | b"fun" | b"val" | b"object" | b"typealias" | b"constructor"
+                            | b"companion" | b"data" | b"sealed" | b"expect" | b"actual"
                     )
             })
         {
