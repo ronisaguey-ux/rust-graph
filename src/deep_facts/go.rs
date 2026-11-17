@@ -225,10 +225,15 @@ impl<'a> Walker<'a> {
         else {
             return;
         };
-        // The class is the first call in the initializer, in source order: the
-        // one-pass reader names a binding after the call at the head of the
-        // value, even when the chain goes on past it.
-        let mut pending = vec![initializer];
+        self.cs_bind_constructed(target, initializer);
+    }
+
+    /// Bind `target` to the class of the call at the head of `value`: the
+    /// one-pass reader names a binding after the first call it reads, even when
+    /// the chain goes on past it (`CreateHostBuilder(..)?.Build()` binds
+    /// `CreateHostBuilder`), and only a capitalised name is a class.
+    pub(crate) fn cs_bind_constructed(&mut self, target: String, value: u32) {
+        let mut pending = vec![value];
         let mut earliest: Option<(u32, u32)> = None;
         while let Some(node) = pending.pop() {
             if matches!(

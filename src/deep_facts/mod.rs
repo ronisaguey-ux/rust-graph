@@ -1351,23 +1351,29 @@ impl<'a> Walker<'a> {
             "assignment_expression" if self.kinds.calls.contains(&"object_creation_expression") => {
                 let children = self.children(id);
                 if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
+                    // `context.Response.Headers = ToBase64String(x)` binds the
+                    // dotted path, and `bytes[i / 2] = Convert.ToByte(..)` binds
+                    // the indexed name's base: both are bindings of a name, and
+                    // reading only a bare identifier lost all of them.
                     let target = children[..at]
                         .iter()
+                        .copied()
                         .rev()
-                        .find(|&&child| self.kind(child) == "identifier")
-                        .map(|&child| self.text_string(child));
+                        .find(|&child| !self.is_layout(child))
+                        .and_then(|child| match self.kind(child) {
+                            "identifier" => Some(self.text_string(child)),
+                            "element_access" | "indexer" => self
+                                .children(child)
+                                .into_iter()
+                                .find(|&node| !self.is_layout(node))
+                                .map(|node| self.path_of(node)),
+                            "member_access" | "field_access" => Some(self.path_of(child)),
+                            _ => None,
+                        })
+                        .filter(|path| !path.is_empty());
                     let value = children.get(at + 1).copied();
                     if let (Some(target), Some(value)) = (target, value) {
-                        if matches!(
-                            self.kind(value),
-                            "invocation_expression" | "object_creation" | "call_expression"
-                        ) {
-                            let path = self.decl_path(value);
-                            let last = path.rsplit('.').next().unwrap_or("").to_string();
-                            if !last.is_empty() {
-                                self.facts.vars.push((target, last));
-                            }
-                        }
+                        self.cs_bind_constructed(target, value);
                     }
                 }
             }
