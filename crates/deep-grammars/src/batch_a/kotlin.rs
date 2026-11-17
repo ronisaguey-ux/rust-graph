@@ -337,7 +337,12 @@ rust_graph_deep::grammar! { KOTLIN {
         [type_constraints] [function_body],
     function_body: block | "=" _expression,
     function_head: &(receiver_head) receiver_head | _name,
-    receiver_head: receiver_type "." _name,
+    /// `JettyApplicationEngineBase.Configuration.loadConfiguration`: an
+    /// extension can be declared on a qualified type, and the head is every
+    /// segment — receiver and name alike — because the name is the last one and
+    /// a parser that cannot backtrack cannot tell where the receiver ends. The
+    /// walk names the symbol after the last segment.
+    receiver_head: receiver_type ("." _name [type_arguments])+,
     receiver_type: _type_head [type_arguments] ["?"],
     parameter_list: "(" (parameter %? ",") ")",
     parameter: [parameter_modifiers] _name ":" _type ["=" _expression],
