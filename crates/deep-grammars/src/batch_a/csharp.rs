@@ -367,10 +367,11 @@ rust_graph_deep::grammar! { CSHARP {
         "bool" | "byte" | "sbyte" | "short" | "ushort" | "int" | "uint" | "long" | "ulong"
         | "char" | "float" | "double" | "decimal" | "object" | "string" | "void",
     tuple_type: "(" _tuple_element "," _tuple_element ("," _tuple_element)* ")",
-    // `(Type, string)`, `(int count, string name)`: a tuple element's name is
-    // optional, and the element required one, so a tuple type without names was
-    // two ERRORs and `Dictionary<(Type, string), T>` cost its whole file
-    // (C# corpus: 87 files carry a tuple type).
+// `(Type, string)`, `(int count, string name)`: a tuple element names its type and
+// may leave the name out. The required name made a tuple type without names
+// two ERRORs, and `Dictionary<(Type, string), T>` cost its whole file (87
+// files carried a tuple type); in a method's return type the same ERROR
+// swallowed the body with it.
     _tuple_element: _type [_name],
     dimensions: "[" ("," | _expression)* "]",
     type_arguments: "<" (_type %? ",") _gt,
@@ -456,7 +457,10 @@ rust_graph_deep::grammar! { CSHARP {
     goto_statement: "goto" ("case" _expression | "default" | _name) ";",
     yield_statement: "yield" ("return" _expression | "break") ";",
     expression_statement: _expression ";",
-    parenthesized_expression: "(" _expression ")",
+    // `return (src, hexMap);` and `(a, b) = (b, a);`: C#'s tuple expression is
+    // the only parenthesised form with commas, and the one-expression rule made
+    // every one of them an ERROR inside the parentheses.
+    parenthesized_expression: "(" _expression ("," _expression)* ")",
 
     // ---- expressions ----
 
