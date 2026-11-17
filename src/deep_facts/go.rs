@@ -406,8 +406,12 @@ impl<'a> Walker<'a> {
     /// assignment to `x`; a `var (...)` group is one expression statement.
     pub(crate) fn go_var(&mut self, id: u32) {
         let children = self.children(id);
-        if children.iter().any(|&child| self.kind(child) == "var_spec_list") {
-            return self.decl_statement(id);
+        if let Some(list) = children
+            .iter()
+            .copied()
+            .find(|&child| matches!(self.kind(child), "var_spec_list" | "const_spec_list"))
+        {
+            return self.go_decl_block(id, list);
         }
         let Some(spec) = children.iter().copied().find(|&child| matches!(self.kind(child), "var_spec" | "const_spec"))
         else {
@@ -447,6 +451,69 @@ impl<'a> Walker<'a> {
         for name in declared {
             self.lexer_event(b'a', line, std::slice::from_ref(&name), &value, false);
         }
+    }
+
+    /// `var ( a = 1; b string = "x" )`: the one-pass lexer opens no block at the
+    /// group's `(`, so the whole group is one expression statement whose value
+    /// is every name, type and initialiser in it, flat and in source order. The
+    /// `var` keyword is not a name to it and a spec is not a value of its own,
+    /// so reading the group as a merge of nested specs matched no file that
+    /// declares one: 425 corpus files made this their only loss.
+    pub(crate) fn go_decl_block(&mut self, id: u32, list: u32) {
+        let mut parts: Vec<String> = Vec::new();
+        for spec in self.children(list) {
+            if !matches!(self.kind(spec), "var_spec" | "const_spec") {
+                continue;
+            }
+            for child in self.children(spec) {
+                let kind = self.kind(child);
+                if self.is_layout(child) || matches!(kind, "," | "=" | "(" | ")") {
+                    continue;
+                }
+                if kind == "function_type" {
+                    let inner = self.children(child);
+                    let lists: Vec<u32> = inner
+                        .iter()
+                        .copied()
+                        .filter(|&row| self.kind(row) == "parameter_list")
+                        .collect();
+                    if let Some(&params) = lists.first() {
+                        let args = self.arguments(params);
+                        // The call atom has to name an entry in the symbol's call
+                        // table or the guard folds it back to the receiver.
+                        let index = self.push_call("func".to_string(), self.line(child));
+                        parts.push(format!("[\"c\",{index},0,{args}]"));
+                    }
+                    // `func(int) error`: an unparenthesised single result is a
+                    // name of its own beside the type's call. A parenthesised
+                    // result list (a second parameter list) is no name at all.
+                    if lists.len() == 1 {
+                        let result = inner.iter().copied().find(|&row| {
+                            !self.is_layout(row)
+                                && !matches!(self.kind(row), "func" | "parameter_list" | "pointer_type" | "map_type" | "slice_type" | "array_type")
+                        });
+                        if let Some(result) = result {
+                            let value = self.decl_value(result);
+                            if !value.is_empty() {
+                                parts.push(value);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let value = self.decl_value(child);
+                if !value.is_empty() {
+                    parts.push(value);
+                }
+            }
+        }
+        let line = self.line(id);
+        let value = match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        };
+        self.lexer_event(b'x', line, &[], &value, false);
     }
 
     /// `ch <- v`: the lexer reads the arrow as an assignment and names the
