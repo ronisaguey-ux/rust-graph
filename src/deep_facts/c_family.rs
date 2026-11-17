@@ -718,6 +718,22 @@ impl<'a> Walker<'a> {
                     }
                 }
                 if !inits.is_empty() {
+                    // `struct chunk *c = MEM_TO_CHUNK(start), *n = …;` and
+                    // `int sh=MIN(29,e2);`: the lexer ties the declared name to
+                    // the call on its right, and the resolver's typed-variable
+                    // edges come from that table. The binding was recorded only
+                    // for a `bare_user_declaration`, so every declarator written
+                    // the ordinary way lost its variable.
+                    for (name, node, _) in &inits {
+                        if self.kind(*node) != "call_expression" {
+                            continue;
+                        }
+                        let path = self.decl_path(*node);
+                        let last = path.rsplit('.').next().unwrap_or("").to_string();
+                        if !last.is_empty() {
+                            self.facts.vars.push((name.clone(), last));
+                        }
+                    }
                     // `char *a=0, *b=0, *c=0;`: the lexer unpacks the declarator
                     // list and keeps the later names as elements of the first
                     // binding's value - `t:[0,n:b,n:c]` - so writing one
@@ -1844,5 +1860,17 @@ mod designated_initializer_tests {
         let events = module_events("static const char map[] = {\n\t[SIGHUP] = 1,\n\t[SIGINT] = 'a',\n};\n");
         assert!(events.contains("[\"t\",[[\"n\",\"SIGHUP\"]]]"), "{events}");
         assert!(events.contains("[\"m\",[[\"t\",[[\"n\",\"SIGINT\"]]],0]]"), "{events}");
+    }
+    /// `struct chunk *c = MEM_TO_CHUNK(start), *n = …;`: each declarator whose
+    /// initialiser is a call binds the declared name to the callee.
+    #[test]
+    fn a_declarator_initialised_by_a_call_binds_its_name() {
+        let source = "void *MEM_TO_CHUNK(void *p);\nstruct chunk { int x; };\n\
+                      void f(void *start, void *end) {\n\tstruct chunk *c = MEM_TO_CHUNK(start), *n = MEM_TO_CHUNK(end);\n}\n";
+        let tree = deep_integration::parse_file(source.as_bytes(), Lang::C).expect("a C tree");
+        let facts = extract(source.as_bytes(), &tree, Lang::C);
+        let names: Vec<(&str, &str)> = facts.vars.iter().map(|(name, class)| (name.as_str(), class.as_str())).collect();
+        assert!(names.contains(&("c", "MEM_TO_CHUNK")), "{names:?}");
+        assert!(names.contains(&("n", "MEM_TO_CHUNK")), "{names:?}");
     }
 }
