@@ -462,20 +462,44 @@ impl<'a> Walker<'a> {
                     }
                 }
                 if has_body_type {
-                if let Some(declarator) = self
+                // `static struct fl { … } builtin, *head;`: every declarator
+                // after the body is a name the lexer keeps, as one tuple
+                // (`t:[n:builtin,n:head]`). Reading only the first left the
+                // rest of the declaration's names out of the record (musl's
+                // atexit list).
+                let mut names: Vec<(String, u32)> = Vec::new();
+                for declarator in self
                     .children(id)
                     .into_iter()
-                    .find(|&node| self.kind(node) == "direct_declarator")
+                    .filter(|&node| self.kind(node) == "direct_declarator")
                 {
                     if let Some(name_node) = self.child_of_kind(declarator, "identifier") {
                         let name = self.text_string(name_node);
                         if !name.is_empty() {
-                            let line = self.line(name_node);
-                            let mut value = String::from("[\"n\",");
-                            push_string(&mut value, &name);
-                            value.push(']');
-                            self.lexer_event(b'x', line, &[], &value, false);
+                            names.push((name, name_node));
                         }
+                    }
+                }
+                if let Some((name, name_node)) = names.first() {
+                    if names.len() == 1 {
+                        let line = self.line(*name_node);
+                        let mut value = String::from("[\"n\",");
+                        push_string(&mut value, name);
+                        value.push(']');
+                        self.lexer_event(b'x', line, &[], &value, false);
+                    } else {
+                        let line = self.line(*name_node);
+                        let parts: Vec<String> = names
+                            .iter()
+                            .map(|(name, _)| {
+                                let mut part = String::from("[\"n\",");
+                                push_string(&mut part, name);
+                                part.push(']');
+                                part
+                            })
+                            .collect();
+                        let value = format!("[\"t\",[{}]]", parts.join(","));
+                        self.lexer_event(b'x', line, &[], &value, false);
                     }
                 }
                 }
