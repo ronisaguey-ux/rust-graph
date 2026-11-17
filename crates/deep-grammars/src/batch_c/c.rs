@@ -207,17 +207,23 @@ rust_graph_deep::grammar! { C {
     /// Only file scope accepts this: inside a function `x * y;` must stay a
     /// multiplication.
     user_pointer_declaration: user_type_name _pointer_named_declarator ("," _pointer_named_declarator)* ";",
-    _pointer_named_declarator: pointer* IDENT _declarator_suffix* attribute* ["=" _initializer],
+    _pointer_named_declarator: pointer* IDENT _declarator_suffix* attribute* ["=" _value_seq],
     /// `typedef Foo (*handler)(void);`: a typedef whose type is a typedef name.
     typedef_user_declaration: "typedef" user_type_name _init_declarator ("," _init_declarator)* ";",
     /// `Foo x;`: a typedef name and a named declarator. It never starts with a
     /// `*`, so `x * y;` in a function stays a multiplication.
     bare_user_declaration: user_type_name _named_init_declarator ("," _named_init_declarator)* ";",
-    _named_init_declarator: IDENT _declarator_suffix* attribute* ["=" _initializer],
+    _named_init_declarator: IDENT _declarator_suffix* attribute* ["=" _value_seq],
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     /// A typedef name where a type specifier is expected.
     user_type_name: IDENT,
-    _init_declarator: _declarator attribute* ["=" _initializer],
+    _init_declarator: _declarator attribute* ["=" _value_seq],
+    /// A preprocessor conditional is trivia, so both branches of
+    /// `bool have_dss =\n#ifdef X\n true\n#else\n false\n#endif\n ;` reach the
+    /// parser as two juxtaposed values. C has no operator between two operands,
+    /// so a run of initialisers is never ambiguous; the reader keeps the last
+    /// one, which is what the one-pass lexer files.
+    _value_seq: _initializer _initializer*,
     _initializer: designated_field | designated_index | _expression@assign | initializer_list,
     initializer_list: "{" (_initializer %? ",") "}",
     /// C99 `.name = value` inside an initializer list.

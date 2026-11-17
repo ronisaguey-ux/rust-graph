@@ -1086,6 +1086,16 @@ impl<'a> Walker<'a> {
             if let Some(name) = pending.take() {
                 let line = statement.unwrap_or_else(|| self.line(child));
                 out.push((name, child, line));
+                continue;
+            }
+            // A second value after the same declarator is the other branch of a
+            // preprocessor conditional (`= #ifdef … true #else false #endif`);
+            // the lexer keeps the last one it read, so the later value replaces
+            // the earlier.
+            if let Some(last) = out.last_mut() {
+                let line = statement.unwrap_or_else(|| self.line(child));
+                last.1 = child;
+                last.2 = line;
             }
         }
     }
