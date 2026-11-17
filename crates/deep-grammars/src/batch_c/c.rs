@@ -156,6 +156,8 @@ rust_graph_deep::grammar! { C {
         | &(IDENT _qualified_tail) macro_qualified_item
         | &(declaration_specifiers IDENT _qualified_tail) specified_macro_item
         | &(IDENT parameter_list "{") implicit_function
+        | &(user_type_name parenthesized_name parameter_list) user_declarator_statement
+        | &(user_type_name "*" parenthesized_name parameter_list) user_declarator_statement
         | &(user_type_name "*") user_pointer_declaration
         | declaration_statement
         | static_assert_statement
@@ -189,6 +191,8 @@ rust_graph_deep::grammar! { C {
         | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
         | &(user_type_name _declarator "{") bare_user_function_definition
         | &(IDENT parameter_list "{") implicit_function
+        | &(user_type_name parenthesized_name parameter_list) user_declarator_statement
+        | &(user_type_name "*" parenthesized_name parameter_list) user_declarator_statement
         | &(user_type_name "*") user_pointer_declaration
         | declaration_statement
         | static_assert_statement,
@@ -203,6 +207,15 @@ rust_graph_deep::grammar! { C {
         | _default_declaration,
     /// `static const Foo *f(void);`: a keyword-qualified typedef name.
     specified_user_declaration: declaration_specifiers user_type_name (_init_declarator % ",") ";",
+    /// `LUALIB_API lua_Number (luaL_optnumber) (lua_State *L, int n, lua_Number def);`:
+    /// a typedef-name return type and a parenthesised declarator. A macro call
+    /// never writes a name and then a parameter list, so the second group is
+    /// what tells the two apart, and only file scope accepts it.
+    user_declarator_statement: user_type_name _declarator attribute* ";",
+    /// `(luaL_checknumber)` in front of a parameter list is a parenthesised
+    /// declarator, not a call: the two groups are what tells a prototype from a
+    /// macro call, so the guard reads them as rules of their own.
+    parenthesized_name: "(" IDENT ")",
     /// `buffer *buffer_new(int size);`: a typedef name and a pointer declarator.
     /// Only file scope accepts this: inside a function `x * y;` must stay a
     /// multiplication.

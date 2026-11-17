@@ -372,7 +372,7 @@ impl<'a> Walker<'a> {
             // as the run of names on its line (plus the initializer's value when
             // there is one), so the CST writes the same event instead of
             // dropping the statement as layout.
-            "declaration_statement" | "declaration" => {
+            "declaration_statement" | "declaration" | "user_declarator_statement" => {
                 // `typedef enum { A = 0, B } T;`: the C grammar flattens the
                 // enumerators into the body itself, so the shared `enum_body`
                 // arm (which reads `enum_member` nodes) writes nothing for a C
@@ -490,6 +490,33 @@ impl<'a> Walker<'a> {
                                 }),
                         ) {
                             let name = name_node;
+                            // `lua_Number (luaL_optnumber) (lua_State *L, int n);`:
+                            // a declaration that opens on a typedef name is one
+                            // call of that name to the one-pass reader, and its
+                            // only argument is the declared name the parenthesis
+                            // holds. Read as a prototype it disagreed on every
+                            // such line in lua's headers.
+                            if forced.is_none() && !name.is_empty() && self.c_own_parenthesized_declarator(id) {
+                                let text = self.text_string(id);
+                                if let Some(word) = leading_word(text.trim_start()) {
+                                    if !crate::expr::c_declaration_word(word) {
+                                        let word = word.to_string();
+                                        let line = self.line(id);
+                                        let index = self.push_call(word, line);
+                                        let mut arg = String::from("[[\"n\",");
+                                        push_string(&mut arg, &name);
+                                        arg.push_str("]]");
+                                        self.lexer_event(
+                                            b'x',
+                                            line,
+                                            &[],
+                                            &format!("[\"c\",{index},0,{arg}]"),
+                                            false,
+                                        );
+                                        return true;
+                                    }
+                                }
+                            }
                             if !name.is_empty() {
                                 let line = self.line(id);
                                 let text = self.text_string(id);
@@ -504,6 +531,15 @@ impl<'a> Walker<'a> {
                                         names.push(word.to_string());
                                     }
                                     rest = rest[word.len()..].trim_start();
+                                }
+                                // `lua_Number (luaL_optnumber) (…)`: a typedef
+                                // name in front of the parenthesised declarator
+                                // is a call to the one-pass reader, so the
+                                // prototype owes that call as well as its own.
+                                for word in &names {
+                                    if !KEYWORDS.contains(&word.as_str()) {
+                                        self.push_call(word.clone(), line);
+                                    }
                                 }
                                 let mut args: Vec<String> = Vec::new();
                                 let mut group: Vec<String> = Vec::new();
@@ -1837,5 +1873,14 @@ mod designated_initializer_tests {
     fn a_macro_initialiser_on_a_pointer_declaration_binds_its_variable() {
         let vars = module_vars("void f(void) {\n  global_State *g = G(L);\n}\n");
         assert!(vars.contains(&("g".to_string(), "G".to_string())), "{vars:?}");
+    }
+
+    /// `LUALIB_API lua_Number (luaL_optnumber) (lua_State *L, int n);`: a
+    /// declaration that opens on a typedef name is one call of that name to the
+    /// one-pass reader, with the parenthesised declarator as its argument.
+    #[test]
+    fn a_typedef_named_prototype_reads_as_its_own_call() {
+        let events = module_events("LUALIB_API lua_Number (luaL_optnumber) (lua_State *L, int n);\n");
+        assert!(events.contains("[\"c\",0,0,[[\"n\",\"luaL_optnumber\"]]]"), "{events}");
     }
 }
