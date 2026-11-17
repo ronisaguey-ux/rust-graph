@@ -4053,7 +4053,9 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         // The statement headers (`using (var f = ...)`, `lock (gate)`,
         // `switch (k)`, `when (p)`) are the same shape and are not calls either.
         // `new`, `this` and `base` stay out: they head a target-typed
-        // construction or a chained constructor, which is a real call.
+        // construction or a chained constructor, which is a real call. No word
+        // here can name a value in C#, so no real call is excused (`unchecked`
+        // alone covered 284 files).
         "CS" => &[
             "if", "for", "foreach", "while", "do", "switch", "case", "catch", "when", "using", "lock", "fixed",
             "unsafe", "is", "as", "in", "out", "ref", "params", "default", "checked", "unchecked", "nameof",
