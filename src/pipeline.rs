@@ -4020,6 +4020,15 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
             "int", "char", "void", "unsigned", "signed", "long", "short", "float", "double", "const", "struct",
             "union", "enum", "static", "extern", "inline", "register", "volatile", "typedef", "auto", "sizeof",
         ],
+        // Kotlin: `when (val t = transport)` puts a declaration inside the
+        // subject's parentheses and the one-pass reader files the keyword as a
+        // callee with that declaration as its argument. `when`, `try`, `catch`,
+        // `else`, `object` and `do` are reserved words: none of them can name a
+        // function, so the CST's statement is the whole fact.
+        "KT" => &[
+            "if", "for", "while", "return", "switch", "function", "when", "try", "catch", "else", "object",
+            "do", "is", "as", "in",
+        ],
         _ => &["if", "for", "while", "return", "switch", "function", "func", "fn", "def"],
     };
     keywords.contains(&name)
