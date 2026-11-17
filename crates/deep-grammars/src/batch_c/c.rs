@@ -400,7 +400,8 @@ rust_graph_deep::grammar! { C {
     },
 
     _primary:
-        &(cast_type) cast_expression
+        &(compound_head "{") compound_literal
+        | &(cast_type) cast_expression
         | &(user_cast_head (IDENT | NUMBER | STR | CHAR_LITERAL)) user_cast_expression
         | sizeof_expression
         | alignof_expression
@@ -414,6 +415,25 @@ rust_graph_deep::grammar! { C {
     _member: IDENT,
     string: STR+,
     cast_expression: cast_type _expression@unary,
+    /// `(posix_spawnattr_t){ 0 }`, `(long[]){ (long)m, type }`: a compound
+    /// literal is a type and an initializer list, not a cast of one. Read as a
+    /// cast the initializer was left over and the statement was recovered as
+    /// an error, which cost every file that used one more than the 1% budget
+    /// allows (26 corpus files, musl and redis).
+    compound_literal: compound_head initializer_list,
+    compound_head: "(" _compound_type_body ")",
+    _compound_type_body:
+        &(type_name) type_name
+        | &(_user_cast_type) _user_cast_type
+        | _array_only_type
+        | _named_array_type
+        | user_type_name,
+    /// `long[]`, `long[6]`: a keyword type with an abstract suffix. `type_name`
+    /// does not accept one — its abstract declarator always starts with a `*` —
+    /// and a compound literal writes `(long[]){ … }` without one.
+    _array_only_type: declaration_specifiers abstract_suffix+,
+    /// `Foo[]`, `Foo[3]`: the same for a typedef name.
+    _named_array_type: user_type_name abstract_suffix+,
     /// `(PyCFunction) f`: a cast to a typedef name. It is read as a cast only
     /// when an operand that cannot be a binary operator follows, so `(a) * b`
     /// stays a multiplication.
