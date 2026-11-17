@@ -217,6 +217,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn a() {\n    assert_matches!(r, ActivityTask { variant: Some(x), .. });\n}\n",
     ),
     (
+        "a block a postfix chain keeps is a value, not a body (001556_build_phase.rs:880)",
+        "fn f() {\n    let result = {\n        let a = 1;\n        a\n    }\n    .catch_unwind()\n    .await;\n}\n",
+    ),
+    (
         "a match inside a binary chain is a value of the chain (001556_build_phase.rs:716)",
         "fn f(io: &Io, spec: &Value) -> bool {\n    let Some(comp) = spec.get(\"comp\") else { return false; };\n    (true || true)\n        && match sha(io) { Some(h) => true, None => false }\n        && ok(io, comp)\n        && false\n}\n",
     ),

@@ -677,6 +677,46 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether the brace just read closes a block that a postfix chain
+    /// continues: `{ … }.await`, `{ … }?`, `{ … }()`.
+    fn brace_continued(&mut self) -> bool {
+        let mut depth = 0i32;
+        for at in 0..MAX_BRACE_SCAN {
+            let token = self.peek_token(at);
+            if token.kind == Kind::Eof {
+                return false;
+            }
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(&token) {
+                b"{" | b"(" | b"[" => depth += 1,
+                b"}" | b")" | b"]" => {
+                    depth -= 1;
+                    if depth < 0 {
+                        // The chain may start on the line after the brace
+                        // (`}\n    .catch_unwind()`), so the line breaks between
+                        // them are skipped before the operator is read.
+                        let mut next_at = at + 1;
+                        loop {
+                            let next = self.peek_token(next_at);
+                            if next.kind == Kind::Newline {
+                                next_at += 1;
+                                continue;
+                            }
+                            if next.kind == Kind::Eof {
+                                return false;
+                            }
+                            return next.kind == Kind::Op && matches!(self.raw(&next), b"." | b"?");
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Whether a `{` here starts statements rather than a value.
     fn is_block(&mut self) -> bool {
         // `if let Some(x) = e {`: the statement holds a `=` and the old test
@@ -709,6 +749,16 @@ impl<'a> Parser<'a> {
                     !bars.is_empty() && self.stmt.iter().any(|token| self.is_op(token, b"->"))
                 };
             if closure_header {
+                return true;
+            }
+            // Rust has no object literal, so a brace straight after `=` opens a
+            // block of statements: `let stem = { use …; static …; … };`. Read as
+            // a value, the block's statements merged into one event the CST
+            // never writes (001556_build_phase.rs:880). A block the chain keeps
+            // (`{ … }.catch_unwind().await`) is still a value: the method that
+            // follows it is the statement's own, and cutting the statement at the
+            // brace lost that call's line (001072_polling_tests.rs:469).
+            if self.stmt.last().is_some_and(|token| self.is_op(token, b"=")) && !self.brace_continued() {
                 return true;
             }
             // `… && match sha256_file(io, file) { … } && …`: a `match` inside a
