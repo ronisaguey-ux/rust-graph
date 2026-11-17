@@ -79,7 +79,8 @@ impl<'a> Walker<'a> {
             "short_var_declaration" | "assignment_statement" => self.go_assign(id),
             "return_statement" => self.go_return(id),
             "var_declaration" | "const_declaration" => self.go_var(id),
-            "call_expression" | "defer_statement" | "go_statement" | "inc_statement" | "send_statement" => {
+            "send_statement" => self.go_send(id),
+            "call_expression" | "defer_statement" | "go_statement" | "inc_statement" => {
                 self.decl_statement(id)
             }
             _ => return false,
@@ -425,6 +426,29 @@ impl<'a> Walker<'a> {
         for name in declared {
             self.lexer_event(b'a', line, std::slice::from_ref(&name), &value, false);
         }
+    }
+
+    /// `ch <- v`: the lexer reads the arrow as an assignment and names the
+    /// channel as its target, so the CST has to write an `a` row with the same
+    /// target and the sent value; as a plain expression the marker never
+    /// matched and every send statement lost its line.
+    pub(crate) fn go_send(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(arrow) = children
+            .iter()
+            .position(|&child| self.kind(child) == "<-" || self.text_string(child) == "<-")
+        else {
+            return self.decl_statement(id);
+        };
+        let target = children[..arrow]
+            .iter()
+            .filter(|&&child| !self.is_layout(child))
+            .find_map(|&child| self.decl_target(child))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let value = self.decl_values(&children[arrow + 1..]);
+        let line = self.line(id);
+        self.lexer_event(b'a', line, &target, &value, false);
     }
 
     /// `if cond {`, `for i := 0; i < n; i++ {`, `switch x {`: every statement the
