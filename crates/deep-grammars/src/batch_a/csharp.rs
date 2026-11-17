@@ -313,24 +313,24 @@ rust_graph_deep::grammar! { CSHARP {
         | &([attributes] [modifiers] _type "operator") operator_declaration
         | &([attributes] [modifiers] _type "this") indexer_declaration
         | &([attributes] [modifiers] "event") event_declaration
-        | &([attributes] [modifiers] _type _name [type_parameters] formal_parameters) method_declaration
-        | &([attributes] [modifiers] _type _name "=>") expression_bodied_member
-        | &([attributes] [modifiers] _type _name property_body) property_declaration
+        | &([attributes] [modifiers] _type _member_name [type_parameters] formal_parameters) method_declaration
+        | &([attributes] [modifiers] _type _member_name "=>") expression_bodied_member
+        | &([attributes] [modifiers] _type _member_name property_body) property_declaration
         | field_declaration
         | ";",
 
-    method_declaration: [attributes] [modifiers] _type _name [type_parameters] formal_parameters [type_parameter_constraints] (block | "=>" _expression ";" | ";"),
-    expression_bodied_member: [attributes] [modifiers] _type _name "=>" _expression ";",
+    method_declaration: [attributes] [modifiers] _type _member_name [type_parameters] formal_parameters [type_parameter_constraints] (block | "=>" _expression ";" | ";"),
+    expression_bodied_member: [attributes] [modifiers] _type _member_name "=>" _expression ";",
     constructor_declaration: [attributes] [modifiers] _name formal_parameters [constructor_initializer] (block | "=>" _expression ";"),
     constructor_initializer: ":" ("base" | "this") arguments,
     destructor_declaration: [attributes] [modifiers] "~" _name empty_arguments block,
-    property_declaration: [attributes] [modifiers] _type _name property_body [property_tail],
+    property_declaration: [attributes] [modifiers] _type _member_name property_body [property_tail],
     property_tail: "=" _expression@assign ";" | ";",
     property_body: "{" accessor_declaration* "}",
     accessor_declaration: [attributes] [modifiers] ("get" | "set" | "init" | "add" | "remove") (block | ";"),
     indexer_declaration: [attributes] [modifiers] _type "this" indexer_parameters property_body [property_tail],
     indexer_parameters: "[" (parameter %? ",") "]",
-    event_declaration: [attributes] [modifiers] "event" _type _name event_tail,
+    event_declaration: [attributes] [modifiers] "event" _type _member_name event_tail,
     event_tail: event_accessors | ";" | "=" _expression ";",
     event_accessors: "{" accessor_declaration* "}",
     operator_declaration: [attributes] [modifiers] ["implicit" | "explicit"] _type "operator" _operator_token formal_parameters (block | "=>" _expression ";"),
@@ -530,6 +530,12 @@ rust_graph_deep::grammar! { CSHARP {
     checked_expression: ("checked" | "unchecked") checked_arguments,
     checked_arguments: "(" _expression ")",
     stackalloc_expression: "stackalloc" _type [array_initializer],
+
+    // `int IJsonLineInfo.LinePosition => ...`: an explicit interface
+    // implementation names its member with the interface in front, and every
+    // member rule took a single `_name`, so the whole file was one ERROR
+    // (C# corpus: the largest recovery cluster).
+    _member_name: _name ["." _name],
 
     _name:
         IDENT | "async" | "record" | "partial" | "where" | "get" | "set" | "init" | "add"
