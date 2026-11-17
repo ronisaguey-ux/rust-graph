@@ -1537,6 +1537,13 @@ impl<'a> Parser<'a> {
     }
 
     fn control_condition_before(&mut self, stmt: &[Token]) {
+        // `catch (IOException ioe)` declares the handler's variable and assigns
+        // nothing: the CST writes no value for the header, and read as one the
+        // parameter became an `x` event with an empty target list — 1,246
+        // losses over 438 files, the second-largest java cluster in the dump.
+        if self.lang.tag == "JAVA" && self.word_at(stmt, 0).as_deref() == Some("catch") {
+            return;
+        }
         // Python's `match subject:` is a switch and `case pattern:` is a label:
         // neither writes a value the CST records, and the guard read both
         // events as lost the moment the CST (rightly) wrote nothing.
