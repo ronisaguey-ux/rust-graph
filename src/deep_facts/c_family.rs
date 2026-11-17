@@ -235,6 +235,14 @@ impl<'a> Walker<'a> {
             // at file scope, on a line that opens with `}` and closes with `;`;
             // the lexer writes that name, so it is read from the line (13 files).
             "ERROR" => {
+                // `{ 0x80, 36 },` repeated: a header that is a preprocessor
+                // fragment has no translation unit to parse, so the grammar
+                // leaves its braces and numbers in one ERROR region and the file
+                // wrote no value at all. The lexer reads one tuple per line, so
+                // the region is read line by line (206 rows, gb18030utf.h).
+                if self.c_fragment_values(id) {
+                    return false;
+                }
                 // The region itself carries only the `}` (the declarator after it
                 // is lost outright), so the name is read from the line.
                 let line = self.line(id);
@@ -1168,6 +1176,31 @@ impl<'a> Walker<'a> {
         None
     }
 
+    /// One tuple event per line of an `ERROR` region that holds a preprocessor
+    /// fragment's brace groups. Answers whether it wrote anything, so the
+    /// caller can fall back to its own reading of the region.
+    fn c_fragment_values(&mut self, id: u32) -> bool {
+        let text = self.text_string(id);
+        let first = self.line(id);
+        let lines = text.matches('\n').count() as u32 + 1;
+        let mut wrote = false;
+        for offset in 0..lines {
+            let line = first + offset;
+            let (Some(start), Some(end)) = (
+                self.line_starts.get(line.saturating_sub(1) as usize).copied(),
+                self.line_starts.get(line as usize).copied(),
+            ) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&self.src[start as usize..end as usize]);
+            if let Some(value) = brace_group_value(text.trim()) {
+                self.lexer_event(b'x', line, &[], &value, false);
+                wrote = true;
+            }
+        }
+        wrote
+    }
+
     /// Every `parameter_list` inside `id`, in source order, not descending
     /// into a body or an initialiser.
     fn c_parameter_lists(&self, id: u32, out: &mut Vec<u32>) {
@@ -1655,6 +1688,45 @@ fn line_starts(src: &[u8]) -> Vec<u32> {
 }
 
 /// The identifier characters at the start of `text`, if any.
+/// `{ 0x80, 36 },` on a line of its own: the one value a preprocessor
+/// fragment writes. The lexer reads the brace group as a tuple of its elements,
+/// one constant each, and the comma after the group ends the statement.
+fn brace_group_value(line: &str) -> Option<String> {
+    let text = line.trim();
+    let rest = text.strip_prefix('{')?;
+    let mut depth = 1i32;
+    let mut elements = 1usize;
+    let mut empty = true;
+    for (at, ch) in rest.char_indices() {
+        match ch {
+            '{' => {
+                depth += 1;
+                empty = false;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let tail = rest[at + 1..].trim();
+                    if !tail.is_empty() && tail != "," {
+                        return None;
+                    }
+                    if empty {
+                        return None;
+                    }
+                    let mut parts: Vec<&str> = vec!["0"; elements];
+                    parts[0] = "0";
+                    return Some(format!("[\"t\",[{}]]", parts.join(",")));
+                }
+                empty = false;
+            }
+            ',' if depth == 1 => elements += 1,
+            ch if !ch.is_whitespace() => empty = false,
+            _ => {}
+        }
+    }
+    None
+}
+
 fn leading_word(text: &str) -> Option<&str> {
     let end = text
         .char_indices()
