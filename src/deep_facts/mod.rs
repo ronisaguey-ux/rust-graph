@@ -1003,6 +1003,19 @@ impl<'a> Walker<'a> {
             // `public IJEnumerable<int> this[object key] { get; }`: an indexer
             // is a header statement to the lexer, with `this` spelled `self`.
             "indexer_declaration" => self.java_header_event(id),
+            // `public IEnumerable<ServerType> ServerTypes => Enum.GetValues(...)`: a
+            // property written with `=>`. The header is the statement both readers
+            // agree on, but the arm claimed the node, so the calls inside the
+            // expression body were never recorded (`call Enum.GetValues line 3`)
+            // and the file fell back on the one call it lost.
+            "expression_bodied_member" => {
+                self.java_header_event(id);
+                let mut calls = Vec::new();
+                self.c_calls_in_pub(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
             "property_declaration" => {
                 if self.kinds.calls.contains(&"object_creation_expression") {
                     self.java_header_event(id);
