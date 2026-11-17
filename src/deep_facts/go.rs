@@ -1108,6 +1108,28 @@ impl<'a> Walker<'a> {
                 continue;
             }
             match child_kind {
+                // `const { files = [], ...error } = require("m")`: a rest
+                // element binds its name from the module like a shorthand does,
+                // and the walker had no arm for it, so the import lost its name.
+                "rest_pattern" => {
+                    let name = self
+                        .children(child)
+                        .into_iter()
+                        .find(|&kid| {
+                            let kk = self.kind(kid);
+                            kk == "identifier" || Self::js_name_word(kk)
+                        })
+                        .map(|kid| self.text_string(kid));
+                    if let Some(name) = name {
+                        self.facts.imports.push(Import {
+                            line,
+                            module: module.into(),
+                            name: name.clone(),
+                            alias: name,
+                            kind: IMPORT_MODULE,
+                        });
+                    }
+                }
                 "object_assignment_pattern" | "assignment_pattern" => {
                     if let Some(&first) = self.children(child).first() {
                         let name = self.text_string(first);
