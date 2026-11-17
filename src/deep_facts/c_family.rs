@@ -709,6 +709,15 @@ impl<'a> Walker<'a> {
                         }
                         let value = format!("[\"t\",[{}]]", parts.join(","));
                         self.lexer_event(b'a', line, &[name], &value, false);
+                        // `int sh=MIN(9,-e2), need=1+…;`: each declarator's own
+                        // initialiser still binds its name to the class its value
+                        // constructs, and writing only the tuple dropped every
+                        // later binding from the vars table.
+                        for (other, node, _) in &inits {
+                            if let Some(class) = self.constructed(*node) {
+                                self.facts.vars.push((other.clone(), class));
+                            }
+                        }
                     }
                 } else if form != "0" && !wrote_prototype {
                     let line = self.line(id);
