@@ -353,7 +353,7 @@ rust_graph_deep::grammar! { C {
         // binds a value — `x * y = 1;` is not an assignment anyone writes, so
         // the initialiser is what tells this declaration from the product,
         // and `x * y;` still reads as one.
-        | &(user_type_name pointer+ IDENT "=") user_pointer_declaration
+        | &(user_type_name pointer+ IDENT array_suffix* attribute* "=") user_pointer_declaration
         | declaration_statement
         | expression_statement,
 
