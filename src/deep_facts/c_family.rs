@@ -298,9 +298,37 @@ impl<'a> Walker<'a> {
                     }
                 }
                 let args: Vec<String> = attributes.clone();
-                let call = format!("[\"c\",{index},0,[{}]]", args.join(","));
-                let mut parts = vec![call];
+                // `@property UIView *topView;` with no attribute list is the
+                // bare word to the one-pass reader, not a call with no
+                // arguments - written as a call it named `c(0;[])` where the
+                // lexer wrote `n:property`.
+                let mut parts = if args.is_empty() {
+                    vec![name_form("property")]
+                } else {
+                    vec![format!("[\"c\",{index},0,[{}]]", args.join(","))]
+                };
                 parts.extend(rest.iter().map(|name| name_form(name)));
+                let value = format!("[\"m\",[{}]]", parts.join(","));
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
+            // `@implementation YYKVStorage`: the header line is a statement to
+            // the lexer, and nothing read the node, so every implementation -
+            // the first line of every .m file - lost its line.
+            "objc_implementation" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, "implementation");
+                form.push(']');
+                parts.push(form);
+                for child in self.children(id) {
+                    for name in self.c_words_of(child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &name);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                }
                 let value = format!("[\"m\",[{}]]", parts.join(","));
                 self.lexer_event(b'x', line, &[], &value, false);
             }

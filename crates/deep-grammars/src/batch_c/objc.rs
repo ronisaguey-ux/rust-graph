@@ -100,6 +100,10 @@ rust_graph_deep::grammar! { OBJC {
         AT_IMPORT = "@import",
         AT_DEFS = "@defs",
         AT_MACRO = "@macro",
+        /// `IBOutlet` / `IBInspectable`: interface-builder words that stand
+        /// between a property's attribute list and its type.
+        KW_IBOUTLET = "IBOutlet",
+        KW_IBINSPECTABLE = "IBInspectable",
         AT_LBRACE = "@{",
         AT_LBRACKET = "@[",
         AT_NUMBER = "@number",
@@ -343,7 +347,12 @@ rust_graph_deep::grammar! { OBJC {
     objc_implementation: "@implementation" IDENT [":" IDENT] [category] [ivar_block] _implementation_item* "@end",
     _implementation_item: objc_method_definition | &(declaration_specifiers _declarator "{") function_definition | objc_synthesize | objc_dynamic | declaration_statement | ";",
     objc_method_definition: ("-" | "+") [method_type] method_selector compound_statement,
-    objc_method_declaration: ("-" | "+") [method_type] method_selector ";",
+    /// `- (instancetype)initWithFrame:(CGRect)frame NS_REQUIRES_SUPER;`: a
+    /// declaration may carry attribute macros after its parameter list, and a
+    /// required `;` straight after the selector made every one of those an
+    /// ERROR - which took the whole interface with it.
+    objc_method_declaration: ("-" | "+") [method_type] method_selector macro_attribute* ";",
+    macro_attribute: IDENT,
     /// `- (void)run:(void (^)(void))done;` and `+ (instancetype)f:(id (^)(id))b;`:
     /// a block-typed parameter. The type is a type, a caret in parentheses and
     /// the block's own parameter list; the grammar had no such type, so every
@@ -364,7 +373,12 @@ rust_graph_deep::grammar! { OBJC {
     objc_class_declaration: "@class" (_class_name % ",") ";",
     _class_name: IDENT [_type_arguments],
 
-    objc_property_declaration: "@property" [property_attributes] _property_type (_declarator % ",") ";",
+    /// `@property (strong, nonatomic) IBOutlet UIImageView *imageView;`: an
+    /// interface-builder modifier is a bare macro between the attribute list and
+    /// the type, and the rule had no room for one - every IBOutlet property in
+    /// the corpus was four ERRORs and took its class body with it.
+    objc_property_declaration: "@property" [property_attributes] property_qualifier* _property_type (_declarator % ",") ";",
+    property_qualifier: KW_IBOUTLET | KW_IBINSPECTABLE,
     _property_type: declaration_specifiers | plain_type_name [_type_arguments],
     property_attributes: "(" (_property_attribute % ",") ")",
     _property_attribute: IDENT ["=" IDENT],
@@ -577,6 +591,8 @@ fn keyword(text: &[u8]) -> Kind {
         b"goto" => KW_GOTO,
         b"if" => KW_IF,
         b"in" => KW_IN,
+        b"IBOutlet" => KW_IBOUTLET,
+        b"IBInspectable" => KW_IBINSPECTABLE,
         b"inline" => KW_INLINE,
         b"int" => KW_INT,
         b"long" => KW_LONG,
