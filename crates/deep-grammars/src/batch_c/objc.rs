@@ -144,7 +144,8 @@ rust_graph_deep::grammar! { OBJC {
     translation_unit: _top_item*,
 
     _top_item:
-        &(declaration_specifiers _declarator "{") function_definition
+        &("typedef" IDENT arguments) macro_enum_declaration
+        | &(declaration_specifiers _declarator "{") function_definition
         | &(plain_type_name _declarator "{") user_function
         | objc_interface
         | objc_implementation
@@ -152,7 +153,14 @@ rust_graph_deep::grammar! { OBJC {
         | objc_protocol
         | objc_class_declaration
         | objc_import
+        | &(IDENT arguments ";") macro_call_statement
         | declaration_statement,
+
+    /// `EXPMatcherInterface(endWith, (id expected));`, `NS_ENUM_BEGIN(…)`:
+    /// a macro invocation with a semicolon that expands to something the
+    /// grammar cannot see. Expecta and the UIKit headers are full of them and
+    /// every one was an error node at file scope.
+    macro_call_statement: IDENT arguments ";",
 
     function_definition: declaration_specifiers _declarator compound_statement,
     user_function: plain_type_name _declarator compound_statement,
@@ -185,6 +193,14 @@ rust_graph_deep::grammar! { OBJC {
     _struct_declaration: declaration_specifiers (_struct_declarator % ",") ";",
     _struct_declarator: _declarator [":" _expression@assign],
 
+    /// `typedef NS_ENUM(NSUInteger, YYTextGrabberDirection) { kStart = 1, … };`
+    /// and `typedef NS_OPTIONS(NSUInteger, X) { … };`: the Foundation macro that
+    /// declares an enum. The macro's arguments sit between `typedef` and the
+    /// body, so the ordinary declaration path saw `typedef NS_ENUM` as a type
+    /// and then a brace it could not place — one error node per enum, and every
+    /// Apple-flavoured header has one.
+    macro_enum_declaration: "typedef" IDENT arguments enum_body ";",
+
     enum_specifier: "enum" [IDENT] [enum_body],
     enum_body: "{" (_enumerator %? ",") "}",
     _enumerator: IDENT ["=" _expression@assign],
@@ -193,7 +209,11 @@ rust_graph_deep::grammar! { OBJC {
     pointer: "*" _pointer_qualifier*,
     _pointer_qualifier: "const" | "volatile",
     direct_declarator: _direct_base _declarator_suffix*,
-    _direct_base: IDENT | parenthesized_declarator,
+    _direct_base: block_direct_declarator | IDENT | parenthesized_declarator,
+    /// `@property (copy) id (^handler)(id);`: the property holds a block, so
+    /// its name sits inside a caret's parentheses and its parameter list
+    /// follows as an ordinary declarator suffix.
+    block_direct_declarator: "(" "^" [IDENT] ")",
     parenthesized_declarator: "(" _declarator ")",
     _declarator_suffix: array_suffix | parameter_list,
     array_suffix: "[" [_expression] "]",
@@ -285,7 +305,15 @@ rust_graph_deep::grammar! { OBJC {
     _implementation_item: objc_method_definition | &(declaration_specifiers _declarator "{") function_definition | objc_synthesize | objc_dynamic | declaration_statement | ";",
     objc_method_definition: ("-" | "+") [method_type] method_selector compound_statement,
     objc_method_declaration: ("-" | "+") [method_type] method_selector ";",
-    method_type: "(" type_name ")",
+    /// `- (void)run:(void (^)(void))done;` and `+ (instancetype)f:(id (^)(id))b;`:
+    /// a block-typed parameter. The type is a type, a caret in parentheses and
+    /// the block's own parameter list; the grammar had no such type, so every
+    /// method that takes a completion block was an error node.
+    method_type: "(" (block_pointer_type | type_name) ")",
+    block_pointer_type: block_type_name block_pointer_parameters,
+    block_type_name: plain_type_name | "void" | "id",
+    block_pointer_parameters: block_caret_group parameter_list,
+    block_caret_group: "(" "^" [declaration_specifiers] ")",
     method_selector: IDENT | _selector_keyword+,
     _selector_keyword: IDENT ":" [method_type] [IDENT],
 
@@ -336,6 +364,7 @@ rust_graph_deep::grammar! { OBJC {
         | selector_expression
         | encode_expression
         | parenthesized_expression
+        | block_literal
         | message
         | string
         | "self"
@@ -346,6 +375,16 @@ rust_graph_deep::grammar! { OBJC {
         | _name
         | NUMBER
         | CHAR_LITERAL,
+
+    /// `^{ … }`, `^void (void) { … }`, `^(int x) { … }`: a block literal is a
+    /// caret, an optional return type, an optional parameter list and a body.
+    /// It was not modelled at all, so every `dispatch_sync(q, ^{…})` — the
+    /// shape most Objective-C files are written in — was one error node and the
+    /// whole file fell back.
+    block_literal: "^" [block_return_type] [block_parameters] compound_statement,
+    block_return_type: &(declaration_specifiers) declaration_specifiers | plain_type_name,
+    block_parameters: "(" [_block_parameter %? ","] ")",
+    _block_parameter: &(declaration_specifiers) declaration_specifiers [_declarator] | plain_type_name [_declarator],
 
     _name: IDENT,
     _member: IDENT,
