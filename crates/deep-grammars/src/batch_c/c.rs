@@ -280,10 +280,17 @@ rust_graph_deep::grammar! { C {
     struct_body: "{" (_struct_declaration | ";")* "}",
     _struct_declaration:
         &(user_type_name _member_declarator_list ";") user_struct_declaration
+        | &(declaration_specifiers user_type_name _struct_declarator)
+            _specified_user_struct_declaration
         | &(declaration_specifiers _struct_declarator "," _struct_declarator)
             declaration_specifiers (_struct_declarator % ",") ";"
-        | declaration_specifiers [user_type_name] (_struct_declarator % ",") ";"
+        | declaration_specifiers (_struct_declarator % ",") ";"
         | macro_field,
+    /// `const Foo *next, *prev;`, `volatile int mask[2];`: a typedef name is
+    /// claimed as the type only when a declarator follows it, so `int a[2];`
+    /// never loses its name and `int a;` still parses as one declarator.
+    _specified_user_struct_declaration:
+        declaration_specifiers user_type_name (_struct_declarator % ",") ";",
     /// `PyObject *weakreflist;`: a typedef name and its declarators. A struct
     /// body holds declarations only, so the `x * y;` ambiguity does not exist
     /// here and the bare name is safe to accept.
