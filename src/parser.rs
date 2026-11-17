@@ -711,6 +711,36 @@ impl<'a> Parser<'a> {
             if closure_header {
                 return true;
             }
+            // `… && match sha256_file(io, file) { … } && …`: a `match` inside a
+            // binary chain is a value of that chain, not a block statement. Opened
+            // as a block, its `}` ended the statement and every later link of the
+            // chain was stamped on a line the CST never wrote one for
+            // (001556_build_phase.rs:716).
+            {
+                let mut depth = 0i32;
+                let mut chain = false;
+                let mut keyword = false;
+                for token in &self.stmt {
+                    if token.kind == Kind::Op {
+                        match self.raw(token) {
+                            b"(" | b"[" | b"{" => depth += 1,
+                            b")" | b"]" | b"}" => depth -= 1,
+                            b"&&" | b"||" | b"=" if depth == 0 => chain = true,
+                            _ => {}
+                        }
+                    } else if depth == 0 && token.kind == Kind::Ident && self.raw(token) == b"match" {
+                        keyword = true;
+                    }
+                }
+                let control = self
+                    .stmt
+                    .iter()
+                    .find(|token| token.kind == Kind::Ident)
+                    .is_some_and(|token| matches!(self.raw(token), b"if" | b"while" | b"else" | b"for" | b"loop"));
+                if chain && keyword && !control {
+                    return false;
+                }
+            }
             if let Some(first) = self.stmt.iter().find(|token| token.kind == Kind::Ident) {
                 if matches!(self.raw(first), b"if" | b"for" | b"while" | b"match" | b"loop" | b"else") {
                     // `if let Self::Enabled {` newline `core,` newline `..` newline

@@ -217,6 +217,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn a() {\n    assert_matches!(r, ActivityTask { variant: Some(x), .. });\n}\n",
     ),
     (
+        "a match inside a binary chain is a value of the chain (001556_build_phase.rs:716)",
+        "fn f(io: &Io, spec: &Value) -> bool {\n    let Some(comp) = spec.get(\"comp\") else { return false; };\n    (true || true)\n        && match sha(io) { Some(h) => true, None => false }\n        && ok(io, comp)\n        && false\n}\n",
+    ),
+    (
         "a block expression inside a let-chain condition is a value (000928_runtime.rs:255)",
         "fn f(options: O) {\n    if let Some(v) = unsafe { options.a.as_ref() }\n        && let Some(v) = unsafe { v.b.as_ref() }\n    {\n        use_it(v);\n    }\n    let runtime = Runtime { core };\n}\n",
     ),
