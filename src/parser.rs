@@ -662,6 +662,16 @@ impl<'a> Parser<'a> {
         false
     }
 
+    /// `type A interface {`, `type S struct {`: a Go type body holds member
+    /// declarations, and `M()` there is a method specification, not a call.
+    fn go_type_body(&self) -> bool {
+        self.lang.tag == "GO"
+            && self.word_at(&self.stmt, 0).as_deref() == Some("type")
+            && self.stmt.iter().any(|token| {
+                token.kind == Kind::Ident && matches!(self.raw(token), b"interface" | b"struct")
+            })
+    }
+
     fn on_open_brace(&mut self, token: Token) {
         let opens_block = self.uses_braces() && self.is_block();
         if opens_block {
@@ -676,7 +686,8 @@ impl<'a> Parser<'a> {
                     let index = self.skip_modifiers(&self.stmt);
                     self.word_at(&self.stmt, index).is_some_and(|w| matches!(w.as_str(), "struct" | "enum" | "union"))
                 })
-                || self.c_enum_body();
+                || self.c_enum_body()
+                || self.go_type_body();
             // The header is a declaration and a type: `declare var M: typeof
             // globalThis extends`. Only the declarator is a name the CST writes;
             // `globalThis` and `extends` are type text here, and writing them
