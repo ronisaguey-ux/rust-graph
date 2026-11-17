@@ -3347,6 +3347,34 @@ impl<'a> Parser<'a> {
         let equal = self.top_level_assign(toks)?;
         // Only the chain touching the `=`: `export const f`, `const f: T` name `f`.
         let mut start = equal.checked_sub(1).filter(|at| toks[*at].kind == Kind::Ident)?;
+        // `const callbackOnce: typeof callback = (e) => …`: the name before the
+        // `=` is the last name of the annotation, and the binder is the name
+        // before the annotation's colon. Read as the last name, the symbol was
+        // called `callback` — a name the CST never writes, in both copies of
+        // multer's utils (2 ts files).
+        if matches!(self.lang.tag, "TS" | "TSX") {
+            let mut depth = 0i32;
+            let mut colon = None;
+            for (index, token) in toks[..equal].iter().enumerate() {
+                if token.kind != Kind::Op {
+                    continue;
+                }
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    b":" if depth == 0 => {
+                        colon = Some(index);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(colon) = colon.filter(|colon| *colon < start) {
+                if let Some(name) = toks[..colon].iter().rposition(|token| token.kind == Kind::Ident) {
+                    start = name;
+                }
+            }
+        }
         while start >= 2
             && toks[start - 2].kind == Kind::Ident
             && toks[start - 1].kind == Kind::Op
