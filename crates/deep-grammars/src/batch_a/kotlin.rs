@@ -355,7 +355,14 @@ rust_graph_deep::grammar! { KOTLIN {
     /// Variance is its own alternative rather than a modifier: `out` is also a
     /// legal name, and one optional prefix that both a modifier and a name can
     /// start cannot be decided by the first token.
-    type_parameter: "in" _name [":" _type] | "out" _name [":" _type] | [annotations] _name [":" _type],
+    /// `reified` is a type-parameter modifier of its own: `inline fun <reified T>`
+    /// is not a name the table knows, and as a bare `_name` it could not be read,
+    /// so every reified generic recovered (103 of them).
+    type_parameter:
+        "in" _name [":" _type]
+        | "out" _name [":" _type]
+        | "reified" _name [":" _type]
+        | [annotations] _name [":" _type],
     type_arguments: "<" (_type_argument %? ",") _gt,
     _type_argument: "*" | _type,
     _gt: ">" | GT_JOINED,
