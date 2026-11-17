@@ -144,7 +144,11 @@ rust_graph_deep::grammar! { OBJC {
     translation_unit: _top_item*,
 
     _top_item:
-        &("typedef" IDENT arguments) macro_enum_declaration
+        &(IDENT "@interface") bare_macro_item
+        | &(IDENT "@protocol") bare_macro_item
+        | &(IDENT "@implementation") bare_macro_item
+        | &(IDENT "@class") bare_macro_item
+        | &("typedef" IDENT arguments) macro_enum_declaration
         | &(declaration_specifiers _declarator "{") function_definition
         | &(plain_type_name _declarator "{") user_function
         | objc_interface
@@ -161,6 +165,11 @@ rust_graph_deep::grammar! { OBJC {
     /// grammar cannot see. Expecta and the UIKit headers are full of them and
     /// every one was an error node at file scope.
     macro_call_statement: IDENT arguments ";",
+    /// `NS_ASSUME_NONNULL_BEGIN` on a line of its own: a bare macro with no
+    /// arguments and no semicolon, which every modern Apple header opens and
+    /// closes with. Nothing else at file scope is a single name, so the guard
+    /// is the top item that follows it.
+    bare_macro_item: IDENT,
 
     function_definition: declaration_specifiers _declarator compound_statement,
     user_function: plain_type_name _declarator compound_statement,
@@ -292,7 +301,7 @@ rust_graph_deep::grammar! { OBJC {
     // A category is the same line with a parenthesised name where a
     // superclass would be: `@interface Foo ()` is the anonymous extension a
     // class continues itself with, `@interface Foo (Bar)` a named one.
-    objc_interface: "@interface" IDENT [":" IDENT] [category] [_type_arguments] [protocol_list] [ivar_block] _interface_item* "@end",
+    objc_interface: "@interface" IDENT [_type_arguments] [":" IDENT] [category] [protocol_list] [ivar_block] _interface_item* "@end",
     category: "(" [IDENT] ")",
     protocol_list: "<" (protocol_name % ",") _gt,
     protocol_name: IDENT,
@@ -311,7 +320,7 @@ rust_graph_deep::grammar! { OBJC {
     /// method that takes a completion block was an error node.
     method_type: "(" (block_pointer_type | type_name) ")",
     block_pointer_type: block_type_name block_pointer_parameters,
-    block_type_name: plain_type_name | "void" | "id",
+    block_type_name: plain_type_name | "void" | "id" | pointer+,
     block_pointer_parameters: block_caret_group parameter_list,
     block_caret_group: "(" "^" [declaration_specifiers] ")",
     method_selector: IDENT | _selector_keyword+,
