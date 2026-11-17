@@ -1100,6 +1100,18 @@ impl<'a> Walker<'a> {
                 }
                 self.cs_declared_vars(id);
             }
+            // `using SafeFileHandle handle = Interop.Kernel32.CreateFile(name);`:
+            // a using declaration is one declarator, and no arm read the node, so
+            // the call it opens with stayed in the tree.
+            "using_declaration" if self.language.name == "csharp" => {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
+                    if let Some(&value) = children.get(at + 1) {
+                        self.form(value);
+                    }
+                }
+                self.cs_declared_vars(id);
+            }
             // `var o = JObject.Parse(text);`: a C# local initialised with a call
             // recorded nothing at all - deep 0 against lexer 2 on a two-line
             // method. Only C# spells its call kinds this way, so the arm is
