@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -50,17 +51,31 @@ DIRS = {
 
 
 def measure(binary: str, path: str) -> tuple[int, int, int]:
-    env = dict(os.environ, RG_AUDIT="1")
+    # The binary's own summary line, not the --stdout JSON: a 15,000-file corpus
+    # writes 291 MB of JSON, and json.loads on that died with a decode error
+    # after the machine had already swapped. The summary reports the same
+    # fallback count in one line.
+    env = dict(os.environ, RG_AUDIT="1", RG_LOSSES="1")
     result = subprocess.run(
-        [binary, "build", path, "--no-cache", "--stdout"],
+        [binary, "build", path, "--no-cache"],
         capture_output=True,
         check=True,
         env=env,
+        text=True,
     )
-    pack = json.loads(result.stdout)
-    rows = pack["sources"]
-    fallbacks = [row for row in rows if row.get("deep_fallback")]
-    return len(fallbacks), sum(row.get("deep_losses", 0) for row in fallbacks), len(rows)
+    files = fallbacks = losses = 0
+    for line in result.stderr.splitlines():
+        if "files (" in line and "parsed" in line:
+            m = re.search(r"(\d+) files", line)
+            if m:
+                files = int(m.group(1))
+        if line.startswith("loss\t"):
+            losses += 1
+        if "fallbacks," in line:
+            m = re.search(r"(\d+) fallbacks", line)
+            if m:
+                fallbacks = int(m.group(1))
+    return fallbacks, losses, files
 
 
 def main() -> int:
