@@ -432,7 +432,7 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix subscript => index_expression,
         postfix "." _name => navigation_expression,
         postfix "?." _name => navigation_expression,
-        postfix "::" _name => callable_reference,
+        postfix "::" _reference_name => callable_reference,
         postfix BANG_BANG => not_null_expression,
     },
 
@@ -481,6 +481,10 @@ rust_graph_deep::grammar! { KOTLIN {
     function_type: function_parameters "->" _type,
     function_parameters: "(" (_type %? ",") ")",
 
+    /// The name after `::`. `class` is the one a callable reference takes that
+    /// is not a name anywhere else (`Foo::class` in an annotation), so it is
+    /// added here rather than to `_name`, where it would start a declaration.
+    _reference_name: _name | "class",
     _name:
         IDENT | "abstract" | "actual" | "annotation" | "by" | "companion" | "const"
         | "constructor" | "context" | "crossinline" | "data" | "delegate" | "dynamic" | "enum"
