@@ -2117,7 +2117,16 @@ fn dotted_piece(text: &str) -> bool {
                         }
                     }
                 }
-                "var" | "val" | ":" | "=" | "by" | "lateinit" | "const" => {}
+                // `val` is a name to the one-pass reader and `var` is not:
+                // `val x: Int` files `m:[n:val,n:x,n:Int]` while
+                // `private var y: String` files `m:[n:private,n:y,n:String]`.
+                "val" => {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, "val");
+                    out.push(']');
+                    parts.push(out);
+                }
+                "var" | ":" | "=" | "by" | "lateinit" | "const" => {}
                 "property_head" => {
                     let mut out = String::from("[\"n\",");
                     push_string(&mut out, name);
@@ -2175,6 +2184,19 @@ fn dotted_piece(text: &str) -> bool {
         if let Some(ty) = ty.filter(|&ty| self.kt_type_nullable(ty)) {
             self.kt_nullable_property(id, &name, ty, line);
             return;
+        }
+        // `public val log: Logger`: a typed property with no initialiser is a
+        // declaration whose value is the run of names it read - the modifiers,
+        // `val`, the name and the type's names. Read as an assignment it wrote
+        // nothing at all, and every uninitialised property in the corpus lost
+        // its line (the largest Kotlin event cluster left).
+        let assigned = children.iter().any(|&child| self.kind(child) == "=");
+        let attached = children.iter().any(|&child| matches!(self.kind(child), "by" | "accessor"));
+        if !assigned && !attached {
+            if let Some(ty) = ty {
+                self.kt_nullable_property(id, &name, ty, line);
+                return;
+            }
         }
         let value = children
             .iter()
