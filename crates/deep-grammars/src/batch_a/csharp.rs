@@ -297,8 +297,12 @@ rust_graph_deep::grammar! { CSHARP {
     delegate_declaration: [attributes] [modifiers] "delegate" _type _name [type_parameters] formal_parameters [type_parameter_constraints] ";",
 
     base_list: ":" _type ("," _type)*,
-    type_parameter_constraints: "where" type_parameter_constraint ("," type_parameter_constraint)*,
-    type_parameter_constraint: _name ":" _constraint_item ("," _constraint_item)*,
+    // `where T : class, new() where U : struct`: C# opens a fresh `where` for
+    // every type parameter, and the rule held one clause whose commas were
+    // misread as more constraints — so a second clause was an ERROR on the
+    // declaration (138 corpus files write two).
+    type_parameter_constraints: type_parameter_constraint+,
+    type_parameter_constraint: "where" _name ":" _constraint_item ("," _constraint_item)*,
     _constraint_item: "class" | "struct" | KW_NOTNULL | KW_UNMANAGED | new_constraint | _type,
     new_constraint: "new" empty_arguments,
     empty_arguments: "(" ")",
