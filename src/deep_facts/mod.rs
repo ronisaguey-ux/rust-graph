@@ -1221,13 +1221,25 @@ impl<'a> Walker<'a> {
                 if matches!(self.facts.tag.as_str(), "C" | "CPP" | "OBJC") =>
             {
                 let children = self.children(id);
-                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
-                    let target = children[..at]
+                // `mh->overhead += kvstoreMemUsage(k);`: a compound assignment
+                // spells its operator as its own token, so a search for `=`
+                // found nothing and the statement kept only the call. A right
+                // shift is two tokens, `>joined` then `>=`.
+                let op = children.iter().position(|&child| {
+                    matches!(
+                        self.kind(child),
+                        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">="
+                    )
+                });
+                if let Some(op) = op {
+                    let shifted = op > 0 && self.kind(children[op - 1]) == ">joined";
+                    let weak = self.kind(children[op]) != "=";
+                    let target = children[..op - usize::from(shifted)]
                         .iter()
                         .rev()
                         .find(|&&child| !self.is_layout(child))
                         .copied();
-                    let value = children.get(at + 1).copied();
+                    let value = children.get(op + 1).copied();
                     if let (Some(target), Some(value)) = (target, value) {
                         let name = self.c_path(target).unwrap_or_default();
                         if !name.is_empty() {
@@ -1254,7 +1266,7 @@ impl<'a> Walker<'a> {
                                 }
                             }
                             let line = self.line(id);
-                            self.lexer_event(b'a', line, &[name.clone()], &form, false);
+                            self.lexer_event(b'a', line, &[name.clone()], &form, weak);
                             if self.kind(value) == "call_expression" {
                                 let path = self.decl_path(value);
                                 let last = path.rsplit('.').next().unwrap_or("").to_string();
