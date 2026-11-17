@@ -1289,12 +1289,16 @@ impl<'a> Walker<'a> {
                     self.arguments(list);
                 }
             }
-            // `fun f() = foo()` and `get() = foo()`: Kotlin wraps the body in
-            // a `function_body` (or writes it straight onto an `accessor`), and
-            // the expression after the `=` was read by no arm, so the call
-            // written in it stayed in the tree and out of the record. The block
-            // form is a child of its own and is walked anyway.
-            "function_body" | "accessor" if self.is_kotlin() => {
+            // `fun f(): T = expr` writes the body as a `function_body` whose
+            // child is the expression itself; a block body is the other
+            // alternative. The lexer writes the expression's value as the
+            // function's `r` event, so the arm does too, and a call in the
+            // expression reaches the record with it. Two lanes fixed this at
+            // once; the arm that states the return wins.
+            "function_body" if self.is_kotlin() => self.function_body(id),
+            // `get() = foo()` writes the same expression straight onto the
+            // accessor, with no `function_body` between them.
+            "accessor" if self.is_kotlin() => {
                 let body = self.children(id).into_iter().rev().find(|&child| {
                     !matches!(
                         self.kind(child),
@@ -1302,7 +1306,9 @@ impl<'a> Walker<'a> {
                     )
                 });
                 if let Some(body) = body {
-                    self.form(body);
+                    let line = self.line(body);
+                    let value = self.form(body);
+                    self.event(&format!("[\"r\",{line},{value}]"));
                 }
             }
             "return_statement" => self.return_statement(id),
@@ -2067,6 +2073,22 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+    }
+
+    /// `fun f(): T = expr`: an expression body is this function's return
+    /// value, which the lexer writes as an `r` event. A block body states its
+    /// own statements, so it is not read again here.
+    fn function_body(&mut self, id: u32) {
+        let Some(body) = self
+            .children(id)
+            .into_iter()
+            .find(|&child| !self.is_layout(child) && !matches!(self.kind(child), "block" | "statement_block"))
+        else {
+            return;
+        };
+        let line = self.line(body);
+        let value = self.form(body);
+        self.event(&format!("[\"r\",{line},{value}]"));
     }
 
     /// The name a definition node carries, if any.
