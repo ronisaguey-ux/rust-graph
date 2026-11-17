@@ -174,6 +174,7 @@ rust_graph_deep::grammar! { CSHARP {
         KW_FILE = "file",
         KW_WITH = "with",
         KW_VAR = "var",
+        KW_NOT = "not",
         KW_NOTNULL = "notnull",
         KW_UNMANAGED = "unmanaged",
 
@@ -415,7 +416,14 @@ rust_graph_deep::grammar! { CSHARP {
     switch_statement: "switch" parenthesized_expression switch_body,
     switch_body: "{" switch_section* "}",
     switch_section: (switch_label ":" | "default" ":") _statement*,
-    switch_label: "case" _expression ["when" _expression],
+    switch_label: "case" _pattern ["when" _expression],
+    // A pattern is what `is` and `case` take: `int n`, `string`, `not null`,
+    // `3`, `{ Length: 0 }`. A designator names the value the test binds.
+    _pattern: pattern_object | _type [_pattern_designator] | _literal,
+    pattern_object: "{" [pattern_members] "}",
+    pattern_members: _pattern_member ("," _pattern_member)*,
+    _pattern_member: _name ":" _pattern,
+    _pattern_designator: "var" _name | _name,
     try_statement: "try" block catch_clause* [finally_clause],
     catch_clause: "catch" [catch_declaration] ["when" parenthesized_expression] block,
     catch_declaration: "(" [_local_modifiers] _type _name ")",
@@ -449,7 +457,13 @@ rust_graph_deep::grammar! { CSHARP {
         xor: left "^" => binary_expression,
         band: left "&" => binary_expression,
         eq: left "==" | "!=" => binary_expression,
-        rel: left "<" | ">" | "<=" | ">=" | "is" | "as" => binary_expression,
+        rel: left "<" | ">" | "<=" | ">=" | "as" => binary_expression,
+        // `o is string s`, `o is not null`, `o is { Length: 0 }`: the right
+        // side of `is` is a pattern (a type with an optional designator, a
+        // constant, or a property pattern), not an expression. Read as a
+        // binary operand, the designator after the type was one MISSING per
+        // line and the whole file fell back (C# corpus: 15 files).
+        type_test: postfix "is" [KW_NOT] _pattern => is_pattern,
         shift: left "<<" | GT_JOINED ">" | GT_JOINED GT_JOINED ">" => binary_expression,
         add: left "+" | "-" => binary_expression,
         mul: left "*" | "/" | "%" => binary_expression,
@@ -524,7 +538,7 @@ rust_graph_deep::grammar! { CSHARP {
     _name:
         IDENT | "async" | "record" | "partial" | "where" | "get" | "set" | "init" | "add"
         | "remove" | "value" | "when" | "required" | "global" | "dynamic" | "scoped"
-        | "yield" | "alias",
+        | "yield" | "alias" | "not",
     _type_name: _name | KW_VAR,
 } }
 
@@ -833,6 +847,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"file" => KW_FILE,
         b"with" => KW_WITH,
         b"var" => KW_VAR,
+        b"not" => KW_NOT,
         b"notnull" => KW_NOTNULL,
         b"unmanaged" => KW_UNMANAGED,
         _ => IDENT,
