@@ -808,7 +808,12 @@ impl<'a> Walker<'a> {
             }
             return !self.kinds.soft.contains(&self.kind(id));
         }
-        !(text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'"' || text[0] == b'\'')
+        // A Go raw string is one constant: it opens with a backtick, which this
+        // filter took for punctuation, so `f(`re`)` lost its only argument.
+        // Kotlin spells identifiers that way, and there the word is a name, not
+        // a value, so the character counts only for Go.
+        let raw_string = text[0] == b'`' && matches!(self.kinds.family, Family::Go);
+        !(text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'"' || text[0] == b'\'' || raw_string)
     }
 
     // -- frames and symbols -------------------------------------------------
