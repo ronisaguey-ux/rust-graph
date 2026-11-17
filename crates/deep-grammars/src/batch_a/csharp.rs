@@ -520,7 +520,14 @@ rust_graph_deep::grammar! { CSHARP {
     // an explicit interface implementation names its member with a dotted
     // name, and a property written that way failed to parse at all, so the
     // whole file fell back on one member (104 corpus files).
-    _member_name: _name ("." _name)*,
+    _member_name: _name ("." _member_segment)*,
+    // `int IOptions<CacheOptions>.Value { get; }`: an explicit interface
+    // implementation may name a generic interface, and a type argument
+    // between the dots is not a name, so that member did not parse and took
+    // its whole class body down. The segment stays behind a `.`, so a generic
+    // method's `Foo<T>(` - no dot first - never reaches it and keeps its own
+    // `type_parameters`.
+    _member_segment: &(_name type_arguments) _name type_arguments | _name,
     _name:
         IDENT | "async" | "record" | "partial" | "where" | "get" | "set" | "init" | "add"
         | "remove" | "value" | "when" | "required" | "global" | "dynamic" | "scoped"
