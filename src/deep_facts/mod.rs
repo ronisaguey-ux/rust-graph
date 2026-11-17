@@ -1056,10 +1056,28 @@ impl<'a> Walker<'a> {
                     // The lexer files the annotation's own arguments as an
                     // event holding the call's form, as it does for any other
                     // call written as a statement.
-                    if let Some(list) = self.children(id).into_iter().find(|&child| self.kind(child) == "annotation_arguments") {
-                        if self.children(list).iter().any(|&child| !self.is_layout(child)) {
-                            let args = self.arguments(list);
-                            self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
+                    let arguments = self
+                        .children(id)
+                        .into_iter()
+                        .find(|&child| self.kind(child) == "annotation_arguments");
+                    let has_arguments = arguments
+                        .is_some_and(|list| self.children(list).iter().any(|&child| !self.is_layout(child)));
+                    if let Some(list) = arguments.filter(|_| has_arguments) {
+                        let args = self.arguments(list);
+                        self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
+                    }
+                    // `@Test fun run()`: an annotation with no arguments is a
+                    // name to the Kotlin lexer and nothing else, and nothing
+                    // wrote it - the tree keeps the annotation as a modifier,
+                    // so every annotated function, property and object lost the
+                    // name its annotation carries (2,400 rows: `@Test` alone is
+                    // 1,807). The name is dotted (`@kotlin.internal.InlineOnly`
+                    // is one name to the lexer) and `@get:Internal` writes its
+                    // use-site target first, because the lexer reads the word
+                    // before the colon as a name of its own.
+                    if self.is_kotlin() && !has_arguments {
+                        if let Some(value) = self.kt_annotation_value(id) {
+                            self.lexer_event(b'x', line, &[], &value, false);
                         }
                     }
                 }
@@ -1835,6 +1853,44 @@ impl<'a> Walker<'a> {
         if restored {
             self.stack.pop();
         }
+    }
+
+    /// The value a Kotlin annotation writes: `@Test` is one name, `@a.b.C` a
+    /// dotted one, and `@get:Internal` names its use-site target first - the
+    /// one-pass lexer reads the word before the colon and the name after it as
+    /// two names in one value.
+    pub(crate) fn kt_annotation_value(&self, id: u32) -> Option<String> {
+        fn atom(text: &str) -> String {
+            let mut atom = String::from("[\"n\",");
+            push_string(&mut atom, text);
+            atom.push(']');
+            atom
+        }
+        let children = self.children(id);
+        let colon = children.iter().position(|&child| self.kind(child) == ":");
+        // A segment is read by shape, not by kind: `@kotlin.internal.InlineOnly`
+        // spells its middle segment `internal`, a keyword whose kind is the word
+        // itself, and `@get:Internal` spells its target `get`, which is a leaf
+        // kind the layout rule calls punctuation. The dots the grammar writes as
+        // tokens are what a path joins on, and `leaf_name` accepts the words.
+        let mut path = String::new();
+        for &child in &children[colon.map_or(0, |at| at + 1)..] {
+            let Some(name) = self.leaf_name(child) else { continue };
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(&name);
+        }
+        if path.is_empty() {
+            return None;
+        }
+        let Some(at) = colon else {
+            return Some(atom(&path));
+        };
+        // The use-site target is the last word before the colon; `@` on its own
+        // is the sigil and names nothing.
+        let target = children.get(..at)?.iter().rev().find_map(|&child| self.leaf_name(child))?;
+        Some(format!("[\"m\",[{},{}]]", atom(&target), atom(&path)))
     }
 
     pub(crate) fn is_kotlin(&self) -> bool {
