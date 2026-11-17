@@ -175,9 +175,6 @@ mod imp {
                 flags |= FLAG_MISSING;
             }
             if node.kind == ERROR {
-                if std::env::var_os("RG_ERR").is_some() {
-                    eprintln!("ERRNODE {}", node.start);
-                }
                 errors += 1;
             }
             nodes.push(Node {
