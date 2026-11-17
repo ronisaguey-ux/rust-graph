@@ -368,7 +368,11 @@ rust_graph_deep::grammar! { CSHARP {
         "bool" | "byte" | "sbyte" | "short" | "ushort" | "int" | "uint" | "long" | "ulong"
         | "char" | "float" | "double" | "decimal" | "object" | "string" | "void",
     tuple_type: "(" _tuple_element "," _tuple_element ("," _tuple_element)* ")",
-    _tuple_element: _type _name,
+    // `internal static (Vector128<byte>, Vector128<byte>) M(..)`: a tuple type
+    // does not have to name its elements, and the rule required a name, so
+    // every method that returns an unnamed tuple failed (the runtime's whole
+    // vector and Number code).
+    _tuple_element: _type [_name],
     dimensions: "[" ("," | _expression)* "]",
     type_arguments: "<" (_type %? ",") _gt,
     _gt: ">" | GT_JOINED,
