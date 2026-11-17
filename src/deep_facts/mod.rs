@@ -1012,23 +1012,27 @@ impl<'a> Walker<'a> {
                     });
                     match (assigned, target) {
                         (Some(at), Some(name)) => {
-                            // The initialiser is the value: `public bool Flag =
-                            // false;` is `a [Flag] n:false` to the lexer, and
-                            // writing the constant `0` for every field but a
-                            // call left each such field a disagreement. A
-                            // keyword literal is a name to the one-pass reader.
-                            let kind = self
-                                .children(id)
-                                .get(at + 1)
-                                .map(|&child| self.kind(child))
-                                .unwrap_or("");
-                            let form = match kind {
-                                "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
-                                "" => "0".to_string(),
-                                _ => {
-                                    let child = self.children(id)[at + 1];
-                                    self.form(child)
+                            // C#: the initialiser is the value. `public bool Flag
+                            // = false;` is `a [Flag] n:false` to the lexer, and
+                            // writing the constant `0` for every field but a call
+                            // left each such field a disagreement. A keyword
+                            // literal is a name to the one-pass reader.
+                            let form = if self.language.name == "csharp" {
+                                let kind = self
+                                    .children(id)
+                                    .get(at + 1)
+                                    .map(|&child| self.kind(child))
+                                    .unwrap_or("");
+                                match kind {
+                                    "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
+                                    "" => "0".to_string(),
+                                    _ => {
+                                        let child = self.children(id)[at + 1];
+                                        self.form(child)
+                                    }
                                 }
+                            } else {
+                                "0".to_string()
                             };
                             let line = self.line(id);
                             self.lexer_event(b'a', line, &[name], &form, false);
