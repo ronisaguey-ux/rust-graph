@@ -1632,6 +1632,33 @@ impl<'a> Walker<'a> {
         Some((name, value))
     }
 
+    /// `f->code[pc++]=CREATE_ABx(…);`: an element assignment writes into its
+    /// base, so the binding the lexer makes is the base's path and the call on
+    /// the right, not the element.
+    pub(crate) fn c_element_call_binding(&self, id: u32) -> Option<(String, String)> {
+        if self.kind(id) != "assignment_expression" {
+            return None;
+        }
+        let children = self.children(id);
+        let at = children.iter().position(|&child| self.kind(child) == "=")?;
+        let target = *children[..at].iter().rev().find(|&&child| !self.is_layout(child))?;
+        if self.kind(target) != "subscript_expression" {
+            return None;
+        }
+        let base = *self.children(target).iter().find(|&&child| !self.is_layout(child))?;
+        if self.kind(base) != "field_expression" {
+            return None;
+        }
+        let name = self.c_path(base)?;
+        let value = *children.get(at + 1)?;
+        if self.kind(value) != "call_expression" {
+            return None;
+        }
+        let path = self.decl_path(value);
+        let last = path.rsplit('.').next().unwrap_or("").to_string();
+        (!last.is_empty()).then_some((name, last))
+    }
+
     pub(crate) fn c_path(&self, id: u32) -> Option<String> {
         match self.kind(id) {
             "field_expression" | "qualified_expression" => {
