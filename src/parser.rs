@@ -316,6 +316,22 @@ impl<'a> Parser<'a> {
         self.lang.blocks == Blocks::Brace
     }
 
+    /// Whether the statement so far is a Go control header — `for`, `if`,
+    /// `switch`, `select` — whose clauses are still open. Go is the one
+    /// brace-block language whose header carries semicolons
+    /// (`for i := 0; i < N; i++`), and a `func` or `type` in the header opens a
+    /// value of its own, so those statements are left to the generic rules.
+    fn go_control_header(&self) -> bool {
+        self.lang.tag == "GO"
+            && self
+                .word_at(&self.stmt, 0)
+                .is_some_and(|word| matches!(word.as_str(), "for" | "if" | "switch" | "select"))
+            && !self
+                .stmt
+                .iter()
+                .any(|token| token.kind == Kind::Ident && matches!(self.raw(token), b"func" | b"type"))
+    }
+
     fn next_line_start(&self, end: usize) -> Option<usize> {
         let mut at = end;
         let mut saw_newline = false;
@@ -550,6 +566,16 @@ impl<'a> Parser<'a> {
             }
             b'{' => self.on_open_brace(token),
             b'}' => self.on_close_brace(token),
+            b';' if self.brackets.is_empty() && self.go_control_header() => {
+                // `for i := 0; i < N; i++ {` and `if x := f(); x > 0 {`: in Go
+                // the semicolons separate the header's clauses, not statements.
+                // Ending the statement at the first one cut the header into
+                // three values and handed the block to the post clause, whose
+                // brace then read as a composite literal — the body's first
+                // name became a name the CST never wrote (LEX_OVER_EMIT:name,
+                // 91 go corpus files).
+                self.stmt.push(token);
+            }
             b';' if self.brackets.is_empty() => {
                 self.declaring = false;
                 self.end_statement();
@@ -719,6 +745,21 @@ impl<'a> Parser<'a> {
 
     /// Whether a `{` here starts statements rather than a value.
     fn is_block(&mut self) -> bool {
+        // A Go control header's brace opens its body: the `:=` in
+        // `if v := f(); v {` binds the header, so it is not an assignment whose
+        // value the brace continues. Go allows an unparenthesised composite
+        // literal inside a header only where its type ends at `]`
+        // (`for _, v := range []T{1, 2} {`), so that shape is the one brace
+        // that stays a value.
+        if self.lang.tag == "GO" && self.go_control_header() {
+            let end = self.stmt.len();
+            let composite = end >= 2
+                && self.stmt[end - 1].kind == Kind::Ident
+                && self.is_op(&self.stmt[end - 2], b"]");
+            if !composite {
+                return true;
+            }
+        }
         // `if let Some(x) = e {`: the statement holds a `=` and the old test
         // read that as an assignment rather than a block opener, so the whole
         // body became one merged value.
