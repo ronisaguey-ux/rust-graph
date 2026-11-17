@@ -197,29 +197,79 @@ impl<'a> Walker<'a> {
     /// C# slice, the largest cluster left once the calls themselves were
     /// read). The name is the whole dotted path, as the lexer's chain is.
     pub(crate) fn cs_declared_vars(&mut self, id: u32) {
-        let children = self.children(id);
-        let Some(at) = children.iter().rposition(|&child| {
-            matches!(
-                self.kind(child),
-                "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression"
-            )
-        }) else {
+        let children: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+        // The grammar keeps no `=` in a declaration: `var webHost =
+        // CreateHostBuilder(..)?.Build()` is `local_variable_declaration var
+        // identifier invocation_expression`, so the initializer is the last
+        // child and the declarator is the name right before it.
+        let Some(&initializer) = children.last() else {
             return;
         };
-        let value = children[at];
-        let path = self.decl_path(value);
-        let last = path.rsplit('.').next().unwrap_or("");
-        if !last.starts_with(|ch: char| ch.is_uppercase()) {
+        if matches!(
+            self.kind(initializer),
+            "identifier" | "predefined_type" | "generic_type" | "qualified_type" | "nullable_type" | "pointer_type"
+        ) {
             return;
         }
-        let target = children[..at]
+        // `var context.Response.Headers = ToBase64String(x)` binds the dotted
+        // path the one-pass reader writes, not just the last name.
+        let Some(target) = children[..children.len() - 1]
             .iter()
+            .copied()
             .rev()
-            .find(|&&child| self.kind(child) == "identifier")
-            .map(|&child| self.text_string(child));
-        if let Some(target) = target {
-            // The lexer binds the *last* name of the chain:
-            // `JsonConvert.SerializeObject(o)` binds `SerializeObject`.
+            .find(|&child| {
+                self.kind(child) == "identifier" || matches!(self.kind(child), "member_access" | "field_access")
+            })
+            .map(|child| self.path_of(child))
+            .filter(|path| !path.is_empty())
+        else {
+            return;
+        };
+        // The class is the first call in the initializer, in source order: the
+        // one-pass reader names a binding after the call at the head of the
+        // value, even when the chain goes on past it.
+        let mut pending = vec![initializer];
+        let mut earliest: Option<(u32, u32)> = None;
+        while let Some(node) = pending.pop() {
+            if matches!(
+                self.kind(node),
+                "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression" | "generic_invocation"
+            ) {
+                let start = self.node(node).start;
+                if earliest.map_or(true, |(at, _)| start < at) {
+                    earliest = Some((start, node));
+                }
+            }
+            for child in self.children(node) {
+                pending.push(child);
+            }
+        }
+        let Some((_, call)) = earliest else {
+            return;
+        };
+        // `CreateHostBuilder(..)?.Build()`: the binding names the call at the
+        // head of the chain, so the callee is followed to its leftmost call
+        // before the name is read.
+        let mut node = call;
+        loop {
+            let callee = self.decl_callee(node);
+            if callee == node {
+                break;
+            }
+            let Some(inner) = self.children(callee).into_iter().find(|&child| !self.is_layout(child)) else {
+                break;
+            };
+            if !matches!(
+                self.kind(inner),
+                "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression" | "generic_invocation"
+            ) {
+                break;
+            }
+            node = inner;
+        }
+        let path = self.decl_path(node);
+        let last = path.rsplit('.').next().unwrap_or("");
+        if last.starts_with(|ch: char| ch.is_uppercase()) {
             self.facts.vars.push((target, last.to_string()));
         }
     }
