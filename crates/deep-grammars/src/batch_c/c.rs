@@ -362,11 +362,11 @@ rust_graph_deep::grammar! { C {
         | static_assert_statement
         | asm_statement
         | declaration_statement
-        | empty_statement
         | expression_statement,
 
-    /// `for (; *s; s++);`: a loop whose body is the null statement. `;` alone is
-    /// a legal statement anywhere, and it is the whole body of the tightest loops.
+    /// A body that is nothing: `while ((r=read())==-1);`, `for (; *p; p++);`.
+    /// The null statement is also what follows a label with no work of its own:
+    /// `case 1: ;`. It is one rule, reachable from both alternations above.
     empty_statement: ";",
 
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
@@ -387,10 +387,6 @@ rust_graph_deep::grammar! { C {
     continue_statement: "continue" ";",
     goto_statement: "goto" (IDENT | "*" _expression) ";",
     labeled_statement: IDENT ":" _statement,
-    /// A body that is nothing: `while ((r=read())==-1);`, `for (; *p; p++);`.
-    /// The null statement is an empty expression statement; it is also what
-    /// follows a label when the label has no work of its own: `case 1: ;`.
-    empty_statement: ";",
     expression_statement: _expression ";",
 
     _expression: precedence _primary {
