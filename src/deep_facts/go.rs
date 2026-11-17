@@ -2032,6 +2032,19 @@ fn dotted_piece(text: &str) -> bool {
                         | "function_type" | "generic_type" | "unsafe_cast" | "anonymous_function"
                 )
             });
+        // A property with no initializer states a declaration, not an
+        // assignment: there is no value, and the type is not one. The lexer
+        // writes the declaration's words as one merge (`m:[val,x,Int]`), the
+        // shape Java and C# fields already agree on; the CST wrote an
+        // assignment of the type, a fact the source never states.
+        let declares_only = !children
+            .iter()
+            .any(|&child| matches!(self.kind(child), "=" | "by" | "accessor"));
+        if declares_only && !self.c_words_of(id).is_empty() {
+            let form = self.c_words_form(id);
+            self.lexer_event(b'x', line, &[], &form, false);
+            return;
+        }
         let Some(value) = value else { return };
         self.assignment_parts(vec![name], value, line, false);
     }
