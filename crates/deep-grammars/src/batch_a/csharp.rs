@@ -176,6 +176,8 @@ rust_graph_deep::grammar! { CSHARP {
         KW_VAR = "var",
         KW_NOT = "not",
         KW_NOTNULL = "notnull",
+        /// A pattern negator: `x is not null`. A name everywhere else.
+        KW_NOT = "not",
         KW_UNMANAGED = "unmanaged",
 
         SEMI = ";",
@@ -876,6 +878,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"var" => KW_VAR,
         b"not" => KW_NOT,
         b"notnull" => KW_NOTNULL,
+        b"not" => KW_NOT,
         b"unmanaged" => KW_UNMANAGED,
         _ => IDENT,
     }
