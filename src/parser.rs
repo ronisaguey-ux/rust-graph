@@ -1871,6 +1871,19 @@ impl<'a> Parser<'a> {
         // were calls too (`visibility("protected")`, `alloc_size(1)`). The CST
         // writes no value for a declaration, so nothing the lexer read out of
         // one is a fact the record should keep (18 corpus files).
+        // `using api::iterator;` and `using Id = int;` are C++ declarations with
+        // no runtime value: the C++ grammar reads them as a using_declaration and
+        // the fact writer binds nothing for it. Read as an expression the lexer
+        // wrote `m:[n:using,n:api.iterator]` on every guarded header that names
+        // an alias (7 rows on the croaring corpus).
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && self.stmt.len() > 1
+            && self.word_at(&self.stmt, 0).as_deref() == Some("using")
+        {
+            self.brackets.clear();
+            self.stmt.clear();
+            return;
+        }
         if matches!(self.lang.tag, "C" | "CPP" | "OBJC") && self.c_declaration() {
             self.brackets.clear();
             self.stmt.clear();
