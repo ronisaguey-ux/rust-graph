@@ -346,6 +346,27 @@ impl<'a> Walker<'a> {
                     self.macro_prefix = Some(self.text_string(first));
                 }
             }
+            // `goto out;`: the one-pass reader writes the jump as the keyword
+            // and its label (`m:[n:goto,n:out]`), and no arm read the node, so
+            // every goto in musl lost its line and the guard paired it with a
+            // neighbouring statement instead.
+            "goto_statement" => {
+                let line = self.line(id);
+                let label = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&node| self.kind(node) == "identifier")
+                    .map(|node| self.text_string(node))
+                    .unwrap_or_default();
+                let mut value = String::from("[\"m\",[[\"n\",\"goto\"]");
+                if !label.is_empty() {
+                    value.push_str(",[\"n\",");
+                    push_string(&mut value, &label);
+                    value.push(']');
+                }
+                value.push_str("]]");
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
             // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
             // grammar gives it a declaration node, and nothing read it.
             "static_assert_declaration" | "static_assert" => {
