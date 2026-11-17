@@ -171,10 +171,9 @@ rust_graph_deep::grammar! { CSHARP {
         KW_FILE = "file",
         KW_WITH = "with",
         KW_VAR = "var",
-        KW_NOT = "not",
-        KW_NOTNULL = "notnull",
         /// A pattern negator: `x is not null`. A name everywhere else.
         KW_NOT = "not",
+        KW_NOTNULL = "notnull",
         KW_UNMANAGED = "unmanaged",
 
         SEMI = ";",
@@ -601,7 +600,7 @@ rust_graph_deep::grammar! { CSHARP {
     // The full expression, not the assignment tier: `Func<int, int> f = x => x`
     // puts a lambda where the value goes, and the lambda postfix sits above that
     // tier, so every lambda initialiser was an error.
-    _declared_value: default_expression | _ref_expression | _expression,
+    _declared_value: default_expression | ["ref"] _expression,
     lambda_parameters: "(" (lambda_parameter %? ",") ")",
     lambda_parameter: [attributes] [_local_modifiers] _type _name | _name,
     cast_type: "(" _type ")",
@@ -971,7 +970,6 @@ fn keyword(text: &[u8]) -> Kind {
         b"var" => KW_VAR,
         b"not" => KW_NOT,
         b"notnull" => KW_NOTNULL,
-        b"not" => KW_NOT,
         b"unmanaged" => KW_UNMANAGED,
         _ => IDENT,
     }
