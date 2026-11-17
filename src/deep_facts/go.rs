@@ -2858,6 +2858,37 @@ fn dotted_piece(text: &str) -> bool {
                 out.push(']');
                 out
             }
+            // `(info){ .name = f(x), .code = 1 }`, `{ f(x), g(y) }`: a
+            // compound literal and the initializer list inside it are values,
+            // and a call written in one is a fact. The default arm read the
+            // type alone and never descended, so every call in a compound
+            // literal was lost (`*li = (info){ … }`, the `long[]` literals).
+            "compound_literal" | "compound_literal_expression" => {
+                match self.children(id).into_iter().find(|&child| self.kind(child) == "initializer_list") {
+                    Some(list) => self.form(list),
+                    None => "0".to_string(),
+                }
+            }
+            "initializer_list" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != ",")
+                    .collect();
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.merge_form(&items)
+                }
+            }
+            // `.name = f(x)`, `[2] = g(x)`: the designator names the field and
+            // the value after `=` is the initializer's value.
+            "designated_field" | "designated_index" => {
+                match self.children(id).into_iter().rev().find(|&child| !self.is_layout(child) && self.kind(child) != "=") {
+                    Some(value) => self.form(value),
+                    None => "0".to_string(),
+                }
+            }
             _ => {
                 // A node with no mapping: its first value-bearing child, so a
                 // wrapper the grammar added costs nothing.
