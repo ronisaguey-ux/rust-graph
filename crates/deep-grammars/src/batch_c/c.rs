@@ -220,8 +220,9 @@ rust_graph_deep::grammar! { C {
     _init_declarator: _declarator attribute* ["=" _initializer],
     _initializer: designated_field | designated_index | _expression@assign | initializer_list,
     initializer_list: "{" (_initializer %? ",") "}",
-    /// C99 `.name = value` inside an initializer list.
-    designated_field: "." IDENT "=" _initializer,
+    /// C99 `.name = value` inside an initializer list, with the `.name[0] = value`
+    /// form for a member that is an array.
+    designated_field: "." IDENT array_suffix* "=" _initializer,
     /// C99 `[index] = value` inside an initializer list.
     designated_index: array_suffix "=" _initializer,
 
@@ -356,7 +357,9 @@ rust_graph_deep::grammar! { C {
         | static_assert_statement
         | asm_statement
         | declaration_statement
-        | expression_statement,
+        | expression_statement
+        // A null statement: `while (x--);`, `for (;;);`, or a bare `;`.
+        | ";",
 
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
     switch_statement: "switch" parenthesized_expression switch_body,
