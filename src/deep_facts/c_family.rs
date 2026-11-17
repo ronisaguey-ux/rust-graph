@@ -1536,6 +1536,31 @@ impl<'a> Walker<'a> {
                 format!("[\"m\",[{}]]", parts.join(","))
             });
         }
+        // `[SIGHUP] = 1` inside a brace list: the index is part of the element,
+        // and the one-pass reader keeps it as a tuple — `t:[n:SIGHUP]` when the
+        // value writes nothing, `m:[t:[0],v]` when it does. Dropped here, every
+        // designated array element in the corpus read as the bare constant the
+        // value alone writes (musl's signal table, musl's `sizeprefix`).
+        if self.kind(id) == "designated_index" {
+            let kids: Vec<u32> = self
+                .children(id)
+                .into_iter()
+                .filter(|&child| !self.is_layout(child) && self.kind(child) != "=")
+                .collect();
+            let suffix = *kids.iter().find(|&&child| self.kind(child) == "array_suffix")?;
+            let index = self
+                .children(suffix)
+                .into_iter()
+                .find(|&child| !self.is_layout(child))?;
+            let mut out = format!("[\"t\",[{}]]", self.form(index));
+            let Some(&value) = kids.iter().find(|&&child| child != suffix) else { return Some(out) };
+            let form = self.form(value);
+            if form == "0" && !self.c_writes_a_constant(value) {
+                return Some(out);
+            }
+            out = format!("[\"m\",[{},{}]]", out, form);
+            return Some(out);
+        }
         if self.kind(id) != "designated_field" {
             return None;
         }
@@ -1784,5 +1809,16 @@ mod designated_initializer_tests {
     fn a_macro_statement_with_no_argument_is_its_name() {
         let events = module_events("LOCK_OBJ_DEF;\n");
         assert!(events.contains("[\"x\",1,[\"n\",\"LOCK_OBJ_DEF\"]]"), "{events}");
+    }
+    /// `[SIGHUP] = 1` keeps its index. The one-pass reader wraps an array
+    /// designator in a tuple and writes the value beside it only when it writes
+    /// one: `[SIGHUP] = 1` is `t:[n:SIGHUP]`, `[SIGINT] = 'a'` is
+    /// `m:[t:[n:SIGINT],0]`. Dropped, every designated array element read as
+    /// the bare value without the name the source puts there.
+    #[test]
+    fn a_designated_index_keeps_its_expression() {
+        let events = module_events("static const char map[] = {\n\t[SIGHUP] = 1,\n\t[SIGINT] = 'a',\n};\n");
+        assert!(events.contains("[\"t\",[[\"n\",\"SIGHUP\"]]]"), "{events}");
+        assert!(events.contains("[\"m\",[[\"t\",[[\"n\",\"SIGINT\"]]],0]]"), "{events}");
     }
 }
