@@ -368,6 +368,14 @@ impl<'a> Walker<'a> {
                 let line = self.line(id);
                 self.push_call("static_assert".to_string(), line);
             }
+            // C11 spells it `_Static_assert(cond, "…")`: the lexer reads the
+            // keyword followed by its argument list as a call, and the C
+            // grammar's node was not in the arm above, so every static
+            // assertion in musl and redis lost its call.
+            "static_assert_statement" => {
+                let line = self.line(id);
+                self.push_call("_Static_assert".to_string(), line);
+            }
             // `char buf[BUF];` / `int x = 0;`: the lexer reads the declaration
             // as the run of names on its line (plus the initializer's value when
             // there is one), so the CST writes the same event instead of
