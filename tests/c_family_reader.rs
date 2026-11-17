@@ -107,6 +107,23 @@ fn a_c_function_returning_a_struct_opens_the_function_not_a_class() {
     );
 }
 
+/// `int (*close)(FILE *);` declares a function pointer and `(int (*)(void))f`
+/// casts a value. In the C family a builtin type word followed by a parenthesis
+/// is a declarator or a cast, and the lexer read it as a call to `int` — a callee
+/// no source spells (12 files across the musl and curl trees).
+#[test]
+fn a_function_pointer_declaration_calls_no_type_word() {
+    let source = "struct impl {\n    int (*close)(int);\n};\n\nint (*open_file)(const char *);\n";
+    let language = langs::by_content("h", source.as_bytes()).expect("a C row");
+    let facts = parser::parse(source.as_bytes(), language);
+    let calls: Vec<&str> = facts
+        .symbols
+        .iter()
+        .flat_map(|symbol| symbol.calls.iter().map(|call| call.path.as_str()))
+        .collect();
+    assert!(!calls.contains(&"int"), "a type word was read as a callee: {calls:?}");
+}
+
 #[test]
 fn every_family_language_reads_its_own_declaration_and_call() {
     let mut failed: Vec<String> = Vec::new();

@@ -1201,7 +1201,14 @@ impl Emit<'_> {
             // binding; the CST writes no value for it.
             RS_NOISE.contains(&word.as_str())
         } else {
+            // `int (*close)(FILE *);` declares a function pointer and
+            // `(int (*)(void))f` casts a value: in the C family a builtin type
+            // word followed by a parenthesis is a declarator or a cast, never a
+            // call. Read as a callee it invented a call to `int` that no source
+            // spells — 7 musl files, and 5 more in the curl tree. `void` and
+            // `sizeof` already sit in `NOISE` for the same reason.
             NOISE.contains(&word.as_str())
+                || (matches!(self.lang.tag, "C" | "CPP" | "OBJC") && word == "int")
         };
         if noise && !go_word {
             self.pos += 1;
