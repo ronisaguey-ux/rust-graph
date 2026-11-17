@@ -439,6 +439,36 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            // `extern hidden FILE *volatile __stdin_used;`: a storage class, a
+            // visibility macro and a type on one line. The lexer keeps the macro
+            // and the type, drops the storage class and the qualifiers, and
+            // writes the run once; the CST reached the pointer's qualifier
+            // instead, so every such musl header disagreed on its first line.
+            "specified_macro_item" if !self.line_text(self.line(id)).unwrap_or_default().contains('(') => {
+                let line = self.line(id);
+                let text = self.line_text(line).unwrap_or_default();
+                let words: Vec<&str> = text
+                    .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                    .filter(|word| {
+                        !word.is_empty()
+                            && !matches!(*word, "extern" | "const" | "volatile" | "static" | "inline" | "register" | "restrict")
+                    })
+                    .collect();
+                if words.len() > 1 {
+                    let parts: Vec<String> = words
+                        .iter()
+                        .map(|word| {
+                            let mut part = String::from("[\"n\",");
+                            push_string(&mut part, word);
+                            part.push(']');
+                            part
+                        })
+                        .collect();
+                    let value = format!("[\"m\",[{}]]", parts.join(","));
+                    self.lexer_event(b'x', line, &[], &value, false);
+                    return true;
+                }
+            }
             // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
             // grammar gives it a declaration node, and nothing read it.
             "static_assert_declaration" | "static_assert" => {
@@ -2187,3 +2217,4 @@ mod designated_initializer_tests {
         );
     }
 }
+
