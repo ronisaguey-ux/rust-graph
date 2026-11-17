@@ -2469,6 +2469,16 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 format!("[\"m\",[{}]]", parts.join(","))
             }
+            // `T(text = writer.toString())`: a named argument is its value. Read
+            // as its first child, the parameter name `text` swallowed the call
+            // on the right of the `=`, and every named call argument was lost.
+            "named_argument" if self.is_kotlin() => {
+                let children = self.children(id);
+                match children.iter().copied().rev().find(|&child| self.kind(child) != "=" && !self.is_layout(child)) {
+                    Some(value) => self.form(value),
+                    None => "0".to_string(),
+                }
+            }
             // `InternalAPI::class`: the one-pass reader spells a class literal
             // as the dotted path `InternalAPI.class`, so the literal is that
             // name. Formed as the constant 0 it made the argument of every
