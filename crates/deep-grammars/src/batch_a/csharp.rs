@@ -332,7 +332,9 @@ rust_graph_deep::grammar! { CSHARP {
     // ERROR (C# corpus: an accessor with a body on the same line as its
     // property is the common style in the runtime's own sources).
     accessor_declaration: [attributes] [modifiers] ("get" | "set" | "init" | "add" | "remove") (block | ";" | "=>" _expression ";"),
-    indexer_declaration: [attributes] [modifiers] _type "this" indexer_parameters property_body [property_tail],
+    // `public object this[int i] => GetItem(i);`: an indexer may be
+    // expression-bodied, and only the accessor form was in the rule.
+    indexer_declaration: [attributes] [modifiers] _type "this" indexer_parameters (property_body [property_tail] | "=>" _expression ";"),
     indexer_parameters: "[" (parameter %? ",") "]",
     event_declaration: [attributes] [modifiers] "event" _type _member_name event_tail,
     event_tail: event_accessors | ";" | "=" _expression ";",
