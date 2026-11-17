@@ -708,7 +708,12 @@ impl<'a> Walker<'a> {
                 let path = self.decl_path(id);
                 (!path.is_empty()).then_some(path)
             }
-            "index_expression" => {
+            // `ek[3] |= 2`: a subscript names its receiver, and Java's grammar
+            // spells it `array_access` where Go's says `index_expression`. With
+            // no arm the target list was empty, so every `a[i] = v` statement
+            // was a target list the CST never wrote (1,008 rows over 89 files,
+            // the largest java cluster left).
+            "index_expression" | "array_access" => {
                 let path = self.children(id).first().map(|&base| self.decl_path(base)).unwrap_or_default();
                 (!path.is_empty()).then_some(path)
             }
