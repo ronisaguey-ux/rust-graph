@@ -212,6 +212,7 @@ mod tests {
         ("collections.m", "function_definition"),
         ("exceptions.m", "function_definition function_definition function_definition objc_interface objc_implementation"),
         ("expressions.m", "declaration_statement declaration_statement function_definition function_definition function_definition function_definition"),
+        ("extensions.m", "objc_interface objc_interface objc_implementation objc_implementation"),
         ("functions.m", "declaration_statement function_definition function_definition function_definition function_definition function_definition"),
         ("hello.m", "objc_implementation function_definition"),
         ("loops.m", "function_definition function_definition function_definition function_definition function_definition"),
