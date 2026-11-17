@@ -48,11 +48,11 @@ PROSE = (
     ),
 )
 
-TUPLE_START = re.compile(r"\(\s*\"((?:[^\"\\]|\\.)*)\"", re.S)
+TUPLE_START = re.compile(r"^\s*\(\s*\"((?:[^\"\\]|\\.)*)\"", re.M)
 
 
-ESCAPE = re.compile(r"\\(u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|n|t|r|0|\\)")
-NAMED = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\"}
+ESCAPE = re.compile(r"\\(u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|n|t|r|0|\\|\"|')")
+NAMED = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "'": "'"}
 
 
 def unescape(text: str) -> str:

@@ -131,7 +131,7 @@ Covered (44):
 - match arms: block body, guard, call value and wildcard
 - match guard: `b'/' if c.peek_at(1) == b'/'` (000081_kotlin.rs:513)
 - or-pattern: `LPAREN | LBRACKET | LBRACE` (000081_kotlin.rs:804)
-- binding at: `Some(q @ ('\"' | '\''))` (001544_before_edit.rs:476) and `x @ 1..=5`
+- binding at: `Some(q @ ('"' | '\''))` (001544_before_edit.rs:476) and `x @ 1..=5`
 - range pattern: `0x00..=0x7f` and `0xc2..=0xdf` (000456_cursor.rs:134)
 - async block in value position
 - unsafe block in value position
