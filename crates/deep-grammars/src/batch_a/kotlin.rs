@@ -414,7 +414,11 @@ rust_graph_deep::grammar! { KOTLIN {
 
     parenthesized_expression: "(" _expression ")",
     arguments: "(" (_argument %? ",") ")",
-    _argument: &(_name "=") named_argument | _expression,
+    /// `listOf(*contentTypes)`, `loadAll(*configPaths)`: a spread argument
+    /// writes a `*` in front of an expression. Without a rule the star was an
+    /// ERROR inside the argument list.
+    spread_argument: "*" _expression,
+    _argument: &(_name "=") named_argument | spread_argument | _expression,
     named_argument: _name "=" _expression,
     annotation_arguments: "(" (_annotation_argument %? ",") ")",
     _annotation_argument: _expression,
