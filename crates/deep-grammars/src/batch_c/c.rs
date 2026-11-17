@@ -277,8 +277,16 @@ rust_graph_deep::grammar! { C {
         &(user_type_name _member_declarator_list ";") user_struct_declaration
         | &(declaration_specifiers _struct_declarator "," _struct_declarator)
             declaration_specifiers (_struct_declarator % ",") ";"
-        | declaration_specifiers [user_type_name] (_struct_declarator % ",") ";"
+        | &(declaration_specifiers user_type_name _struct_declarator)
+            declaration_specifiers user_type_name (_struct_declarator % ",") ";"
+        | declaration_specifiers (_struct_declarator % ",") ";"
         | macro_field,
+    /// `int p[2];` and `const Foo *next;`: a keyword-typed member. The typedef
+    /// name after the specifiers is claimed by its own predicate, because an
+    /// optional `[user_type_name]` here takes the member's own name and then
+    /// finds a `[` where a declarator should be (`int p[2];` failed while
+    /// `int p;` and `int p[2], q;` did not).
+    ///
     /// `PyObject *weakreflist;`: a typedef name and its declarators. A struct
     /// body holds declarations only, so the `x * y;` ambiguity does not exist
     /// here and the bare name is safe to accept.
@@ -308,7 +316,10 @@ rust_graph_deep::grammar! { C {
     _direct_base: IDENT | parenthesized_declarator,
     parenthesized_declarator: "(" _declarator ")",
     _declarator_suffix: array_suffix | parameter_list,
-    array_suffix: "[" [_expression] "]",
+    /// `char *const argv[restrict]`, `int a[static 10]`: an array parameter may
+    /// qualify its size, and the qualifier stands where the size would.
+    array_suffix: "[" [_array_qualifier] [_expression] "]",
+    _array_qualifier: ("static" | _pointer_qualifier)+,
     parameter_list: "(" (_parameter % ",") ")",
     _parameter:
         declaration_specifiers [user_type_name] [_declarator_or_abstract]
