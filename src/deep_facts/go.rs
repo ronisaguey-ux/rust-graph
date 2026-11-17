@@ -1250,6 +1250,23 @@ impl<'a> Walker<'a> {
         }) else {
             return
         };
+        // A computed key is an expression evaluated in the enclosing scope when
+        // the class is defined, and the one-pass lexer reads `[K];` as an
+        // array-shaped expression on that line, so a field with no initialiser
+        // left its `x` event unpartnered (`class A { [K]; }`). The method path
+        // already writes this event; a field writes it before the `=` gate,
+        // which used to return on the first field without an initialiser.
+        if let Some(computed) = self.child_of_kind(id, "computed_property_name") {
+            for child in self.children(computed) {
+                if !self.is_layout(child) {
+                    let value = self.form(child);
+                    if value != "0" {
+                        let at = self.line(child);
+                        self.event(&format!("[\"x\",{at},{value}]"));
+                    }
+                }
+            }
+        }
         let Some(equal) = children.iter().position(|&child| self.kind(child) == "=") else { return };
         let Some(&value) = children.get(equal + 1) else { return };
         let targets = self.pattern_names(name_node);
