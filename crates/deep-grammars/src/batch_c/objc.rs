@@ -100,6 +100,9 @@ rust_graph_deep::grammar! { OBJC {
         AT_IMPORT = "@import",
         AT_DEFS = "@defs",
         AT_MACRO = "@macro",
+        AT_LBRACE = "@{",
+        AT_LBRACKET = "@[",
+        AT_NUMBER = "@number",
 
         COMMA = ",",
         SEMI = ";",
@@ -389,6 +392,8 @@ rust_graph_deep::grammar! { OBJC {
         | sizeof_expression
         | selector_expression
         | at_macro_expression
+        | dictionary_literal
+        | array_literal
         | encode_expression
         | parenthesized_expression
         | block_literal
@@ -401,6 +406,7 @@ rust_graph_deep::grammar! { OBJC {
         | "NO"
         | _name
         | NUMBER
+        | AT_NUMBER
         | CHAR_LITERAL,
 
     /// `^{ … }`, `^void (void) { … }`, `^(int x) { … }`: a block literal is a
@@ -424,7 +430,12 @@ rust_graph_deep::grammar! { OBJC {
     /// `@weakify(self)`, `@keypath(self.enabled)`: a macro that opens with an
     /// `@word` and takes arguments. The one-pass reader files it as a call of
     /// the word without the `@`, so the tree has to see a call here.
-    at_macro_expression: AT_MACRO arguments,
+    at_macro_expression: AT_MACRO [arguments],
+    /// `@{ @"key": @1 }` and `@[ @1, @2 ]`: the literal forms every modern
+    /// Objective-C file writes instead of dictionaryWithObjectsAndKeys.
+    dictionary_literal: AT_LBRACE (dictionary_entry %? ",") "}",
+    dictionary_entry: _expression ":" _expression,
+    array_literal: AT_LBRACKET (_expression %? ",") "]",
     selector_arguments: "(" method_selector ")",
     encode_expression: "@encode" encode_arguments,
     encode_arguments: "(" type_name ")",
@@ -472,6 +483,21 @@ fn at_word(c: &mut Cursor) -> Kind {
         c.bump();
         c.bump();
         return if quoted(c, b'"') { STR } else { BAD_LITERAL };
+    }
+    // `@{ @"k": @1 }` and `@[ @1, @2 ]`: the collection literals take their
+    // bracket with the `@`, so the rule that opens the literal sees one token.
+    if matches!(c.peek_at(1), b'{' | b'[') {
+        let kind = if c.peek_at(1) == b'{' { AT_LBRACE } else { AT_LBRACKET };
+        c.bump();
+        c.bump();
+        return kind;
+    }
+    // `@1`, `@3.5`: a boxed number, which is how every modern file writes an
+    // NSNumber in a collection literal.
+    if c.peek_at(1).is_ascii_digit() {
+        c.bump();
+        number(c, false);
+        return AT_NUMBER;
     }
     let start = c.rest();
     c.bump();
