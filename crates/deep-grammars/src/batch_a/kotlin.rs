@@ -520,6 +520,9 @@ rust_graph_deep::grammar! { KOTLIN {
     suspend_function_type: "suspend" _type,
     function_type: function_parameters "->" _type,
     function_parameters: "(" (_type %? ",") ")",
+    /// What may follow `::`: a name, or the `class` keyword a class literal
+    /// names. Kept out of `_name`, which is also what an expression starts
+    /// with, so a bare `class` cannot be read as a value.
 
     /// The name after `::`. `class` is the one a callable reference takes that
     /// is not a name anywhere else (`Foo::class` in an annotation), so it is
