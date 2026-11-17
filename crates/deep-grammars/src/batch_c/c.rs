@@ -235,7 +235,9 @@ rust_graph_deep::grammar! { C {
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     /// A typedef name where a type specifier is expected.
     user_type_name: IDENT,
-    _init_declarator: _declarator attribute* ["=" _initializer],
+    /// `A_EVENT = { 1, 1 }, __attribute__ ((deprecated)) B_EVENT = { 2, 1 };`:
+    /// an attribute may open any declarator of a list, not only the first.
+    _init_declarator: attribute* _declarator attribute* ["=" _initializer],
     _initializer: designated_field | designated_index | _expression@assign | initializer_list,
     initializer_list: "{" (_initializer %? ",") "}",
     /// C99 `.name = value` inside an initializer list.
@@ -319,7 +321,9 @@ rust_graph_deep::grammar! { C {
 
     enum_specifier: "enum" [IDENT] [enum_body],
     enum_body: "{" (_enumerator %? ",") "}",
-    _enumerator: IDENT ["=" _expression@assign],
+    /// `FRIDAY, __attribute__ ((deprecated)) SATURDAY = 6`: an attribute
+    /// stands before the name it deprecates.
+    _enumerator: attribute* IDENT ["=" _expression@assign],
 
     _declarator: pointer* direct_declarator,
     pointer: "*" _pointer_qualifier*,
