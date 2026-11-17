@@ -4112,6 +4112,7 @@ impl<'a> Parser<'a> {
             self.assignment(&stmt[..equal], value, line, augmented);
         } else if !(self.lang.tag == "JAVA" && self.java_declares_only(stmt))
             && !(self.lang.tag == "SWIFT" && self.swift_declares_only(stmt))
+            && !(self.lang.tag == "KT" && self.kotlin_declares_only(stmt))
         {
             self.expression_event("x", stmt);
         }
@@ -4150,6 +4151,14 @@ impl<'a> Parser<'a> {
             Kind::Op => matches!(self.raw(token), b"@" | b":" | b"."),
             _ => false,
         })
+    }
+
+    /// A Kotlin member that declares and assigns nothing: `init {` is the
+    /// introducer of an initializer block, and the CST writes no event for the
+    /// introducer itself. Read as an expression, `init` invented one `x` event
+    /// per initializer block in the corpus, and every such file fell back.
+    fn kotlin_declares_only(&self, stmt: &[Token]) -> bool {
+        stmt.len() == 1 && self.word_at(stmt, 0).as_deref() == Some("init")
     }
 
     fn java_declares_only(&self, stmt: &[Token]) -> bool {
