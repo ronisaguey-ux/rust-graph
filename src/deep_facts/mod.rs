@@ -1403,6 +1403,17 @@ impl<'a> Walker<'a> {
                     self.form(call);
                 }
             }
+            // `new CVariation(t) { Attribute = new Variation("x") { Pri = 0 } }`:
+            // a creation inside an object initialiser is a call of its own, and
+            // the initialiser was read for its assignments alone, so every nested
+            // creation stayed in the tree and out of the call table.
+            "object_initializer" if self.language.name == "csharp" => {
+                let mut calls = Vec::new();
+                self.lambda_calls(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
             "expression_statement" => self.expression_statement(id),
             // `Assert.Throws<X>(() => new Foo());`: a lambda's expression body
             // holds a call, and no arm read the node, so every call written in
