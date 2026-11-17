@@ -634,6 +634,19 @@ impl<'a> Parser<'a> {
     }
 
     fn on_open_brace(&mut self, token: Token) {
+        // `handleUnknownError<` newline `  TClient extends { emit?: Function },
+        // >(exception: TError)`: a brace inside a type-argument list opens an
+        // object type, not a block. Read as a block its members became
+        // statements of the class and wrote the values `m:[n:emit,n:Function]`
+        // and `m:[n:send,n:Function]` the CST never writes — a type is not a
+        // value (one ts file, 4 rows). A comparison (`a < b`) is not a list:
+        // the angle has to be glued to the name, and a brace inside
+        // parentheses or a block is never a type.
+        if self.brackets.is_empty() && self.open_type_arguments() {
+            self.brackets.push(b'{');
+            self.stmt.push(token);
+            return;
+        }
         let opens_block = self.uses_braces() && self.is_block();
         if opens_block {
             self.settle_branch(None);
