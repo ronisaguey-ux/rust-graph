@@ -885,12 +885,7 @@ impl<'a> Walker<'a> {
                 // accepts where a name can be bound has to be a binder here too,
                 // or `const protected = [...]`, `const { global } = x` and
                 // `const unique = new SafeSet()` bind nothing at all.
-                "is" | "as" | "satisfies" | "get" | "set" | "static" | "async" | "readonly" | "declare" | "type"
-                | "from" | "of" | "module" | "keyof" | "unique" | "namespace" | "interface" | "abstract"
-                | "public" | "private" | "protected" | "implements" | "infer" | "asserts" | "override"
-                | "accessor" | "global" => {
-                    out.push(self.text_string(node))
-                }
+                kind if Self::js_name_word(kind) => out.push(self.text_string(node)),
                 _ => {
                     // Children are pushed in reverse so the stack pops them in
                     // source order: the binding order is part of the record.
@@ -1098,17 +1093,21 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn js_require_destructured(&mut self, pat: u32, module: &str, line: u32) {
         for child in self.children(pat) {
-            match self.kind(child) {
-                "shorthand_property_identifier_pattern" | "shorthand_property_identifier" | "identifier" => {
-                    let name = self.text_string(child);
-                    self.facts.imports.push(Import {
-                        line,
-                        module: module.into(),
-                        name: name.clone(),
-                        alias: name,
-                        kind: IMPORT_MODULE,
-                    });
-                }
+            let child_kind = self.kind(child);
+            if matches!(child_kind, "shorthand_property_identifier_pattern" | "shorthand_property_identifier" | "identifier")
+                || Self::js_name_word(child_kind)
+            {
+                let name = self.text_string(child);
+                self.facts.imports.push(Import {
+                    line,
+                    module: module.into(),
+                    name: name.clone(),
+                    alias: name,
+                    kind: IMPORT_MODULE,
+                });
+                continue;
+            }
+            match child_kind {
                 "object_assignment_pattern" | "assignment_pattern" => {
                     if let Some(&first) = self.children(child).first() {
                         let name = self.text_string(first);
@@ -1961,6 +1960,20 @@ impl<'a> Walker<'a> {
 /// not a segment — an argument list, a star, an `as` clause.
 fn dotted_piece(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || c == '_' || !c.is_ascii())
+}
+
+/// The words the JS grammar accepts where a name can be bound (`_name`), a
+/// dozen of which are lexed as their own keyword kind. A binder is a binder
+/// whatever the keyword table calls the word: `const { get } = require("m")`
+/// puts the keyword `get` in the pattern and no shorthand node at all.
+fn js_name_word(kind: &str) -> bool {
+    matches!(
+        kind,
+        "is" | "as" | "satisfies" | "get" | "set" | "static" | "async" | "readonly" | "declare"
+            | "type" | "from" | "of" | "module" | "keyof" | "unique" | "namespace" | "interface"
+            | "abstract" | "public" | "private" | "protected" | "implements" | "infer" | "asserts"
+            | "override" | "accessor" | "global"
+    )
 }
 
     pub(crate) fn kt_import(&mut self, id: u32) {
