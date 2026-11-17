@@ -1221,7 +1221,18 @@ impl<'a> Walker<'a> {
                 if matches!(self.facts.tag.as_str(), "C" | "CPP" | "OBJC") =>
             {
                 let children = self.children(id);
-                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
+                // `msg->msg_controllen += CMSG_SPACE(sizeof tvts);`: a compound
+                // assignment is the same statement to the lexer, which marks it
+                // weak, and reading only `=` left every `+=` in the corpus as a
+                // bare value event.
+                let assign = children.iter().position(|&child| {
+                    matches!(
+                        self.kind(child),
+                        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+                    )
+                });
+                if let Some(at) = assign {
+                    let weak = self.kind(children[at]) != "=";
                     let target = children[..at]
                         .iter()
                         .rev()
@@ -1254,7 +1265,7 @@ impl<'a> Walker<'a> {
                                 }
                             }
                             let line = self.line(id);
-                            self.lexer_event(b'a', line, &[name.clone()], &form, false);
+                            self.lexer_event(b'a', line, &[name.clone()], &form, weak);
                             if self.kind(value) == "call_expression" {
                                 let path = self.decl_path(value);
                                 let last = path.rsplit('.').next().unwrap_or("").to_string();
