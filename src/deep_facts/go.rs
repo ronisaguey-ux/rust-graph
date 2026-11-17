@@ -168,14 +168,12 @@ impl<'a> Walker<'a> {
         self.assignment_parts(vec![target], value, line, false);
         // `new P { Name = new S(name, false) }`: the outer creation is the
         // value, and each creation inside the initialiser is a call of its own.
-        // Read as part of the value's form they were never recorded.
-        let mut nested = Vec::new();
-        for child in self.children(value) {
-            self.c_calls_in_pub(child, &mut nested);
-        }
-        for call in nested {
-            self.form(call);
-        }
+        // Read as part of the value's form they were never recorded. The read
+        // stops at the *first* level, so `new D { P = new E { Q = new F() } }`
+        // - an initialiser inside an initialiser - lost `F` while the same
+        // locals one level down were right; the walk below descends at any
+        // depth and pushes each creation once.
+        self.field_initializer_calls(value);
         true
     }
 
