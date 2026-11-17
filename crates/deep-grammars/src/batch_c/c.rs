@@ -334,6 +334,9 @@ rust_graph_deep::grammar! { C {
 
     compound_statement: "{" _statement* "}",
 
+    /// `;;` and `case 1: ;`: a stray semicolon declares nothing and is legal.
+    empty_statement: ";",
+
     _statement:
         compound_statement
         | if_statement
@@ -348,6 +351,10 @@ rust_graph_deep::grammar! { C {
         | labeled_statement
         | static_assert_statement
         | asm_statement
+        // `if (l+1 > len) goto err;;` — a stray `;` is an empty statement in
+        // C, and a grammar without one carries the rest of the block in an
+        // error node.
+        | empty_statement
         // `client *replica = listNodeValue(ln);`: a typedef name with a
         // pointer inside a block is a multiplication unless the statement
         // binds a value — `x * y = 1;` is not an assignment anyone writes, so
