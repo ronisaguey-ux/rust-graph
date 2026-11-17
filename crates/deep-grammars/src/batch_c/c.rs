@@ -372,8 +372,16 @@ rust_graph_deep::grammar! { C {
     do_statement: "do" _statement "while" parenthesized_expression ";",
     for_statement: "for" for_header _statement,
     for_header: "(" [_for_init] ";" [_expression] ";" [_expression] ")",
-    _for_init: _for_declaration | _expression,
-    _for_declaration: declaration_specifiers (_init_declarator % ","),
+    _for_init: &(_for_declaration) _for_declaration | _expression,
+    /// `for (size_t i = 0; …)`: a C99 declaration in the init clause. The
+    /// type may be a typedef name (`for (pszind_t p = 0; …)`), which
+    /// `declaration_specifiers` does not hold — it reads keywords only — so the
+    /// bare-user form is its own alternative.
+    _for_declaration:
+        declaration_specifiers (_init_declarator % ",")
+        // `for (i = 0; …)` is an expression, not a declaration: the guard
+        // wants two names in a row (`size_t huge`), which no assignment has.
+        | &(user_type_name IDENT) user_type_name (_init_declarator % ","),
     parenthesized_expression: "(" _expression ")",
     return_statement: "return" [_expression] ";",
     break_statement: "break" ";",
