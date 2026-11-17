@@ -2024,7 +2024,16 @@ impl<'a> Walker<'a> {
             return Some(self.text_string(node));
         }
         if let Some(node) = def.name.iter().find_map(|kind| self.child_of_kind(id, *kind)) {
-            return Some(self.text_string(node));
+            let text = self.text_string(node);
+            // `fun A.B.load()`: a Kotlin extension's head is its receiver and
+            // its name, and the name is the last segment — the lexer files the
+            // symbol under that alone.
+            if self.facts.tag == "KT" && self.kind(node) == "function_head" {
+                if let Some((_, name)) = text.rsplit_once('.') {
+                    return Some(name.to_string());
+                }
+            }
+            return Some(text);
         }
         // A function or method called `get` or `set` reads as the modifier that
         // introduces an accessor, so the grammar gives the name that anonymous
