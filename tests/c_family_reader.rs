@@ -150,3 +150,18 @@ fn a_parenthesised_declarator_writes_no_value() {
     }
     assert!(failed.is_empty(), "a parenthesised declarator lost {} line(s):\n{}", failed.len(), failed.join("\n"));
 }
+
+/// `{ 0x80, 36 },` is a row of a table header that a declaration `#include`s
+/// (musl's locale and ctype tables). At file scope C has no compound
+/// statement, so the row is data and writes no fact; read as a block, the lexer
+/// filed one tuple value per row and the CST had nothing to match — 99 rows in
+/// gb18030utf.h alone.
+#[test]
+fn a_table_header_row_writes_no_value() {
+    let source = "{ 0x80, 36 },\n{ 0xa5, 2 },\n{ 0xa9, 7 },\n";
+    let language = langs::by_content("c", source.as_bytes()).expect("a C row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let deep = read(source, Lang::C);
+    let verdict = pipeline::loses(&lexer, &deep);
+    assert!(!verdict.lost(), "a table row lost a value: {verdict:?}");
+}
