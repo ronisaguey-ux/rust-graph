@@ -217,7 +217,7 @@ rust_graph_deep::grammar! { C {
     typedef_user_declaration: "typedef" user_type_name _init_declarator ("," _init_declarator)* ";",
     /// `Foo x;`: a typedef name and a named declarator. It never starts with a
     /// `*`, so `x * y;` in a function stays a multiplication.
-    bare_user_declaration: user_type_name _named_init_declarator ("," _named_init_declarator)* ";",
+    bare_user_declaration: user_type_name _named_init_declarator ("," _pointer_named_declarator)* ";",
     _named_init_declarator: IDENT _declarator_suffix* attribute* ["=" _initializer],
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     /// A typedef name where a type specifier is expected.
