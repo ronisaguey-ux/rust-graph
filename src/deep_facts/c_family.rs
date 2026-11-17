@@ -440,7 +440,20 @@ impl<'a> Walker<'a> {
                         if let (Some(list), Some(name_node)) = (
                             self.c_descendant(id, "parameter_list"),
                             self.child_of_kind(id, "direct_declarator")
-                                .and_then(|node| self.first_identifier(node)),
+                                .and_then(|node| self.first_identifier(node))
+                                // `hidden off_t __lseek(int, off_t, int);`: a
+                                // return type the grammar does not know becomes
+                                // a `bare_user_declaration`, whose name is a
+                                // direct child of it, so the declarator lookup
+                                // found nothing and the macro word in front of
+                                // the type was dropped from a prototype the
+                                // lexer keeps whole.
+                                .or_else(|| {
+                                    let bare = self.c_descendant(id, "bare_user_declaration")?;
+                                    let kids = self.children(bare);
+                                    let at = kids.iter().rposition(|&node| self.kind(node) == "identifier")?;
+                                    Some(self.text_string(kids[at]))
+                                }),
                         ) {
                             let name = name_node;
                             if !name.is_empty() {
