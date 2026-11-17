@@ -41,6 +41,24 @@ const RS_NOISE: [&str; 20] = [
     "ref", "unsafe", "pub", "move", "try", "use",
 ];
 const NAMED_ARGS_WITH_COLON: [&str; 5] = ["RB", "CR", "SWIFT", "DART", "EX"];
+/// Words that describe a C declaration instead of naming a value. `const` and
+/// `void` are already in [`NOISE`]; the rest are the storage classes and
+/// type specifiers the one-pass reader emitted as names, so `static int h(int
+/// x);` carried `n:static` and `extern hidden void g(int);` carried `n:extern`
+/// where the CST writes the type and the declared name alone.
+const C_SPECIFIERS: [&str; 20] = [
+    "static", "extern", "register", "inline", "auto", "typedef", "_Noreturn", "thread_local", "_Thread_local",
+    "__inline", "__inline__", "volatile", "restrict", "__restrict", "__restrict__", "signed", "unsigned", "short",
+    "long", "struct",
+];
+/// The C words a declaration specifier can precede. A word in front of one of
+/// these is an annotation macro (`LUAI_FUNC const TValue *f(..)`,
+/// `hidden size_t f(..)`), not a value: no expression writes a name and then a
+/// type, and every one of them was a name the source never read.
+const C_TYPE_WORDS: [&str; 15] = [
+    "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool", "_Complex", "const",
+    "volatile", "restrict", "struct",
+];
 
 pub fn lexeme(src: &[u8], token: &Token, lang: &Language) -> String {
     let text = String::from_utf8_lossy(&src[token.start as usize..token.end as usize]);
@@ -1031,6 +1049,20 @@ impl Emit<'_> {
         }
     }
 
+    /// Whether the word at the cursor describes the declaration that follows
+    /// (`static`, `extern`, a calling-convention or annotation macro) rather
+    /// than naming a value read by the statement.
+    fn c_specifier(&self, word: &str) -> bool {
+        if C_SPECIFIERS.contains(&word) {
+            return true;
+        }
+        // An annotation macro sits exactly where a type does: `hidden size_t
+        // __strftime_l(..)`, `LUAI_FUNC const TValue *luaH_getnum(..)`. No
+        // expression writes a name and then a type, so the word before a type
+        // is a specifier.
+        self.word(1).is_some_and(|next| C_TYPE_WORDS.contains(&next.as_str()))
+    }
+
     fn ident(&mut self, out: &mut String, close: u8) {
         let token = &self.toks[self.pos];
         let line = token.line;
@@ -1204,6 +1236,15 @@ impl Emit<'_> {
             NOISE.contains(&word.as_str())
         };
         if noise && !go_word {
+            self.pos += 1;
+            return;
+        }
+        // A C declaration's specifiers are not values. `static int h(int x);`
+        // read `static` as a name, `LUAI_FUNC const TValue *luaH_getnum(..)`
+        // read the annotation macro, and `extern hidden void j(int);` read
+        // both; the CST writes the type and the declared name and nothing else,
+        // so each was a name the source never had as a value (c corpus).
+        if self.lang.tag == "C" && self.c_specifier(&word) {
             self.pos += 1;
             return;
         }
