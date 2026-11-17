@@ -340,10 +340,36 @@ impl<'a> Walker<'a> {
         let Some(equal) = parts.iter().position(|&child| self.kind(child) == "=") else {
             return self.decl_statement(id);
         };
-        let target = parts.first().and_then(|&name| self.decl_target(name)).into_iter().collect::<Vec<_>>();
         let value = self.decl_values(&parts[equal + 1..]);
         let line = self.line(id);
-        self.lexer_event(b'a', line, &target, &value, false);
+        // `var a, b int = 1, 2` binds two names, and the lexer writes one event
+        // per declarator; reading the first name alone left every later binder
+        // with no counterpart and the file fell back. A name is the identifier
+        // that opens a comma-separated group: the one after it is the type.
+        let mut declared: Vec<String> = Vec::new();
+        let mut expect_name = true;
+        for &part in &parts[..equal] {
+            let kind = self.kind(part);
+            if kind == "," {
+                expect_name = true;
+                continue;
+            }
+            match (expect_name, kind) {
+                (true, "identifier") => {
+                    declared.extend(self.decl_target(part));
+                    expect_name = false;
+                }
+                _ => break,
+            }
+        }
+        if declared.is_empty() {
+            let target = parts.first().and_then(|&name| self.decl_target(name)).into_iter().collect::<Vec<_>>();
+            self.lexer_event(b'a', line, &target, &value, false);
+            return;
+        }
+        for name in declared {
+            self.lexer_event(b'a', line, std::slice::from_ref(&name), &value, false);
+        }
     }
 
     /// `if cond {`, `for i := 0; i < n; i++ {`, `switch x {`: every statement the
