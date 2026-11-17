@@ -432,6 +432,10 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix subscript => index_expression,
         postfix "." _name => navigation_expression,
         postfix "?." _name => navigation_expression,
+        // `InternalAPI::class`: the class literal's word is the keyword
+        // `class`, which is not a name, so every `@file:OptIn(X::class)` and
+        // every `X::class` in an expression was a recovery region.
+        postfix "::" "class" => class_literal,
         postfix "::" _name => callable_reference,
         postfix BANG_BANG => not_null_expression,
     },
