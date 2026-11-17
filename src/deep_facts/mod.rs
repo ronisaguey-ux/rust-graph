@@ -845,6 +845,19 @@ impl<'a> Walker<'a> {
         calls.len() - 1
     }
 
+    /// `push_call`, twice at most once: a node read for its value and again by
+    /// the walk is one call in the record, and the second read needs the index
+    /// the first one got rather than a second row.
+    pub(crate) fn push_call_once(&mut self, path: String, line: u32) -> usize {
+        let symbol = self.frame().symbol;
+        let calls = &mut self.facts.symbols[symbol].calls;
+        if let Some(at) = calls.iter().position(|call| call.path == path && call.line == line) {
+            return at;
+        }
+        calls.push(Call { path, line });
+        calls.len() - 1
+    }
+
     // -- enter / leave ------------------------------------------------------
 
     pub(crate) fn enter(&mut self, id: u32) {
@@ -964,6 +977,41 @@ impl<'a> Walker<'a> {
             // function's value and no statement arm holds it, so the calls
             // written in one were never read - every expression-bodied Kotlin
             // function lost its call.
+            // `val headers = object : ResponseHeaders() { … }`: the supertype
+            // of an object expression is a constructor call to the one-pass
+            // reader, and nothing read the node when the object stood as a
+            // value, so every anonymous subclass lost its constructor call.
+            "object_expression" if self.is_kotlin() => {
+                let mut constructors = Vec::new();
+                let mut candidates = Vec::new();
+                for child in self.children(id) {
+                    if self.kind(child) == "supertypes" {
+                        candidates.extend(self.children(child));
+                    } else {
+                        candidates.push(child);
+                    }
+                }
+                for child in candidates {
+                    if self.kind(child) != "superclass_constructor" {
+                        continue;
+                    }
+                    let parts = self.children(child);
+                    if !parts.iter().any(|&part| self.kind(part) == "arguments") {
+                        continue;
+                    }
+                    if let Some(&callee) = parts.iter().find(|&&part| self.kind(part) != "arguments") {
+                        constructors.push(callee);
+                    }
+                }
+                for callee in constructors {
+                    let path = self.decl_path(callee);
+                    if path.is_empty() {
+                        continue;
+                    }
+                    let line = self.line(callee);
+                    self.push_call_once(path, line);
+                }
+            }
             // `init { … }`: the one-pass reader files the keyword as a
             // statement of its own (`n:init`) and nothing wrote the line, so
             // every class with an initialiser block lost one event.

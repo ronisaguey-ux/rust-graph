@@ -2428,6 +2428,47 @@ fn dotted_piece(text: &str) -> bool {
             return out;
         }
         match kind {
+            // `object : Base() { … }` as a value: the one-pass reader spells the
+            // expression as the name `object` and the constructor's call, so the
+            // property's value is that merge. Formed as the constant 0 every
+            // anonymous subclass initialiser disagreed.
+            "object_expression" if self.is_kotlin() => {
+                let mut parts: Vec<String> = Vec::new();
+                let mut word = "[\"n\",".to_string();
+                push_string(&mut word, "object");
+                word.push(']');
+                parts.push(word);
+                let mut constructors = Vec::new();
+                for child in self.children(id) {
+                    if self.kind(child) == "supertypes" {
+                        for part in self.children(child) {
+                            if self.kind(part) == "superclass_constructor" {
+                                constructors.push(part);
+                            }
+                        }
+                    }
+                }
+                for constructor in constructors {
+                    let members = self.children(constructor);
+                    let Some(&callee) = members.iter().find(|&&part| self.kind(part) != "arguments") else {
+                        continue;
+                    };
+                    let path = self.decl_path(callee);
+                    if path.is_empty() {
+                        continue;
+                    }
+                    let line = self.line(callee);
+                    let index = self.push_call_once(path, line);
+                    let args = members
+                        .iter()
+                        .copied()
+                        .find(|&part| self.kind(part) == "arguments")
+                        .map(|list| self.arguments(list))
+                        .unwrap_or_else(|| "[]".to_string());
+                    parts.push(format!("[\"c\",{index},0,{args}]"));
+                }
+                format!("[\"m\",[{}]]", parts.join(","))
+            }
             // `InternalAPI::class`: the one-pass reader spells a class literal
             // as the dotted path `InternalAPI.class`, so the literal is that
             // name. Formed as the constant 0 it made the argument of every
