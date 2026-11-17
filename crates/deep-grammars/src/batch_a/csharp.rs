@@ -501,6 +501,11 @@ rust_graph_deep::grammar! { CSHARP {
         | "base"
         | &("new" array_specifier) implicit_array_creation
         | &("new" arguments) implicit_creation
+        // `Error = delegate(object sender, ErrorEventArgs args) { ... }`: C# 2's
+        // anonymous method is a value, and the grammar only knew `delegate`
+        // as the head of a type declaration, so every handler written that
+        // way failed inside its initialiser.
+        | &("delegate") anonymous_method
         | &("new" anonymous_body) anonymous_object
         | object_creation
         // `x ?? throw new ArgumentNullException(nameof(x))`, `=> throw new
@@ -525,6 +530,7 @@ rust_graph_deep::grammar! { CSHARP {
     _cast_operand: _literal | _name | "this" | "base" | "new" | "typeof" | "sizeof" | "!" | "~",
     _lambda_body: block | _expression,
     object_creation: "new" _type [arguments] [object_initializer],
+    anonymous_method: "delegate" [formal_parameters] block,
     implicit_creation: "new" arguments [object_initializer],
     implicit_array_creation: "new" array_specifier+ [array_initializer],
     array_specifier: array_size_specifier | array_rank_specifier,
