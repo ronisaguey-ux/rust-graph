@@ -1046,18 +1046,26 @@ impl<'a> Walker<'a> {
                     });
                     match (assigned, target) {
                         (Some(at), Some(name)) => {
-                            // `private bool _inheritance = true;`: the value is
-                            // the initialiser's own form, not the constant 0.
-                            // Written as 0, every field whose initialiser names
-                            // a constant (`true`, `null`, a named item) lost its
-                            // line to "the CST wrote the value as the constant 0"
-                            // (C# corpus: every `= true` field and property).
-                            let line = self.line(id);
-                            let value = children
+                            // The initialiser is the value: `public bool Flag =
+                            // false;` is `a [Flag] n:false` to the lexer, and
+                            // writing the constant `0` for every field but a
+                            // call left each such field a disagreement. A
+                            // keyword literal is a name to the one-pass reader.
+                            let kind = self
+                                .children(id)
                                 .get(at + 1)
-                                .map(|&child| self.form(child))
-                                .unwrap_or_else(|| "0".to_string());
-                            self.lexer_event(b'a', line, &[name], &value, false);
+                                .map(|&child| self.kind(child))
+                                .unwrap_or("");
+                            let form = match kind {
+                                "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
+                                "" => "0".to_string(),
+                                _ => {
+                                    let child = self.children(id)[at + 1];
+                                    self.form(child)
+                                }
+                            };
+                            let line = self.line(id);
+                            self.lexer_event(b'a', line, &[name], &form, false);
                         }
                         _ => {
                             self.decl_statement(id);
