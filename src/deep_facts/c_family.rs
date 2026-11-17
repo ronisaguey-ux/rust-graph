@@ -687,7 +687,17 @@ impl<'a> Walker<'a> {
                         self.lexer_event(b'a', line, &[name], &value, false);
                     } else if inits.len() == 1 {
                         let (name, node, line) = first;
-                        self.assignment_parts(vec![name], node, line, false);
+                        // `int l, o, m=0;` and `FILE _f, *f = fopen(…);`: the
+                        // lexer writes every name of the declaration as a
+                        // target and the one initialiser as the value, so a
+                        // declaration whose only initialiser is on its last
+                        // declarator was written with one target here.
+                        let names = self.c_declared_names(id);
+                        if names.len() > 1 && names.last() == Some(&name) {
+                            self.assignment_parts(names, node, line, false);
+                        } else {
+                            self.assignment_parts(vec![name], node, line, false);
+                        }
                     } else {
                         let (name, node, line) = first;
                         let mut parts = vec![self.form(node)];
@@ -1053,15 +1063,44 @@ impl<'a> Walker<'a> {
     /// so the binding was never read.
     fn c_user_initializer(&mut self, id: u32, out: &mut Vec<(String, u32, u32)>) {
         let kids = self.children(id);
-        let Some(name_at) = kids.iter().position(|&child| self.kind(child) == "identifier") else { return };
-        let name = self.text_string(kids[name_at]);
-        let Some(equal) = kids.iter().skip(name_at).position(|&child| self.kind(child) == "=") else { return };
-        let Some(&value) = kids.get(name_at + equal + 1) else { return };
+        let Some(equal) = kids.iter().position(|&child| self.kind(child) == "=") else { return };
+        // The name belongs to the declarator the `=` closes, and in
+        // `FILE _f, *f = fopen(…)` that is `f`, not the first name of the
+        // declaration. Reading the first identifier named `_f` and gave it the
+        // call's value.
+        let Some(name_node) = kids[..equal].iter().rev().find(|&&child| self.kind(child) == "identifier") else {
+            return
+        };
+        let name = self.text_string(*name_node);
+        let Some(&value) = kids.get(equal + 1) else { return };
         if self.is_layout(value) {
             return;
         }
         let line = self.line(value);
         out.push((name, value, line));
+    }
+
+    /// Every name a declaration declares, in source order: the declarators
+    /// only, never the typedef name that qualifies them and never a name from
+    /// the initialiser.
+    fn c_declared_names(&self, id: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        for child in self.children(id) {
+            match self.kind(child) {
+                "declaration_specifiers" | "user_type_name" | "pointer" | "attribute" | "," | ";" | "=" | ":" => {}
+                "identifier" => out.push(self.text_string(child)),
+                "direct_declarator" => {
+                    if let Some(name) = self.declarator_of(child) {
+                        out.push(name);
+                    }
+                }
+                "bare_user_declaration" | "user_pointer_declaration" | "specified_user_declaration" => {
+                    out.extend(self.c_declared_names(child));
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     /// The first descendant of `id` of `kind`, in source order.
