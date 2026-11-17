@@ -415,6 +415,11 @@ rust_graph_deep::grammar! { C {
     _primary:
         &(cast_type) cast_expression
         | &(user_cast_head (IDENT | NUMBER | STR | CHAR_LITERAL)) user_cast_expression
+        // `(UBits)(SBits)bn.n`: a cast whose operand is another cast. Without
+        // this the second group read as an argument list and the operand was
+        // left over, so every double cast in the corpus was an error node.
+        | &(user_cast_head cast_expression) user_cast_expression
+        | &(user_cast_head user_cast_expression) user_cast_expression
         | sizeof_expression
         | alignof_expression
         | parenthesized_expression
