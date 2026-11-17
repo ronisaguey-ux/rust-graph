@@ -679,8 +679,13 @@ impl<'a> Walker<'a> {
                 }
                 // `Value = "a"`: a named attribute argument is the lexer's
                 // keyword form `["k",name,value]`.
-                let value = if matches!(self.kind(node), "named_attribute_argument" | "named_argument") {
-                    let inner = self.children(node);
+                let inner = self.children(node);
+                // `EntryPoint = "getppid"`: the C# grammar keeps a named
+                // attribute argument as an assignment, and the lexer reads it
+                // as a keyword argument, so the name is part of the value.
+                let named = matches!(self.kind(node), "assignment" | "assignment_expression" | "named_attribute_argument")
+                    || inner.iter().any(|&row| self.kind(row) == ":");
+                let value = if named {
                     let name = inner
                         .iter()
                         .copied()
@@ -688,7 +693,13 @@ impl<'a> Walker<'a> {
                         .next()
                         .and_then(|row| self.leaf_name(row))
                         .unwrap_or_default();
-                    let value = inner.last().copied().map(|row| self.form(row)).unwrap_or_else(|| "0".to_string());
+                    let value = inner
+                        .iter()
+                        .copied()
+                        .rev()
+                        .find(|&row| self.kind(row) != ":" && !self.is_layout(row) && Some(row) != inner.first().copied())
+                        .map(|row| self.form(row))
+                        .unwrap_or_else(|| "0".to_string());
                     let mut keyed = "[\"k\",".to_string();
                     push_string(&mut keyed, &name);
                     keyed.push(',');
