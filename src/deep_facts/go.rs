@@ -1871,18 +1871,37 @@ impl<'a> Walker<'a> {
             return;
         }
         let module = parts.join(".");
+        // A selector list is a comma-separated run of names, and the rename
+        // form `{List => JList}` carries its arrow as an unnamed token between
+        // the two names. Read flat, `{List => JList}` was two imports of one
+        // name each (`List` and `JList`, both aliasing themselves) while the
+        // lexer files one import named `List` and aliased `JList`; the guard
+        // then refused the tree. Splitting at the commas is enough: an item
+        // with two names is a rename, an item with one is a plain selector.
+        let mut items: Vec<Vec<String>> = Vec::new();
+        let mut item: Vec<String> = Vec::new();
         for selector in selectors {
-            if self.is_layout(selector) || matches!(self.kind(selector), "import_selectors" | "," | "{" | "}") {
+            let kind = self.kind(selector);
+            if kind == "," {
+                if !item.is_empty() {
+                    items.push(std::mem::take(&mut item));
+                }
                 continue;
             }
-            let name = self.text_string(selector);
-            self.facts.imports.push(Import {
-                line,
-                module: module.clone(),
-                name: name.clone(),
-                alias: name,
-                kind: IMPORT_MODULE,
-            });
+            if matches!(kind, "{" | "}") || self.is_layout(selector) {
+                continue;
+            }
+            if matches!(kind, "identifier" | "simple_identifier" | "type_identifier" | "_" | "wildcard") {
+                item.push(self.text_string(selector));
+            }
+        }
+        if !item.is_empty() {
+            items.push(item);
+        }
+        for names in items {
+            let Some(name) = names.first().cloned() else { continue };
+            let alias = names.get(1).cloned().unwrap_or_else(|| name.clone());
+            self.facts.imports.push(Import { line, module: module.clone(), name, alias, kind: IMPORT_MODULE });
         }
     }
 
