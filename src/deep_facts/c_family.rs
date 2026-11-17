@@ -235,6 +235,14 @@ impl<'a> Walker<'a> {
             // at file scope, on a line that opens with `}` and closes with `;`;
             // the lexer writes that name, so it is read from the line (13 files).
             "ERROR" => {
+                // A header fragment — `{ 0x80, 36 },` a line, or a bare run of
+                // numbers — is the whole file and one ERROR region: the grammar
+                // has no statement to build, while the one-pass reader still
+                // reads a value per brace item, or one tuple for a flat list.
+                // Those values are on the lines, so they are read from the text.
+                if self.c_fragment_events(id) {
+                    return true;
+                }
                 // The region itself carries only the `}` (the declarator after it
                 // is lost outright), so the name is read from the line.
                 let line = self.line(id);
@@ -1077,6 +1085,98 @@ impl<'a> Walker<'a> {
         out.push((name, value, line));
     }
 
+    /// One event per line for a header fragment: a file whose whole body is a
+    /// run of numbers, commas and braces. `{ 0x80, 36 },` is a tuple of two
+    /// constants to the one-pass reader and a flat list of numbers is one tuple
+    /// of all of them, so the region is read from the text, not from a tree the
+    /// grammar could not build. Anything else in the region leaves it alone.
+    fn c_fragment_events(&mut self, id: u32) -> bool {
+        let text = self.text(id);
+        if text.is_empty() || text.len() * 10 < self.src.len() * 9 {
+            return false;
+        }
+        // (byte offset, brace depth, which top-level brace group it is in)
+        let mut numbers: Vec<(u32, usize, usize)> = Vec::new();
+        let mut depth = 0usize;
+        let mut groups = 0usize;
+        let mut at = 0usize;
+        while at < text.len() {
+            let byte = text[at];
+            if byte.is_ascii_digit() {
+                let begin = at as u32;
+                while at < text.len() && (text[at].is_ascii_alphanumeric() || text[at] == b'.' || text[at] == b'_') {
+                    at += 1;
+                }
+                numbers.push((begin, depth, groups));
+                continue;
+            }
+            match byte {
+                b'{' => {
+                    if depth == 0 {
+                        groups += 1;
+                    }
+                    depth += 1;
+                    at += 1;
+                }
+                b'}' => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    at += 1;
+                }
+                b',' | b' ' | b'\n' | b'\r' | b'\t' => at += 1,
+                _ => return false,
+            }
+        }
+        if depth != 0 || numbers.is_empty() {
+            return false;
+        }
+        let braced = text.contains(&b'{');
+        let mut items: Vec<(u32, usize)> = Vec::new();
+        if braced {
+            let mut group: Option<usize> = None;
+            for &(offset, depth, which) in &numbers {
+                if depth != 1 {
+                    continue;
+                }
+                if group != Some(which) {
+                    items.push((offset, 0));
+                    group = Some(which);
+                }
+                if let Some(last) = items.last_mut() {
+                    last.1 += 1;
+                }
+            }
+        } else if let Some(&(offset, _, _)) = numbers.first() {
+            items.push((offset, numbers.len()));
+        }
+        for (offset, count) in items {
+            if count < 2 {
+                continue;
+            }
+            let line = self.line_at(offset);
+            let mut value = "[\"t\",[".to_string();
+            for index in 0..count {
+                if index > 0 {
+                    value.push(',');
+                }
+                value.push('0');
+            }
+            value.push_str("]]");
+            self.lexer_event(b'x', line, &[], &value, false);
+        }
+        true
+    }
+
+    /// The line a byte offset sits on.
+    fn line_at(&self, offset: u32) -> u32 {
+        match self.line_starts.partition_point(|&start| start <= offset) {
+            0 => 1,
+            found => found as u32,
+        }
+    }
+
     /// The first descendant of `id` of `kind`, in source order.
     fn c_descendant(&self, id: u32, kind: &str) -> Option<u32> {
         let mut stack = vec![id];
@@ -1777,6 +1877,15 @@ mod designated_initializer_tests {
         let events = module_events("struct S { int x; };\nstruct S s = { .x = 0 };\n");
         assert!(events.contains("[\"n\",\"x\"]"), "{events}");
         assert!(!events.contains("[[\"n\",\"x\"],0]"), "{events}");
+    }
+
+    /// A header fragment is data the grammar cannot build a statement for, and
+    /// the one-pass reader still writes a value per brace item. Those lines are
+    /// the file's record, so both readers have to write them.
+    #[test]
+    fn a_header_fragment_writes_a_tuple_per_brace_item() {
+        let events = module_events("{ 0x80, 36 },\n{ 0x81, 37 },\n");
+        assert_eq!(events.matches("[\"t\",[0,0]]").count(), 2, "{events}");
     }
 
     /// `int (*configure)(void *priv, int reconfigure);`: a struct field that is
