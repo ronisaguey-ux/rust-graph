@@ -193,6 +193,9 @@ rust_graph_deep::grammar! { KOTLIN {
         KW_VALUE = "value",
         KW_VARARG = "vararg",
         KW_WHERE = "where",
+        /// `@file:JvmName("X")`: the target of a file annotation is the one
+        /// place `file` means a keyword instead of a name.
+        KW_FILE = "file",
         /// A line break where Kotlin infers a statement end.
         LINE_END = "line_end",
 
@@ -250,7 +253,15 @@ rust_graph_deep::grammar! { KOTLIN {
     /// arguments, its trailing lambda, or a plain assignment — and never a bare
     /// block, so a broken declaration is recovered inside itself instead of
     /// being re-read as a top-level statement.
-    _top: package_header | import_header | _declaration | script_statement | LINE_END | ";",
+    /// `@file:OptIn(InternalAPI::class)` before the package clause: a file
+    /// annotation is an item of its own - no declaration follows it - and
+    /// nothing in `_top` could hold one, so the annotation, the package clause
+    /// and every declaration after it were one recovery region. The target is
+    /// the token that tells it from a declaration's own modifiers.
+    _top:
+        package_header | import_header | _declaration | &("@" KW_FILE ":") file_annotation | script_statement
+        | LINE_END | ";",
+    file_annotation: annotation LINE_END*,
     script_statement: _script_head [arguments] [lambda_literal] ["=" _expression],
     /// A plain identifier starts a script statement. A contextual keyword does
     /// not: `data class X` and `abstract class X` are declarations, and a start
@@ -486,7 +497,7 @@ rust_graph_deep::grammar! { KOTLIN {
         | "expect" | "external" | "field" | "final" | "get" | "infix" | "init" | "inline"
         | "inner" | "internal" | "lateinit" | "noinline" | "open" | "operator" | "out"
         | "override" | "private" | "protected" | "public" | "reified" | "sealed" | "set"
-        | "suspend" | "tailrec" | "value" | "vararg" | "where",
+        | "suspend" | "tailrec" | "value" | "vararg" | "where" | "file",
 } }
 
 /// One token at the cursor.
@@ -701,6 +712,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"value" => KW_VALUE,
         b"vararg" => KW_VARARG,
         b"where" => KW_WHERE,
+        b"file" => KW_FILE,
         _ => IDENT,
     }
 }
