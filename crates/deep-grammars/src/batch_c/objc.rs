@@ -262,7 +262,11 @@ rust_graph_deep::grammar! { OBJC {
 
     // ---- @-declarations ----
 
-    objc_interface: "@interface" IDENT [":" IDENT] [protocol_list] [ivar_block] _interface_item* "@end",
+    // A category is the same line with a parenthesised name where a
+    // superclass would be: `@interface Foo ()` is the anonymous extension a
+    // class continues itself with, `@interface Foo (Bar)` a named one.
+    objc_interface: "@interface" IDENT [":" IDENT] [category] [protocol_list] [ivar_block] _interface_item* "@end",
+    category: "(" [IDENT] ")",
     protocol_list: "<" (protocol_name % ",") _gt,
     protocol_name: IDENT,
     _gt: ">" | GT_JOINED,
@@ -270,7 +274,7 @@ rust_graph_deep::grammar! { OBJC {
     ivar_declaration: (declaration_specifiers | plain_type_name) (_declarator % ",") ";",
     _interface_item: objc_method_declaration | objc_property_declaration | declaration_statement | ";",
 
-    objc_implementation: "@implementation" IDENT [":" IDENT] _implementation_item* "@end",
+    objc_implementation: "@implementation" IDENT [":" IDENT] [category] _implementation_item* "@end",
     _implementation_item: objc_method_definition | &(declaration_specifiers _declarator "{") function_definition | objc_synthesize | objc_dynamic | declaration_statement | ";",
     objc_method_definition: ("-" | "+") [method_type] method_selector compound_statement,
     objc_method_declaration: ("-" | "+") [method_type] method_selector ";",
