@@ -3891,6 +3891,15 @@ impl<'a> Parser<'a> {
                 return;
             }
         }
+        // `@Test` on a line of its own annotates the declaration below it and
+        // states no value: the CST files an annotation's event only when the
+        // annotation carries arguments (`@Suppress("x")`), so reading the bare
+        // name as an expression invented one `x` event per annotated
+        // declaration - 765 corpus45/kotlin files, the largest kotlin cluster
+        // in the shape table.
+        if self.lang.tag == "KT" && self.kotlin_annotation_alone(stmt) {
+            return;
+        }
         // A C header's data tables are fragments of an initializer, not
         // statements. musl includes `ctype/alpha.h` inside a declaration
         // (`static const unsigned char table[] = {` … `};`) and
@@ -4087,6 +4096,21 @@ impl<'a> Parser<'a> {
     /// reading each as an expression invented `x` events the other reader never
     /// had: 4,961 events over 1,204 files, the largest java cluster in the
     /// shape table.
+    /// A statement that is nothing but annotations: `@Test`, `@file:JvmName`,
+    /// `@org.junit.Test`. Kotlin files each as a call of its name, and the CST
+    /// writes that call's event only when the annotation has an argument list,
+    /// so a bare name on its own line states nothing both readers can agree on.
+    fn kotlin_annotation_alone(&self, stmt: &[Token]) -> bool {
+        if !stmt.first().is_some_and(|token| self.is_op(token, b"@")) {
+            return false;
+        }
+        stmt.iter().all(|token| match token.kind {
+            Kind::Ident => true,
+            Kind::Op => matches!(self.raw(token), b"@" | b":" | b"."),
+            _ => false,
+        })
+    }
+
     fn java_declares_only(&self, stmt: &[Token]) -> bool {
         let Some(first) = stmt.first() else { return false };
         let word = |token: &Token| if token.kind == Kind::Ident { Some(self.text(token)) } else { None };
