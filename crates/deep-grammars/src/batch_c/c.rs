@@ -169,8 +169,12 @@ rust_graph_deep::grammar! { C {
     bare_user_function_definition: user_type_name _declarator compound_statement,
     /// `PyDoc_STRVAR(name, "...");`: a macro that expands to a declaration, at
     /// file scope. Nothing else is a statement there, so this is the only
-    /// expression-shaped form the root accepts.
-    macro_call_statement: IDENT arguments ";",
+    /// expression-shaped form the root accepts. `LOCK_OBJ_DEF;` is the same
+    /// shape with no argument at all — and the lookahead keeps a bare name that
+    /// is not alone on its statement out of this rule, so `hidden int f(void);`
+    /// still reads as the qualified declaration and a recovered block does not
+    /// turn every identifier into a macro call.
+    macro_call_statement: &(IDENT ";") IDENT ";" | IDENT arguments ";",
     /// `extern "C" { ... }` and `extern "C" int f(void);`: a linkage block.
     linkage_specification: "extern" string ("{" _top_item* "}" | _top_item),
     /// A visibility macro in front of a declaration: `NPY_NO_EXPORT int f(void);`,

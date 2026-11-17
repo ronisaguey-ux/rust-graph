@@ -362,6 +362,35 @@ impl<'a> Walker<'a> {
                     self.macro_prefix = Some(self.text_string(first));
                 }
             }
+            // `extern hidden FILE *volatile __stdin_used;`: the macro sits
+            // between the storage class and the type, and no arm read this node.
+            // The lexer keeps the macro as the first name of the line and drops
+            // the words that describe the declaration, so the line read as
+            // `m:[n:FILE,n:volatile,n:__stdin_used]` — the macro missing and a
+            // word the lexer never writes. Both readers agree on the line's
+            // names, so the event is read off the node with the lexer's own
+            // specifier list.
+            "specified_macro_item" => {
+                let words: Vec<String> = self
+                    .c_words_of(id)
+                    .into_iter()
+                    .filter(|word| !crate::expr::C_SPECIFIERS.contains(&word.as_str()))
+                    .collect();
+                if !words.is_empty() {
+                    let line = self.line(id);
+                    let parts: Vec<String> = words
+                        .iter()
+                        .map(|word| {
+                            let mut part = String::from("[\"n\",");
+                            push_string(&mut part, word);
+                            part.push(']');
+                            part
+                        })
+                        .collect();
+                    let value = format!("[\"m\",[{}]]", parts.join(","));
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+            }
             // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
             // grammar gives it a declaration node, and nothing read it.
             "static_assert_declaration" | "static_assert" => {
@@ -1747,5 +1776,13 @@ mod designated_initializer_tests {
         let events = module_events("int t[2] = { 1, 2 };\n");
         assert!(events.contains("[\"m\",[0,0]]"), "{events}");
         assert!(!events.contains("[\"m\",[0,0,0,0]]"), "{events}");
+    }
+    /// A macro statement with no argument is the bare name to the one-pass
+    /// reader. Read as a call it named nothing, and the declaration it stands
+    /// for lost its line.
+    #[test]
+    fn a_macro_statement_with_no_argument_is_its_name() {
+        let events = module_events("LOCK_OBJ_DEF;\n");
+        assert!(events.contains("[\"x\",1,[\"n\",\"LOCK_OBJ_DEF\"]]"), "{events}");
     }
 }
