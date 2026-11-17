@@ -247,6 +247,15 @@ fn conformance(root: &str, reps: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Directories that are never source: the same list `src/pipeline.rs` walks
+/// past, so a conformance number and a build number count the same files. A
+/// build artifact is not a file the budget is about — `.rust-graph/graph.json`
+/// alone is 410 ms of a sweep and would sit in the cpp p95 as if it were C++.
+const SKIPPED_DIRS: [&str; 14] = [
+    ".git", ".hg", ".svn", ".rust-graph", "node_modules", "target", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache",
+    ".pytest_cache", ".gradle", ".idea",
+];
+
 /// Every regular file under `root`, in directory order (the caller sorts).
 fn collect(root: &str, out: &mut Vec<String>) -> Result<(), String> {
     let directory = std::fs::read_dir(root).map_err(|error| format!("{root}: {error}"))?;
@@ -254,6 +263,10 @@ fn collect(root: &str, out: &mut Vec<String>) -> Result<(), String> {
         let entry = entry.map_err(|error| format!("{root}: {error}"))?;
         let path = entry.path();
         if path.is_dir() {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if SKIPPED_DIRS.contains(&name) {
+                continue;
+            }
             collect(&path.to_string_lossy(), out)?;
         } else if path.is_file() {
             out.push(path.to_string_lossy().into_owned());
