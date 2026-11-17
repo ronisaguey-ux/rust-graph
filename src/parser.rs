@@ -14,6 +14,13 @@ const MODIFIERS: [&str; 34] = [
     "virtual", "override", "inline", "extern", "sealed", "open", "data", "partial", "local", "declare", "readonly",
     "unsafe", "pure", "external", "view", "payable", "friend", "rec", "impure", "elemental", "recursive", "shared", "module",
 ];
+/// The words Kotlin writes in front of a member. `lateinit`, `suspend`,
+/// `vararg` and `reified` are not in [`MODIFIERS`], which is the C-family list.
+const KOTLIN_MODIFIERS: [&str; 24] = [
+    "public", "private", "protected", "internal", "abstract", "final", "open", "sealed", "data", "value", "inner",
+    "override", "lateinit", "const", "suspend", "inline", "infix", "operator", "tailrec", "external", "annotation",
+    "vararg", "expect", "actual",
+];
 /// A word Java writes in front of a member and binds nothing.
 fn java_modifier(word: &str) -> bool {
     matches!(
@@ -4120,6 +4127,7 @@ impl<'a> Parser<'a> {
             self.assignment(&stmt[..equal], value, line, augmented);
         } else if !(self.lang.tag == "JAVA" && self.java_declares_only(stmt))
             && !(self.lang.tag == "SWIFT" && self.swift_declares_only(stmt))
+            && !(self.lang.tag == "KT" && self.kotlin_declares_only(stmt))
         {
             self.expression_event("x", stmt);
         }
@@ -4158,6 +4166,25 @@ impl<'a> Parser<'a> {
             Kind::Op => matches!(self.raw(token), b"@" | b":" | b"."),
             _ => false,
         })
+    }
+
+    /// A Kotlin member that declares and assigns nothing: `public val log:
+    /// Logger`, `public fun f(): Int`, `companion object`, `abstract val x:
+    /// Int`, `internal lateinit var y: Channel`. The CST writes no event for
+    /// any of them — a declaration header is not a value — so reading each as
+    /// an expression invented the event the other reader never had, and every
+    /// interface member and companion object in the corpus lost its line.
+    /// A statement with a top-level `=` never reaches this: it is an
+    /// assignment, and the initialiser is read as one.
+    fn kotlin_declares_only(&self, stmt: &[Token]) -> bool {
+        let mut index = 0;
+        while self.word_at(stmt, index).is_some_and(|word| KOTLIN_MODIFIERS.contains(&word.as_str())) {
+            index += 1;
+        }
+        matches!(
+            self.word_at(stmt, index).as_deref(),
+            Some("val" | "var" | "fun" | "class" | "interface" | "object" | "companion" | "enum" | "typealias")
+        )
     }
 
     /// `init {` arrives as the keyword alone: the brace opened the block this
