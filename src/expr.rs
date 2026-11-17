@@ -1088,6 +1088,34 @@ impl Emit<'_> {
             }
             return;
         }
+        // `int (*close)(FILE *);`: a function pointer's declaration. The type
+        // word in front of the parenthesis names the declared type and the
+        // group that follows is the declarator, so the line carries no callee
+        // at all; read as a call it carried a call of the type word and an
+        // applied `.call` whose only argument was the pointer's own name, where
+        // the CST writes the declaration's own names (the client_comp shape,
+        // 4 c files). Both groups belong to the declaration: the declarator and
+        // the parameter list after it.
+        if self.lang.tag == "C"
+            && C_TYPE_WORDS.contains(&word.as_str())
+            && self.op_byte(1) == b'('
+            && self.op_byte(2) == b'*'
+        {
+            let mut at = self.pos + 1;
+            if let Some(after) = self.skip_balanced(at, b"(", b")") {
+                at = after;
+                if self.op_byte_at(at) == b'(' {
+                    if let Some(end) = self.skip_balanced(at, b"(", b")") {
+                        at = end;
+                    }
+                }
+            }
+            self.pos = at;
+            out.push_str("[\"n\",");
+            push_string(out, &word);
+            out.push(']');
+            return;
+        }
         // `new Fab;` with no parentheses is still a constructor call: the
         // grammar writes the call, the lexer dropped `new` as layout and left
         // the callee standing as a name. `new.target` is not a call, and a
