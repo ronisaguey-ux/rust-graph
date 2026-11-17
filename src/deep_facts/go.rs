@@ -3365,7 +3365,7 @@ fn dotted_piece(text: &str) -> bool {
             // (`path.Join(os.Getenv(..))`) would come back as `0`.
             let value = if ellipsis {
                 "0".to_string()
-            } else if kind == "labeled_argument" {
+            } else if kind == "labeled_argument" || (kind == "named_argument" && self.is_kotlin()) {
                 // `Package(name: "x", platforms: [.macOS("10")])`: a Swift
                 // labeled argument is a keyword argument to the lexer -
                 // `[\"k\",name,value]` - and read as a plain form it came back
