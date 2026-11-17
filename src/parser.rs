@@ -3922,7 +3922,24 @@ impl<'a> Parser<'a> {
         let toks = &toks[..end];
         let mut at = toks.len();
         if toks.last().is_some_and(|token| self.is_op(token, b"]")) {
-            at = toks.iter().position(|token| self.is_op(token, b"["))?;
+            // The subscript that ends the assignment, not the first `[` in the
+            // target: `suite[0].children[a:b] = v` writes `suite[0].children`,
+            // so the bracket to cut at is the one matching the final `]` and
+            // the receiver walk continues from there.
+            let mut depth = 0usize;
+            let mut open = None;
+            for index in (0..toks.len()).rev() {
+                if self.is_op(&toks[index], b"]") {
+                    depth += 1;
+                } else if self.is_op(&toks[index], b"[") {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(index);
+                        break;
+                    }
+                }
+            }
+            at = open?;
             if at > 0
                 && (at == 1 || !self.is_join(&toks[at - 2]))
                 && matches!(self.raw(&toks[at - 1]), b"const" | b"let" | b"var" | b"mut")
