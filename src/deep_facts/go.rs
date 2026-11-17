@@ -2266,8 +2266,12 @@ fn dotted_piece(text: &str) -> bool {
             // it read as a leaf and the property vanished from the value.
             "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" | "_" | "type" | "from"
             | "of" | "satisfies" => {
+                // A compiler directive's word keeps no `#`: the lexer reads
+                // `#endif` as the name `endif` (`path_of` already trims it), so
+                // the CST's `#endif` was a name the lexer's record never carried
+                // — 62 rows, the largest event cluster left in the swift dump.
                 let text = self.text_string(id);
-                let text = if text == "this" { "self".to_string() } else { text };
+                let text = if text == "this" { "self".to_string() } else { text.trim_start_matches('#').to_string() };
                 if text.is_empty() {
                     "0".to_string()
                 } else {
