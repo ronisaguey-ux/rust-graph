@@ -2825,6 +2825,30 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            // `String::class` written where a value goes: a callable reference
+            // names the path with a dot, the way the one-pass reader spells
+            // `::`, and read as the constant 0 it left the annotation's own
+            // argument disagreeing with the lexer (`@OptIn(X::class)`).
+            "callable_reference" => {
+                let mut path = String::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(&self.text_string(child));
+                }
+                if path.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    out
+                }
+            }
             // `field_expression` is Rust's spelling of the same path; without
             // this arm `self.skipped_groups == 0` read both sides as the
             // constant and the name left the record.
