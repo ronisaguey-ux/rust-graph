@@ -312,24 +312,28 @@ rust_graph_deep::grammar! { CSHARP {
         | &([attributes] [modifiers] _type "operator") operator_declaration
         | &([attributes] [modifiers] _type "this") indexer_declaration
         | &([attributes] [modifiers] "event") event_declaration
-        | &([attributes] [modifiers] _type _name [type_parameters] formal_parameters) method_declaration
-        | &([attributes] [modifiers] _type _name "=>") expression_bodied_member
-        | &([attributes] [modifiers] _type _name property_body) property_declaration
+        | &([attributes] [modifiers] _type _member_name [type_parameters] formal_parameters) method_declaration
+        | &([attributes] [modifiers] _type _member_name "=>") expression_bodied_member
+        | &([attributes] [modifiers] _type _member_name property_body) property_declaration
         | field_declaration
         | ";",
 
-    method_declaration: [attributes] [modifiers] _type _name [type_parameters] formal_parameters [type_parameter_constraints] (block | "=>" _expression ";" | ";"),
-    expression_bodied_member: [attributes] [modifiers] _type _name "=>" _expression ";",
+    method_declaration: [attributes] [modifiers] _type _member_name [type_parameters] formal_parameters [type_parameter_constraints] (block | "=>" _expression ";" | ";"),
+    expression_bodied_member: [attributes] [modifiers] _type _member_name "=>" _expression ";",
     constructor_declaration: [attributes] [modifiers] _name formal_parameters [constructor_initializer] (block | "=>" _expression ";"),
     constructor_initializer: ":" ("base" | "this") arguments,
     destructor_declaration: [attributes] [modifiers] "~" _name empty_arguments block,
-    property_declaration: [attributes] [modifiers] _type _name property_body [property_tail],
+    property_declaration: [attributes] [modifiers] _type _member_name property_body [property_tail],
     property_tail: "=" _expression@assign ";" | ";",
     property_body: "{" accessor_declaration* "}",
-    accessor_declaration: [attributes] [modifiers] ("get" | "set" | "init" | "add" | "remove") (block | ";"),
+    // `public int P { get => 1; set => _p = value; }`: an expression-bodied
+    // accessor is written with `=>` and no block, and the grammar only knew the
+    // block and the `;`, so every property with one failed to parse and took the
+    // whole file's record with it.
+    accessor_declaration: [attributes] [modifiers] ("get" | "set" | "init" | "add" | "remove") (block | "=>" _expression ";" | ";"),
     indexer_declaration: [attributes] [modifiers] _type "this" indexer_parameters property_body [property_tail],
     indexer_parameters: "[" (parameter %? ",") "]",
-    event_declaration: [attributes] [modifiers] "event" _type _name event_tail,
+    event_declaration: [attributes] [modifiers] "event" _type _member_name event_tail,
     event_tail: event_accessors | ";" | "=" _expression ";",
     event_accessors: "{" accessor_declaration* "}",
     operator_declaration: [attributes] [modifiers] ["implicit" | "explicit"] _type "operator" _operator_token formal_parameters (block | "=>" _expression ";"),
@@ -512,6 +516,11 @@ rust_graph_deep::grammar! { CSHARP {
     checked_arguments: "(" _expression ")",
     stackalloc_expression: "stackalloc" _type [array_initializer],
 
+    // `object IEnumerator.Current { get { … } }`, `void IDisposable.Dispose()`:
+    // an explicit interface implementation names its member with a dotted
+    // name, and a property written that way failed to parse at all, so the
+    // whole file fell back on one member (104 corpus files).
+    _member_name: _name ("." _name)*,
     _name:
         IDENT | "async" | "record" | "partial" | "where" | "get" | "set" | "init" | "add"
         | "remove" | "value" | "when" | "required" | "global" | "dynamic" | "scoped"
@@ -958,6 +967,14 @@ mod tests {
     #[test]
     fn csharp_malformed_fixtures_keep_the_root_and_report_inside_it() {
         fixtures::malformed("csharp", &CSHARP, MALFORMED);
+    }
+
+    #[test]
+    fn csharp_member_declarations_take_bodies_and_dotted_names() {
+        assert!(fixtures::clean(&CSHARP, "class C { int P { get => 1; set => _p = value; } }"));
+        assert!(fixtures::clean(&CSHARP, "class C { object IEnumerator.Current { get { throw null; } } }"));
+        assert!(fixtures::clean(&CSHARP, "class C { void IDisposable.Dispose() { } }"));
+        assert!(fixtures::clean(&CSHARP, "class C { [Obsolete(\"x\")] int P { get => 1; } }"));
     }
 
     #[test]
