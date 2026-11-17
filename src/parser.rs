@@ -3960,6 +3960,19 @@ impl<'a> Parser<'a> {
 
     fn statement(&mut self, stmt: &[Token]) {
         let Some(first) = stmt.first() else { return };
+        // A Java member declares; it never assigns by expression. An enum
+        // constant with arguments (`ALL(Integer.MIN_VALUE),`) and an annotation
+        // with arguments (`@SuppressWarnings("unchecked")`) are declarations,
+        // and the CST writes no value for either — read as expressions they
+        // were a call per constant and a call per annotation (java: 184 and 13
+        // files). A member that binds nothing has no event; a field with an
+        // initialiser has its `=` and keeps its own.
+        if self.lang.tag == "JAVA"
+            && self.top().kind == FrameKind::Class
+            && !stmt.iter().any(|token| self.is_op(token, b"="))
+        {
+            return;
+        }
         // `#![allow(unused)]` and a `#[derive(Debug)]` written on its own line
         // are layout: the CST writes nothing for them. Read as a value, the inner
         // attribute became the call `allow(unused)` on the module symbol. A
