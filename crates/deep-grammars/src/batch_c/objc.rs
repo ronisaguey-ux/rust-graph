@@ -76,6 +76,8 @@ rust_graph_deep::grammar! { OBJC {
         KW_NIL = "nil",
         KW_YES = "YES",
         KW_NO = "NO",
+        KW_COVARIANT = "__covariant",
+        KW_CONTRAVARIANT = "__contravariant",
 
         AT_INTERFACE = "@interface",
         AT_IMPLEMENTATION = "@implementation",
@@ -157,7 +159,7 @@ rust_graph_deep::grammar! { OBJC {
 
     declaration_statement: _user_type_declaration | &(declaration_specifiers plain_type_name _declarator) _qualified_user_declaration | _default_declaration,
     _qualified_user_declaration: declaration_specifiers plain_type_name (_init_declarator % ",") ";",
-    _user_type_declaration: plain_type_name (_init_declarator % ",") ";",
+    _user_type_declaration: plain_type_name [_type_arguments] (_init_declarator % ",") ";",
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     _init_declarator: _declarator ["=" _initializer],
     _initializer: designated_field | &(array_suffix "=") designated_index | _expression@assign | initializer_list,
@@ -172,9 +174,10 @@ rust_graph_deep::grammar! { OBJC {
         | type_specifier,
     type_specifier:
         "void" | "char" | "short" | "int" | "long" | "float" | "double"
-        | "signed" | "unsigned" | "id" | "SEL" | "Class" | "BOOL"
+        | "signed" | "unsigned" | _qualified_id | "SEL" | "Class" | "BOOL"
         | struct_or_union_specifier
         | enum_specifier,
+    _qualified_id: "id" [_type_arguments],
     plain_type_name: IDENT,
 
     struct_or_union_specifier: ("struct" | "union") [IDENT] [struct_body],
@@ -203,7 +206,10 @@ rust_graph_deep::grammar! { OBJC {
     abstract_suffix: array_suffix | parameter_list,
     type_name: _type_prefixed | _user_type_name,
     _type_prefixed: declaration_specifiers [_abstract_declarator],
-    _user_type_name: plain_type_name [_abstract_declarator],
+    _user_type_name: plain_type_name [_type_arguments] [_abstract_declarator],
+    _type_arguments: "<" (_type_argument % ",") _gt,
+    _type_argument: [_variance] type_name,
+    _variance: "__covariant" | "__contravariant",
 
     compound_statement: "{" _statement* "}",
 
@@ -226,6 +232,7 @@ rust_graph_deep::grammar! { OBJC {
         | objc_synthesize
         | objc_dynamic
         | &(declaration_specifiers) declaration_statement
+        | &(plain_type_name _type_arguments) declaration_statement
         | &(plain_type_name _declarator) declaration_statement
         | expression_statement,
 
@@ -265,7 +272,7 @@ rust_graph_deep::grammar! { OBJC {
     // A category is the same line with a parenthesised name where a
     // superclass would be: `@interface Foo ()` is the anonymous extension a
     // class continues itself with, `@interface Foo (Bar)` a named one.
-    objc_interface: "@interface" IDENT [":" IDENT] [category] [protocol_list] [ivar_block] _interface_item* "@end",
+    objc_interface: "@interface" IDENT [":" IDENT] [category] [_type_arguments] [protocol_list] [ivar_block] _interface_item* "@end",
     category: "(" [IDENT] ")",
     protocol_list: "<" (protocol_name % ",") _gt,
     protocol_name: IDENT,
@@ -287,10 +294,11 @@ rust_graph_deep::grammar! { OBJC {
     optional_marker: "@optional",
     required_marker: "@required",
     objc_forward_declaration: "@protocol" IDENT ("," IDENT)* ";",
-    objc_class_declaration: "@class" (IDENT % ",") ";",
+    objc_class_declaration: "@class" (_class_name % ",") ";",
+    _class_name: IDENT [_type_arguments],
 
     objc_property_declaration: "@property" [property_attributes] _property_type (_declarator % ",") ";",
-    _property_type: declaration_specifiers | plain_type_name,
+    _property_type: declaration_specifiers | plain_type_name [_type_arguments],
     property_attributes: "(" (_property_attribute % ",") ")",
     _property_attribute: IDENT ["=" IDENT],
 
@@ -486,6 +494,8 @@ fn keyword(text: &[u8]) -> Kind {
         b"nil" => KW_NIL,
         b"YES" => KW_YES,
         b"NO" => KW_NO,
+        b"__covariant" => KW_COVARIANT,
+        b"__contravariant" => KW_CONTRAVARIANT,
         _ => IDENT,
     }
 }
