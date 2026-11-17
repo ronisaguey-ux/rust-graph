@@ -1603,6 +1603,35 @@ impl<'a> Walker<'a> {
     }
 
     /// The merge of every value-bearing child, in order.
+    /// `global_State *g = G(L);` at statement level: an unknown type and a
+    /// pointer parse as a product, so the declared name is the product's right
+    /// operand and the value is what the assignment stores.
+    pub(crate) fn c_product_declarator(&self, id: u32) -> Option<(String, u32)> {
+        if self.kind(id) != "assignment_expression" {
+            return None;
+        }
+        let children = self.children(id);
+        let at = children.iter().position(|&child| self.kind(child) == "=")?;
+        let target = *children[..at].iter().rev().find(|&&child| !self.is_layout(child))?;
+        if self.kind(target) != "binary_expression" {
+            return None;
+        }
+        let inner = self.children(target);
+        if inner.iter().filter(|&&child| self.kind(child) == "*").count() != 1 {
+            return None;
+        }
+        let name = *inner.last()?;
+        if self.kind(name) != "identifier" {
+            return None;
+        }
+        let name = self.text_string(name);
+        if name.is_empty() {
+            return None;
+        }
+        let value = *children.get(at + 1)?;
+        Some((name, value))
+    }
+
     pub(crate) fn c_path(&self, id: u32) -> Option<String> {
         match self.kind(id) {
             "field_expression" | "qualified_expression" => {
@@ -1691,6 +1720,12 @@ mod designated_initializer_tests {
     use super::*;
     use crate::deep_integration::{self, Lang};
 
+    /// The bindings the reader writes, as `name -> what it holds` pairs.
+    fn module_vars(source: &str) -> Vec<(String, String)> {
+        let tree = deep_integration::parse_file(source.as_bytes(), Lang::C).expect("a C tree");
+        extract(source.as_bytes(), &tree, Lang::C).vars
+    }
+
     fn module_events(source: &str) -> String {
         let tree = deep_integration::parse_file(source.as_bytes(), Lang::C).expect("a C tree");
         let facts = extract(source.as_bytes(), &tree, Lang::C);
@@ -1747,5 +1782,16 @@ mod designated_initializer_tests {
         let events = module_events("int t[2] = { 1, 2 };\n");
         assert!(events.contains("[\"m\",[0,0]]"), "{events}");
         assert!(!events.contains("[\"m\",[0,0,0,0]]"), "{events}");
+    }
+
+    /// `global_State *g = G(L);`: an unknown type and a pointer parse as a
+    /// product, and the one-pass reader binds `g` to the capitalised call on
+    /// the right. Nothing named the declared operand, so every macro
+    /// initialiser on a pointer declaration in lua and the redis modules was a
+    /// variable the tree did not have (15 files).
+    #[test]
+    fn a_macro_initialiser_on_a_pointer_declaration_binds_its_variable() {
+        let vars = module_vars("void f(void) {\n  global_State *g = G(L);\n}\n");
+        assert!(vars.contains(&("g".to_string(), "G".to_string())), "{vars:?}");
     }
 }
