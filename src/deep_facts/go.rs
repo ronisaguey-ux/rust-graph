@@ -350,12 +350,44 @@ impl<'a> Walker<'a> {
     /// lexer writes before the body is written here, one event each, and a
     /// branch marker for the body.
     pub(crate) fn go_header(&mut self, id: u32) {
+        self.go_header_statements(id);
+        // `switch v := f(x); v {` and `if v := f(x); p(v) {`: the lexer writes
+        // one condition event over the whole header as well, and a value that
+        // holds the names of all of it covers that event.
+        if let Some(value) = self.header_value(id) {
+            let line = self.line(id);
+            self.lexer_event(b'x', line, &[], &value, false);
+        }
+        self.event("[\"b\"]");
+    }
+
+    /// The statements a header writes before its body, one event each.
+    ///
+    /// `for i := 0; i < n; i++` puts all three of them inside a `for_clause`
+    /// node, and the lexer still writes three statements on that line: the init
+    /// as an assignment to `i`, the condition and the post as expressions. Read
+    /// as one merged value the clause holds no assignment to `i` at all, so
+    /// every three-part `for` lost its binder.
+    pub(crate) fn go_header_statements(&mut self, id: u32) {
         for child in self.children(id) {
             if self.is_layout(child) {
                 continue;
             }
             let kind = self.kind(child);
             if matches!(kind, "block" | "else_clause" | "literal_value" | "field_declaration_list") {
+                continue;
+            }
+            // A clause is not a statement; the statements it holds are. A clause
+            // with no init — `for ; i < n; i++ {` — also needs the lexer's own
+            // reading of the whole clause beside them: there the lexer merges
+            // the post with the body, and neither split row covers that.
+            if matches!(kind, "for_clause" | "range_clause") {
+                self.go_header_statements(child);
+                if kind == "for_clause" && !self.go_clause_has_init(child) {
+                    let value = self.decl_value(child);
+                    let line = self.line(child);
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
                 continue;
             }
             if self.go_statement(child) {
@@ -365,14 +397,22 @@ impl<'a> Walker<'a> {
             let line = self.line(child);
             self.lexer_event(b'x', line, &[], &value, false);
         }
-        // `switch v := f(x); v {` and `if v := f(x); p(v) {`: the lexer writes
-        // one condition event over the whole header as well, and a value that
-        // holds the names of all of it covers that event.
-        if let Some(value) = self.header_value(id) {
-            let line = self.line(id);
-            self.lexer_event(b'x', line, &[], &value, false);
+    }
+
+    /// Whether a `for_clause` binds anything before its first `;`. The lexer
+    /// only opens the loop's block when it does: `for i := 0; …` is three
+    /// statements on the header's line, `for ; …` is one merged value.
+    pub(crate) fn go_clause_has_init(&self, clause: u32) -> bool {
+        let mut bound = false;
+        for child in self.children(clause) {
+            if self.node(child).first_child == NONE && self.text(child) == b";" {
+                return bound;
+            }
+            if !self.is_layout(child) {
+                bound = true;
+            }
         }
-        self.event("[\"b\"]");
+        bound
     }
 
     /// The header's values as one expression, or `None` when there is nothing
@@ -388,6 +428,10 @@ impl<'a> Walker<'a> {
                 kind,
                 "block" | "else_clause" | "literal_value" | "field_declaration_list" | "switch_block"
                     | "catch_clause" | "finally_clause"
+                    // A `for` clause is walked statement by statement: merging
+                    // it here wrote the same condition event a second time and
+                    // left the pool with two rows the record cannot tell apart.
+                    | "for_clause" | "range_clause"
             ) {
                 continue;
             }
