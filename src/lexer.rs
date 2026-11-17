@@ -494,6 +494,30 @@ impl<'a> Lexer<'a> {
         token
     }
 
+    /// Past a C# verbatim literal's opening `@"` (or `$@"`): to the quote that
+    /// is not doubled. Newlines update the line count and a backslash is an
+    /// ordinary byte, so `@"c:\\temp"` ends at its own quote.
+    fn csharp_verbatim(&mut self) {
+        while self.peek(0) == b'@' || self.peek(0) == b'$' {
+            self.pos += 1;
+        }
+        if self.peek(0) != b'"' {
+            return;
+        }
+        self.pos += 1;
+        while self.pos < self.src.len() {
+            match self.peek(0) {
+                b'"' if self.peek(1) == b'"' => self.pos += 2,
+                b'"' => {
+                    self.pos += 1;
+                    return;
+                }
+                b'\n' => self.newline(),
+                _ => self.pos += 1,
+            }
+        }
+    }
+
     /// A `/` where a value is expected, closed on the same line.
     fn try_regex(&mut self) -> bool {
         let mut at = self.pos + 1;
@@ -720,6 +744,16 @@ impl<'a> Lexer<'a> {
                 self.pos += width + 1;
                 return self.token(Kind::Str, start, line, col);
             }
+        }
+        // C#'s `@"\u{2026}"` is a *verbatim* literal: it spans lines, a pair of
+        // quotes spells one quote, and a backslash is a literal byte. Read as
+        // an ordinary one-line string it ended at the first newline and the
+        // rest of the literal became code, which moved every later statement
+        // up one line per newline inside it: a two-line `@"{ ... }"` sent 75
+        // statements in the C# corpus to the wrong line.
+        if self.lang.tag == "CS" && (byte == b'@' || (byte == b'$' && self.peek(1) == b'@')) {
+            self.csharp_verbatim();
+            return self.token(Kind::Str, start, line, col);
         }
         if matches!(byte, b'$' | b'@') && self.lang.quotes.contains(&self.peek(1)) {
             self.pos += 1;
