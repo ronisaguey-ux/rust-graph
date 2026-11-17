@@ -327,3 +327,54 @@ fn declares_type(source: &str, name: &str) -> bool {
         .iter()
         .any(|keyword| source.contains(&format!("{keyword} {name}")) || source.contains(&format!("{keyword} {name}<")))
 }
+
+/// An annotation is layout: it never becomes an event.
+///
+/// The claim this test pins is narrower than the symbol table above. A scanner
+/// that turns `@Override` into a call still declares the right symbols — the
+/// damage shows up in the flows, where an annotation appears as a call the
+/// source never made. So each row parses a function twice, once with three
+/// annotations and once without, and the events of the function must agree in
+/// both count and text. Kotlin is not a row yet: its lexer states an event for
+/// a bare annotation and nothing for one with arguments, so the parity there is
+/// a reader problem for the Kotlin lanes, recorded in the queue.
+/// The plain twin keeps the same line count — three blank
+/// lines where the annotations sit — because the events carry line numbers and
+/// a shifted body is not a disagreement.
+#[test]
+fn an_annotation_never_becomes_an_event() {
+    const ROWS: [(&str, Lang, &str, &str, &str); 2] = [
+        (
+            "Java",
+            Lang::Java,
+            "class C {\n    @Override\n    @Deprecated\n    @SuppressWarnings(\"unchecked\")\n    int f(int x) {\n        return g(x) + 1;\n    }\n}\n",
+            "class C {\n\n\n\n    int f(int x) {\n        return g(x) + 1;\n    }\n}\n",
+            "C.f",
+        ),
+        (
+            "C#",
+            Lang::CSharp,
+            "class C {\n    [Obsolete]\n    [UsedImplicitly]\n    [SuppressMessage(\"A\", \"B\")]\n    int F(int x) {\n        return G(x) + 1;\n    }\n}\n",
+            "class C {\n\n\n\n    int F(int x) {\n        return G(x) + 1;\n    }\n}\n",
+            "C.F",
+        ),
+    ];
+    let mut failed: Vec<String> = Vec::new();
+    for (name, lang, decorated, plain, key) in ROWS {
+        let with = deep_facts(lang, decorated);
+        let without = deep_facts(lang, plain);
+        let pick = |facts: &Facts| -> Option<String> {
+            facts.symbols.iter().find(|symbol| symbol.key == key).map(|symbol| symbol.events.clone())
+        };
+        let (Some(with_events), Some(without_events)) = (pick(&with), pick(&without)) else {
+            failed.push(format!("{name}: {key} is missing from one of the two parses"));
+            continue;
+        };
+        if with_events != without_events {
+            failed.push(format!(
+                "{name}: three annotations changed the events of {key}\n  with: {with_events}\n  without: {without_events}"
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "an annotation became an event:\n{}", failed.join("\n"));
+}
