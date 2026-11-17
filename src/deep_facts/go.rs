@@ -594,7 +594,7 @@ impl<'a> Walker<'a> {
     pub(crate) fn decl_call(&mut self, id: u32) -> usize {
         let callee = self.decl_callee(id);
         let path = self.decl_path(callee);
-        let line = self.line(callee);
+        let line = self.call_line(callee, id);
         self.push_call(path, line)
     }
 
@@ -3471,7 +3471,10 @@ fn dotted_piece(text: &str) -> bool {
     /// start would say the line of `path`.
     pub(crate) fn call_line(&self, callee: u32, call: u32) -> u32 {
         match self.kind(callee) {
-            "attribute" | "member_expression" => {
+            // Kotlin's navigation, like JavaScript's attribute: a chain written
+            // one call per line is recorded on the line its member name is on,
+            // which is the line the one-pass reader files.
+            "attribute" | "member_expression" | "navigation_expression" => {
                 let children = self.children(callee);
                 if let Some(&name) = children.iter().rev().find(|&&child| {
                     self.node(child).first_child == NONE && !self.is_layout(child)
