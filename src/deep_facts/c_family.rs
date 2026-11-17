@@ -822,6 +822,33 @@ impl<'a> Walker<'a> {
                     self.c_initializers(child, out);
                     continue;
                 }
+                // `size_t amount = 0;`: a type the grammar knows only as a
+                // typedef name wraps its declarator in a bare_user_declaration,
+                // where the declarator is a plain identifier and not a
+                // direct_declarator. The initialiser was never read, so the
+                // line was written as the merge of the type and the name and
+                // the lexer's assignment had no counterpart.
+                "bare_user_declaration" => {
+                    let mut name: Option<String> = None;
+                    for node in self.children(child) {
+                        match self.kind(node) {
+                            "user_type_name" | "attribute" | "array_suffix" | "parameter_list" => continue,
+                            "identifier" if name.is_none() => {
+                                name = Some(self.text_string(node));
+                                continue;
+                            }
+                            _ => {}
+                        }
+                        if self.is_layout(node) {
+                            continue;
+                        }
+                        if let Some(declared) = name.take() {
+                            let line = self.line(node);
+                            out.push((declared, node, line));
+                        }
+                    }
+                    continue;
+                }
                 "direct_declarator" => {
                     pending = self.declarator_of(child);
                     continue;
