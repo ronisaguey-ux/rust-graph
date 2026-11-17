@@ -1312,7 +1312,46 @@ impl<'a> Walker<'a> {
                     .unwrap_or_default();
                 if !name.is_empty() {
                     let line = self.line(id);
-                    self.push_call(name, line);
+                    // `[Obsolete] int F()` is written on the member's header,
+                    // but the attribute is the class's statement, not the
+                    // member's: the one-pass reader files it while the class is
+                    // open, so the call belongs to the enclosing symbol. Pushed
+                    // onto the member, it took the first index and every call
+                    // the method itself writes shifted by one, which changed a
+                    // method's events when its attributes changed.
+                    let current = self.frame().symbol;
+                    // The attribute decorates the declaration whose frame is
+                    // already open, and the one-pass reader files it while the
+                    // enclosing scope is open - so its call belongs one level up.
+                    // Pushed onto the member it took the first index and every
+                    // call the member itself writes shifted by the attribute's
+                    // count.
+                    let decorated = self.stack.last().is_some_and(|frame| {
+                        matches!(
+                            self.kind(frame.node),
+                            "method_declaration"
+                                | "constructor_declaration"
+                                | "destructor_declaration"
+                                | "property_declaration"
+                                | "field_declaration"
+                                | "event_declaration"
+                                | "indexer_declaration"
+                                | "delegate_declaration"
+                                | "operator_declaration"
+                                | "conversion_operator_declaration"
+                                | "class_declaration"
+                                | "struct_declaration"
+                                | "interface_declaration"
+                                | "enum_declaration"
+                                | "record_declaration"
+                        )
+                    });
+                    let target = if decorated && self.stack.len() > 1 {
+                        self.stack[self.stack.len() - 2].symbol
+                    } else {
+                        current
+                    };
+                    self.facts.symbols[target].calls.push(Call { path: name, line });
                 }
             }
             "annotation" if self.kinds.family == Family::Plain => {
@@ -2072,7 +2111,13 @@ impl<'a> Walker<'a> {
                             let inner = name[open + 1..].trim_end_matches('>');
                             parts = vec![base];
                             parts.extend(
-                                inner.split(',').map(|part| part.trim().to_string()).filter(|part| !part.is_empty()),
+                                inner
+                                    .split(',')
+                                    // `__covariant ValueType` is two names to the
+                                    // one-pass reader: the variance word and the
+                                    // parameter, written with a space between.
+                                    .flat_map(|part| part.split_whitespace().map(str::to_string))
+                                    .filter(|part| !part.is_empty()),
                             );
                         }
                         parts
@@ -2187,12 +2232,35 @@ impl<'a> Walker<'a> {
                 Some(' ') | Some('(') => {}
                 _ => continue,
             }
-            if !trimmed.ends_with(';') {
+            // `+ (UIColor *)colorWithHue:(CGFloat)hue` continued over four
+            // lines is one declaration to the one-pass reader, which writes it
+            // once on the line it starts. Read one line at a time, a declaration
+            // that wraps could never end in `;` on its first line and was
+            // dropped - 3 call losses on the corpus, each a whole file.
+            let mut declaration = trimmed.to_string();
+            let mut next = index + 1;
+            while !declaration.trim_end().ends_with(';')
+                && !declaration.contains('{')
+                && !declaration.contains('}')
+                && next < count
+                && declaration.len() < 4000
+            {
+                let start = self.line_starts[next] as usize;
+                let end = self.line_starts.get(next + 1).map(|&at| at as usize).unwrap_or(self.src.len());
+                let more = String::from_utf8_lossy(&self.src[start..end]).trim().to_string();
+                next += 1;
+                if more.is_empty() {
+                    continue;
+                }
+                declaration.push(' ');
+                declaration.push_str(&more);
+            }
+            if !declaration.trim_end().ends_with(';') {
                 continue;
             }
             let mut words: Vec<String> = Vec::new();
             let mut word = String::new();
-            for ch in trimmed.chars() {
+            for ch in declaration.chars() {
                 if ch.is_alphanumeric() || ch == '_' {
                     word.push(ch);
                 } else if !word.is_empty() {
