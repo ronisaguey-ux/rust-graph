@@ -1654,6 +1654,10 @@ return verdict(Some("symbol"), detail, accepted);
                     && (is_declaration_line(&lines, call.line)
                         || is_method_declaration_line(&lexer.tag, &lines, call.line)
                         || is_member_signature_line(&lexer.tag, &lines, call.line, &name)
+                        // `public fun stop(gracePeriodMillis: Long = 500)`:
+                        // Kotlin declares a function with its parameters on the
+                        // line and nothing after them.
+                        || is_kotlin_declaration_line(&lexer.tag, &lines, call.line, &call.path)
                         // `error?: (e: any) => void`, `readonly x: T`,
                         // `constructor(...): Base`: a `.d.ts` member declares
                         // a type, and the lexer reads the property word as a
@@ -2583,6 +2587,31 @@ fn is_method_declaration_line(tag: &str, src: &Lines<'_>, line: u32) -> bool {
     // assignment, so it must not disqualify the line.
     let without_arrows = rest.replace("=>", ">");
     rest.starts_with(':') && !without_arrows.contains('=') || rest.starts_with('{')
+}
+
+/// `public fun install(pipeline: ApplicationCallPipeline, handler: HookHandler)`:
+/// a Kotlin function declaration writes its parameter list on the line, and the
+/// one-pass reader files the declared name as a call. A `fun` in front of the
+/// callee's own name is a declaration, whatever follows the parameter list -
+/// Kotlin lets it end at the `)`, as JS and TS never do.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_kotlin_declaration_line(tag: &str, src: &Lines<'_>, line: u32, path: &str) -> bool {
+    if tag != "KT" || path.is_empty() {
+        return false;
+    }
+    let Some(text) = src.get(line) else {
+        return false;
+    };
+    let Some(at) = text.find("fun ") else {
+        return false;
+    };
+    let after = &text[at + 4..];
+    let Some(open) = after.find('(') else {
+        return false;
+    };
+    let head = after[..open].trim_end();
+    let leaf = path.rsplit('.').next().unwrap_or(path);
+    head == path || head == leaf || head.ends_with(&format!(".{leaf}"))
 }
 
 /// The parameter list the callee writes itself, when something else on the line
