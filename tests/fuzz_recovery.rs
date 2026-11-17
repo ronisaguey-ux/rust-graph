@@ -17,12 +17,50 @@ mod deep_integration;
 
 use deep_integration::Lang;
 
-const SOURCES: [(&str, Lang); 5] = [
+const SOURCES: [(&str, Lang); 14] = [
     ("fn f(x: u32) -> u32 {\n    let y = x + 1;\n    y\n}\n", Lang::Rust),
     ("def f(x):\n    y = x + 1\n    return y\n", Lang::Python),
     ("export function f(x) {\n  const y = x + 1;\n  return y;\n}\n", Lang::JavaScript),
     ("interface A {\n    f(x: string): number;\n}\n", Lang::TypeScript),
     ("{\"a\": [1, 2, {\"b\": null}], \"c\": true}\n", Lang::Json),
+    // The C family, because a half-written header is the input that actually
+    // arrives: a save in flight, a merge marker, a file cut at a buffer edge.
+    (
+        "#include <stddef.h>\n#define MAX(a, b) ((a) > (b) ? (a) : (b))\ntypedef struct point { int x, y; } point;\nstatic inline int sum(const point *p) { return p->x + p->y; }\n",
+        Lang::C,
+    ),
+    (
+        "#include <vector>\nclass Holder { public: std::vector<int> v; int first() const { return v.empty() ? 0 : v[0]; } };\n",
+        Lang::Cpp,
+    ),
+    (
+        "#import <Foundation/Foundation.h>\n@interface Counter : NSObject\n@property (nonatomic) int value;\n- (int)add:(int)x to:(int)y;\n@end\n",
+        Lang::ObjC,
+    ),
+    (
+        "@SuppressWarnings(\"unchecked\")\nclass Box<T> { private T v; T get() { return v; } }\n",
+        Lang::Java,
+    ),
+    (
+        "namespace N { class C { public string S => @\"a\" + \"b\"; public int M(int x) { return x switch { 0 => 1, _ => 2 }; } } }\n",
+        Lang::CSharp,
+    ),
+    (
+        "package main\nfunc f(xs []int) int {\n\ts := 0\n\tfor _, v := range xs {\n\t\ts += v\n\t}\n\treturn s\n}\n",
+        Lang::Go,
+    ),
+    (
+        "data class P(val x: Int) {\n    fun sum(other: P): Int = when (x) { 0 -> other.x; else -> x + other.x }\n}\n",
+        Lang::Kotlin,
+    ),
+    (
+        "object M { def f(xs: List[Int]): Int = xs match { case Nil => 0; case h :: t => h + f(t) } }\n",
+        Lang::Scala,
+    ),
+    (
+        "struct P { var x: Int\n    func sum(_ o: P) -> Int { return x + o.x } }\n",
+        Lang::Swift,
+    ),
 ];
 
 /// A deterministic xorshift: the same mutations on every run and every machine,
@@ -105,5 +143,53 @@ fn mutated_input_never_panics() {
             parses += 1;
         }
     }
-    assert_eq!(parses, 1000, "the sweep runs 200 mutations per language");
+    assert_eq!(parses, 2800, "the sweep runs 200 mutations per language");
+}
+
+/// A header cut at every byte is still a file the tool has to answer for.
+///
+/// Editors write partial files and corpora carry them; the C family is where it
+/// bites, because a `.h` truncated mid-declaration is a normal input to a scan
+/// that walks a checkout being edited. The contract is the same as for mutation:
+/// a tree with a valid root, or a refusal only when there is not enough source
+/// to be a file at all.
+#[test]
+fn a_truncated_c_family_file_still_yields_a_tree() {
+    const TARGETS: [(&str, Lang); 3] = [
+        (
+            "#ifndef POINT_H\n#define POINT_H\n#include <stddef.h>\n\
+             typedef struct point { int x, y; } point;\n\
+             static inline int sum(const point *p) { return p->x + p->y; }\n#endif\n",
+            Lang::C,
+        ),
+        (
+            "#import <Foundation/Foundation.h>\n\
+             @interface Counter : NSObject\n@property (nonatomic) int value;\n\
+             - (int)add:(int)x to:(int)y;\n@end\n",
+            Lang::ObjC,
+        ),
+        (
+            "namespace N { class C { public: int m(int x) { return x > 0 ? x : -x; } }; }\n",
+            Lang::Cpp,
+        ),
+    ];
+    for (source, lang) in TARGETS {
+        let bytes = source.as_bytes();
+        for cut in 0..=bytes.len() {
+            let prefix = &bytes[..cut];
+            match deep_integration::parse_file(prefix, lang) {
+                Some(cst) => {
+                    assert!(!cst.nodes.is_empty(), "a tree without a root at cut {cut} of {source:?}");
+                    assert!(
+                        cst.root < cst.nodes.len() as u32,
+                        "root outside the arena at cut {cut} of {source:?}"
+                    );
+                }
+                None => assert!(
+                    cut < 8,
+                    "a {cut}-byte prefix of {source:?} was refused instead of recovered"
+                ),
+            }
+        }
+    }
 }
