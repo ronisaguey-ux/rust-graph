@@ -766,6 +766,19 @@ impl<'a> Walker<'a> {
             return self.csharp_attribute_section(id, false);
         }
         let mut parts = Vec::new();
+        // `fs.WalkDir(fsys, ".", func(name string, …) error { … })`: the lexer
+        // opens a call at a function literal's parameter list, because a `func(`
+        // is a callee to a reader with no keyword table in value position. The
+        // tree writes the parameters as a type, so the call atom was missing
+        // from every callback passed to a call — 643 loss rows in one cluster,
+        // the largest left in the corpus.
+        if self.language.name == "go" && kind == "func_literal" {
+            if let Some(params) = self.child_of_kind(id, "parameter_list") {
+                let args = self.arguments(params);
+                let index = self.push_call("func".to_string(), self.line(id));
+                parts.push(format!("[\"c\",{index},0,{args}]"));
+            }
+        }
         if matches!(
             kind,
             // `JObject.Parse(x)`: the C# grammar keeps a member access as
