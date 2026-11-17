@@ -3954,6 +3954,14 @@ impl<'a> Parser<'a> {
         if self.lang.tag == "KT" && self.kotlin_annotation_alone(stmt) {
             return;
         }
+        // `init { }`: an initializer block is a member of the class, not a
+        // value. The brace opens the frame this statement is the head of, so
+        // the keyword arrives alone and the block's own statements are read as
+        // the class's. Read as an expression it wrote `n:init`, an event the
+        // CST never has.
+        if self.lang.tag == "KT" && self.kotlin_declares_only(stmt) {
+            return;
+        }
         // A C header's data tables are fragments of an initializer, not
         // statements. musl includes `ctype/alpha.h` inside a declaration
         // (`static const unsigned char table[] = {` … `};`) and
@@ -4196,7 +4204,9 @@ impl<'a> Parser<'a> {
     /// A Kotlin member that declares and assigns nothing: `init {` is the
     /// introducer of an initializer block, and the CST writes no event for the
     /// introducer itself. Read as an expression, `init` invented one `x` event
-    /// per initializer block in the corpus, and every such file fell back.
+    /// per initializer block in the corpus, and every such file fell back. Two
+    /// lanes reached the same fact at different call sites; one function now
+    /// answers both.
     fn kotlin_declares_only(&self, stmt: &[Token]) -> bool {
         stmt.len() == 1 && self.word_at(stmt, 0).as_deref() == Some("init")
     }
