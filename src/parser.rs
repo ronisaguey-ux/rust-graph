@@ -2061,6 +2061,23 @@ impl<'a> Parser<'a> {
                 at += 1;
             }
         }
+        // `return callee(y);` also opens with two words in a row, and the
+        // "two words declare a type" rule below read it as a prototype: the
+        // returned call vanished from every C function that returns one (the
+        // caller→callee edge test caught it). A statement keyword opens no
+        // declaration, whatever follows it.
+        if self
+            .word_at(stmt, at)
+            .is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "return" | "goto" | "if" | "for" | "while" | "switch" | "break" | "continue" | "sizeof"
+                        | "throw" | "delete" | "co_return" | "co_await"
+                )
+            })
+        {
+            return false;
+        }
         let Some(head) = stmt.get(at) else { return false };
         if head.kind != Kind::Ident {
             return false;
