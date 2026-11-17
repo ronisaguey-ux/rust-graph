@@ -4026,6 +4026,19 @@ impl<'a> Parser<'a> {
         {
             return;
         }
+        // `extern "C" {` opens a linkage block and states no value: the CST's
+        // `linkage_specification` header writes no event, so the words form the
+        // lexer invented here (`m:[n:extern,0]` — a keyword and a zero) had no
+        // counterpart and cost every `#ifdef __cplusplus` header in the corpus.
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && self.word_at(stmt, 0).as_deref() == Some("extern")
+            && stmt.get(1).is_some_and(|token| token.kind == Kind::Str)
+            && stmt[2..]
+                .iter()
+                .all(|token| token.kind == Kind::Op && matches!(self.raw(token), b"{" | b"}"))
+        {
+            return;
+        }
         let word = self.word_at(stmt, 0);
         if matches!(word.as_deref(), Some("return")) {
             self.expression_event("r", &stmt[1..]);
