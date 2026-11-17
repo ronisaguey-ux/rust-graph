@@ -321,9 +321,16 @@ rust_graph_deep::grammar! { C {
     array_suffix: "[" [_expression] "]",
     parameter_list: "(" (_parameter % ",") ")",
     _parameter:
-        declaration_specifiers [user_type_name] [_declarator_or_abstract]
+        // `void (*)(void)` and `void *(*)(void *)`: a parameter that is a
+        // function pointer and names nothing, so its declarator is
+        // parenthesised and abstract. The guard fails on `void (*p)(void)`,
+        // where a name follows the star.
+        &(declaration_specifiers pointer* parenthesized_abstract) abstract_parameter
+        | declaration_specifiers [user_type_name] [_declarator_or_abstract]
         | user_parameter
         | "...",
+    /// The type of a function-pointer parameter that names nothing.
+    abstract_parameter: declaration_specifiers pointer* parenthesized_abstract abstract_suffix*,
     /// `Foo *self`, `Foo*`, `Foo`: a typedef name and either a named or an
     /// abstract declarator.
     user_parameter: user_type_name _declarator_or_abstract,
