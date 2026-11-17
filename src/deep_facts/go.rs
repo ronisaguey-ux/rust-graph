@@ -3442,7 +3442,9 @@ fn dotted_piece(text: &str) -> bool {
                 keyed.push_str(&inner);
                 keyed.push(']');
                 keyed
-            } else if self.kinds.family == Family::Plain && kind == "assignment" {
+            } else if self.kinds.family == Family::Plain
+                && (kind == "assignment" || (self.language.name == "kotlin" && kind == "assignment_expression"))
+            {
                 // `@deprecated("old", since = "2")`: a named argument is the
                 // lexer's keyword form, not the assignment's merge.
                 let parts = self.children(child);
