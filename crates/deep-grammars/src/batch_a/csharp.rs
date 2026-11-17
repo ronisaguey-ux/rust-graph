@@ -548,13 +548,20 @@ rust_graph_deep::grammar! { CSHARP {
     // The full expression, not the assignment tier: `Func<int, int> f = x => x`
     // puts a lambda where the value goes, and the lambda postfix sits above that
     // tier, so every lambda initialiser was an error.
-    _declared_value: default_expression | _expression,
+    _declared_value: default_expression | _ref_expression | _expression,
     lambda_parameters: "(" (lambda_parameter %? ",") ")",
     lambda_parameter: [attributes] [_local_modifiers] _type _name | _name,
     cast_type: "(" _type ")",
     cast_expression: cast_type _expression@unary,
     _cast_operand: _literal | _name | "this" | "base" | "new" | "typeof" | "sizeof" | "!" | "~",
-    _lambda_body: block | _expression,
+    // `ref x` is an expression that may only stand where a value is stored or
+    // returned: `ref int a = ref b;`, `return ref x;`, `=> ref x`. Written as a
+    // prefix operator of the expression table it collided with an argument's
+    // `ref x` (a call's argument and a value position start the same way), so
+    // the prefix is read here, at the three places that take one, and a ref
+    // local and a ref return stop being one ERROR each.
+    _ref_expression: ["ref"] _expression,
+    _lambda_body: block | _ref_expression,
     object_creation: "new" _type [arguments] [object_initializer],
     implicit_creation: "new" arguments [object_initializer],
     implicit_array_creation: "new" array_specifier+ [array_initializer],
