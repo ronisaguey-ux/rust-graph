@@ -3403,7 +3403,14 @@ fn dotted_piece(text: &str) -> bool {
                 keyed.push_str(&inner);
                 keyed.push(']');
                 keyed
-            } else if self.kinds.family == Family::Plain && kind == "assignment" {
+            } else if self.kinds.family == Family::Plain
+                && (kind == "assignment"
+                    // Kotlin's annotation writes its named argument as an
+                    // `assignment_expression` (`@Deprecated("x", level = …)`),
+                    // and the lexer files it as the keyword form there too, so
+                    // read as a merge it lost the name off every annotation.
+                    || (kind == "assignment_expression" && self.kind(list) == "annotation_arguments"))
+            {
                 // `@deprecated("old", since = "2")`: a named argument is the
                 // lexer's keyword form, not the assignment's merge.
                 let parts = self.children(child);
