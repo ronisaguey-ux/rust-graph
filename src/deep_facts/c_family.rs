@@ -230,6 +230,43 @@ impl<'a> Walker<'a> {
                 return false;
             }
             "namespace_definition" => self.c_namespace(id),
+            // `using api::roaring_iterator;` and `using vec_t = int;` inside a
+            // `#ifdef __cplusplus` block: the grammar gives the line its own
+            // node and nothing read it, so every croaring header lost its
+            // using lines (4 files, `event x … m:[n:using,…]`).
+            "using_declaration" => {
+                let line = self.line(id);
+                let mut segments: Vec<String> = Vec::new();
+                let mut words: Vec<String> = Vec::new();
+                let mut value_node: Option<u32> = None;
+                for child in self.children(id) {
+                    match self.kind(child) {
+                        "using" | "namespace" => {
+                            let mut form = String::from("[\"n\",");
+                            push_string(&mut form, self.kind(child));
+                            form.push(']');
+                            words.push(form);
+                        }
+                        "identifier" if value_node.is_none() => segments.push(self.text_string(child)),
+                        _ if !self.is_layout(child) => value_node = Some(child),
+                        _ => {}
+                    }
+                }
+                if let Some(node) = value_node {
+                    // `using vec_t = int;` binds, and the lexer writes it as an
+                    // assignment of the new name to the type it aliases.
+                    if let Some(name) = segments.first() {
+                        self.assignment_parts(vec![name.clone()], node, line, false);
+                    }
+                } else if !segments.is_empty() {
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, &segments.join("."));
+                    form.push(']');
+                    words.push(form);
+                    let value = format!("[\"m\",[{}]]", words.join(","));
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+            }
             // `typedef struct aeApiState { … } aeApiState;` whose field list the
             // grammar cannot read leaves the closing declarator in an ERROR node
             // at file scope, on a line that opens with `}` and closes with `;`;
