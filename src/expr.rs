@@ -915,6 +915,19 @@ impl Emit<'_> {
 
     fn group(&mut self, out: &mut String) {
         let line = self.toks[self.pos].line;
+        // `(*byte)(unsafe.Pointer(&b[0]))`, `(*T)(p)`: a Go conversion writes its
+        // type in parentheses, and a type is not a value. Read as a name, it was
+        // the only name the statement carried and no CST has it; the value of a
+        // conversion is the argument group that follows the type.
+        if self.lang.tag == "GO" && self.op_byte(1) == b'*' {
+            if let Some(after) = self.skip_balanced(self.pos, b"(", b")") {
+                if self.toks.get(after).is_some_and(|token| token.kind == Kind::Op && self.raw_is(token, b"(")) {
+                    self.pos = after;
+                    self.group(out);
+                    return;
+                }
+            }
+        }
         self.pos += 1;
         if self.lang.prefix_calls {
             if let Some(name) = self.word(0) {
