@@ -3631,7 +3631,11 @@ fn dotted_piece(text: &str) -> bool {
     /// start would say the line of `path`.
     pub(crate) fn call_line(&self, callee: u32, call: u32) -> u32 {
         match self.kind(callee) {
-            "attribute" | "member_expression" => {
+            // `member_access` is C#'s spelling of the same node: a chain written
+            // over several lines - `RemoteExecutor.Invoke(x,\n  new Options { .. })
+            // .DisposeAsync();` - was dated to the receiver's first line, and the
+            // one-pass reader dates a call to its name (84 files).
+            "attribute" | "member_expression" | "member_access" => {
                 let children = self.children(callee);
                 if let Some(&name) = children.iter().rev().find(|&&child| {
                     self.node(child).first_child == NONE && !self.is_layout(child)
