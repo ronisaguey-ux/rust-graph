@@ -250,7 +250,13 @@ rust_graph_deep::grammar! { KOTLIN {
     /// arguments, its trailing lambda, or a plain assignment — and never a bare
     /// block, so a broken declaration is recovered inside itself instead of
     /// being re-read as a top-level statement.
-    _top: package_header | import_header | _declaration | script_statement | LINE_END | ";",
+    _top: package_header | import_header | &("@" _annotation_target) file_annotation | _declaration | script_statement | LINE_END | ";",
+    /// `@file:OptIn(...)` stands before the package header and annotates the
+    /// file, not the declaration under it, so it is its own top-level item:
+    /// without one, an annotated file has no alternative that starts with `@`
+    /// and every declaration in it is recovered inside an error. The guard is
+    /// the use-site colon, which no declaration annotation has.
+    file_annotation: "@" _annotation_target _qualified_name [annotation_arguments],
     script_statement: _script_head [arguments] [lambda_literal] ["=" _expression],
     /// A plain identifier starts a script statement. A contextual keyword does
     /// not: `data class X` and `abstract class X` are declarations, and a start
@@ -454,7 +460,9 @@ rust_graph_deep::grammar! { KOTLIN {
     _string_part: STRING_TEXT | interpolation | SIMPLE_TEMPLATE,
     interpolation: TEMPLATE_OPEN _expression TEMPLATE_CLOSE,
     subscript: "[" _expression ("," _expression)* "]",
-    lambda_literal: "{" lambda_body "}",
+    /// `{}` is a lambda too: the empty body is the parameter a default
+    /// argument supplies most often (`onClick = {}`), so the body is optional.
+    lambda_literal: "{" [lambda_body] "}",
     lambda_body: &(_lambda_parameters "->") _lambda_parameters "->" _block_item* | lambda_items,
     lambda_items: _block_item+,
     _lambda_parameters: _lambda_parameter ("," _lambda_parameter)*,
@@ -477,7 +485,12 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix &("?." function_parameters "->") "?." function_parameters "->" _type => receiver_function_type,
         postfix "." _name => qualified_type,
     },
-    _type_head: _name | function_type,
+    _type_head: _name | function_type | suspend_function_type,
+    /// `suspend () -> Unit` and `suspend Config.() -> Unit`: the modifier is
+    /// part of the type, so it is a head of its own rather than a modifier of
+    /// whatever declares it — `block: suspend () -> Unit` has no function
+    /// declaration to hang it on.
+    suspend_function_type: "suspend" _type,
     function_type: function_parameters "->" _type,
     function_parameters: "(" (_type %? ",") ")",
 
@@ -491,7 +504,7 @@ rust_graph_deep::grammar! { KOTLIN {
         | "expect" | "external" | "field" | "final" | "get" | "infix" | "init" | "inline"
         | "inner" | "internal" | "lateinit" | "noinline" | "open" | "operator" | "out"
         | "override" | "private" | "protected" | "public" | "reified" | "sealed" | "set"
-        | "suspend" | "tailrec" | "value" | "vararg" | "where",
+        | "tailrec" | "value" | "vararg" | "where",
 } }
 
 /// One token at the cursor.
