@@ -1851,6 +1851,7 @@ mod designated_initializer_tests {
         assert!(events.contains("[\"m\",[0,0]]"), "{events}");
         assert!(!events.contains("[\"m\",[0,0,0,0]]"), "{events}");
     }
+
     /// A macro statement with no argument is the bare name to the one-pass
     /// reader. Read as a call it named nothing, and the declaration it stands
     /// for lost its line.
@@ -1859,6 +1860,7 @@ mod designated_initializer_tests {
         let events = module_events("LOCK_OBJ_DEF;\n");
         assert!(events.contains("[\"x\",1,[\"n\",\"LOCK_OBJ_DEF\"]]"), "{events}");
     }
+
     /// `[SIGHUP] = 1` keeps its index. The one-pass reader wraps an array
     /// designator in a tuple and writes the value beside it only when it writes
     /// one: `[SIGHUP] = 1` is `t:[n:SIGHUP]`, `[SIGINT] = 'a'` is
@@ -1870,6 +1872,7 @@ mod designated_initializer_tests {
         assert!(events.contains("[\"t\",[[\"n\",\"SIGHUP\"]]]"), "{events}");
         assert!(events.contains("[\"m\",[[\"t\",[[\"n\",\"SIGINT\"]]],0]]"), "{events}");
     }
+
     /// `struct chunk *c = MEM_TO_CHUNK(start), *n = …;`: each declarator whose
     /// initialiser is a call binds the declared name to the callee.
     #[test]
@@ -1882,6 +1885,7 @@ mod designated_initializer_tests {
         assert!(names.contains(&("c", "MEM_TO_CHUNK")), "{names:?}");
         assert!(names.contains(&("n", "MEM_TO_CHUNK")), "{names:?}");
     }
+
     /// A visibility macro between the storage class and the type is one of the
     /// line's names: the one-pass reader drops `extern` and `volatile` and
     /// keeps `hidden` and the type.
