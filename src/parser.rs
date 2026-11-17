@@ -3662,6 +3662,15 @@ impl<'a> Parser<'a> {
                 return;
             }
         }
+        // `debugger;` is a statement with no value: the CST writes nothing for
+        // it, and the lexer's `n:debugger` was a name the tree never has (one
+        // ts file, `fail()` in typescript's own utils).
+        if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+            && stmt.len() == 1
+            && self.word_at(stmt, 0).as_deref() == Some("debugger")
+        {
+            return;
+        }
         // `export { a }` and `export * from …` name what leaves the module and
         // carry no value: the lexer read `export` as a name and the braces as a
         // merge. `export default X` is the value of X, not a merge with the
