@@ -1566,8 +1566,35 @@ impl<'a> Parser<'a> {
         let Some(at) = self.binding_index(stmt) else { return };
         let is_with = self.raw(&stmt[at]) == b"as";
         let head = self.binding_head(stmt);
-        let (targets, value) = if is_with { (&stmt[at + 1..], &stmt[head + 1..at]) } else { (&stmt[head + 1..at], &stmt[at + 1..]) };
+        let value_start = if is_with { self.with_item_start(&stmt[head + 1..at]) } else { 0 };
+        let (targets, value) = if is_with {
+            (&stmt[at + 1..], &stmt[head + 1 + value_start..at])
+        } else {
+            (&stmt[head + 1..at], &stmt[at + 1..])
+        };
         self.assignment(targets, value, stmt[0].line, false);
+    }
+
+    /// Where the context manager an `as` binds starts. `with open(a), open(b)
+    /// as fh:` binds `fh` to the second item, not to the whole clause; read
+    /// from the `with`, the value was a tuple of every item and the CST's one
+    /// call had no partner. The last comma at the clause's own depth is the
+    /// boundary, so commas inside an item's call or literal do not split it.
+    fn with_item_start(&self, clause: &[Token]) -> usize {
+        let mut depth = 0i32;
+        let mut start = 0;
+        for (index, token) in clause.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" | b"{" => depth += 1,
+                b")" | b"]" | b"}" => depth -= 1,
+                b"," if depth == 0 => start = index + 1,
+                _ => {}
+            }
+        }
+        start
     }
 
     fn head_word(&self, toks: &[Token]) -> Option<String> {
