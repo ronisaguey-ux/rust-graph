@@ -151,20 +151,26 @@ rust_graph_deep::grammar! { OBJC {
         | &("typedef" IDENT arguments) macro_enum_declaration
         | &(declaration_specifiers _declarator "{") function_definition
         | &(plain_type_name _declarator "{") user_function
+        | &("static" plain_type_name _declarator "{") static_user_function
         | objc_interface
         | objc_implementation
         | &("@protocol" IDENT (";" | ",")) objc_forward_declaration
         | objc_protocol
         | objc_class_declaration
         | objc_import
-        | &(IDENT arguments ";") macro_call_statement
+        | &(IDENT arguments) macro_call_statement
         | declaration_statement,
 
     /// `EXPMatcherInterface(endWith, (id expected));`, `NS_ENUM_BEGIN(…)`:
     /// a macro invocation with a semicolon that expands to something the
     /// grammar cannot see. Expecta and the UIKit headers are full of them and
     /// every one was an error node at file scope.
-    macro_call_statement: IDENT arguments ";",
+    /// `QuickSpecBegin(Spec)` and `EXPMatcherInterface(endWith, (id expected));`:
+    /// a macro invocation with or without the semicolon. The Quick/Spec framework
+    /// writes its spec headers as a bare call with no semicolon at file scope, so
+    /// an optional `;` and one alternative covers both shapes - two alternatives
+    /// would be indistinguishable at `IDENT "("`.
+    macro_call_statement: IDENT arguments [";"],
     /// `NS_ASSUME_NONNULL_BEGIN` on a line of its own: a bare macro with no
     /// arguments and no semicolon, which every modern Apple header opens and
     /// closes with. Nothing else at file scope is a single name, so the guard
@@ -173,6 +179,11 @@ rust_graph_deep::grammar! { OBJC {
 
     function_definition: declaration_specifiers _declarator compound_statement,
     user_function: plain_type_name _declarator compound_statement,
+    /// `static dispatch_queue_t f(void) { … }`: a storage class in front of a
+    /// typedef'd return type. `declaration_specifiers` has no room for an
+    /// unknown type name, so this shape - which AFNetworking and ReactiveObjC
+    /// open a private helper with - was two error nodes.
+    static_user_function: "static" plain_type_name _declarator compound_statement,
 
     declaration_statement: _user_type_declaration | &(declaration_specifiers plain_type_name _declarator) _qualified_user_declaration | _default_declaration,
     _qualified_user_declaration: declaration_specifiers plain_type_name (_init_declarator % ",") ";",
@@ -310,7 +321,7 @@ rust_graph_deep::grammar! { OBJC {
     ivar_declaration: (declaration_specifiers | plain_type_name) (_declarator % ",") ";",
     _interface_item: objc_method_declaration | objc_property_declaration | declaration_statement | ";",
 
-    objc_implementation: "@implementation" IDENT [":" IDENT] [category] _implementation_item* "@end",
+    objc_implementation: "@implementation" IDENT [":" IDENT] [category] [ivar_block] _implementation_item* "@end",
     _implementation_item: objc_method_definition | &(declaration_specifiers _declarator "{") function_definition | objc_synthesize | objc_dynamic | declaration_statement | ";",
     objc_method_definition: ("-" | "+") [method_type] method_selector compound_statement,
     objc_method_declaration: ("-" | "+") [method_type] method_selector ";",
