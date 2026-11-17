@@ -243,7 +243,7 @@ rust_graph_deep::grammar! { SWIFT {
         | &([declaration_modifiers] "subscript") subscript_declaration
         | &([declaration_modifiers] ("let" | "var")) property_declaration
         | &("deinit") deinitializer_declaration
-        | &("import") import_declaration
+        | &([declaration_modifiers] "import") import_declaration
         | &("typealias") typealias_declaration
         | &("associatedtype") associated_type_declaration
         | &(_name ":") labeled_statement
@@ -275,9 +275,24 @@ rust_graph_deep::grammar! { SWIFT {
     /// `private(set)` and friends: the setter is narrower than the getter.
     setter_arguments: "(" "set" ")",
     attribute: "@" _name [attribute_arguments],
-    attribute_arguments: "(" (_expression %? ",") ")",
+    /// An attribute's parentheses do not hold an expression list. available
+    /// writes a platform beside a bare version and a trailing star
+    /// (SwiftStdlib 6.0, star), _specialize writes a where constraint, and
+    /// _effects writes notEscaping self.value**. None of those is an
+    /// expression, so the argument list is a run of words and signs.
+    attribute_arguments: "(" (_attribute_argument %? ",") ")",
+    /// `message: "…"` is a labeled argument like any other, so it reuses the
+    /// call's own rule: the record reads a keyword there, and a second rule
+    /// would have to be taught to.
+    _attribute_argument: &(_argument_label ":") labeled_argument | _attribute_word_run,
+    _attribute_word_run: _attribute_word+,
+    _attribute_word: STAR | COLON | AMP | DOT | ARROW | EQ
+        | "self" | "where"
+        | IDENT | NUMBER | FLOAT | STRING,
 
-    import_declaration: "import" ["class" | "struct" | "enum" | "protocol" | "func" | "var" | "let" | "typealias"] _name ("." _name)*,
+    /// _exported import Foundation and testable import X put an attribute in
+    /// front of the import, so the declaration shares the modifier prefix.
+    import_declaration: [declaration_modifiers] "import" ["class" | "struct" | "enum" | "protocol" | "func" | "var" | "let" | "typealias"] _name ("." _name)*,
     typealias_declaration: "typealias" _name [generic_parameters] "=" _type,
 
     class_declaration: [declaration_modifiers] "class" _name [generic_parameters] [inheritance_clause] [where_clause] type_body,
