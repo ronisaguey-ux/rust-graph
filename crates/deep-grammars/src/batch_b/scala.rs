@@ -216,7 +216,15 @@ rust_graph_deep::grammar! { SCALA {
 
     program: _top*,
 
-    _top: package_clause | import_declaration | _member,
+    _top: package_clause | _member,
+
+    /// An import is legal at the head of a template body or a block, not only
+    /// at the top of a file: `class A { import x._ }` and a method body that
+    /// opens with `import config._` are ordinary Scala. With imports reachable
+    /// only from `_top`, every nested one came back as `(ERROR import)` plus an
+    /// expression statement, so the tree lost the directive and the record lost
+    /// the import (68 files of the scala corpus stopped at their first nested
+    /// import).
 
     package_clause: "package" _qualified_name,
     import_declaration: "import" (_import_expr % ","),
@@ -230,7 +238,7 @@ rust_graph_deep::grammar! { SCALA {
     _import_selector: _name ["=>" _name],
     _qualified_name: _name ("." _name)*,
 
-    _member: _definition | _statement,
+    _member: _definition | import_declaration | _statement,
 
     // ---- definitions ----
 
