@@ -3099,6 +3099,19 @@ fn dotted_piece(text: &str) -> bool {
                 };
                 (path, receiver)
             }
+            // `a.c!(x)`, `(x as any).c(y)`: a postfix assertion wrapped around
+            // the callee is not a receiver of its own — the call's name and its
+            // receiver are the unwrapped expression's. Read through the default
+            // arm the call kept its path but lost the receiver the lexer writes
+            // on every member call (`c(0;…)` against `c(n:a;…)`, 4 ts rows in 2
+            // files). The `!` is `non_null_expression`, `as` is
+            // `as_expression`, and a parenthesised assertion is one level in.
+            "non_null_expression" | "as_expression" | "satisfies_expression" | "type_assertion" => {
+                match self.expression_child(callee) {
+                    Some(inner) => self.call_target(inner, receiver_call),
+                    None => (self.path_of(callee), "0".to_string()),
+                }
+            }
             "call" | "call_expression" | "new_expression" => {
                 // `f()(...)`: the callee is an inner call, and the name is the
                 // inner call's own callee. It has to be looked for *inside*
