@@ -1213,6 +1213,28 @@ impl<'a> Walker<'a> {
             // child is the expression itself. Nothing read that node, so a call
             // in an expression-bodied def never reached the record.
             "def_body" => self.expression_statement(id),
+            // `val x = object : B() { }`: a supertype constructor is not a
+            // `call_expression`, so no arm recorded the call the lexer reads
+            // from `B()` when the object is written as an expression. A class
+            // header already reads its supertypes through `decl_value`, which
+            // is why only the expression form lost them.
+            "superclass_constructor" if self.is_kotlin() => {
+                let children = self.children(id);
+                if let Some(&ty) = children.first() {
+                    let path = self.path_of(ty);
+                    if !path.is_empty() {
+                        let line = self.line(ty);
+                        self.push_call(path, line);
+                    }
+                }
+                if let Some(list) = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                {
+                    self.arguments(list);
+                }
+            }
             // `fun f() = foo()` and `get() = foo()`: Kotlin wraps the body in
             // a `function_body` (or writes it straight onto an `accessor`), and
             // the expression after the `=` was read by no arm, so the call
