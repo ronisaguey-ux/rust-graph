@@ -250,7 +250,15 @@ rust_graph_deep::grammar! { KOTLIN {
     /// arguments, its trailing lambda, or a plain assignment — and never a bare
     /// block, so a broken declaration is recovered inside itself instead of
     /// being re-read as a top-level statement.
-    _top: package_header | import_header | _declaration | script_statement | LINE_END | ";",
+    /// `@file:Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")` written above the
+    /// package clause decorates the file, not the declaration after it, and the
+    /// clause that follows is its own top-level node. Without the first
+    /// alternative the annotation was read as a declaration's modifier, the
+    /// `package` header fell into recovery, and the package fact vanished from
+    /// the CST (kotlin: 8 files, 89 losses).
+    _top:
+        &([annotations] LINE_END* "package") [annotations] LINE_END* package_header
+        | package_header | import_header | _declaration | script_statement | LINE_END | ";",
     script_statement: _script_head [arguments] [lambda_literal] ["=" _expression],
     /// A plain identifier starts a script statement. A contextual keyword does
     /// not: `data class X` and `abstract class X` are declarations, and a start
