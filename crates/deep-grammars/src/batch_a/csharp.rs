@@ -264,10 +264,16 @@ rust_graph_deep::grammar! { CSHARP {
     named_attribute_argument: _name ":" _expression,
 
     modifiers: _modifier+,
+    // `ref` is a modifier as well as a parameter direction: `ref struct S`,
+    // `readonly ref struct S`, `public ref int P;` and `ref int M()` all write
+    // it before the type, and no declaration accepted it — every ref struct file
+    // failed on its first line (180 in the corpus carry one). A parameter's
+    // `ref` is read by `parameter` below, which comes after the type, so the
+    // two never stand in the same place.
     _modifier:
         "public" | "private" | "protected" | "internal" | "static" | "abstract" | "sealed"
         | "partial" | "readonly" | "unsafe" | "virtual" | "override" | "new" | "extern"
-        | "async" | "const" | "volatile" | "fixed" | "required" | KW_FILE,
+        | "async" | "const" | "volatile" | "fixed" | "required" | "ref" | KW_FILE,
     _local_modifiers: (attribute_section | "const" | "ref" | "readonly" | "scoped" | "static" | "unsafe" | "extern")*,
 
     // ---- type declarations ----
