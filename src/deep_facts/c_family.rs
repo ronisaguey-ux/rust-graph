@@ -69,14 +69,23 @@ impl<'a> Walker<'a> {
                 if let Some(node) = self.child_of_kind(id, "identifier") {
                     let name = self.text_string(node);
                     let line = self.line(id);
+                    // `LOCK_OBJ_DEF;` at file scope: a macro that takes no
+                    // argument is the whole statement, and the lexer reads the
+                    // line as the bare name — no call, no arguments. Read as a
+                    // call, the statement named nothing at all.
+                    let Some(list) = self.child_of_kind(id, "arguments") else {
+                        let mut value = String::from("[\"n\",");
+                        push_string(&mut value, &name);
+                        value.push(']');
+                        self.lexer_event(b'x', line, &[], &value, false);
+                        return true;
+                    };
                     let index = self.push_call(name, line);
                     // The lexer files the statement twice: the call, and an
                     // event whose value is that call's form. Writing only the
                     // call left one loss on every alias line in musl.
-                    if let Some(list) = self.child_of_kind(id, "arguments") {
-                        let args = self.arguments(list);
-                        self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
-                    }
+                    let args = self.arguments(list);
+                    self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
                 }
             }
             // `__attribute__((__may_alias__))`, `__attribute__((visibility("hidden")))`:
@@ -1872,5 +1881,16 @@ mod designated_initializer_tests {
         let names: Vec<(&str, &str)> = facts.vars.iter().map(|(name, class)| (name.as_str(), class.as_str())).collect();
         assert!(names.contains(&("c", "MEM_TO_CHUNK")), "{names:?}");
         assert!(names.contains(&("n", "MEM_TO_CHUNK")), "{names:?}");
+    }
+    /// A visibility macro between the storage class and the type is one of the
+    /// line's names: the one-pass reader drops `extern` and `volatile` and
+    /// keeps `hidden` and the type.
+    #[test]
+    fn a_macro_between_the_class_and_the_type_is_a_name() {
+        let events = module_events("extern hidden FILE *volatile __stdin_used;\n");
+        assert!(
+            events.contains("[\"m\",[[\"n\",\"hidden\"],[\"n\",\"FILE\"],[\"n\",\"__stdin_used\"]]]"),
+            "{events}"
+        );
     }
 }

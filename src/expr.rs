@@ -46,7 +46,7 @@ const NAMED_ARGS_WITH_COLON: [&str; 5] = ["RB", "CR", "SWIFT", "DART", "EX"];
 /// type specifiers the one-pass reader emitted as names, so `static int h(int
 /// x);` carried `n:static` and `extern hidden void g(int);` carried `n:extern`
 /// where the CST writes the type and the declared name alone.
-const C_SPECIFIERS: [&str; 20] = [
+pub(crate) const C_SPECIFIERS: [&str; 20] = [
     "static", "extern", "register", "inline", "auto", "typedef", "_Noreturn", "thread_local", "_Thread_local",
     "__inline", "__inline__", "volatile", "restrict", "__restrict", "__restrict__", "signed", "unsigned", "short",
     "long", "struct",
