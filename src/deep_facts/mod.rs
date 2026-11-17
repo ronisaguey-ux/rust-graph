@@ -1075,20 +1075,21 @@ impl<'a> Walker<'a> {
                             // = false;` is `a [Flag] n:false` to the lexer, and
                             // writing the constant `0` for every field but a call
                             // left each such field a disagreement. A keyword
-                            // literal is a name to the one-pass reader.
+                            // literal is a name to the one-pass reader, and a
+                            // constant's initialiser merges the name and the
+                            // constant, so the written form is the child's own.
+                            // Other languages keep the constant: the model is the
+                            // C# arm's, measured here, not theirs.
                             let form = if self.language.name == "csharp" {
-                                let kind = self
-                                    .children(id)
-                                    .get(at + 1)
-                                    .map(|&child| self.kind(child))
-                                    .unwrap_or("");
+                                let child = children.get(at + 1).copied();
+                                let kind = child.map(|node| self.kind(node)).unwrap_or("");
                                 match kind {
                                     "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
                                     "" => "0".to_string(),
-                                    _ => {
-                                        let child = self.children(id)[at + 1];
-                                        self.form(child)
-                                    }
+                                    _ => child
+                                        .map(|node| self.form(node))
+                                        .filter(|form| !form.is_empty() && form != "0")
+                                        .unwrap_or_else(|| "0".to_string()),
                                 }
                             } else {
                                 "0".to_string()
