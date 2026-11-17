@@ -486,6 +486,10 @@ rust_graph_deep::grammar! { KOTLIN {
     /// `parse(::load)`: `::name` with nothing in front is a reference to a
     /// top-level callable, and as no primary it could not be an argument.
     absolute_reference: "::" _callable_name,
+    /// `this@toASCIITable`, `super@Outer`: a label on `this` or `super` names the
+    /// enclosing lambda or class. Read as a bare `this` the label could not
+    /// follow it, so every qualified labeled receiver recovered.
+    labeled_this: ("this" | "super") "@" _name,
 
     _primary:
         _literal
@@ -495,6 +499,8 @@ rust_graph_deep::grammar! { KOTLIN {
         | parenthesized_expression
         | lambda_literal
         | absolute_reference
+        | &("this" "@") labeled_this
+        | &("super" "@") labeled_this
         | object_expression
         | if_statement
         | when_statement
