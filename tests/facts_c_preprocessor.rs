@@ -90,18 +90,17 @@ const COVERAGE: &[(&str, &str, Lang, &str)] = &[
         Lang::C,
         "#define LOG(fmt, ...) \\\n    do { \\\n        report(fmt, ##__VA_ARGS__); \\\n    } while (0)\n\nvoid emit(int value) {\n    LOG(\"%d\", value);\n}\n",
     ),
+    (
+        "a prototype wrapped in an extern C block",
+        "cpp",
+        Lang::Cpp,
+        "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\nint api_version(void);\nint api_open(const char *path);\n\n#ifdef __cplusplus\n}\n#endif\n",
+    ),
 ];
 
 /// Shapes that still disagree, with the exact disagreement. A row here must
 /// still lose: closing one without moving it up fails the suite.
 const KNOWN_GAPS: &[(&str, &str, Lang, &str, &str)] = &[
-    (
-        "a prototype read as a call by the lexer",
-        "cpp",
-        Lang::Cpp,
-        "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\nint api_version(void);\nint api_open(const char *path);\n\n#ifdef __cplusplus\n}\n#endif\n",
-        "`int api_version(void);` declares and calls nothing; the lexer reads the header as a call to `api_version` (call api_version line 5 in `<module>`), so the CST, which is right, still looks like it lost one",
-    ),
     (
         "a method header read as a call by the lexer",
         "cpp",
