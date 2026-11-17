@@ -67,6 +67,7 @@ rust_graph_deep::grammar! { C {
         KW_INLINE = "inline",
         KW_INT = "int",
         KW_LONG = "long",
+        KW_NAMESPACE = "namespace",
         KW_REGISTER = "register",
         KW_RESTRICT = "restrict",
         KW_RETURN = "return",
@@ -143,12 +144,17 @@ rust_graph_deep::grammar! { C {
         PIPE_EQ = "|=",
         CARET_EQ = "^=",
         SHL_EQ = "<<=",
+        /// `namespace a::b {`: C has no scope operator, but a C source's C++
+        /// guard block can name a nested namespace, and the rule needs the token
+        /// to spell it.
+        COLON_COLON = "::",
     }
 
     translation_unit: _top_item*,
 
     _top_item:
-        &(declaration_specifiers _declarator "{") function_definition
+        namespace_block
+        | &(declaration_specifiers _declarator "{") function_definition
         | &(declaration_specifiers user_type_name _declarator "{") user_function_definition
         | &(user_type_name _declarator "{") bare_user_function_definition
         | &("extern" string) linkage_specification
@@ -173,6 +179,16 @@ rust_graph_deep::grammar! { C {
     macro_call_statement: IDENT arguments ";",
     /// `extern "C" { ... }` and `extern "C" int f(void);`: a linkage block.
     linkage_specification: "extern" string ("{" _top_item* "}" | _top_item),
+    /// `namespace roaring { import … }` inside a C source's `#ifdef __cplusplus`
+    /// guard: the preprocessor is trivia here, so a C file that carries the C++
+    /// guard block reaches a grammar with no namespaces in it. Read as a
+    /// declaration the header named the block (`namespace roaring {` matched a
+    /// bare user function), gave the file a symbol the lexer never makes, and
+    /// left a `namespace internal` event inside it — 53 error nodes across
+    /// bitset.c alone. The block is layout: it names nothing, and the items
+    /// inside it are file-scope items, which is what the lexer's plain frame
+    /// does. The node is not `namespace_definition`, so the walk is transparent.
+    namespace_block: "namespace" ["inline"] IDENT (COLON_COLON IDENT)* "{" _top_item* "}",
     /// A visibility macro in front of a declaration: `NPY_NO_EXPORT int f(void);`,
     /// `XMLPUBFUN xmlRegexpPtr xmlRegexpCompile(...)`. The guard above claims
     /// the name only when a whole declaration follows it, so a macro *call*
@@ -522,6 +538,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"inline" => KW_INLINE,
         b"int" => KW_INT,
         b"long" => KW_LONG,
+        b"namespace" => KW_NAMESPACE,
         b"register" => KW_REGISTER,
         b"restrict" => KW_RESTRICT,
         b"return" => KW_RETURN,
