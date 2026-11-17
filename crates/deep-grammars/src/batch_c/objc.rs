@@ -160,7 +160,12 @@ rust_graph_deep::grammar! { OBJC {
         | objc_class_declaration
         | objc_import
         | &(IDENT arguments) macro_call_statement
-        | declaration_statement,
+        | declaration_statement
+        // `NS_ASSUME_NONNULL_BEGIN`, and every other bare macro that stands as
+        // an item of its own: without this alternative the item reached the
+        // tree only through error recovery, and a file that ended on one - which
+        // is every modern Apple header - kept a trailing ERROR node.
+        | &(IDENT) bare_macro_item,
 
     /// `EXPMatcherInterface(endWith, (id expected));`, `NS_ENUM_BEGIN(…)`:
     /// a macro invocation with a semicolon that expands to something the
