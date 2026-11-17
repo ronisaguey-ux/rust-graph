@@ -284,17 +284,33 @@ impl<'a> Lexer<'a> {
         true
     }
 
-    fn scan_interpolated(&mut self, close: &[u8], interp: Interp, multi_line: bool) -> Vec<(u32, u32)> {
+    fn scan_interpolated(
+        &mut self,
+        close: &[u8],
+        interp: Interp,
+        multi_line: bool,
+        verbatim: bool,
+    ) -> Vec<(u32, u32)> {
         let mut parts = Vec::new();
         while self.pos < self.src.len() {
             let rest = &self.src[self.pos..];
+            // A verbatim string doubles its quote instead of escaping it: `@""`
+            // is one quote inside the literal, so the first quote of a pair must
+            // not close it, or the rest of the literal is read as code.
+            if verbatim && rest.starts_with(close) && rest.get(close.len()) == Some(&close[0]) {
+                self.pos += close.len() + 1;
+                continue;
+            }
             if rest.starts_with(close) {
                 self.pos += close.len();
                 return parts;
             }
             let byte = rest[0];
             match byte {
-                b'\\' => {
+                // In a verbatim string a backslash is a literal byte, so
+                // `@"C:\temp\"` ends at its own quote instead of escaping it and
+                // swallowing the statement that follows.
+                b'\\' if !verbatim => {
                     if interp == Interp::Swift && self.peek(1) == b'(' {
                         self.pos += 2;
                         parts.push(self.balanced_expr(b'(', b')'));
@@ -466,8 +482,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn string(&mut self, start: usize, line: u32, col: u32, formatted: bool) -> Token {
+    fn string(&mut self, start: usize, line: u32, col: u32, formatted: bool, verbatim: bool) -> Token {
         let quote = self.peek(0);
+        // Verbatim semantics (a doubled quote escapes, a backslash is literal,
+        // a newline continues the literal) belong to C#. Objective-C spells its
+        // literals `@"…"` too, but there `""` is two adjacent literals and a
+        // backslash still escapes, so the flag stops at the language.
+        let verbatim = verbatim && self.lang.tag == "CS";
         let triple = self.lang.triple_quotes && self.peek(1) == quote && self.peek(2) == quote;
         let closer = [quote; 3];
         let close: &[u8] = if triple { &closer } else { &closer[..1] };
@@ -480,13 +501,16 @@ impl<'a> Lexer<'a> {
         };
         // A Rust string literal may carry a raw newline, and the CST reads one
         // token where a line-bounded scanner reads a dangling word followed by
-        // whatever the next line starts with.
+        // whatever the next line starts with. A C# verbatim string (`@"…"`) is
+        // the same shape and the C# corpus is full of them (JSON fixtures and
+        // SQL), so it spans lines too.
         let multi_line = triple
             || quote == b'`'
             || self.lang.sigils
             || self.lang.interp == Interp::Hash
-            || self.lang.tag == "RS";
-        let parts = self.scan_interpolated(close, interp, multi_line);
+            || self.lang.tag == "RS"
+            || (verbatim && self.lang.tag == "CS");
+        let parts = self.scan_interpolated(close, interp, multi_line, verbatim);
         let mut token = self.token(Kind::Str, start, line, col);
         if !parts.is_empty() {
             token.interp = Some(Box::new(parts));
@@ -641,7 +665,7 @@ impl<'a> Lexer<'a> {
             }
             if self.lang.quotes.contains(&next) && word.len() <= 2 && word.iter().all(|b| b"rRbBuUfF".contains(b)) {
                 let formatted = word.iter().any(|b| matches!(b, b'f' | b'F'));
-                return self.string(start, line, col, formatted);
+                return self.string(start, line, col, formatted, false);
             }
             if self.lang.tag == "RS" && matches!(word, b"r" | b"br" | b"cr") && next == b'#' {
                 let mut hashes = 0;
@@ -675,11 +699,11 @@ impl<'a> Lexer<'a> {
             return self.token(Kind::Num, start, line, col);
         }
         if self.lang.quotes.contains(&byte) {
-            return self.string(start, line, col, false);
+            return self.string(start, line, col, false, false);
         }
         if self.lang.tag == "M" && byte == b'\'' && !self.after_value {
             self.pos += 1;
-            self.scan_interpolated(b"'", Interp::None, false);
+            self.scan_interpolated(b"'", Interp::None, false, false);
             return self.token(Kind::Str, start, line, col);
         }
         if byte == b'\'' {
@@ -721,9 +745,25 @@ impl<'a> Lexer<'a> {
                 return self.token(Kind::Str, start, line, col);
             }
         }
+        // `@"…"` is verbatim and `$@"…"` / `@$"…"` are both interpolated and
+        // verbatim: C# spells the two prefixes in either order, and reading the
+        // pair as an operator left the literal cut at its first newline.
         if matches!(byte, b'$' | b'@') && self.lang.quotes.contains(&self.peek(1)) {
             self.pos += 1;
-            return self.string(start, line, col, byte == b'$');
+            return self.string(start, line, col, byte == b'$', byte == b'@');
+        }
+        // `$@"…"` and `@$"…"` are C#: it spells the two prefixes in either
+        // order, and reading the pair as an operator left the literal cut at its
+        // first newline. Perl's `$"` and `$@` are variables, so the pair is read
+        // as one literal only in the language that spells it.
+        if self.lang.tag == "CS"
+            && matches!(byte, b'$' | b'@')
+            && matches!(self.peek(1), b'$' | b'@')
+            && self.lang.quotes.contains(&self.peek(2))
+            && (byte == b'@' || self.peek(1) == b'@')
+        {
+            self.pos += 2;
+            return self.string(start, line, col, true, true);
         }
         if self.lang.tag == "LUA" && byte == b'[' && self.peek(1) == b'[' {
             self.pos += 2;
@@ -802,6 +842,20 @@ mod tests {
     #[test]
     fn a_rust_char_with_a_quote_does_not_open_a_string() {
         assert_eq!(words("rs", "let c = '\"'; let d = 1;\n"), ["let", "c", "let", "d"]);
+    }
+
+    #[test]
+    fn a_verbatim_string_holds_its_own_lines() {
+        // A C# verbatim literal spans lines, doubles its quote instead of
+        // escaping it, and treats a backslash as a byte. Cutting it at the first
+        // newline swallowed the next statement's semicolon, so the statement
+        // after the literal was stamped with the literal's last line.
+        assert_eq!(
+            words("cs", "string json = @\"{\n  \"\"a\"\": 1\n}\";\nint x = 1;\n"),
+            ["string", "json", "int", "x"]
+        );
+        assert_eq!(words("cs", "var p = @\"C:\\temp\\\";\nvar q = 2;\n"), ["var", "p", "var", "q"]);
+        assert_eq!(words("cs", "var s = $\"a {b}\";\nvar t = 1;\n"), ["var", "s", "var", "t"]);
     }
 
     #[test]
