@@ -271,7 +271,17 @@ rust_graph_deep::grammar! { SCALA {
     trait_definition: [definition_modifiers] "trait" _name [type_parameters] [extends_clause] [template_body],
     object_definition: [definition_modifiers] "object" _name [extends_clause] [template_body],
     enum_definition: [definition_modifiers] "enum" _name [type_parameters] [class_parameters] [extends_clause] [template_body],
-    def_definition: [definition_modifiers] "def" _name [type_parameters] parameter_clause* [":" _type] [def_body],
+    def_definition: [definition_modifiers] "def" _method_name [type_parameters] parameter_clause* [":" _type] [def_body],
+    /// A method may be named by the operator it implements: `def +(x: T)`,
+    /// `def unary_-`, `def !(message: String)`. The lexer spells every operator
+    /// as its own token, so `_name` (an identifier) could not start the
+    /// definition and the whole member was a parse error — 1,139 error lines
+    /// over 47 files of the scala corpus, and a `this.type` return or an
+    /// annotation above it went with it.
+    _method_name: _name [operator_name] | operator_name,
+    operator_name:
+        "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "~" | "!" | "<" | ">"
+        | "==" | "!=" | "<=" | ">=" | "&&" | "||" | "::" | "++" | "--" | "<<" | "<-" | "->",
     def_body: "=" (block | _expression) | block,
     val_definition: [definition_modifiers] ("val" | "var") (_binding % ","),
     _binding: _name [":" _type] ["=" _expression],

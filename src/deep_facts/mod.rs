@@ -1929,6 +1929,28 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+        // Scala: a method can be named by the operator it implements (`def +`,
+        // `def unary_-`, `def !`), and the grammar writes the operator as its
+        // own token rather than an identifier. The identifier lookup below then
+        // fell through to the return type, so `def +(x: Int): A` was recorded
+        // as a definition named `A` while the lexer wrote `+`, and every file
+        // that held one lost the name. The name is the leaf right after `def`;
+        // a name ending in `_` continues into the operator (`unary_-`), which
+        // the lexer splits at the `_`.
+        if self.language.name == "scala" && def.kind == "def_definition" {
+            let children = self.children(id);
+            if let Some(at) = children.iter().position(|&child| self.text_string(child) == "def") {
+                let mut name = self.text_string(*children.get(at + 1)?);
+                if name.ends_with('_') {
+                    if let Some(next) = children.get(at + 2) {
+                        name.push_str(&self.text_string(*next));
+                    }
+                }
+                if !name.is_empty() && name != "(" {
+                    return Some(name);
+                }
+            }
+        }
         if def.name_last {
             // Java writes the return type before the name: `Item find(int id)`.
             let node = self
