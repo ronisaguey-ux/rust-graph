@@ -234,6 +234,18 @@ const KT_DEFS: &[Def] = &[
     Def { kind: "function_declaration", name: &["function_head"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 const KT_CALLS: &[&str] = &["call_expression"];
+/// Kotlin's soft keywords: every word the grammar's `_name` rule accepts is a
+/// name wherever a name can sit (`val value = f()`, `fun open() {}`), and the
+/// token the tree keeps for one is the keyword itself rather than an
+/// `identifier`. Without the list a property called `value`, `data` or `open`
+/// read as a head with no name, so its initialiser's call never reached the
+/// record — the largest kotlin cluster the guard still saw.
+const KT_SOFT: &[&str] = &[
+    "abstract", "actual", "annotation", "by", "companion", "const", "constructor", "context", "crossinline",
+    "data", "delegate", "dynamic", "enum", "expect", "external", "field", "final", "get", "infix", "init",
+    "inline", "inner", "internal", "lateinit", "noinline", "open", "operator", "out", "override", "private",
+    "protected", "public", "reified", "sealed", "set", "suspend", "tailrec", "value", "vararg", "where",
+];
 const KT_IMPORTS: &[&str] = &["import_header", "package_header"];
 
 const SC_DEFS: &[Def] = &[
@@ -397,7 +409,9 @@ fn kinds(lang: Lang) -> Kinds {
         Lang::Go => Kinds { definitions: GO_DEFS, calls: &[], imports: GO_IMPORTS, soft: &[], family: Family::Go },
         Lang::Java => Kinds { definitions: JAVA_DEFS, calls: &[], imports: JAVA_IMPORTS, soft: &[], family: Family::Java },
         Lang::CSharp => Kinds { definitions: CS_DEFS, calls: CS_CALLS, imports: CS_IMPORTS, soft: &[], family: Family::Plain },
-        Lang::Kotlin => Kinds { definitions: KT_DEFS, calls: KT_CALLS, imports: KT_IMPORTS, soft: &[], family: Family::Plain },
+        Lang::Kotlin => {
+            Kinds { definitions: KT_DEFS, calls: KT_CALLS, imports: KT_IMPORTS, soft: KT_SOFT, family: Family::Plain }
+        }
         Lang::Scala => Kinds { definitions: SC_DEFS, calls: SC_CALLS, imports: SC_IMPORTS, soft: &[], family: Family::Plain },
         Lang::Swift => Kinds { definitions: SW_DEFS, calls: SW_CALLS, imports: SW_IMPORTS, soft: &[], family: Family::Plain },
         // The other grammars have no definition table here yet; the walk still

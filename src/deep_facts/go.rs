@@ -2072,9 +2072,12 @@ fn dotted_piece(text: &str) -> bool {
             .copied()
             .find(|&child| self.kind(child) == "property_head")
             .and_then(|head| {
+                // A property named with one of Kotlin's soft keywords
+                // (`val value = …`, `val data = …`) carries that keyword as its
+                // head's only child, not an `identifier`.
                 self.children(head)
                     .into_iter()
-                    .find(|&child| matches!(self.kind(child), "identifier"))
+                    .find(|&child| matches!(self.kind(child), "identifier") || self.kinds.soft.contains(&self.kind(child)))
             })
             .map(|node| self.text_string(node))
             .or_else(|| {
