@@ -4150,6 +4150,20 @@ impl<'a> Parser<'a> {
 
     /// `repo = new Repo()` and `repo = Repo()` say what `repo.find` means.
     fn note_class(&mut self, targets: &[Token], value: &[Token]) {
+        // `array_container_t *c_qua_array = CAST_array(c);` states the type in
+        // the declaration, and a pointer declarator's binding is the specifier:
+        // the C walk records no class for it, and the lexer's was the macro's
+        // name, which is not a class at all (`CAST_array` is a #define). The
+        // same reading caught `*type = CAST_shared(c)->typecode;`, whose target
+        // is a dereference and whose class is the typecode's, not the cast's
+        // (8 rows on the croaring corpus).
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && targets
+                .iter()
+                .any(|token| self.is_op(token, b"*") || self.is_op(token, b"&"))
+        {
+            return;
+        }
         // `recv, send = RecvChannel(cid), SendChannel(cid)`: the class belongs
         // to the value in the same position. Read as one tuple, the last
         // target took the first value's class — `send = RecvChannel` — which
