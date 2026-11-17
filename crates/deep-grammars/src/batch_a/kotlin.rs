@@ -452,6 +452,9 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix subscript => index_expression,
         postfix "." _name => navigation_expression,
         postfix "?." _name => navigation_expression,
+        // `InternalAPI::class`: the class literal's word is the keyword
+        // `class` and it is a node of its own, not a callable reference.
+        postfix "::" "class" => class_literal,
         postfix "::" _reference_name => callable_reference,
         postfix BANG_BANG => not_null_expression,
     },
