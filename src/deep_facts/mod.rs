@@ -858,6 +858,20 @@ impl<'a> Walker<'a> {
         if self.is_c() && self.enter_c(id) {
             return;
         }
+        // `public override Task AcceptConnectionAsync(..) => throw new
+        // NotImplementedException();`: a method with an expression body is read
+        // here as a bodyless declaration - its header event and a call named
+        // after the method - and the value after `=>` was never read, so the
+        // creation the lexer records on that line was lost. NotImplemented and
+        // its sibling exceptions cost 220 files.
+        if kind == "method_declaration" && self.kinds.calls.contains(&"object_creation_expression") {
+            let children = self.children(id);
+            if let Some(at) = children.iter().position(|&child| self.kind(child) == "=>") {
+                if let Some(&value) = children.get(at + 1) {
+                    self.form(value);
+                }
+            }
+        }
         // `public abstract T Create(Type objectType);` in an interface or an
         // abstract class has no body: the grammar calls it a declaration and
         // the lexer reads a call, so every abstract member of the corpus lost
