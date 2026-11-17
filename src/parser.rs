@@ -494,6 +494,20 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `export class C` newline `extends B implements I` newline `{`: a
+            // class head spans the breaks, and neither `extends`, `implements`
+            // nor `{` can start a statement. Ended at the first break, the class
+            // never opened a frame: its members were read as statements of
+            // `<module>` and every `public name<T = any>(` wrote a merge the CST
+            // never writes (7 ts files, 14 rows).
+            if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX")
+                && self.class_head(&self.stmt).is_some()
+                && (self.next_starts_with_brace(last.end as usize)
+                    || self.next_starts_with_word(last.end as usize, b"extends")
+                    || self.next_starts_with_word(last.end as usize, b"implements"))
+            {
+                return;
+            }
         }
         // `x = a ? // a comment` newline `b : c`: a trailing `?` in JS/TS
         // begins a ternary branch (or `??`), never ends a statement. Ending
