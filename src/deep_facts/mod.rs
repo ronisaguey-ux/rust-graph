@@ -1267,6 +1267,11 @@ impl<'a> Walker<'a> {
             // child is the expression itself. Nothing read that node, so a call
             // in an expression-bodied def never reached the record.
             "def_body" => self.expression_statement(id),
+            // `companion object { … }`: the one-pass lexer files the introducer
+            // as a header statement (`m:[n:companion,n:object,n:Name]`), and no
+            // arm wrote an event for the tree's `companion_object`, so every
+            // class that declares one lost that line.
+            "companion_object" if self.is_kotlin() => self.java_header_event(id),
             // `val x = object : B() { }`: a supertype constructor is not a
             // `call_expression`, so no arm recorded the call the lexer reads
             // from `B()` when the object is written as an expression. A class
