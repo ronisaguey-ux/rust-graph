@@ -1825,6 +1825,26 @@ impl<'a> Walker<'a> {
         (!last.is_empty()).then_some((name, last))
     }
 
+    /// The path a receiver goes by: a chain of members, with element accesses
+    /// unwrapped, because `f->locvars[i].varname` is `f.locvars.varname` to the
+    /// one-pass reader.
+    fn c_receiver_path(&self, id: u32) -> Option<String> {
+        if let Some(path) = self.c_path(id) {
+            return Some(path);
+        }
+        if self.kind(id) == "subscript_expression" {
+            let base = self
+                .children(id)
+                .into_iter()
+                .find(|&child| !self.is_layout(child))?;
+            if let Some(path) = self.c_receiver_path(base) {
+                return Some(path);
+            }
+        }
+        let path = self.path_of(id);
+        (!path.is_empty()).then_some(path)
+    }
+
     pub(crate) fn c_path(&self, id: u32) -> Option<String> {
         match self.kind(id) {
             "field_expression" | "qualified_expression" => {
@@ -1846,13 +1866,10 @@ impl<'a> Walker<'a> {
                 // `cf->next->cft->do_connect(…)`: the receiver is itself a
                 // field expression, and `path_of` reads a name, not a chain, so
                 // the call came out as `.do_connect` and matched nothing.
-                let base = self
-                    .c_path(object)
-                    .or_else(|| {
-                        let path = self.path_of(object);
-                        (!path.is_empty()).then_some(path)
-                    })
-                    .unwrap_or_default();
+                // `f->locvars[i].varname` is the same gap one level deeper: an
+                // element access is transparent to the path the lexer spells
+                // (`f.locvars.varname`), so the receiver unwraps it.
+                let base = self.c_receiver_path(object).unwrap_or_default();
                 Some(if base.is_empty() { format!(".{name}") } else { format!("{base}.{name}") })
             }
             // `mh->db[mh->num_dbs].dbid`: a subscript is transparent in a
