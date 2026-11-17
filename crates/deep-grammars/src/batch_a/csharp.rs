@@ -319,6 +319,7 @@ rust_graph_deep::grammar! { CSHARP {
         | &([attributes] [modifiers] "interface") interface_declaration
         | &([attributes] [modifiers] "enum") enum_declaration
         | &([attributes] [modifiers] "record" _name) record_declaration
+        | &([attributes] [modifiers] ["implicit" | "explicit"] "operator" _type formal_parameters) conversion_operator_declaration
         | &([attributes] [modifiers] _type "operator") operator_declaration
         // `public static implicit operator T(Source s)`: a conversion writes no
         // return type and puts the target type after `operator`, so the
@@ -356,8 +357,13 @@ rust_graph_deep::grammar! { CSHARP {
     event_declaration: [attributes] [modifiers] "event" _type _member_name event_tail,
     event_tail: event_accessors | ";" | "=" _expression ";",
     event_accessors: "{" accessor_declaration* "}",
-    operator_declaration: [attributes] [modifiers] _type "operator" _operator_token formal_parameters (block | "=>" _expression ";"),
-    conversion_operator_declaration: [attributes] [modifiers] ("implicit" | "explicit") "operator" _type formal_parameters (block | "=>" _expression ";"),
+    operator_declaration: [attributes] [modifiers] ["implicit" | "explicit"] _type "operator" _operator_token formal_parameters (block | "=>" _expression ";"),
+    // `public static explicit operator System.Reflection.Metadata.AssemblyDefinitionHandle
+    // (System.Reflection.Metadata.EntityHandle handle)`: a conversion operator names
+    // its target type AFTER `operator`, so the type the arm expected in front of
+    // the keyword was `explicit` itself and every conversion operator - 180 corpus
+    // files, and the whole body of each ref assembly - failed to parse.
+    conversion_operator_declaration: [attributes] [modifiers] ["implicit" | "explicit"] "operator" _type formal_parameters (block | "=>" _expression ";" | ";"),
     _operator_token: PLUS | MINUS | STAR | SLASH | PERCENT | AMP | PIPE | CARET | BANG | TILDE | EQ | NE | LT | GT | LE | GE | INCREMENT | DECREMENT | "true" | "false",
     field_declaration: [attributes] [modifiers] _type _variable_declarator ("," _variable_declarator)* ";",
     // `bool[] values = { true, false };`: a declaration may initialise from a bare

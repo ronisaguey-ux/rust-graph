@@ -1173,6 +1173,9 @@ impl<'a> Walker<'a> {
             // the one-pass reader, with no node kind of its own in the walk, so
             // every operator declaration lost its line.
             "operator_declaration" => self.java_header_event(id),
+            // `public static explicit operator BlobHandle(EntityHandle handle)`:
+            // a conversion operator is the same header statement to the lexer.
+            "conversion_operator_declaration" => self.java_header_event(id),
             "property_declaration" => {
                 if self.kinds.calls.contains(&"object_creation_expression") {
                     self.java_header_event(id);
