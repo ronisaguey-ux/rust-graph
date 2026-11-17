@@ -341,6 +341,11 @@ rust_graph_deep::grammar! { CSHARP {
     // ---- types ----
 
     _type: precedence _type_head {
+        // `byte* Base;`: a pointer type writes its `*` after the type it points
+        // at, and only the prefix form was in the table, so every pointer
+        // declaration was one ERROR and the file fell back (C# corpus: 26 files
+        // carry a pointer declarator). `**` is the same operator twice.
+        postfix "*" => pointer_type,
         prefix "*" => pointer_type,
         postfix "?" => nullable_type,
         postfix type_arguments => generic_type,
