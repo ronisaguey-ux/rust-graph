@@ -86,6 +86,12 @@ Known gaps (0):
 
 - none: every construct the table claims reads the same on both paths
 
+Rows the guard excuses by reading its line (3):
+
+- a member signature whose line is opened by another group: has(o: any) in a union type
+- a generic method signature whose type argument calls import(): setState<K extends keyof import(…).S>
+- an annotated arrow whose annotation is a function type: the name is before the colon
+
 ## Python — `tests/python_coverage.rs`
 
 Covered (9):
