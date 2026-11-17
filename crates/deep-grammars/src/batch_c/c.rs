@@ -222,7 +222,12 @@ rust_graph_deep::grammar! { C {
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     /// A typedef name where a type specifier is expected.
     user_type_name: IDENT,
-    _init_declarator: _declarator attribute* ["=" _initializer],
+    /// `register long long r4 __asm__("$4") = fd;`: a declarator may name the
+    /// machine register it lives in, and the label sits where an attribute
+    /// would, in front of the initializer.
+    _init_declarator: _declarator attribute* [asm_label] ["=" _initializer],
+    asm_label: "asm" asm_label_arguments,
+    asm_label_arguments: "(" string ")",
     _initializer: designated_field | designated_index | _expression@assign | initializer_list,
     /// The separator is optional because a macro element can carry its own
     /// comma: `A(1)` and `A(2)` on consecutive lines are two elements when `A`
