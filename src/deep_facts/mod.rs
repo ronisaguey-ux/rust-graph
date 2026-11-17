@@ -1212,6 +1212,17 @@ impl<'a> Walker<'a> {
             "public_field_definition" | "field_definition" | "property_signature" if self.is_js() => {
                 self.field(id)
             }
+            // `f->code[pc++]=CREATE_ABx(OP_CLOSURE,0,i);`: the lexer binds an
+            // element assignment's base to the call it stores, and nothing
+            // wrote a variable for a subscripted target, so every table fill
+            // in lua lost its binding (2 files).
+            "assignment_expression"
+                if matches!(self.facts.tag.as_str(), "C" | "CPP" | "OBJC")
+                    && self.c_element_call_binding(id).is_some() =>
+            {
+                let (name, last) = self.c_element_call_binding(id).unwrap();
+                self.facts.vars.push((name, last));
+            }
             // `global_State *g = G(L);` inside a function: the grammar reads an
             // unknown type and a pointer as a product, so the assignment's
             // target was a `binary_expression` and `c_path` named nothing -
