@@ -1869,6 +1869,25 @@ impl<'a> Parser<'a> {
         if self.import_of(stmt) {
             return;
         }
+        // A Kotlin declaration may have no body at all: `fun check(list: T)`
+        // in an interface or an abstract class is a signature, and the CST
+        // records it as a function symbol. Read as a value it became a call of
+        // its own name, so 454 corpus files lost the call and never gained the
+        // member the CST has.
+        if self.lang.tag == "KT" {
+            if let Some(head) = self
+                .function_head(stmt, false)
+                .filter(|head| head.body.is_none() && !head.name.is_empty())
+            {
+                if stmt.len() > 1
+                    && stmt.last().is_some_and(|token| self.is_op(token, b")") || token.kind == Kind::Ident)
+                {
+                    self.push_function(head, stmt[0].col, None);
+                    self.pop_frame();
+                    return;
+                }
+            }
+        }
         if self.function_head(stmt, false).is_some_and(|head| head.body.is_some()) {
             let head = self.function_head(stmt, false).unwrap_or_default();
             self.inline_function(head, stmt);
