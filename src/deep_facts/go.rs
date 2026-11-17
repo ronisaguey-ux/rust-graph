@@ -2426,10 +2426,13 @@ fn dotted_piece(text: &str) -> bool {
             .and_then(|head| {
                 // A property named with one of Kotlin's soft keywords
                 // (`val value = …`, `val data = …`) carries that keyword as its
-                // head's only child, not an `identifier`.
+                // head's only child, not an `identifier`. A property declared on
+                // an extension receiver (`val ApplicationRequest.uri`) writes
+                // the receiver first, so the name is the last segment.
                 self.children(head)
                     .into_iter()
-                    .find(|&child| matches!(self.kind(child), "identifier") || self.kinds.soft.contains(&self.kind(child)))
+                    .filter(|&child| matches!(self.kind(child), "identifier") || self.kinds.soft.contains(&self.kind(child)))
+                    .next_back()
             })
             .map(|node| self.text_string(node))
             .or_else(|| {
