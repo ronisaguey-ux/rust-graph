@@ -308,7 +308,11 @@ rust_graph_deep::grammar! { C {
     _direct_base: IDENT | parenthesized_declarator,
     parenthesized_declarator: "(" _declarator ")",
     _declarator_suffix: array_suffix | parameter_list,
-    array_suffix: "[" [_expression] "]",
+    /// `int buf[static 1]`, `char canon[static 256]`: C99 array-parameter
+    /// qualifiers sit between the brackets and the size, and musl uses the
+    /// `static` form in every lookup prototype.
+    array_suffix: "[" array_qualifier* [_expression] "]",
+    array_qualifier: "static" | "const" | "volatile" | "restrict",
     parameter_list: "(" (_parameter % ",") ")",
     _parameter:
         declaration_specifiers [user_type_name] [_declarator_or_abstract]
