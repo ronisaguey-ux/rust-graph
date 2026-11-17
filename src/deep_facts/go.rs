@@ -2392,6 +2392,17 @@ fn dotted_piece(text: &str) -> bool {
             out.push(']');
             return out;
         }
+        // Kotlin's `true`, `false` and `null` are keyword leaves here, and the
+        // lexer reads each of them as a name: `enableSsl = false` is
+        // `a:[n:enableSsl,:n:false]` there and formed as the constant 0 here,
+        // which lost every boolean assignment in the corpus.
+        if self.is_kotlin() && matches!(kind, "true" | "false" | "null") {
+            let text = self.text_string(id);
+            let mut out = "[\"n\",".to_string();
+            push_string(&mut out, &text);
+            out.push(']');
+            return out;
+        }
         if let Some(name) = self.soft_name(id) {
             let mut out = "[\"n\",".to_string();
             push_string(&mut out, &name);
