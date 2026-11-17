@@ -490,6 +490,14 @@ pub fn lang_for(tag: &str) -> Option<Lang> {
     // lexer's artefacts often enough that the guard keeps the lexer on most
     // files, so choosing them automatically would pay for a second parse and
     // then throw it away.
+    // `RG_AUDIT=1` asks for the guard's verdict on every language this build can
+    // parse, including the ones `auto` will not pay a second parse for. The
+    // audit that decides whether a language is ready to enter `auto` needs that
+    // number, and `--deep` cannot give it: it forces the CST on every file
+    // instead of comparing the two readers. Measurement only, off by default.
+    if std::env::var_os("RG_AUDIT").is_some() {
+        return lang_for_forced(tag);
+    }
     match tag {
         "PY" | "JS" | "TS" | "RS" => lang_for_forced(tag),
         _ => None,
