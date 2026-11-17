@@ -867,23 +867,51 @@ impl<'a> Walker<'a> {
             && !self.has_kind(id, &["block"])
         {
             let children = self.children(id);
-            let name = children
+            let named = children
                 .iter()
                 .copied()
                 .take_while(|&child| !matches!(self.kind(child), "parameter_list" | "formal_parameters"))
                 .filter(|&child| self.kind(child) == "identifier")
-                .last()
-                .map(|node| self.text_string(node));
-            if let Some(name) = name {
-                let line = self.line(id);
-                let index = self.push_call(name, line);
+                .last();
+            if let Some(named) = named {
+                let name = self.text_string(named);
+                // The call is written on the line the name is, not on the
+                // declaration's first line: `[Obsolete(..)]` in front of a
+                // member puts the node two lines below its own name.
+                let call_line = self.line(named);
+                let index = self.push_call(name, call_line);
+                // The header itself is an event on the attribute list's first
+                // line when there is one: `[DllImport(..)] public static extern
+                // int F();` is one statement to the one-pass reader, and it
+                // starts where the first `[` is.
+                let mut line = self.line(id);
+                if self.language.name == "csharp" {
+                    if let Some(first) = children.iter().copied().find(|&child| {
+                        matches!(self.kind(child), "attributes" | "attribute_section" | "attribute_list")
+                    }) {
+                        line = self.line(first);
+                    }
+                }
                 // The line is an `x` event whose last element is that call,
                 // with every parameter read as one merge of its words:
                 // `m:[n:public,n:abstract,n:T,c(0;[m:[n:Type,n:objectType]])]`.
                 let mut parts: Vec<String> = Vec::new();
+                let mut attributed = false;
                 for child in &children {
                     if matches!(self.kind(*child), "parameter_list" | "formal_parameters") {
                         break;
+                    }
+                    // `[DefaultDllImportSearchPaths(..)] [DllImport(..)] public
+                    // static extern int F();`: the lexer writes the first
+                    // attribute section as the header's first value - a call
+                    // per attribute that has arguments - and every later
+                    // section contributes its calls and no value. Flattening
+                    // the list into name words lost the call on 1,081 C# files.
+                    if self.language.name == "csharp"
+                        && matches!(self.kind(*child), "attributes" | "attribute_section" | "attribute_list")
+                    {
+                        self.csharp_attributes(*child, &mut attributed, &mut parts);
+                        continue;
                     }
                     for word in self.c_words_of(*child) {
                         let mut form = String::from("[\"n\",");
