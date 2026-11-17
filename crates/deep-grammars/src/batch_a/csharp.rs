@@ -324,7 +324,7 @@ rust_graph_deep::grammar! { CSHARP {
     constructor_initializer: ":" ("base" | "this") arguments,
     destructor_declaration: [attributes] [modifiers] "~" _name empty_arguments block,
     property_declaration: [attributes] [modifiers] _type _member_name property_body [property_tail],
-    property_tail: "=" _expression@assign ";" | ";",
+    property_tail: "=" _declared_value ";" | ";",
     property_body: "{" accessor_declaration* "}",
     // `public int P { get => 1; set => _p = value; }`: an expression-bodied
     // accessor is written with `=>` and no block, and the grammar only knew the
@@ -344,7 +344,7 @@ rust_graph_deep::grammar! { CSHARP {
     operator_declaration: [attributes] [modifiers] ["implicit" | "explicit"] _type "operator" _operator_token formal_parameters (block | "=>" _expression ";"),
     _operator_token: PLUS | MINUS | STAR | SLASH | PERCENT | AMP | PIPE | CARET | BANG | TILDE | EQ | NE | LT | GT | LE | GE | INCREMENT | DECREMENT | "true" | "false",
     field_declaration: [attributes] [modifiers] _type _variable_declarator ("," _variable_declarator)* ";",
-    _variable_declarator: _name ["=" _expression@assign],
+    _variable_declarator: _name ["=" _declared_value],
 
     // ---- types ----
 
@@ -460,7 +460,7 @@ rust_graph_deep::grammar! { CSHARP {
     unsafe_statement: "unsafe" block,
     fixed_statement: "fixed" fixed_header _statement,
     fixed_header: "(" [_local_modifiers] _type _name "=" _expression ")",
-    return_statement: "return" [_expression] ";",
+    return_statement: "return" [_declared_value] ";",
     throw_statement: "throw" [_expression] ";",
     break_statement: "break" ";",
     continue_statement: "continue" ";",
@@ -526,7 +526,6 @@ rust_graph_deep::grammar! { CSHARP {
         | nameof_expression
         | checked_expression
         | _predefined_type
-        | default_expression
         | stackalloc_expression,
     _literal:
         INTEGER | FLOAT | CHAR | STRING | VERBATIM_STRING | INTERPOLATED_STRING | RAW_STRING
@@ -536,6 +535,11 @@ rust_graph_deep::grammar! { CSHARP {
     // that label is matched by `switch_section` before any statement is tried,
     // so the two never meet.
     default_expression: "default" [parenthesized_type],
+    // The value of a declarator, which may be `default`. `default` is kept out
+    // of `_primary` on purpose: it also labels a switch section, and a statement
+    // list that could start one would swallow the label (`default:` became an
+    // expression statement and an error node at the colon).
+    _declared_value: default_expression | _expression@assign,
     lambda_parameters: "(" (lambda_parameter %? ",") ")",
     lambda_parameter: [attributes] [_local_modifiers] _type _name | _name,
     cast_type: "(" _type ")",
