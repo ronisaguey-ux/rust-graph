@@ -2452,6 +2452,96 @@ fn dotted_piece(text: &str) -> bool {
         }
     }
 
+    /// `true` when the type after the `:` carries a `?` anywhere. The lexer's
+    /// Kotlin statement reader stops the type at that `?`, so the property is
+    /// left as a declaration (`x`) rather than the assignment (`a`) an untyped
+    /// or non-nullable property gets.
+    fn kt_type_nullable(&self, id: u32) -> bool {
+        if self.kind(id) == "?" {
+            return true;
+        }
+        self.children(id).into_iter().any(|child| self.kt_type_nullable(child))
+    }
+
+    /// The identifier leaves of a type, in source order, as names:
+    /// `List<String>` is `n:List` then `n:String`, the run of names the lexer
+    /// reads in the type.
+    fn kt_type_names(&self, id: u32, parts: &mut Vec<String>) {
+        if self.node(id).first_child == NONE {
+            if self.kind(id) == "identifier" {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                parts.push(out);
+            }
+            return;
+        }
+        for child in self.children(id) {
+            self.kt_type_names(child, parts);
+        }
+    }
+
+    /// `var x: List<String>? = null`: the modifiers, the name, the type's names
+    /// and a name or call on the right of the `=`, in that order, as the one
+    /// declaration event the lexer files for the statement.
+    fn kt_nullable_property(&mut self, id: u32, name: &str, ty: u32, line: u32) {
+        let mut parts: Vec<String> = Vec::new();
+        for child in self.children(id) {
+            match self.kind(child) {
+                "modifiers" => {
+                    for modifier in self.children(child) {
+                        if self.kind(modifier) == "annotation" {
+                            let word =
+                                self.children(modifier).into_iter().find(|&leaf| self.kind(leaf) == "identifier");
+                            if let Some(word) = word {
+                                let mut out = String::from("[\"n\",");
+                                push_string(&mut out, &self.text_string(word));
+                                out.push(']');
+                                parts.push(out);
+                            }
+                            continue;
+                        }
+                        let value = self.decl_value(modifier);
+                        if !value.is_empty() && value != "0" {
+                            parts.push(value);
+                        }
+                    }
+                }
+                // `val` is a name to the one-pass reader and `var` is not:
+                // `val x: Int` files `m:[n:val,n:x,n:Int]` while
+                // `private var y: String` files `m:[n:private,n:y,n:String]`.
+                "val" => {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, "val");
+                    out.push(']');
+                    parts.push(out);
+                }
+                "var" | ":" | "=" | "by" | "lateinit" | "const" => {}
+                "property_head" => {
+                    let mut out = String::from("[\"n\",");
+                    push_string(&mut out, name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                _ if child == ty => self.kt_type_names(ty, &mut parts),
+                _ => {
+                    let value = self.decl_value(child);
+                    if !value.is_empty() && value != "0" {
+                        parts.push(value);
+                    }
+                }
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        let value = match parts.len() {
+            1 => parts.pop().unwrap_or_default(),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        };
+        self.lexer_event(b'x', line, &[], &value, false);
+    }
+
     /// `val a = 1`, `private val b: Int = 2`: the declared name and the value,
     /// as the assignment the lexer files.
     pub(crate) fn kt_property(&mut self, id: u32) {
@@ -2513,6 +2603,19 @@ fn dotted_piece(text: &str) -> bool {
             }
             return;
         };
+        // `public val log: Logger`: a typed property with no initialiser is a
+        // declaration whose value is the run of names it read - the modifiers,
+        // `val`, the name and the type's names. Read as an assignment it wrote
+        // nothing at all, and every uninitialised property in the corpus lost
+        // its line (the largest Kotlin event cluster left).
+        let assigned = children.iter().any(|&child| self.kind(child) == "=");
+        let attached = children.iter().any(|&child| matches!(self.kind(child), "by" | "accessor"));
+        if !assigned && !attached {
+            if let Some(ty) = ty {
+                self.kt_nullable_property(id, &name, ty, line);
+                return;
+            }
+        }
         // `val ApplicationRequest.uri: String get() = origin.uri`: the getter is
         // written on the declaration's line, and its expression is the value the
         // lexer files for the property.
