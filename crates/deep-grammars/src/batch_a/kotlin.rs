@@ -344,7 +344,13 @@ rust_graph_deep::grammar! { KOTLIN {
     property_declaration:
         [modifiers] ("val" | "var") [type_parameters] property_head [":" _type]
         (["by" _expression | "=" _expression])?,
-    property_head: &(_type ".") receiver_head | _name,
+    /// `val ApplicationRequest.uri: String`: the head is the receiver"s
+    /// segments and then the name, and a parser that cannot backtrack cannot
+    /// tell where the receiver ends, so it is one rule and the walk reads the
+    /// last segment as the name. The old `&(_type ".") receiver_head` lookahead
+    /// could never match - `_type` eats every dotted segment and then wants one
+    /// more - so every extension property stopped at its first dot.
+    property_head: _type_head [type_arguments] ("." _name [type_arguments])*,
     accessor: [modifiers] ("get" | "set") [accessor_parameters] ("=" _expression | block),
     accessor_parameters: "(" [parameter] ")",
 
