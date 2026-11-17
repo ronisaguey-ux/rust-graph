@@ -594,8 +594,13 @@ impl<'a> Walker<'a> {
                             .and_then(|node| self.declarator_of(node))
                             .unwrap_or_default();
                         let mut args = String::new();
-                        if !name.is_empty() {
-                            args = "[[\"n\",".to_string();
+                        if name.is_empty() {
+                            // `int (*)(const void *, const void *));`: the
+                            // declarator names nothing, and an empty `args`
+                            // wrote `["c",0,0,]`, which is not JSON.
+                            args.push_str("[]");
+                        } else {
+                            args.push_str("[[\"n\",");
                             push_string(&mut args, &name);
                             args.push_str("]]");
                         }
