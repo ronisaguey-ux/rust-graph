@@ -268,7 +268,11 @@ rust_graph_deep::grammar! { KOTLIN {
         | "sealed" | "data" | "value" | "inner" | "override" | "lateinit" | "const" | "suspend"
         | "inline" | "infix" | "operator" | "tailrec" | "external" | "annotation"
         | "vararg" | "noinline" | "crossinline" | "reified" | "expect" | "actual"
-        | "dynamic" | "init" | "delegate",
+        // `init` is not a modifier: it opens an `init { … }` block, and as a
+        // modifier word it swallowed the keyword before `init_block` could
+        // match, so every class with an `init` block recovered as a broken
+        // typealias and lost the calls inside it.
+        | "dynamic" | "delegate",
     annotation: "@" (&(_annotation_target) _annotation_target _qualified_name [annotation_arguments] | _qualified_name [annotation_arguments]),
     /// A use-site target (`@file:`, `@get:`) is a name and a colon; nothing else
     /// is one. It is guarded by a lookahead at the start of the alternative the
