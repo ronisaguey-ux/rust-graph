@@ -41,6 +41,11 @@ const RS_NOISE: [&str; 20] = [
     "ref", "unsafe", "pub", "move", "try", "use",
 ];
 const NAMED_ARGS_WITH_COLON: [&str; 5] = ["RB", "CR", "SWIFT", "DART", "EX"];
+/// Kotlin keywords that take a parenthesised header without being a call.
+/// `when` is a keyword in Kotlin and a name nowhere, so `when (x) { … }` read as
+/// the call `when(x)` in every file that used it as a value (`val p = when (x) …`),
+/// which is the lexer saying a call the CST never writes.
+const KT_NOISE: [&str; 1] = ["when"];
 /// Words that describe a C declaration instead of naming a value. `const` and
 /// `void` are already in [`NOISE`]; the rest are the storage classes and
 /// type specifiers the one-pass reader emitted as names, so `static int h(int
@@ -1257,6 +1262,8 @@ impl Emit<'_> {
                 && !(word == "async" && self.op_byte(1) == b'(' && !self.async_arrow_head(1))
         } else if self.lang.tag == "PY" {
             PY_NOISE.contains(&word.as_str())
+        } else if self.lang.tag == "KT" {
+            NOISE.contains(&word.as_str()) || KT_NOISE.contains(&word.as_str())
         } else if self.lang.tag == "RS" {
             // `async move { … }` / `move ||`: `move` names a closure, not a
             // binding; the CST writes no value for it.
@@ -1278,6 +1285,28 @@ impl Emit<'_> {
             return;
         }
         self.pos += 1;
+        // `typealias H = suspend (Int) -> Unit`, `val w: suspend C.() -> Unit`:
+        // a suspend function *type*. The group is its parameter list and the
+        // type after `->` is its result, so the construct names no value at all;
+        // read as a call it invented a callee called `suspend` in every file
+        // that wrote one.
+        if self.lang.tag == "KT" && word == "suspend" && self.op_byte(0) == b'(' {
+            self.pos += 1;
+            let mut params = String::new();
+            self.list(&mut params, b')', false);
+            if self.is_op(0, b"->") {
+                self.pos += 1;
+                while let Some(token) = self.tok(0) {
+                    let op = if token.kind == Kind::Op { self.src[token.start as usize..token.end as usize].to_vec() } else { Vec::new() };
+                    let is_type = token.kind == Kind::Ident || matches!(op.as_slice(), b"?" | b"." | b"::" | b"<");
+                    if !is_type {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+            }
+            return;
+        }
         // `pick: fn(&Corners) -> f64`: a function *type*. `fn` is a keyword that
         // names no value, its parentheses are a parameter list, and the type
         // after `->` is a type. Read as a value chain the two words `fn` and
