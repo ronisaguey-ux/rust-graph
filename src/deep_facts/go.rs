@@ -2474,6 +2474,21 @@ fn dotted_piece(text: &str) -> bool {
                 self.java_header_event(id);
             }
             return;
+        let Some(value) = value else { return };
+        // `val ApplicationRequest.uri: String get() = origin.uri`: the getter is
+        // written on the declaration's line, and its expression is the value the
+        // lexer files for the property.
+        let value = if self.kind(value) == "accessor" {
+            let inner = self.children(value);
+            match inner.iter().copied().rev().find(|&child| {
+                !self.is_layout(child)
+                    && !matches!(self.kind(child), "get" | "set" | "(" | ")" | "=" | "block" | "accessor_parameters")
+            }) {
+                Some(node) => node,
+                None => return,
+            }
+        } else {
+            value
         };
         self.assignment_parts(vec![name], value, line, false);
     }

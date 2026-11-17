@@ -349,7 +349,7 @@ rust_graph_deep::grammar! { KOTLIN {
     parameter_modifiers: (annotation | "public" | "private" | "protected" | "internal" | "vararg" | "noinline" | "crossinline" | "out" | "override")+,
     property_declaration:
         [modifiers] ("val" | "var") [type_parameters] property_head [":" _type]
-        (["by" _expression | "=" _expression])?,
+        (["by" _expression | "=" _expression])? [accessor],
     /// `val ApplicationRequest.uri: String`: the head is the receiver"s
     /// segments and then the name, and a parser that cannot backtrack cannot
     /// tell where the receiver ends, so it is one rule and the walk reads the
