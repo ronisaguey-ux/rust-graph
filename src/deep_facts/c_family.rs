@@ -353,6 +353,26 @@ impl<'a> Walker<'a> {
                     self.form(call);
                 }
             }
+            // `extern hidden FILE *volatile __stdin_used;`: a storage class and
+            // a macro in front of a pointer declarator is a
+            // `specified_macro_item`, and the declarator inside it writes
+            // nothing unless it names a function, so the names the lexer keeps
+            // whole on that line went missing (musl's stdio_impl.h).
+            "specified_macro_item" | "double_qualified_item" => {
+                let tail = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&child| self.kind(child) == "user_pointer_declaration");
+                if let Some(tail) = tail {
+                    if !self.c_has_kind(tail, "parameter_list") {
+                        let form = self.c_words_form_skipping(id, &["initializer_list"]);
+                        if form != "0" {
+                            let line = self.line(id);
+                            self.event(&format!("[\"x\",{line},{form}]"));
+                        }
+                    }
+                }
+            }
             // `hidden void __vm_wait(void);`: the macro before the type is its
             // own node, and the lexer keeps it as the first name of the line.
             "macro_qualified_item" => {
