@@ -428,11 +428,15 @@ rust_graph_deep::grammar! { C {
     /// allows (26 corpus files, musl and redis).
     compound_literal: compound_head initializer_list,
     compound_head: "(" _compound_type_body ")",
+    /// The array forms are tried first: `(long[]){ … }` is a compound literal
+    /// of an array type, and `&(type_name)` matched the `long` alone, so the
+    /// `[]` was left over and the whole statement recovered — the eight
+    /// `(long long[]){ … }` sites in musl and every `(long[]){ CLAMP … }`.
     _compound_type_body:
-        &(type_name) type_name
+        &(_array_only_type) _array_only_type
+        | &(_named_array_type) _named_array_type
+        | &(type_name) type_name
         | &(_user_cast_type) _user_cast_type
-        | _array_only_type
-        | _named_array_type
         | user_type_name,
     /// `long[]`, `long[6]`: a keyword type with an abstract suffix. `type_name`
     /// does not accept one — its abstract declarator always starts with a `*` —
