@@ -697,15 +697,6 @@ impl<'a> Walker<'a> {
                 parts.push(out);
             }
         }
-        // `syscall.Socket` in a Go value is one name to the lexer: it reads the
-        // dotted path and never the segments. Descending into the selector as
-        // well wrote the joined name and both of its leaves, so every qualified
-        // name in a Go value disagreed with the lexer.
-        if self.language.name == "go" && matches!(kind, "selector_expression" | "qualified_type") {
-            if let Some(joined) = parts.pop() {
-                return joined;
-            }
-        }
         for child in self.children(id) {
             let value = self.decl_value(child);
             if !value.is_empty() {
