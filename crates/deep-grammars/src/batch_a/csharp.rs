@@ -454,7 +454,7 @@ rust_graph_deep::grammar! { CSHARP {
         | using_statement
         | lock_statement
         | return_statement
-        | throw_statement
+        | &("throw") throw_statement
         | break_statement
         | continue_statement
         | goto_statement
@@ -563,6 +563,12 @@ rust_graph_deep::grammar! { CSHARP {
         | &("new" arguments) implicit_creation
         | &("new" anonymous_body) anonymous_object
         | object_creation
+        // `x ?? throw new ArgumentNullException(nameof(x))`, `=> throw new
+        // NotImplementedException()`: C# 7 put `throw` in expression position,
+        // and the grammar only knew it as a statement, so every null-coalescing
+        // guard and every throw-bodied member failed (NotImplementedException
+        // alone: 58 files).
+        | &("throw") throw_expression
         | typeof_expression
         | sizeof_expression
         | nameof_expression
@@ -611,6 +617,7 @@ rust_graph_deep::grammar! { CSHARP {
     _initializer_item: &(_name "=") _name "=" _expression | _expression,
     array_initializer: "{" (_initializer_item %? ",") "}",
     subscript: "[" _expression ("," _expression)* "]",
+    throw_expression: "throw" _expression,
     typeof_expression: "typeof" parenthesized_type,
     sizeof_expression: "sizeof" parenthesized_type,
     nameof_expression: "nameof" nameof_arguments,
