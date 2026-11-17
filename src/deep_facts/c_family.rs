@@ -266,12 +266,17 @@ impl<'a> Walker<'a> {
             // redis-style prototype on an unknown type lost it (10 files).
             "user_pointer_declaration" => {
                 if self.child_of_kind(id, "parameter_list").is_some() {
+                    // `lua_State *(lua_newstate) (lua_Alloc f, void *ud);`: the
+                    // declarator is parenthesised, so there is no identifier
+                    // child and the prototype wrote nothing at all.
                     if let Some(name) = self
                         .children(id)
                         .into_iter()
                         .find(|&child| self.kind(child) == "identifier")
+                        .map(|node| self.text_string(node))
+                        .filter(|name| !name.is_empty())
+                        .or_else(|| self.declarator_name(id))
                     {
-                        let name = self.text_string(name);
                         if !name.is_empty() {
                             let line = self.line(id);
                             let index = self.push_call(name.clone(), line);
@@ -279,14 +284,22 @@ impl<'a> Walker<'a> {
                             let text = self.text_string(id);
                             let mut names: Vec<String> = Vec::new();
                             let mut rest = text.trim_start();
+                            let mut named = false;
                             while let Some(word) = leading_word(rest) {
                                 if word == name {
+                                    named = true;
                                     break;
                                 }
                                 if word != "void" {
                                     names.push(word.to_string());
                                 }
                                 rest = rest[word.len()..].trim_start();
+                            }
+                            // A parenthesised declarator never spells the name
+                            // among the leading words, so the declaration lists
+                            // it beside its type the way the lexer reads it.
+                            if !named && !names.iter().any(|word| word == &name) {
+                                names.push(name.clone());
                             }
                             let mut args: Vec<String> = Vec::new();
                             if let Some(list) = self.child_of_kind(id, "parameter_list") {
