@@ -3809,9 +3809,16 @@ impl<'a> Parser<'a> {
         let capital = class.starts_with(|ch: char| ch.is_uppercase());
         let name = if owner.is_empty() { class } else { self.name_chain(value, at).0 };
         if called && (explicit || capital) && name.starts_with(|ch: char| ch.is_uppercase()) {
-            let target = self.target_path(targets);
-            if let Some(target) = target {
-                self.facts.vars.push((target, name));
+            // `const { port1: a, port2: b } = new MessageChannel()`: every binder
+            // in the pattern holds the class. Read as one path the target list
+            // named the first key (`port1`) instead of a binder, which is a name
+            // the source does not bind.
+            let names = match self.unpack_targets(targets) {
+                Some(names) if !names.is_empty() => names,
+                _ => self.target_path(targets).into_iter().collect(),
+            };
+            for target in names {
+                self.facts.vars.push((target, name.clone()));
             }
         }
     }
