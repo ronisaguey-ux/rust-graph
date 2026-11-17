@@ -465,16 +465,21 @@ rust_graph_deep::grammar! { KOTLIN {
 
     // ---- types ----
 
+    /// A function type with a receiver — `Config.() -> Unit`, the parameter
+    /// that makes `config { }` work — is a type, not a head: its receiver is
+    /// whatever type the operand has already built, so `Repo.Item.() -> Unit`,
+    /// `List<T>.() -> Unit` and the nullable `String?.() -> Unit` are the same
+    /// row. The guard is the `(` after the dot, which a qualified name never
+    /// has, so `A.B` still reads as a qualified type.
     _type: precedence _type_head {
         postfix "?" => nullable_type,
         postfix type_arguments => generic_type,
+        postfix &("." function_parameters "->") "." function_parameters "->" _type => receiver_function_type,
+        postfix &("?." function_parameters "->") "?." function_parameters "->" _type => receiver_function_type,
         postfix "." _name => qualified_type,
     },
-    _type_head: &(receiver_function_type) receiver_function_type | _name | function_type,
+    _type_head: _name | function_type,
     function_type: function_parameters "->" _type,
-    /// A function type with a receiver: `Config.() -> Unit`, the parameter that
-    /// makes `config { }` work.
-    receiver_function_type: _name ["?"] "." function_parameters "->" _type,
     function_parameters: "(" (_type %? ",") ")",
 
     _name:
