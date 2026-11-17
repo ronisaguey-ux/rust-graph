@@ -344,7 +344,12 @@ impl<'a> Walker<'a> {
             // `return (void *)a_cas((volatile int *)p, (int)t, (int)s);`: the
             // call sits behind a cast and nothing descended into that node, so
             // every cast-receiver call in musl lost its call (3 shapes, 8 rows).
-            "cast_expression" | "user_cast_expression" => {
+            // `to = to ? (void *)(long[]){CLAMP(s), ns} : 0;`: a compound
+            // literal is a cast with a brace list, and nothing descended into
+            // it either, so the calls in its elements were lost the moment
+            // the grammar started reading the form.
+            "cast_expression" | "user_cast_expression" | "compound_literal_expression"
+            | "user_compound_literal" => {
                 let mut calls = Vec::new();
                 self.c_calls_in_pub(id, &mut calls);
                 for call in calls {
