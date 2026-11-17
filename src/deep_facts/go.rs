@@ -2905,6 +2905,19 @@ fn dotted_piece(text: &str) -> bool {
                 out.push(']');
                 out
             }
+            // C# spells its three constants as keywords and the one-pass
+            // reader writes each of them as a name (`n:true`, `n:null`). A
+            // *generic* method's body reaches this shared walk instead of
+            // `c_function`, so `return true;` inside `T M<T>()` formed as the
+            // constant 0 and lost its value on every member with a type
+            // parameter list, while the same statement in a non-generic method
+            // was right.
+            "true" | "false" | "null" if self.language.name == "csharp" => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment"
             | "arrow_function" | "function_expression" | "generator_function" => "0".to_string(),
