@@ -1753,6 +1753,16 @@ impl<'a> Parser<'a> {
     }
 
     fn end_statement(&mut self) {
+        // A statement that opens with `.` is the tail of a chain whose head was
+        // a block that just closed: `let line = if c { a } else { b }` then
+        // `.max(1.0);`. The CST writes that chain inside the enclosing value, so
+        // an event of its own is a line the other reader never writes
+        // (001659_commit.rs:491).
+        if self.lang.tag == "RS" && self.stmt.first().is_some_and(|token| self.is_op(token, b".")) {
+            self.stmt.clear();
+            self.brackets.clear();
+            return;
+        }
         if self.suppress_event {
             self.suppress_event = false;
             self.stmt.clear();

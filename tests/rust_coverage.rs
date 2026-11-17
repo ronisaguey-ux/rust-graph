@@ -217,6 +217,10 @@ const COVERAGE: &[(&str, &str)] = &[
         "fn a() {\n    assert_matches!(r, ActivityTask { variant: Some(x), .. });\n}\n",
     ),
     (
+        "a chain after a closed control block writes no statement of its own (001659_commit.rs:491)",
+        "fn f(hint_line: f64) -> f64 {\n    let line = if hint_line == 0.0 {\n        1.0f64\n    } else {\n        hint_line\n    }\n    .max(1.0);\n    line\n}\n",
+    ),
+    (
         "a block a postfix chain keeps is a value, not a body (001556_build_phase.rs:880)",
         "fn f() {\n    let result = {\n        let a = 1;\n        a\n    }\n    .catch_unwind()\n    .await;\n}\n",
     ),
