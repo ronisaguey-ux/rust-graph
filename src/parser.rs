@@ -1971,12 +1971,28 @@ impl<'a> Parser<'a> {
         if stmt.first().is_none_or(|token| token.kind != Kind::Ident) {
             return false;
         }
-        stmt.windows(4).any(|window| {
+        // `int (*fp)(void) = handler;` initialises the pointer and is a
+        // declaration like any other; only the bare form writes nothing.
+        if self.top_level_assign(stmt).is_some() {
+            return false;
+        }
+        let named = stmt.windows(4).any(|window| {
             self.is_op(&window[0], b"(")
                 && window[1].kind == Kind::Ident
                 && self.is_op(&window[2], b")")
                 && self.is_op(&window[3], b"(")
-        })
+        });
+        // `int (*init_compress)(struct compressionState *st, int level);`:
+        // a function pointer's declarator is `( * name ) (`, and read as a
+        // value the lexer wrote a call whose only argument is the name.
+        let pointer = stmt.windows(5).any(|window| {
+            self.is_op(&window[0], b"(")
+                && self.is_op(&window[1], b"*")
+                && window[2].kind == Kind::Ident
+                && self.is_op(&window[3], b")")
+                && self.is_op(&window[4], b"(")
+        });
+        named || pointer
     }
 
     /// `int i = 0, cnt;` and `size_t size=0, nmem=0;`: a C declarator list
