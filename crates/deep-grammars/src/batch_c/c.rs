@@ -212,7 +212,7 @@ rust_graph_deep::grammar! { C {
     typedef_user_declaration: "typedef" user_type_name _init_declarator ("," _init_declarator)* ";",
     /// `Foo x;`: a typedef name and a named declarator. It never starts with a
     /// `*`, so `x * y;` in a function stays a multiplication.
-    bare_user_declaration: user_type_name _named_init_declarator ("," _named_init_declarator)* ";",
+    bare_user_declaration: user_type_name _named_init_declarator ("," _pointer_named_declarator)* ";",
     _named_init_declarator: IDENT _declarator_suffix* attribute* ["=" _initializer],
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     /// A typedef name where a type specifier is expected.
@@ -733,6 +733,10 @@ mod kinds {
                 ("attribute", "__attribute__((noreturn))"),
                 ("function_definition", "__attribute__((always_inline)) static inline int twice(int value) {\n    return value + value;\n}"),
             ],
+        ),
+        (
+            "c_declarator_pointers.c",
+            &[("bare_user_declaration", "handle_t slot, *open_slot = slot;")],
         ),
         (
             "c_designated_initializers.c",
