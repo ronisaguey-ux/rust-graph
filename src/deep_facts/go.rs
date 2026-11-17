@@ -2233,6 +2233,14 @@ fn dotted_piece(text: &str) -> bool {
         // value to the one-pass reader, and the shared fallbacks below read
         // the node as its first child, which is the type alone.
         if self.is_c() {
+            // `{ .buf = …, .write = … }` and `{ 0, 0, … }`: a brace
+            // initialiser's value is one part per element, and the shared
+            // fallback read the node as its first child, so every designated
+            // table lost its keys and every multi-element brace list collapsed
+            // to the punctuation around the first one (13 c files).
+            if let Some(out) = self.c_initializer_form(id) {
+                return out;
+            }
             if let Some(out) = self.c_cast_form(id) {
                 return out;
             }

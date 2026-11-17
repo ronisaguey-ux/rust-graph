@@ -1437,15 +1437,59 @@ impl<'a> Walker<'a> {
     /// of names, and writing the constant 0 for each element made every
     /// initialised table of function pointers disagree with the lexer, which
     /// reads the name (c corpus, 125 rows).
+    /// A brace initialiser read as a value: the shared `form` fallback reads
+    /// an unknown node as its first child, which is the `{` of the list, so
+    /// every element after the first was dropped here.
+    pub(crate) fn c_initializer_form(&mut self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "initializer_list" => Some(format!("[\"m\",[{}]]", self.c_initializer_elements(id).join(","))),
+            _ => None,
+        }
+    }
+
     fn c_initializer_elements(&mut self, node: u32) -> Vec<String> {
-        let kids: Vec<u32> = self.children(node).into_iter().filter(|&child| self.kind(child) != ",").collect();
+        // The braces are nodes of their own in this grammar (`(initializer_list
+        // { designated_field … }`), and read as elements they wrote the two
+        // constants that bracketed every table.
+        let kids: Vec<u32> = self
+            .children(node)
+            .into_iter()
+            .filter(|&child| !matches!(self.kind(child), "," | "{" | "}"))
+            .collect();
         kids.into_iter()
-            .map(|child| {
-                if self.kind(child) == "initializer_list" {
-                    format!("[\"m\",[{}]]", self.c_initializer_elements(child).join(","))
-                } else {
-                    self.form(child)
+            .map(|child| match self.kind(child) {
+                "initializer_list" => format!("[\"m\",[{}]]", self.c_initializer_elements(child).join(",")),
+                // `.buf = …`, `.write = …`: a designated initialiser names the
+                // field it sets as well as the value it gives it, and the one-
+                // pass reader writes the pair. Writing the value alone left
+                // every designated table - a FILE, a hook table, a callback
+                // type - short of its keys and, where the value was a bare
+                // function name, of the value too (13 c files: the client_comp
+                // zstdType shape).
+                "designated_field" => {
+                    let mut name = String::new();
+                    let mut value = "0".to_string();
+                    for kid in self.children(child) {
+                        match self.kind(kid) {
+                            "." | "=" | "," => {}
+                            // Only the first identifier is the field: the value
+                            // is the identifier after the `=`.
+                            "identifier" if name.is_empty() => name = self.text_string(kid),
+                            _ => value = self.form(kid),
+                        }
+                    }
+                    if name.is_empty() {
+                        value
+                    } else {
+                        let mut pair = "[\"m\",[[\"n\",".to_string();
+                        push_string(&mut pair, &name);
+                        pair.push_str("],");
+                        pair.push_str(&value);
+                        pair.push_str("]]");
+                        pair
+                    }
                 }
+                _ => self.form(child),
             })
             .collect()
     }
