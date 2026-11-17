@@ -1038,6 +1038,7 @@ impl<'a> Walker<'a> {
             if let Some(body) = self.cs_expression_body(id) {
                 self.form(body);
             }
+        }
 
         // `public delegate object ObjectConstructor<T>(params object[] args);`:
         // a delegate declaration is one header statement to the one-pass
@@ -2060,6 +2061,22 @@ impl<'a> Walker<'a> {
                     .split(',')
                     .map(|part| part.split('=').next().unwrap_or("").trim().to_string())
                     .filter(|name| !name.is_empty())
+                    // `RACSequence<__covariant ValueType>` is a class name and
+                    // the type parameters it forwards, which the one-pass reader
+                    // files as three names in a row. Kept whole, the recorded
+                    // name held the angle brackets and no row matched.
+                    .flat_map(|name| {
+                        let mut parts = vec![name.clone()];
+                        if let Some(open) = name.find('<') {
+                            let base = name[..open].trim().to_string();
+                            let inner = name[open + 1..].trim_end_matches('>');
+                            parts = vec![base];
+                            parts.extend(
+                                inner.split(',').map(|part| part.trim().to_string()).filter(|part| !part.is_empty()),
+                            );
+                        }
+                        parts
+                    })
                     .collect();
                 if names.is_empty() {
                     break;
