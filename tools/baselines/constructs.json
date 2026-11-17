@@ -2,171 +2,72 @@
   "corpora": {
     "js": {
       "total": 1854,
-      "fallen": 36
+      "fallen": 0
     },
     "ts": {
       "total": 2000,
-      "fallen": 41
+      "fallen": 2
     },
     "python": {
       "total": 568,
-      "fallen": 8
+      "fallen": 0
     },
     "rust": {
       "total": 1816,
-      "fallen": 48
+      "fallen": 3
     }
   },
   "codes": {
-    "CST_MISSING_KIND:symbol": {
+    "LEX_OVER_EMIT:name": {
       "rus": 0,
-      "js": 3,
-      "ts": 2,
+      "js": 0,
+      "ts": 1,
       "python": 0,
       "samples": [
         {
-          "path": "000006_popads.js",
-          "line": "27",
-          "reason": "the CST lost a symbol: symbol onerror kind 1 line 27"
+          "path": "000114_Schema.ts",
+          "line": "13536",
+          "reason": "the CST lost an event: event a line 13536 targets [\"xml\"] in  (paired  line 1): a name the lexer read is not in the CST's value; wanted line 13536 targets [\"xml"
         },
         {
-          "path": "000010_amazon-apstag.js",
-          "line": "32",
-          "reason": "the CST lost a symbol: symbol noopfn kind 1 line 32"
+          "path": "001659_commit.rs",
+          "line": "1696",
+          "reason": "the CST lost an event: event x line 1696 targets  in repair_post_apply_validation (paired repair_post_apply_validation line 1586): a name the lexer read is not "
         }
-      ]
+      ],
+      "rust": 1
     },
     "PAIR_AMBIGUOUS:1": {
       "rus": 0,
-      "js": 19,
-      "ts": 8,
-      "python": 0,
-      "samples": [
-        {
-          "path": "000011_subscribe.js",
-          "line": "1922",
-          "reason": "the CST lost an event: event x line 1922 targets  in exports (paired exports line 2190): no event on a line both readers can mean; wanted line 1922 targets  val"
-        },
-        {
-          "path": "000013_css-tokenizer.js",
-          "line": "169",
-          "reason": "the CST lost an event: event x line 169 targets  in isNonPrintableCodePoint (paired isNonPrintableCodePoint line 164): no event on a line both readers can mean;"
-        }
-      ],
-      "rust": 6
-    },
-    "LEX_OVER_EMIT:name": {
-      "rus": 0,
-      "js": 2,
-      "ts": 1,
-      "python": 4,
-      "samples": [
-        {
-          "path": "000283_reader.js",
-          "line": "27",
-          "reason": "the CST lost an event: event a line 27 targets [\"readable\"] in recordBatchReaderThroughDOMStream (paired recordBatchReaderThroughDOMStream line 24): a name the "
-        },
-        {
-          "path": "001046_applyDecs2311.js",
-          "line": "99",
-          "reason": "the CST lost an event: event a line 99 targets [\"ctx\"] in applyDec (paired applyDec line 38): a name the lexer read is not in the CST's value; wanted line 99 ta"
-        }
-      ],
-      "rust": 19
-    },
-    "CST_MISSING_KIND:the": {
-      "rus": 0,
-      "js": 8,
+      "js": 0,
       "ts": 1,
       "python": 0,
       "samples": [
         {
-          "path": "000386_argparse.js",
-          "line": "",
-          "reason": "the CST lost an import: import ./lib/textwrap name  alias HelpFormatter"
-        },
-        {
-          "path": "000876_index.js",
-          "line": "",
-          "reason": "the CST lost an import: import ./CachedInputFileSystem name  alias getCachedFileSystem"
+          "path": "001681_schemas.d.ts",
+          "line": "256",
+          "reason": "the CST lost an event: event x line 256 targets  in partial (paired partial line 255): no event on a line both readers can mean; wanted line 256 targets  value "
         }
       ]
     },
     "CST_MISSING_KIND:call": {
       "rus": 0,
-      "js": 3,
-      "ts": 8,
-      "python": 1,
-      "samples": [
-        {
-          "path": "000429_UserPrompt.js",
-          "line": "119",
-          "reason": "the CST lost a call: call throwIfDisposed line 119 in <anonymous>@46"
-        },
-        {
-          "path": "000605_Page.js",
-          "line": "1450",
-          "reason": "the CST lost a call: call guarded line 1450 in <anonymous>@161"
-        }
-      ],
-      "rust": 6
-    },
-    "LEX_OVER_EMIT:call": {
-      "rus": 0,
-      "js": 1,
-      "ts": 0,
-      "python": 2,
-      "samples": [
-        {
-          "path": "000503_sign-stream.js",
-          "line": "49",
-          "reason": "the CST lost an event: event x line 49 targets  in SignStream (paired SignStream line 36): a call or constant the lexer read is not in the CST's value; wanted l"
-        },
-        {
-          "path": "000117__pyio.py",
-          "line": "1962",
-          "reason": "the CST lost an event: event r line 1962 targets  in newlines (paired newlines line 1961): a call or constant the lexer read is not in the CST's value; wanted l"
-        }
-      ],
-      "rust": 14
-    },
-    "CST_DEGRADED:recovery": {
-      "rus": 0,
       "js": 0,
-      "ts": 18,
+      "ts": 0,
       "python": 0,
       "samples": [
         {
-          "path": "000176_be.d.ts",
-          "line": "",
-          "reason": "the CST needed 1 error nodes in 36: more than 1% is recovery noise"
+          "path": "001214_rsi.rs",
+          "line": "66",
+          "reason": "the CST lost a call: call self.update line 66 in "
         },
         {
-          "path": "000294_tg.d.ts",
-          "line": "",
-          "reason": "the CST needed 1 error nodes in 36: more than 1% is recovery noise"
+          "path": "001368_rsi.rs",
+          "line": "66",
+          "reason": "the CST lost a call: call self.update line 66 in "
         }
       ],
       "rust": 2
-    },
-    "CST_SHAPE_MISMATCH:targets": {
-      "rus": 0,
-      "js": 0,
-      "ts": 3,
-      "python": 1,
-      "samples": [
-        {
-          "path": "001661_loadManager.test.ts",
-          "line": "3",
-          "reason": "the CST lost an event: event a line 3 targets [\"globalThisasany.JSZip\"] in  (paired  line 1): the statement's target list differs (names or order); wanted line "
-        },
-        {
-          "path": "001670_matcher.ts",
-          "line": "40",
-          "reason": "the CST lost an event: event a line 40 targets [\"any\",\"any\",\"any\",\"any\"] in  (paired  line 1): the statement's target list differs (names or order); wanted line"
-        }
-      ],
-      "rust": 1
     }
   }
 }
