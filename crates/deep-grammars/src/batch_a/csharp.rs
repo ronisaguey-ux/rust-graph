@@ -273,7 +273,12 @@ rust_graph_deep::grammar! { CSHARP {
     _modifier:
         "public" | "private" | "protected" | "internal" | "static" | "abstract" | "sealed"
         | "partial" | "readonly" | "unsafe" | "virtual" | "override" | "new" | "extern"
-        | "async" | "const" | "volatile" | "fixed" | "required" | "ref" | KW_FILE,
+        | "async" | "const" | "volatile" | "fixed" | "required" | KW_FILE
+        // `internal ref struct NumberBuffer`, `readonly ref struct Span<T>`:
+        // C# 7.2 spells a by-ref type with `ref` in front of the keyword, and
+        // the modifier list had no `ref`, so every such type failed and took
+        // everything inside it (60 files on `Debug.Assert` alone).
+        | "ref",
     _local_modifiers: (attribute_section | "const" | "ref" | "readonly" | "scoped" | "static" | "unsafe" | "extern")*,
 
     // ---- type declarations ----
