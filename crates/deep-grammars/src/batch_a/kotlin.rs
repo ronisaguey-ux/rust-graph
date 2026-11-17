@@ -458,7 +458,11 @@ rust_graph_deep::grammar! { KOTLIN {
     _string_part: STRING_TEXT | interpolation | SIMPLE_TEMPLATE,
     interpolation: TEMPLATE_OPEN _expression TEMPLATE_CLOSE,
     subscript: "[" _expression ("," _expression)* "]",
-    lambda_literal: "{" lambda_body "}",
+    /// `{}` is a lambda with no statements: `run {}`, `install(X) {}` and every
+    /// empty default handler in the corpus. Written without the optional body
+    /// the empty pair could not be read at all and the enclosing declaration
+    /// recovered.
+    lambda_literal: "{" [lambda_body] "}",
     lambda_body: &(_lambda_parameters "->") _lambda_parameters "->" _block_item* | lambda_items,
     lambda_items: _block_item+,
     _lambda_parameters: _lambda_parameter ("," _lambda_parameter)*,
