@@ -468,6 +468,10 @@ rust_graph_deep::grammar! { KOTLIN {
         | "super"
         | parenthesized_expression
         | lambda_literal
+        // `createRouteScopedPlugin("x", ::Cfg)`: a bare callable reference has
+        // no receiver, and the `::` was an ERROR inside the argument list - the
+        // argument formed as the constant 0.
+        | COLONCOLON _name
         | object_expression
         | if_statement
         | when_statement

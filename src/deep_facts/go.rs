@@ -2533,6 +2533,35 @@ fn dotted_piece(text: &str) -> bool {
                     None => "0".to_string(),
                 }
             }
+            // `::RequestBodyLimitConfig`: a bare callable reference names the
+            // constructor or function it points at, and the one-pass reader
+            // wrote that name. Formed as the constant 0 it made the argument of
+            // every `createRouteScopedPlugin("x", ::Cfg)` disagree.
+            "callable_reference" if self.is_kotlin() => {
+                let children = self.children(id);
+                let bare = children
+                    .iter()
+                    .find(|&&child| !self.is_layout(child))
+                    .is_some_and(|&child| self.kind(child) == "::");
+                let name = if bare {
+                    children
+                        .iter()
+                        .rev()
+                        .find(|&&child| matches!(self.kind(child), "identifier" | "simple_identifier" | "type_identifier"))
+                        .map(|&child| self.text_string(child))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
             // `InternalAPI::class`: the one-pass reader spells a class literal
             // as the dotted path `InternalAPI.class`, so the literal is that
             // name. Formed as the constant 0 it made the argument of every
