@@ -323,6 +323,22 @@ impl<'a> Walker<'a> {
                             );
                         }
                     }
+                } else {
+                    // `TString *g = NULL;`: a pointer declarator with an
+                    // initialiser and no parameter list is an ordinary
+                    // declaration, and this arm wrote nothing for it, so the
+                    // binding the lexer reads was lost (c corpus, 4 files).
+                    let mut inits = Vec::new();
+                    self.c_user_initializer(id, &mut inits);
+                    if let Some((name, node, line)) = inits.first().cloned() {
+                        self.assignment_parts(vec![name], node, line, false);
+                    } else {
+                        let form = self.c_words_form_skipping(id, &["initializer_list"]);
+                        if form != "0" {
+                            let line = self.line(id);
+                            self.event(&format!("[\"x\",{line},{form}]"));
+                        }
+                    }
                 }
             }
             // `return (void *)a_cas((volatile int *)p, (int)t, (int)s);`: the
@@ -806,6 +822,16 @@ impl<'a> Walker<'a> {
                     self.c_initializers(child, out);
                     continue;
                 }
+                // `size_t n = CHUNK_SIZE(self);` and `TString *g = NULL;` are
+                // `(bare_user_declaration (user_type_name ..) identifier =
+                // value)` and `(user_pointer_declaration ..)`: the declarator is
+                // a bare identifier, not a `direct_declarator`, so the binding
+                // and its value were never read and the declaration wrote only
+                // the words form (c corpus, 40 rows).
+                "bare_user_declaration" | "user_pointer_declaration" => {
+                    self.c_user_initializer(child, out);
+                    continue;
+                }
                 "direct_declarator" => {
                     pending = self.declarator_of(child);
                     continue;
@@ -824,6 +850,24 @@ impl<'a> Walker<'a> {
                 out.push((name, child, line));
             }
         }
+    }
+
+    /// `size_t n = CHUNK_SIZE(self);` is `(bare_user_declaration
+    /// (user_type_name identifier) identifier = value ;)`: the declared name is
+    /// the first identifier and the initialiser is the node after the `=`.
+    /// A declarator written as a bare identifier is not a `direct_declarator`,
+    /// so the binding was never read.
+    fn c_user_initializer(&mut self, id: u32, out: &mut Vec<(String, u32, u32)>) {
+        let kids = self.children(id);
+        let Some(name_at) = kids.iter().position(|&child| self.kind(child) == "identifier") else { return };
+        let name = self.text_string(kids[name_at]);
+        let Some(equal) = kids.iter().skip(name_at).position(|&child| self.kind(child) == "=") else { return };
+        let Some(&value) = kids.get(name_at + equal + 1) else { return };
+        if self.is_layout(value) {
+            return;
+        }
+        let line = self.line(value);
+        out.push((name, value, line));
     }
 
     /// The first descendant of `id` of `kind`, in source order.
