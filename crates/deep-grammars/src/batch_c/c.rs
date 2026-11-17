@@ -339,7 +339,12 @@ rust_graph_deep::grammar! { C {
     array_qualifier: "static" | "const" | "volatile" | "restrict",
     parameter_list: "(" (_parameter % ",") ")",
     _parameter:
-        declaration_specifiers [user_type_name] [_declarator_or_abstract]
+        // `int (*)(void *, int)`: an unnamed function pointer is a
+        // parenthesised abstract declarator and matched nothing below, so every
+        // prototype with a callback parameter kept an error node.
+        &(declaration_specifiers parenthesized_abstract)
+            declaration_specifiers parenthesized_abstract abstract_suffix*
+        | declaration_specifiers [user_type_name] [_declarator_or_abstract]
         | user_parameter
         | "...",
     /// `Foo *self`, `Foo*`, `Foo`: a typedef name and either a named or an
