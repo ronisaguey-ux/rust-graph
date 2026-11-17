@@ -395,8 +395,14 @@ rust_graph_deep::grammar! { C {
     do_statement: "do" _statement "while" parenthesized_expression ";",
     for_statement: "for" for_header _statement,
     for_header: "(" [_for_init] ";" [_expression] ";" [_expression] ")",
-    _for_init: _for_declaration | _expression,
+    /// `for (uint32_t i = firstword + 1; …)`: a typedef name declares the loop's
+    /// own variable, and the header's init had only a keyword specifier and an
+    /// expression, so the declaration was read as a merge and the whole family
+    /// of `for` loops over a user type was an error node (46 rows in one
+    /// croaring header, every bitset loop on the corpus).
+    _for_init: _for_declaration | &(user_type_name IDENT) _for_user_declaration | _expression,
     _for_declaration: declaration_specifiers (_init_declarator % ","),
+    _for_user_declaration: user_type_name (_named_init_declarator % ","),
     parenthesized_expression: "(" _expression ")",
     return_statement: "return" [_expression] ";",
     break_statement: "break" ";",
