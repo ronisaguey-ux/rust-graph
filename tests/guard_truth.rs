@@ -730,3 +730,23 @@ fn member_modifiers_in_any_order_are_declarations() {
     let verdict = pipeline::loses_in(&lexer, &deep, source);
     assert!(!verdict.lost(), "a member with modifiers is a declaration: {verdict:?}");
 }
+/// A C declaration's comma-separated declarators are separate bindings: the
+/// initialiser belongs to the declarator it follows, and to that declarator's
+/// line. Read as one run, `int l, o, m=0;` gave the assignment all three names
+/// on the type's line, and a constant whose type sits on the line above the
+/// name was stamped two lines early — no declaration with more than one
+/// declarator in musl could be paired with the CST's.
+#[test]
+fn a_c_declaration_list_binds_only_the_declarator_it_initialises() {
+    let source = "int l, o, m=0;\n";
+    let language = langs::by_content("c", source.as_bytes()).expect("a C row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let first = events(&lexer, "");
+    assert!(first.contains(r#"["a",1,["m"],"#), "one declarator is initialised: {first}");
+
+    let source = "static const float\n/* coefficients for R(x^2) */\npS0 = 1.6e-01,\npS1 = 2.4e-01;\n";
+    let language = langs::by_content("c", source.as_bytes()).expect("a C row");
+    let lexer = parser::parse(source.as_bytes(), language);
+    let second = events(&lexer, "");
+    assert!(second.contains(r#"["a",3,["pS0"],"#), "the assignment keeps the declarator's line: {second}");
+}

@@ -4623,7 +4623,42 @@ impl<'a> Parser<'a> {
         // names the CST never writes — and in TypeScript the type's own words
         // (`any`) became the statement's target list.
         let trimmed: Vec<Token>;
+        /// The declarator list of a C declaration, when the statement is one.
+        let c_split: Vec<Token>;
+        // A C declaration's comma-separated declarators are separate bindings:
+        // `int l, o, m=0;` initialises `m` alone, and the initialiser belongs to
+        // the declarator's line rather than the type's. Read as one run, every
+        // declaration with more than one declarator gave the assignment every
+        // name and the type's line, so musl's own `int l, o, m=0;` and every
+        // constant whose type sits on the line above lost its line.
+        let mut line = line;
         let mut targets = targets;
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && targets.first().is_some_and(|token| {
+                token.kind == Kind::Ident && crate::expr::c_declaration_word(&self.text(token))
+            })
+        {
+            let mut depth = 0i32;
+            let mut cut = 0usize;
+            for (index, token) in targets.iter().enumerate() {
+                if token.kind != Kind::Op {
+                    continue;
+                }
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    b"," if depth == 0 => cut = index + 1,
+                    _ => {}
+                }
+            }
+            if cut > 0 {
+                c_split = targets[cut..].to_vec();
+                targets = &c_split;
+            }
+            if let Some(token) = targets.iter().rev().find(|token| token.kind == Kind::Ident) {
+                line = token.line;
+            }
+        }
         if matches!(self.lang.tag, "RS" | "TS" | "TSX") {
             let mut depth = 0i32;
             for (index, token) in targets.iter().enumerate() {
