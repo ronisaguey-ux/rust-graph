@@ -3914,6 +3914,14 @@ impl<'a> Parser<'a> {
         if self.lang.tag == "KT" && self.kotlin_annotation_alone(stmt) {
             return;
         }
+        // `init { }`: an initializer block is a member of the class, not a
+        // value. The brace opens the frame this statement is the head of, so
+        // the keyword arrives alone and the block's own statements are read as
+        // the class's. Read as an expression it wrote `n:init`, an event the
+        // CST never has.
+        if self.lang.tag == "KT" && self.kotlin_init_alone(stmt) {
+            return;
+        }
         // A C header's data tables are fragments of an initializer, not
         // statements. musl includes `ctype/alpha.h` inside a declaration
         // (`static const unsigned char table[] = {` … `};`) and
@@ -4150,6 +4158,12 @@ impl<'a> Parser<'a> {
             Kind::Op => matches!(self.raw(token), b"@" | b":" | b"."),
             _ => false,
         })
+    }
+
+    /// `init {` arrives as the keyword alone: the brace opened the block this
+    /// statement is the head of, and an initializer block declares no name.
+    fn kotlin_init_alone(&self, stmt: &[Token]) -> bool {
+        stmt.len() == 1 && stmt[0].kind == Kind::Ident && self.raw(&stmt[0]) == b"init"
     }
 
     fn java_declares_only(&self, stmt: &[Token]) -> bool {
