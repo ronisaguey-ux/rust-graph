@@ -70,24 +70,29 @@ fn constructs(source: &str, name: &str) -> Vec<String> {
             }
             if j < end && body[j] == b'"' {
                 j += 1;
-                let mut text = String::new();
+                // Bytes, not chars: `body[j] as char` maps each UTF-8 byte to its
+                // own character, so a construct whose prose carries a `…` was
+                // read back as three characters and no longer matched the
+                // document. The escapes are ASCII, so decoding them as bytes and
+                // reading the result as UTF-8 is the same string the table holds.
+                let mut text: Vec<u8> = Vec::new();
                 let mut escaped = false;
                 while j < end && (escaped || body[j] != b'"') {
                     if escaped {
                         text.push(match body[j] {
-                            b'n' => '\n',
-                            b't' => '\t',
-                            other => other as char,
+                            b'n' => b'\n',
+                            b't' => b'\t',
+                            other => other,
                         });
                         escaped = false;
                     } else if body[j] == b'\\' {
                         escaped = true;
                     } else {
-                        text.push(body[j] as char);
+                        text.push(body[j]);
                     }
                     j += 1;
                 }
-                out.push(text);
+                out.push(String::from_utf8_lossy(&text).into_owned());
             }
         }
         i += 1;
@@ -101,6 +106,9 @@ fn claimed() -> BTreeSet<String> {
         let source = std::fs::read_to_string(root().join(table)).expect("a coverage table");
         out.extend(constructs(&source, "COVERAGE"));
         out.extend(constructs(&source, "KNOWN_GAPS"));
+        // A row that needs the source in hand is compared through `loses_in`
+        // rather than by event shape, but the test still claims the construct.
+        out.extend(constructs(&source, "LINE_ROWS"));
     }
     out
 }

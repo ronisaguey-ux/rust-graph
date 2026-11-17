@@ -124,6 +124,13 @@ def render() -> str:
         lines += [f"- {name}" for name in covered] or ["- nothing claimed yet"]
         lines += ["", f"Known gaps ({len(gaps)}):", ""]
         lines += [f"- {name}" for name in gaps] or ["- none: every construct the table claims reads the same on both paths"]
+        # A row that can only be compared through `loses_in` is still a construct a
+        # test claims; leaving it out of this list published a coverage claim no
+        # document carried, and `tests/readers_doc.rs` reads it back as claimed.
+        line_rows = constructs(Path(path), "LINE_ROWS")
+        if line_rows:
+            lines += ["", f"Rows the guard excuses by reading its line ({len(line_rows)}):", ""]
+            lines += [f"- {name}" for name in line_rows]
         lines.append("")
     constructs_rows = rust_constructs()
     if constructs_rows:
