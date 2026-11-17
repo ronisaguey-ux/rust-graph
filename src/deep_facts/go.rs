@@ -2436,6 +2436,35 @@ fn dotted_piece(text: &str) -> bool {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
+            // `val h = object : Base() { … }`: an object expression is the
+            // keyword and its supertype's constructor call, which is the call
+            // the lexer records on that line. With no arm the node formed the
+            // constant 0, so every anonymous implementation lost its call.
+            "object_expression" => {
+                let mut parts: Vec<String> = Vec::new();
+                let mut word = String::from("[\"n\",");
+                push_string(&mut word, "object");
+                word.push(']');
+                parts.push(word);
+                for child in self.children(id) {
+                    if self.kind(child) != "supertypes" {
+                        continue;
+                    }
+                    for entry in self.children(child) {
+                        if matches!(self.kind(entry), "superclass_constructor" | "call_expression") {
+                            let form = self.call_form(entry);
+                            if form != "0" {
+                                parts.push(form);
+                            }
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             // `return { type, value, line }`: a shorthand property whose name
             // is a keyword in another position carries that keyword's kind, so
             // it read as a leaf and the property vanished from the value.
