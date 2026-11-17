@@ -450,7 +450,10 @@ rust_graph_deep::grammar! { CSHARP {
     goto_statement: "goto" ("case" _expression | "default" | _name) ";",
     yield_statement: "yield" ("return" _expression | "break") ";",
     expression_statement: _expression ";",
-    parenthesized_expression: "(" _expression ")",
+    // `return (src, src);`, `var pair = (a, b);`: a parenthesized expression
+    // is also where C# writes a tuple, and the rule took exactly one
+    // expression, so every tuple literal in a body failed.
+    parenthesized_expression: "(" _expression ("," _expression)* ")",
 
     // ---- expressions ----
 
