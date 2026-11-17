@@ -244,8 +244,16 @@ rust_graph_deep::grammar! { SCALA {
 
     definition_modifiers: (annotation | modifier)+,
     modifier:
-        "private" | "protected" | "override" | "final" | "sealed" | "abstract" | "lazy"
+        access_modifier
+        | "override" | "final" | "sealed" | "abstract" | "lazy"
         | "implicit" | "case" | "open" | "inline" | "transparent" | "infix",
+    /// `private[akka]`, `private[this]`, `protected[this]`: an access modifier
+    /// takes the scope it is limited to, and the scope is a qualified name or
+    /// `this`. Without the bracket form `private[akka] final case class` was a
+    /// parse error for the whole declaration, and 192 files of the scala corpus
+    /// carried them (1,901 error lines).
+    access_modifier: ("private" | "protected") [access_scope],
+    access_scope: "[" (_qualified_name | "this") "]",
     annotation: "@" _qualified_name [annotation_arguments],
     annotation_arguments: "(" (_expression %? ",") ")",
 
