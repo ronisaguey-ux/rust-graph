@@ -479,8 +479,16 @@ impl<'a> Walker<'a> {
                 return "0".to_string();
             }
             if first.is_ascii_alphabetic() || first == b'_' {
+                // `this` is the flow form's `self`, exactly as `form`'s leaf arm
+                // and `path_of` spell it: the lexer names the receiver `self` in
+                // every language, and read verbatim the java record wrote
+                // `n:this` for the one value the lexer called `n:self` — one
+                // loss per `this`, `return this;` and `new X(this)` alike
+                // (1,046 losses, the largest java cluster left after the
+                // declarations).
+                let name: &[u8] = if text == b"this" { b"self" } else { text };
                 let mut out = "[\"n\",".to_string();
-                push_string(&mut out, &String::from_utf8_lossy(text));
+                push_string(&mut out, &String::from_utf8_lossy(name));
                 out.push(']');
                 return out;
             }
