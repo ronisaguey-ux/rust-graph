@@ -352,7 +352,10 @@ rust_graph_deep::grammar! { CSHARP {
         "bool" | "byte" | "sbyte" | "short" | "ushort" | "int" | "uint" | "long" | "ulong"
         | "char" | "float" | "double" | "decimal" | "object" | "string" | "void",
     tuple_type: "(" _tuple_element "," _tuple_element ("," _tuple_element)* ")",
-    _tuple_element: _type _name,
+    // `(Vector128<byte>, Vector128<byte>) AsciiToHex(...)`: a tuple element names
+    // its type and may leave the name out, and the required name made the whole
+    // tuple type an ERROR — which swallowed the method body with it.
+    _tuple_element: _type [_name],
     dimensions: "[" ("," | _expression)* "]",
     type_arguments: "<" (_type %? ",") _gt,
     _gt: ">" | GT_JOINED,
@@ -430,7 +433,10 @@ rust_graph_deep::grammar! { CSHARP {
     goto_statement: "goto" ("case" _expression | "default" | _name) ";",
     yield_statement: "yield" ("return" _expression | "break") ";",
     expression_statement: _expression ";",
-    parenthesized_expression: "(" _expression ")",
+    // `return (src, hexMap);` and `(a, b) = (b, a);`: C#'s tuple expression is
+    // the only parenthesised form with commas, and the one-expression rule made
+    // every one of them an ERROR inside the parentheses.
+    parenthesized_expression: "(" _expression ("," _expression)* ")",
 
     // ---- expressions ----
 
