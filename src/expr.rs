@@ -1060,7 +1060,15 @@ impl Emit<'_> {
         // __strftime_l(..)`, `LUAI_FUNC const TValue *luaH_getnum(..)`. No
         // expression writes a name and then a type, so the word before a type
         // is a specifier.
-        self.word(1).is_some_and(|next| C_TYPE_WORDS.contains(&next.as_str()))
+        if self.word(1).is_some_and(|next| C_TYPE_WORDS.contains(&next.as_str())) {
+            return true;
+        }
+        // The same macro in front of a name that is not a keyword: `LUAI_FUNC
+        // TString *luaS_newlstr(..)`, `hidden size_t __strftime_l(..)`. A
+        // statement cannot open with two words unless the first one declares
+        // the type, so the word that opens a statement and is followed by
+        // another word is a specifier.
+        self.pos == 0 && self.word(1).is_some()
     }
 
     fn ident(&mut self, out: &mut String, close: u8) {
