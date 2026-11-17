@@ -439,8 +439,13 @@ impl<'a> Walker<'a> {
                     if forced.is_some() || !KEYWORDS.contains(&word.as_str()) {
                         if let (Some(list), Some(name_node)) = (
                             self.c_descendant(id, "parameter_list"),
-                            self.child_of_kind(id, "direct_declarator")
-                                .and_then(|node| self.first_identifier(node)),
+                            // The declared name sits under a direct_declarator
+                            // when the grammar spells it that way, and under a
+                            // declarator node of its own when a parameter is a
+                            // function pointer: the musl prototype
+                            // hidden int f(pthread_once_t *, void (*)(void));
+                            // kept the macro as the call and lost the function.
+                            self.declarator_name(id).or_else(|| self.word_before_paren(id)),
                         ) {
                             let name = name_node;
                             if !name.is_empty() {
@@ -887,6 +892,24 @@ impl<'a> Walker<'a> {
 
     /// The declared name of a declaration: the first identifier under a
     /// `direct_declarator`, never one inside its parameter list.
+    /// The word in front of the first opening parenthesis of an item: the
+    /// callee a reader of the tokens sees in a declaration, and the type word
+    /// in a function pointer.
+    fn word_before_paren(&self, id: u32) -> Option<String> {
+        let text = self.text_string(id);
+        let head = text.split('(').next()?;
+        let word: String = head
+            .chars()
+            .rev()
+            .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+            .collect::<Vec<char>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let first = word.chars().next()?;
+        (first.is_alphabetic() || first == '_').then_some(word)
+    }
+
     fn declarator_name(&self, id: u32) -> Option<String> {
         let mut stack = vec![id];
         while let Some(node) = stack.pop() {
