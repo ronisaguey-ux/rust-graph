@@ -354,7 +354,10 @@ rust_graph_deep::grammar! { KOTLIN {
         [modifiers] ("val" | "var") [type_parameters] property_head [":" _type]
         (["by" _expression | "=" _expression])? [accessor],
     property_head: &(_type ".") receiver_head | _name,
-    accessor: [modifiers] ("get" | "set") [accessor_parameters] ("=" _expression | block),
+    /// `private set` has no body at all: the accessor only narrows the
+    /// property's visibility. Requiring `= expression` or a block made every
+    /// bodyless accessor an ERROR, and the class holding it lost its symbol.
+    accessor: [modifiers] ("get" | "set") [accessor_parameters] ["=" _expression | block],
     accessor_parameters: "(" [parameter] ")",
 
     enum_body: "{" (enum_entry %? ",") [";" _member*] "}",

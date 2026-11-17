@@ -1055,6 +1055,36 @@ impl<'a> Walker<'a> {
                             self.event(&format!("[\"x\",{line},{value}]"));
                         }
                     }
+                } else if !children.iter().any(|&child| self.kind(child) == "block") {
+                    // `private set`: a bodyless accessor states the words it is
+                    // written with - the modifiers and the keyword - and
+                    // nothing wrote that line, so every visibility-narrowed
+                    // setter in the corpus lost its event.
+                    let mut parts: Vec<String> = Vec::new();
+                    for child in children {
+                        let kind = self.kind(child);
+                        if kind == "modifiers" {
+                            for word in self.c_words_of(child) {
+                                let mut out = String::from("[\"n\",");
+                                push_string(&mut out, &word);
+                                out.push(']');
+                                parts.push(out);
+                            }
+                        } else if matches!(kind, "get" | "set") {
+                            let mut out = String::from("[\"n\",");
+                            push_string(&mut out, &self.text_string(child));
+                            out.push(']');
+                            parts.push(out);
+                        }
+                    }
+                    if !parts.is_empty() {
+                        let value = match parts.len() {
+                            1 => parts[0].clone(),
+                            _ => format!("[\"m\",[{}]]", parts.join(",")),
+                        };
+                        let line = self.line(id);
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
                 }
             }
             // `companion object Named { … }`: the one-pass reader files the
