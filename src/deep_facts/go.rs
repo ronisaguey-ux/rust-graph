@@ -3583,9 +3583,15 @@ fn dotted_piece(text: &str) -> bool {
                 keyed.push_str(&inner);
                 keyed.push(']');
                 keyed
-            } else if self.kinds.family == Family::Plain && kind == "assignment" {
+            } else if self.kinds.family == Family::Plain
+                && (kind == "assignment" || (self.is_kotlin() && kind == "assignment_expression"))
+            {
                 // `@deprecated("old", since = "2")`: a named argument is the
                 // lexer's keyword form, not the assignment's merge.
+                // Kotlin's annotations write the same argument with an
+                // `assignment_expression` (`@Deprecated(level = X)`) where its
+                // call arguments use `named_argument`, and that shape formed as
+                // the value alone - the key `level` left the record.
                 let parts = self.children(child);
                 let name = parts.first().map(|&node| self.path_of(node)).unwrap_or_default();
                 let inner = parts.last().map(|&node| self.form(node)).unwrap_or_else(|| "0".to_string());
