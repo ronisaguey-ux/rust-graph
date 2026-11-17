@@ -539,7 +539,10 @@ rust_graph_deep::grammar! { CSHARP {
     // of `_primary` on purpose: it also labels a switch section, and a statement
     // list that could start one would swallow the label (`default:` became an
     // expression statement and an error node at the colon).
-    _declared_value: default_expression | _expression@assign,
+    // The full expression, not the assignment tier: `Func<int, int> f = x => x`
+    // puts a lambda where the value goes, and the lambda postfix sits above that
+    // tier, so every lambda initialiser was an error.
+    _declared_value: default_expression | _expression,
     lambda_parameters: "(" (lambda_parameter %? ",") ")",
     lambda_parameter: [attributes] [_local_modifiers] _type _name | _name,
     cast_type: "(" _type ")",

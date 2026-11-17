@@ -857,6 +857,31 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// `Func<int, int> handler = x => x;` and `_creator = a => Make(a);`: a
+    /// binding whose value is a lambda holds a function, and the one-pass lexer
+    /// opens a symbol under the target's name. Nothing in the tree did, so every
+    /// such binding was a symbol the CST never declared.
+    pub(crate) fn cs_lambda_symbol(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "lambda_expression") else {
+            return;
+        };
+        let Some(target) = children[..at]
+            .iter()
+            .rev()
+            .find(|&&child| self.kind(child) == "identifier")
+            .map(|&child| self.text_string(child))
+        else {
+            return;
+        };
+        if target.is_empty() {
+            return;
+        }
+        let line = self.line(id);
+        let owner = self.frame().class.clone();
+        self.add_symbol(target, owner, KIND_FUNCTION, line, Vec::new());
+    }
+
     /// Every call inside a lambda body, block or expression, at any depth. The
     /// shared `c_calls_in_pub` stops at a block and at a nested lambda because a
     /// C/C++ lambda body is entered on its own walk; a C# lambda is not, so its
@@ -1084,6 +1109,7 @@ impl<'a> Walker<'a> {
                     self.field_initializer_calls(id);
                 }
                 self.cs_declared_vars(id);
+                self.cs_lambda_symbol(id);
             }
             // `using var tempListener = new MeterListener();`: a using
             // declaration is a local declaration to the lexer - it binds the
@@ -1549,6 +1575,7 @@ impl<'a> Walker<'a> {
             // here read the statement at all, so every such reassignment in
             // the corpus was a variable the lexer had and the tree did not.
             "assignment_expression" if self.kinds.calls.contains(&"object_creation_expression") => {
+                self.cs_lambda_symbol(id);
                 let children = self.children(id);
                 if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
                     // `context.Response.Headers = ToBase64String(x)` binds the
