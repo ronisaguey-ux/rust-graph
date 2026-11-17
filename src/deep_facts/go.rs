@@ -3633,7 +3633,11 @@ fn dotted_piece(text: &str) -> bool {
             // every call through a type in the corpus lost its dotted name.
             // `_reader?.Close()` - the null-conditional member access names the
             // same path as a plain one.
-            "attribute" | "member_expression" | "member_access" | "conditional_member_access" => {
+            "attribute" | "member_expression" | "member_access" | "conditional_member_access"
+            // Kotlin spells `x.y` as `navigation_expression`. Read through the
+            // default arm it named only its first leaf, so `DeprecationLevel.ERROR`
+            // in a value formed as `DeprecationLevel`.
+            | "navigation_expression" => {
                 let children = self.children(id);
                 let name = self.member_name(id);
                 let base = children.first().map(|&child| self.path_of(child)).unwrap_or_default();
