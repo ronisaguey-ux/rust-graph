@@ -2886,6 +2886,20 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        // `import kotlin.contracts.*` is a wildcard and ends the directive. The
+        // statement reader lets the line continue past a trailing `*` (it can
+        // open a multiplication), so the next line's string was read as this
+        // import's module: `import kotlin.contracts.*` over `val s = "1.1"`
+        // filed `import 1.1`, one row per generated stdlib file and per .kts
+        // with a star import (359 import losses in corpus45/kotlin).
+        let rest = if self.lang.tag == "KT" {
+            match rest.iter().position(|token| self.is_op(token, b"*")) {
+                Some(end) => &rest[..=end],
+                None => rest,
+            }
+        } else {
+            rest
+        };
         let strings: Vec<&Token> = rest.iter().filter(|token| token.kind == Kind::Str).collect();
         if !strings.is_empty() {
             for (index, token) in rest.iter().enumerate() {
