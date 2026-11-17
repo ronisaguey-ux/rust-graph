@@ -581,6 +581,20 @@ impl<'a> Walker<'a> {
         // holds the names of all of it covers that event.
         if let Some(value) = self.header_value(id) {
             let line = self.line(id);
+            // `if s.end > s.start || s.err != nil { advance, token, err := … }`:
+            // the one-pass reader does not open the block at every header. Where
+            // the body opens with a multi-target binding it keeps the statement
+            // open and merges the body into the header's row, and the narrower
+            // row then lacks names the lexer read. A row holding the header *and*
+            // the body covers both readings, and an extra atom is never a loss,
+            // so the wider row is written beside it.
+            let body = self
+                .child_of_kind(id, "block")
+                .map(|block| self.decl_value(block))
+                .unwrap_or_default();
+            if !body.is_empty() && body != "0" {
+                self.lexer_event(b'x', line, &[], &format!("[\"m\",[{value},{body}]]"), false);
+            }
             self.lexer_event(b'x', line, &[], &value, false);
         }
         self.event("[\"b\"]");
