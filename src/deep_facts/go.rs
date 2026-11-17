@@ -2528,6 +2528,27 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            // `longStrings[toInt()]`: Kotlin's indexed access is the base's
+            // value, and a call written in the subscript is a fact of its own.
+            // With no arm the node formed the constant 0 and the call in the
+            // index was lost on every `xs[f(..)]` in the corpus.
+            "index_expression" => {
+                let children = self.children(id);
+                for child in &children {
+                    if self.kind(*child) != "subscript" {
+                        continue;
+                    }
+                    for inner in self.children(*child) {
+                        if !self.is_layout(inner) {
+                            self.form(inner);
+                        }
+                    }
+                }
+                match children.first() {
+                    Some(&base) => self.form(base),
+                    None => "0".to_string(),
+                }
+            }
             // `(0, _createSvgIcon.default)(...)`: the comma idiom every
             // transpiler emits is a sequence expression, and it was forming as
             // the constant 0, so every CommonJS `exports.default = ...` in the
