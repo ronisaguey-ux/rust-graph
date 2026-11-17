@@ -522,7 +522,7 @@ impl<'a> Walker<'a> {
             // and the lexer records it as one. Reading only the outer call lost
             // every chained call in Go (57 of the 96 remaining fallbacks on
             // net/http were exactly this shape).
-            self.record_receiver_calls(callee);
+            let chained = self.record_receiver_calls(callee);
             let path = self.decl_path(callee);
             let receiver = match path.rsplit_once('.') {
                 Some((head, _)) if !head.is_empty() => {
@@ -532,6 +532,19 @@ impl<'a> Walker<'a> {
                     out
                 }
                 _ => "0".to_string(),
+            };
+            let args = if chained.is_empty() {
+                args
+            } else {
+                let mut merged = if args == "[]" { "[".to_string() } else { args[..args.len() - 1].to_string() };
+                for value in chained {
+                    if merged.len() > 1 {
+                        merged.push(',');
+                    }
+                    merged.push_str(&value);
+                }
+                merged.push(']');
+                merged
             };
             return format!("[\"c\",{index},{receiver},{args}]");
         }
@@ -582,22 +595,42 @@ impl<'a> Walker<'a> {
 
 
     /// Record every call that sits in a callee's receiver chain.
-    pub(crate) fn record_receiver_calls(&mut self, callee: u32) {
+    pub(crate) fn record_receiver_calls(&mut self, callee: u32) -> Vec<String> {
         let mut node = callee;
+        let mut values = Vec::new();
         for _ in 0..8 {
             if !matches!(self.kind(node), "selector_expression" | "member_expression" | "field_access") {
-                return;
+                break;
             }
             let Some(object) = self.children(node).into_iter().find(|&child| !self.is_layout(child)) else {
-                return;
+                break;
             };
             if matches!(self.kind(object), "call_expression" | "method_invocation") {
-                self.decl_call(object);
+                let index = self.decl_call(object);
+                // The arguments of a call that sits in a receiver chain are
+                // calls too: `reflect.New(reflect.TypeOf(x).Elem())` files both,
+                // and reading only the chain dropped the inner one. A call read
+                // on its own reads its own arguments, so skipping them here made
+                // the same source lose a fact as soon as the call was chained -
+                // `reflect.TypeOf`, `rand.NewSource` and `field.NewPath` were a
+                // single `call` loss in a whole file of them (100+ files).
+                let args = self
+                    .children(object)
+                    .into_iter()
+                    .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                    .map(|list| self.arguments(list))
+                    .unwrap_or_else(|| "[]".to_string());
+                // The one-pass reader merges a receiver's own arguments into the
+                // call it writes, so keeping them only in the call table left
+                //their names out of the value (`x := a.New(b.TypeOf(c).Elem())`
+                // lost `c`). The value carries them, as the lexer's does.
+                values.push(format!("[\"c\",{index},0,{args}]"));
                 node = object;
                 continue;
             }
             node = object;
         }
+        values
     }
 
     /// The callee of a call node: the expression before the argument list.
