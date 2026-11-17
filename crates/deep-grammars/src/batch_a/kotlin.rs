@@ -284,7 +284,8 @@ rust_graph_deep::grammar! { KOTLIN {
     // ---- declarations ----
 
     _declaration:
-        &([modifiers] "enum" "class") enum_class_declaration
+        &([modifiers] "fun" "interface") fun_interface_declaration
+        | &([modifiers] "enum" "class") enum_class_declaration
         | &([modifiers] "class") class_declaration
         | &([modifiers] "interface") interface_declaration
         | &([modifiers] "object") object_declaration
@@ -296,6 +297,10 @@ rust_graph_deep::grammar! { KOTLIN {
         | typealias_declaration,
 
     class_declaration: [modifiers] "class" _name [type_parameters] [primary_constructor] [":" supertypes] [type_constraints] [class_body],
+    /// `fun interface Plugin { fun intercept() }`: a functional interface is a
+    /// declaration of its own, and read as a function it took the whole file's
+    /// declaration with it.
+    fun_interface_declaration: [modifiers] "fun" "interface" _name [type_parameters] [":" supertypes] [class_body],
     interface_declaration: [modifiers] "interface" _name [type_parameters] [":" supertypes] [type_constraints] [class_body],
     enum_class_declaration: [modifiers] ["enum"] "class" _name [type_parameters] [primary_constructor] [":" supertypes] [type_constraints] enum_body,
     object_declaration: [modifiers] "object" _name [":" supertypes] [class_body],
@@ -305,7 +310,10 @@ rust_graph_deep::grammar! { KOTLIN {
     primary_constructor: [modifiers] ["constructor"] class_parameters,
     class_parameters: "(" (class_parameter %? ",") ")",
     class_parameter: [parameter_modifiers] ["val" | "var"] _name ":" _type ["=" _expression],
-    secondary_constructor: [modifiers] "constructor" parameter_list [":" constructor_delegation] block,
+    /// `constructor(x: Int) : this(x)` may end the class: the body is optional,
+    /// and requiring it left an empty recovery in every constructor that
+    /// delegates without one.
+    secondary_constructor: [modifiers] "constructor" parameter_list [":" constructor_delegation] [block],
     constructor_delegation: ("this" | "super") arguments,
     init_block: [modifiers] "init" block,
     supertypes: _supertype ("," _supertype)*,
@@ -411,7 +419,9 @@ rust_graph_deep::grammar! { KOTLIN {
 
     parenthesized_expression: "(" _expression ")",
     arguments: "(" (_argument %? ",") ")",
-    _argument: &(_name "=") named_argument | _expression,
+    /// `f(*paths)`: a spread argument names the array it spreads.
+    _argument: &(_name "=") named_argument | spread_argument | _expression,
+    spread_argument: "*" _expression,
     named_argument: _name "=" _expression,
     annotation_arguments: "(" (_annotation_argument %? ",") ")",
     _annotation_argument: _expression,
@@ -452,6 +462,10 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix BANG_BANG => not_null_expression,
     },
 
+    /// `parse(::load)`: `::name` with nothing in front is a reference to a
+    /// top-level callable, and as no primary it could not be an argument.
+    absolute_reference: "::" _callable_name,
+
     _primary:
         _literal
         | _name
@@ -459,6 +473,7 @@ rust_graph_deep::grammar! { KOTLIN {
         | "super"
         | parenthesized_expression
         | lambda_literal
+        | absolute_reference
         | object_expression
         | if_statement
         | when_statement
