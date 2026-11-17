@@ -355,7 +355,12 @@ rust_graph_deep::grammar! { C {
         | static_assert_statement
         | asm_statement
         | declaration_statement
+        | empty_statement
         | expression_statement,
+
+    /// `for (; *s; s++);`: a loop whose body is the null statement. `;` alone is
+    /// a legal statement anywhere, and it is the whole body of the tightest loops.
+    empty_statement: ";",
 
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
     switch_statement: "switch" parenthesized_expression switch_body,
