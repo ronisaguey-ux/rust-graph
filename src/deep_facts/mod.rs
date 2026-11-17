@@ -1012,6 +1012,16 @@ impl<'a> Walker<'a> {
                     self.push_call_once(path, line);
                 }
             }
+            // `constructor(x: Int) : this(x.toString())`: the delegation's
+            // arguments are expressions, and no arm read them, so every call
+            // written there was lost.
+            "constructor_delegation" if self.is_kotlin() => {
+                for child in self.children(id) {
+                    if matches!(self.kind(child), "arguments" | "argument_list") {
+                        self.form(child);
+                    }
+                }
+            }
             // `val x: Int\n        get() = helper()`: an accessor declares the
             // value its property returns, and nothing read the body when the
             // accessor stood on a line of its own, so every call in a getter

@@ -312,7 +312,10 @@ rust_graph_deep::grammar! { KOTLIN {
     primary_constructor: [modifiers] ["constructor"] class_parameters,
     class_parameters: "(" (class_parameter %? ",") ")",
     class_parameter: [parameter_modifiers] ["val" | "var"] _name ":" _type ["=" _expression],
-    secondary_constructor: [modifiers] "constructor" parameter_list [":" constructor_delegation] block,
+    /// : the body of a secondary
+    /// constructor is optional - a constructor that only delegates has none -
+    /// and a required block made every such declaration a recovery region.
+    secondary_constructor: [modifiers] "constructor" parameter_list [":" constructor_delegation] [block],
     constructor_delegation: ("this" | "super") arguments,
     init_block: [modifiers] "init" block,
     supertypes: _supertype ("," _supertype)*,
