@@ -107,6 +107,15 @@ rust_graph_deep::grammar! { OBJC {
         /// front of the type it casts to.
         /// `(nullable NSDate *)date`: a nullability qualifier in front of the
         /// type in a parameter, which every modern Apple header writes.
+        /// `__block RACCommand *command;`, `__weak id target;`: the ownership
+        /// qualifiers a block or a capture list writes in front of a type.
+        KW_BLOCK = "__block",
+        KW_WEAK = "__weak",
+        KW_STRONG = "__strong",
+        KW_UNSAFE_UNRETAINED = "__unsafe_unretained",
+        KW_AUTORELEASING = "__autoreleasing",
+        KW_KINDOF = "__kindof",
+        KW_UNUSED = "__unused",
         KW_NULLABLE = "nullable",
         KW_NONNULL = "nonnull",
         KW_NULL_UNSPECIFIED = "null_unspecified",
@@ -233,6 +242,8 @@ rust_graph_deep::grammar! { OBJC {
     declaration_specifiers: _declaration_specifier+,
     _declaration_specifier:
         "typedef" | "extern" | "static" | "auto" | "register" | "inline" | "const" | "volatile"
+        | KW_BLOCK | KW_WEAK | KW_STRONG | KW_UNSAFE_UNRETAINED | KW_AUTORELEASING | KW_KINDOF
+        | KW_UNUSED
         | type_specifier,
     type_specifier:
         "void" | "char" | "short" | "int" | "long" | "float" | "double"
@@ -307,7 +318,14 @@ rust_graph_deep::grammar! { OBJC {
         | objc_dynamic
         | &(declaration_specifiers) declaration_statement
         | &(plain_type_name _type_arguments) declaration_statement
-        | &(plain_type_name _declarator) declaration_statement
+        // `Foo f;`, `Foo *p = 0;`, `Foo a, b;`: a declaration whose type is a
+        // class name. The guard names the line end, because `expect(command)
+        // .notTo(beNil());` is also a name and a parenthesised declarator - and
+        // reading it as a declaration left the call chain as error nodes, which
+        // in turn took down the block that held it.
+        | &(plain_type_name _declarator ";") declaration_statement
+        | &(plain_type_name _declarator "=") declaration_statement
+        | &(plain_type_name _declarator ",") declaration_statement
         | expression_statement,
 
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
@@ -486,8 +504,17 @@ rust_graph_deep::grammar! { OBJC {
     arguments: "(" (_argument %? ",") ")",
     _argument: _expression@assign,
     message: "[" _expression [_message_selector] "]",
-    _message_selector: IDENT | _message_keyword+,
-    _message_keyword: IDENT ":" _expression ("," _expression)*,
+    _message_selector: _message_name | _message_keyword+,
+    _message_keyword: _message_name ":" _expression ("," _expression)*,
+    /// `[RACSignal return:value]`, `[formatter default]`: a C keyword is a
+    /// perfectly good Objective-C selector, and a lexer that keeps `return` a
+    /// keyword leaves an error node inside every message that spells one - which
+    /// in turn took down the block or the call that held it.
+    _message_name:
+        IDENT | KW_RETURN | KW_DEFAULT | KW_IN | KW_FOR | KW_IF | KW_ELSE | KW_CASE
+        | KW_WHILE | KW_DO | KW_BREAK | KW_CONTINUE | KW_GOTO | KW_ENUM | KW_STRUCT
+        | KW_UNION | KW_SIGNED | KW_UNSIGNED | KW_STATIC | KW_AUTO | KW_EXTERN
+        | KW_CONST | KW_VOLATILE | KW_INLINE | KW_SWITCH,
 } }
 
 /// One token at the cursor.
@@ -612,6 +639,13 @@ fn keyword(text: &[u8]) -> Kind {
         b"if" => KW_IF,
         b"in" => KW_IN,
         b"IBOutlet" => KW_IBOUTLET,
+        b"__block" => KW_BLOCK,
+        b"__weak" => KW_WEAK,
+        b"__strong" => KW_STRONG,
+        b"__unsafe_unretained" => KW_UNSAFE_UNRETAINED,
+        b"__autoreleasing" => KW_AUTORELEASING,
+        b"__kindof" => KW_KINDOF,
+        b"__unused" => KW_UNUSED,
         b"nullable" => KW_NULLABLE,
         b"nonnull" => KW_NONNULL,
         b"null_unspecified" => KW_NULL_UNSPECIFIED,
