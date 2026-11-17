@@ -3735,6 +3735,16 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        // `goto out;` jumps to a label and states no value: the CST writes no
+        // event for a `goto_statement`, so reading the label as an expression
+        // invented one on every cleanup jump in the C corpus. A computed
+        // `goto *ptr;` is the same statement with an expression for a target.
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && self.word_at(stmt, 0).as_deref() == Some("goto")
+            && stmt.len() >= 2
+        {
+            return;
+        }
         let word = self.word_at(stmt, 0);
         if matches!(word.as_deref(), Some("return")) {
             self.expression_event("r", &stmt[1..]);
