@@ -1022,6 +1022,13 @@ impl<'a> Walker<'a> {
                     self.kt_property(id);
                 }
             }
+            // `init { … }`: the lexer reads the keyword as a line of its own,
+            // so the block's statements follow a bare `init` event. Without it
+            // every initialiser block disagreed on its first line.
+            "init_block" => {
+                let line = self.line(id);
+                self.event(&format!("[\"x\",{line},[\"n\",\"init\"]"));
+            }
             // `fun f() = listOf(x)`: Kotlin's expression body is the
             // function's value, and the lexer reads the call on that line as
             // the line's expression. Nothing in the walk read `function_body`,
