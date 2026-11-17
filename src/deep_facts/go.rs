@@ -2084,19 +2084,24 @@ fn dotted_piece(text: &str) -> bool {
                     .map(|node| self.text_string(node))
             });
         let Some(name) = name else { return };
+        // The initialiser is the child after `=` (or `by`), and nothing else.
+        // Taking "the last child that is not a type word" made the type of a
+        // property that has no initialiser (`val x: String`) read as its
+        // value, so the line was written as an assignment the lexer never
+        // makes instead of the declaration header it does.
         let value = children
             .iter()
-            .copied()
-            .rev()
-            .find(|&child| {
-                !matches!(
-                    self.kind(child),
-                    "val" | "var" | "property_head" | "modifiers" | ":" | "=" | "by" | "const" | "lateinit" | "override"
-                        | "private" | "public" | "internal" | "protected" | "type_identifier" | "user_type" | "nullable_type"
-                        | "function_type" | "generic_type" | "unsafe_cast" | "anonymous_function"
-                )
-            });
-        let Some(value) = value else { return };
+            .position(|&child| matches!(self.kind(child), "=" | "by"))
+            .and_then(|at| children.get(at + 1).copied());
+        let Some(value) = value else {
+            // `val x: String` with its getter on the next line: there is no
+            // initialiser to assign, so nothing was written for the line and
+            // the lexer's header event had no counterpart in the record.
+            if self.is_kotlin() {
+                self.java_header_event(id);
+            }
+            return;
+        };
         self.assignment_parts(vec![name], value, line, false);
     }
 
