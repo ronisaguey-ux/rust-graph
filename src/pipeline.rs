@@ -4010,6 +4010,16 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         "JAVA" => &[
             "new", "if", "while", "for", "switch", "return", "throw", "synchronized", "assert", "try", "catch", "instanceof",
         ],
+        // C, C++ and Objective-C: a type word is never a callee. `int
+        // (*flush)(struct _rio *);` and `((int (*)(void *, void *))cmp)(…)`
+        // put a type in front of a group, and the one-pass reader read each as
+        // a call on the type's own word - the C corpus's single largest call
+        // cluster, 24 files. The source makes no call there, so the CST has
+        // none to name.
+        "C" | "CPP" | "OBJC" => &[
+            "int", "char", "void", "unsigned", "signed", "long", "short", "float", "double", "const", "struct",
+            "union", "enum", "static", "extern", "inline", "register", "volatile", "typedef", "auto", "sizeof",
+        ],
         _ => &["if", "for", "while", "return", "switch", "function", "func", "fn", "def"],
     };
     keywords.contains(&name)
