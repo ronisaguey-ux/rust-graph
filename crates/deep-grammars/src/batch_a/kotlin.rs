@@ -432,6 +432,7 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix subscript => index_expression,
         postfix "." _name => navigation_expression,
         postfix "?." _name => navigation_expression,
+        postfix "::" "class" => callable_reference,
         postfix "::" _name => callable_reference,
         postfix BANG_BANG => not_null_expression,
     },
