@@ -4087,9 +4087,23 @@ impl<'a> Parser<'a> {
             let value = self.c_initialiser(&stmt[..equal], &stmt[equal + 1..]);
             self.note_class(&stmt[..equal], value);
             self.assignment(&stmt[..equal], value, line, augmented);
-        } else if !(self.lang.tag == "JAVA" && self.java_declares_only(stmt)) {
+        } else if !(self.lang.tag == "JAVA" && self.java_declares_only(stmt))
+            && !(self.lang.tag == "SWIFT" && self.swift_declares_only(stmt))
+        {
             self.expression_event("x", stmt);
         }
+    }
+
+    /// A Swift attribute run on a line of its own (`@inlinable`,
+    /// `@available(SwiftStdlib 6.0, *)`, `@_exported`) decorates the
+    /// declaration under it and binds no value: the CST marks the following
+    /// declaration with its modifiers and writes no event of its own for the
+    /// attribute, so reading the attribute's name as an expression invented an
+    /// `n:inlinable` on 123 lines. A statement that carries a declaration
+    /// keyword is the declaration itself (`@objc func f()`) and keeps its
+    /// event.
+    fn swift_declares_only(&self, stmt: &[Token]) -> bool {
+        stmt.first().is_some_and(|token| self.is_op(token, b"@"))
     }
 
     /// A Java member that declares and assigns nothing: a signature with no
