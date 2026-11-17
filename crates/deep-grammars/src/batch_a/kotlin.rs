@@ -522,7 +522,10 @@ rust_graph_deep::grammar! { KOTLIN {
     /// A function type with a receiver: `Config.() -> Unit`, the parameter that
     /// makes `config { }` work.
     receiver_function_type: _name ["?"] "." function_parameters "->" _type,
-    function_parameters: "(" (_type %? ",") ")",
+    /// `(config: ApplicationConfig) -> PluginConfig`: a function type may name
+    /// its parameters, and a bare type list could not read the name and colon.
+    function_parameters: "(" (_function_parameter %? ",") ")",
+    _function_parameter: &(_name ":") _name ":" _type | _type,
     /// What may follow `::`: a name, or the `class` keyword a class literal
     /// names. Kept out of `_name`, which is also what an expression starts
     /// with, so a bare `class` cannot be read as a value.
