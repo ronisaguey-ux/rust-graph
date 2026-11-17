@@ -4193,11 +4193,17 @@ impl<'a> Parser<'a> {
         let called = value.get(next).is_some_and(|token| self.is_op(token, b"("));
         // A call that the value then continues past does not leave the variant
         // in the binding: `Value::Object(m).to_string()` holds a String and
-        // `Value::Object(m)?` unwraps it, so neither names the variant.
+        // `Value::Object(m)?` unwraps it, so neither names the variant. C
+        // reaches the rest of the value through `->` as well: `mt =
+        // G(L)->mt[i]` holds a table slot, not a `G`, and reading it as one
+        // bound four lua files to a macro name.
         if called {
             if let Some((_, close)) = self.group_at(value, next) {
                 if value.get(close + 1).is_some_and(|token| {
-                    self.is_op(token, b".") || self.is_op(token, b"?") || self.is_op(token, b"[")
+                    self.is_op(token, b".")
+                        || self.is_op(token, b"?")
+                        || self.is_op(token, b"[")
+                        || self.is_op(token, b"->")
                 }) {
                     return;
                 }
