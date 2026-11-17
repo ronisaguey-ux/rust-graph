@@ -436,7 +436,11 @@ rust_graph_deep::grammar! { KOTLIN {
         postfix subscript => index_expression,
         postfix "." _name => navigation_expression,
         postfix "?." _name => navigation_expression,
-        postfix "::" _name => callable_reference,
+        // `X::class`, `@OptIn(X::class)`: the class literal is a callable
+        // reference to the keyword `class`, and `_name` excludes a keyword
+        // name, so the pair could not be read and every `::class` in the
+        // corpus recovered - 502 of them, the largest single shape left.
+        postfix "::" _callable_name => callable_reference,
         postfix BANG_BANG => not_null_expression,
     },
 
@@ -483,6 +487,10 @@ rust_graph_deep::grammar! { KOTLIN {
     /// makes `config { }` work.
     receiver_function_type: _name ["?"] "." function_parameters "->" _type,
     function_parameters: "(" (_type %? ",") ")",
+    /// What may follow `::`: a name, or the `class` keyword a class literal
+    /// names. Kept out of `_name`, which is also what an expression starts
+    /// with, so a bare `class` cannot be read as a value.
+    _callable_name: _name | "class",
 
     _name:
         IDENT | "abstract" | "actual" | "annotation" | "by" | "companion" | "const"
