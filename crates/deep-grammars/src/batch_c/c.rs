@@ -341,9 +341,10 @@ rust_graph_deep::grammar! { C {
     _type_abstract_declarator:
         pointer+ [parenthesized_abstract] abstract_suffix*
         | parenthesized_abstract abstract_suffix*
-        // `(int[]){1, 2}` and `sizeof(int[4])`: an array or function suffix with
-        // no pointer in front of it.
-        | abstract_suffix+,
+        // `(int[]){1, 2}` and `sizeof(int[4])`: an array suffix with no
+        // pointer in front of it. A bare parameter list is left out: `f (x)`
+        // inside parentheses is a call, not the type of a function.
+        | array_suffix+,
 
     compound_statement: "{" _statement* "}",
 
@@ -444,7 +445,9 @@ rust_graph_deep::grammar! { C {
     _user_cast_type: user_type_name _nonempty_abstract_declarator,
     _nonempty_abstract_declarator:
         pointer+ [parenthesized_abstract] abstract_suffix*
-        | parenthesized_abstract abstract_suffix*,
+        | parenthesized_abstract abstract_suffix*
+        // `(size_t [3]){0, 0}[whence]`: an array type with no pointer in front.
+        | array_suffix+,
     sizeof_expression: "sizeof" sizeof_operand,
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     alignof_expression: "_Alignof" cast_type,
