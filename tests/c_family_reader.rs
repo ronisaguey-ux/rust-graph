@@ -137,6 +137,7 @@ fn a_parenthesised_declarator_writes_no_value() {
     let mut failed: Vec<String> = Vec::new();
     for source in [
         "void (f) (int x);\n",
+        "int (*init_compress)(struct compressionState *st, int level);\n",
         "LUALIB_API void (luaL_setn) (lua_State *L, int t, int n);\n",
         "void kvstoreEmpty(kvstore *kvs, void(callback)(dict*));\n",
     ] {
