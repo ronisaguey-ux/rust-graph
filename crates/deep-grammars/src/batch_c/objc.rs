@@ -103,6 +103,17 @@ rust_graph_deep::grammar! { OBJC {
         /// `IBOutlet` / `IBInspectable`: interface-builder words that stand
         /// between a property's attribute list and its type.
         KW_IBOUTLET = "IBOutlet",
+        /// `(__bridge_transfer id)x`: the ownership transfer a cast names in
+        /// front of the type it casts to.
+        /// `(nullable NSDate *)date`: a nullability qualifier in front of the
+        /// type in a parameter, which every modern Apple header writes.
+        KW_NULLABLE = "nullable",
+        KW_NONNULL = "nonnull",
+        KW_NULL_UNSPECIFIED = "null_unspecified",
+        KW_NULL_RESETTABLE = "null_resettable",
+        KW_BRIDGE = "__bridge",
+        KW_BRIDGE_TRANSFER = "__bridge_transfer",
+        KW_BRIDGE_RETAINED = "__bridge_retained",
         KW_IBINSPECTABLE = "IBInspectable",
         AT_LBRACE = "@{",
         AT_LBRACKET = "@[",
@@ -357,7 +368,11 @@ rust_graph_deep::grammar! { OBJC {
     /// a block-typed parameter. The type is a type, a caret in parentheses and
     /// the block's own parameter list; the grammar had no such type, so every
     /// method that takes a completion block was an error node.
-    method_type: "(" (block_pointer_type | type_name) ")",
+    /// `(nullable NSDate *)date`, `(nonnull NSString *)name`: a nullability
+    /// qualifier in front of a parameter's type is written on every modern
+    /// header, and the type rule had no room for the word.
+    method_type: "(" [nullability] (block_pointer_type | type_name) ")",
+    nullability: KW_NULLABLE | KW_NONNULL | KW_NULL_UNSPECIFIED | KW_NULL_RESETTABLE,
     block_pointer_type: block_type_name block_pointer_parameters,
     block_type_name: plain_type_name | "void" | "id" | pointer+,
     block_pointer_parameters: block_caret_group parameter_list,
@@ -447,7 +462,12 @@ rust_graph_deep::grammar! { OBJC {
     _member: IDENT,
     string: STR+,
     cast_expression: cast_type _expression@unary,
-    cast_type: "(" (_type_prefixed | _user_type_name) ")",
+    /// `(__bridge CFStringRef)domain`, `(__bridge_transfer id)obj`: a bridged
+    /// cast names the ownership transfer and then the type, and the rule had no
+    /// room for the word - every bridged cast in AFNetworking and YYKit was two
+    /// ERRORs inside its statement.
+    cast_type: "(" [bridge_qualifier] (_type_prefixed | _user_type_name) ")",
+    bridge_qualifier: KW_BRIDGE | KW_BRIDGE_TRANSFER | KW_BRIDGE_RETAINED,
     sizeof_expression: "sizeof" sizeof_operand,
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     selector_expression: "@selector" selector_arguments,
@@ -592,6 +612,13 @@ fn keyword(text: &[u8]) -> Kind {
         b"if" => KW_IF,
         b"in" => KW_IN,
         b"IBOutlet" => KW_IBOUTLET,
+        b"nullable" => KW_NULLABLE,
+        b"nonnull" => KW_NONNULL,
+        b"null_unspecified" => KW_NULL_UNSPECIFIED,
+        b"null_resettable" => KW_NULL_RESETTABLE,
+        b"__bridge" => KW_BRIDGE,
+        b"__bridge_transfer" => KW_BRIDGE_TRANSFER,
+        b"__bridge_retained" => KW_BRIDGE_RETAINED,
         b"IBInspectable" => KW_IBINSPECTABLE,
         b"inline" => KW_INLINE,
         b"int" => KW_INT,
