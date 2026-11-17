@@ -4417,7 +4417,14 @@ impl<'a> Parser<'a> {
         if called && (explicit || capital) && name.starts_with(|ch: char| ch.is_uppercase()) {
             let target = self.target_path(targets);
             if let Some(target) = target {
-                self.facts.vars.push((target, name));
+                // A C# declarator names one identifier; a dotted target is a
+                // member being assigned, not a variable being declared.
+                // `sock.LingerState = new LingerOption(…)` bound `sock.LingerState`
+                // to `LingerOption` and the CST, which never declares that name,
+                // lost a variable for every such line.
+                if !(self.lang.tag == "CS" && target.contains('.')) {
+                    self.facts.vars.push((target, name));
+                }
             }
         }
     }
