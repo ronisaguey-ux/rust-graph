@@ -1041,6 +1041,18 @@ impl<'a> Walker<'a> {
                 }
                 self.cs_declared_vars(id);
             }
+            // `uint A(int hc) => hc.ToHashCode();`: an expression-bodied member
+            // writes its body after the arrow, and no arm read the expression, so
+            // the call it holds stayed in the tree — the same shape of gap
+            // Kotlin's `function_body` arm closes.
+            "expression_bodied_member" | "method_declaration" if self.language.name == "csharp" => {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=>") {
+                    if let Some(&value) = children.get(at + 1) {
+                        self.form(value);
+                    }
+                }
+            }
             // `using SafeFileHandle handle = Interop.Kernel32.CreateFile(name);`:
             // a using declaration is one declarator, and no arm read the node, so
             // the call it opens with stayed in the tree.
