@@ -4010,6 +4010,14 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         "JAVA" => &[
             "new", "if", "while", "for", "switch", "return", "throw", "synchronized", "assert", "try", "catch", "instanceof",
         ],
+        // C#: `unchecked(...)`, `default(T)`, `nameof(x)`, `when` on a catch
+        // clause - the one-pass reader has no keyword table, so it read each as
+        // a call on the keyword and the CST, which writes an expression, lost
+        // the row. None of these words can name a value in C#, so no real call
+        // is excused (`unchecked` alone: 284 files).
+        "CS" => &[
+            "checked", "unchecked", "default", "nameof", "when", "typeof", "sizeof", "is", "as", "await", "stackalloc", "fixed",
+        ],
         // C, C++ and Objective-C: a type word is never a callee. `int
         // (*flush)(struct _rio *);` and `((int (*)(void *, void *))cmp)(…)`
         // put a type in front of a group, and the one-pass reader read each as
