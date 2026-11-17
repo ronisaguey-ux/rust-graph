@@ -1898,6 +1898,20 @@ impl<'a> Parser<'a> {
         // were calls too (`visibility("protected")`, `alloc_size(1)`). The CST
         // writes no value for a declaration, so nothing the lexer read out of
         // one is a fact the record should keep (18 corpus files).
+        // `typedef uint8_t art_key_chunk_t;` names a type: no runtime value is
+        // bound, and a reader of the record needs no event for it. The C++
+        // grammar's declaration_statement keeps the name and the C grammar keeps
+        // the whole specifier chain, so the two readers wrote a different number
+        // of names for the same declaration and every typedef header lost its
+        // file (5 rows on the croaring corpus). Whether the specifier chain is
+        // written is the C reader's choice; the lexer writes none.
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && self.word_at(&self.stmt, 0).as_deref() == Some("typedef")
+        {
+            self.brackets.clear();
+            self.stmt.clear();
+            return;
+        }
         // `using api::iterator;` and `using Id = int;` are C++ declarations with
         // no runtime value: the C++ grammar reads them as a using_declaration and
         // the fact writer binds nothing for it. Read as an expression the lexer
