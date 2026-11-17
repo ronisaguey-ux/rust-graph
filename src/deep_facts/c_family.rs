@@ -511,6 +511,31 @@ impl<'a> Walker<'a> {
                 // constant in musl lost its line.
                 let mut inits = Vec::new();
                 self.c_initializers(id, &mut inits);
+                // `int sh=MIN(29,e2);` and `size_t len = CHUNK_SIZE(self) + extra;`:
+                // the one-pass reader binds the declared name to the call the
+                // initialiser starts with, and no declaration arm recorded that
+                // binding - only the `bare_user_declaration` shape did, so every
+                // local whose initialiser is a macro call lost its var. An extra
+                // binding costs nothing: the guard counts only the bindings the
+                // lexer made and complains when the CST has fewer.
+                for (name, node, _line) in &inits {
+                    if name.is_empty() {
+                        continue;
+                    }
+                    // The initialiser may be the call itself, and
+                    // `c_descendant` only looks below the node it is given.
+                    let call = if self.kind(*node) == "call_expression" {
+                        Some(*node)
+                    } else {
+                        self.c_descendant(*node, "call_expression")
+                    };
+                    let Some(call) = call else { continue };
+                    let path = self.decl_path(call);
+                    let last = path.rsplit('.').next().unwrap_or("").to_string();
+                    if !last.is_empty() {
+                        self.facts.vars.push((name.clone(), last));
+                    }
+                }
                 // `lua_pushnil(L);` - one argument, and C's most vexing parse
                 // makes the grammar call it a declaration: a plain type name
                 // with a parenthesised declarator. The lexer reads a call, so
