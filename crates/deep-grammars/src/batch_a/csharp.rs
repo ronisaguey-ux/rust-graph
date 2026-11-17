@@ -320,6 +320,11 @@ rust_graph_deep::grammar! { CSHARP {
         | &([attributes] [modifiers] "enum") enum_declaration
         | &([attributes] [modifiers] "record" _name) record_declaration
         | &([attributes] [modifiers] _type "operator") operator_declaration
+        // `public static implicit operator T(Source s)`: a conversion writes no
+        // return type and puts the target type after `operator`, so the
+        // shape the rule above expects (`_type "operator"`) never held one and
+        // every converting operator was an ERROR in its own member.
+        | &([attributes] [modifiers] ("implicit" | "explicit") "operator") conversion_operator_declaration
         | &([attributes] [modifiers] _type "this") indexer_declaration
         | &([attributes] [modifiers] "event") event_declaration
         | &([attributes] [modifiers] _type _member_name [type_parameters] formal_parameters) method_declaration
@@ -351,7 +356,8 @@ rust_graph_deep::grammar! { CSHARP {
     event_declaration: [attributes] [modifiers] "event" _type _member_name event_tail,
     event_tail: event_accessors | ";" | "=" _expression ";",
     event_accessors: "{" accessor_declaration* "}",
-    operator_declaration: [attributes] [modifiers] ["implicit" | "explicit"] _type "operator" _operator_token formal_parameters (block | "=>" _expression ";"),
+    operator_declaration: [attributes] [modifiers] _type "operator" _operator_token formal_parameters (block | "=>" _expression ";"),
+    conversion_operator_declaration: [attributes] [modifiers] ("implicit" | "explicit") "operator" _type formal_parameters (block | "=>" _expression ";"),
     _operator_token: PLUS | MINUS | STAR | SLASH | PERCENT | AMP | PIPE | CARET | BANG | TILDE | EQ | NE | LT | GT | LE | GE | INCREMENT | DECREMENT | "true" | "false",
     field_declaration: [attributes] [modifiers] _type _variable_declarator ("," _variable_declarator)* ";",
     _variable_declarator: _name ["=" _declared_value],
