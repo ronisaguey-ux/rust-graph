@@ -2160,11 +2160,12 @@ impl<'a> Parser<'a> {
             return false;
         }
         let mut at = 0;
-        // `__attribute__((__visibility__("hidden"))) int f(void);`: an
-        // attribute is part of the declaration it precedes, not a value of it.
+        // `__attribute__((__visibility__("hidden"))) int f(void);` and
+        // `__declspec(dllexport) int exported(void);`: an attribute is part of
+        // the declaration it precedes, not a value or call of it.
         while at < stmt.len()
             && stmt[at].kind == Kind::Ident
-            && matches!(self.raw(&stmt[at]), b"__attribute__" | b"__attribute")
+            && matches!(self.raw(&stmt[at]), b"__attribute__" | b"__attribute" | b"__declspec")
         {
             let mut depth = 0i32;
             at += 1;
@@ -3979,11 +3980,19 @@ impl<'a> Parser<'a> {
         // `pub` — or, once `pub` was refused, nothing at all. The head's group
         // is the first one that has a usable name in front of it.
         // In a JS/TS class body, `*[Symbol.iterator]()` has `]` before `(`.
+        // `int __attribute__((__visibility__("default"))) foo(int x) {` and
+        // `__declspec(dllexport) int bar(int y) {`: the attribute's group is
+        // not the function's parameter list, so skip it to find the real name.
         let open = *groups.iter().find(|&&open| {
             open > 0
                 && (self
                     .word_at(toks, open - 1)
-                    .is_some_and(|name| !CONTROL.contains(&name.as_str()) && !NOT_A_NAME.contains(&name.as_str()))
+                    .is_some_and(|name| {
+                        !CONTROL.contains(&name.as_str())
+                            && !NOT_A_NAME.contains(&name.as_str())
+                            && !(matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+                                && matches!(name.as_str(), "__attribute__" | "__attribute" | "__declspec"))
+                    })
                     || (js_class && self.is_op(&toks[open - 1], b"]")))
         })?;
         let name_at = open - 1;
