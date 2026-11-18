@@ -560,10 +560,7 @@ impl<'a> Parser<'a> {
             return;
         }
         if let Some(last) = self.stmt.last() {
-            let wildcard_import = self.is_op(last, b"*")
-                && self.stmt.first().is_some_and(|t| t.kind == Kind::Ident && self.raw(t) == b"import");
             let continues = self.lang.operator_continues
-                && !wildcard_import
                 && last.kind == Kind::Op
                 && !matches!(self.raw(last), b")" | b"]" | b"}" | b":" | b"++" | b"--" | b"=" | b"!" | b"?");
             let trailing_equal = last.kind == Kind::Op && self.raw(last) == b"=" && self.lang.blocks != Blocks::Indent;
