@@ -725,12 +725,23 @@ fn the_delimiter_pass_is_linear_on_hostile_input() {
     // an absolute deadline would only say how busy the box was.
     let many_ifs = format!("{}{}", "{".repeat(2000), "ixen".repeat(50_000));
     let twice = format!("{}{}", "{".repeat(2000), "ixen".repeat(100_000));
-    let start = Instant::now();
-    pairs_of(&many_ifs);
-    let small = start.elapsed().max(Duration::from_micros(1));
-    let start = Instant::now();
-    pairs_of(&twice);
-    let large = start.elapsed();
+    // The best of three runs each: one scheduling hiccup on either side used to
+    // decide the ratio (a loaded box took 35 ms against a lucky 6.9 ms and
+    // failed a pass whose two runs are 7 ms and 14 ms when measured alone).
+    // The floor keeps a run of a few microseconds from dividing by zero.
+    let best = |src: &str| {
+        (0..3)
+            .map(|_| {
+                let start = Instant::now();
+                pairs_of(src);
+                start.elapsed()
+            })
+            .min()
+            .unwrap_or(Duration::from_micros(1))
+            .max(Duration::from_micros(1))
+    };
+    let small = best(&many_ifs);
+    let large = best(&twice);
     assert!(
         large.as_secs_f64() < small.as_secs_f64() * 4.0,
         "snapshots over the depth cap are skipped: doubling the input took {large:?} against {small:?}"
