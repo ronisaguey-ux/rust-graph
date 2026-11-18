@@ -405,7 +405,10 @@ rust_graph_deep::grammar! { KOTLIN {
     /// modifier, and without one `Array<out T>` stopped the receiver at `Array`
     /// — the declaration took the receiver's name and its body was never walked
     /// (the stdlib wasm/generated files).
-    _type_argument: "*" | (_variance)? _type,
+    /// `List<@kotlin.internal.NoInfer R>`: a type argument may carry an
+    /// annotation, and without one the whole declaration failed to parse — the
+    /// body of such a function was never walked (stdlib `_Arrays.kt`, `_Collections.kt`).
+    _type_argument: "*" | (_variance)? annotation* _type,
     _variance: "out" | "in",
     _gt: ">" | GT_JOINED,
 
