@@ -375,7 +375,10 @@ rust_graph_deep::grammar! { KOTLIN {
     /// could never match - `_type` eats every dotted segment and then wants one
     /// more - so every extension property stopped at its first dot.
     property_head: _type_head [type_arguments] ("." _name [type_arguments])*,
-    accessor: [modifiers] ("get" | "set") [accessor_parameters] ("=" _expression | block),
+    /// `override var size: Int = 0` / `private set`: a bare accessor has no
+    /// body at all, and requiring one turned the whole property into a recovery
+    /// (ArrayDeque.kt's every `private set`).
+    accessor: [modifiers] ("get" | "set") [accessor_parameters] [("=" _expression | block)],
     accessor_parameters: "(" [parameter] ")",
 
     enum_body: "{" (enum_entry %? ",") [";" _member*] "}",

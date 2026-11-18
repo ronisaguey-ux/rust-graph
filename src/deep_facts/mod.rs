@@ -1641,6 +1641,39 @@ impl<'a> Walker<'a> {
                     // whose getter stood before another member lost its value
                     // (`get() = keys.length` in a class with more members).
                     self.event(&format!("[\"x\",{line},{value}]"));
+                } else {
+                    // `override var size: Int = 0` / `private set`: a bare
+                    // accessor writes its modifiers and keyword as one value on
+                    // its own line (`m:[n:private,n:set]`), and nothing was read
+                    // for it, so every such property lost a statement
+                    // (ArrayDeque.kt, SlidingWindow.kt, SequenceTest.kt).
+                    let line = self.line(id);
+                    let mut parts: Vec<String> = Vec::new();
+                    for child in self.children(id) {
+                        match self.kind(child) {
+                            "modifiers" => {
+                                for modifier in self.children(child) {
+                                    let word = self.text_string(modifier);
+                                    if !word.is_empty() {
+                                        let mut atom = String::from("[\"n\",");
+                                        push_string(&mut atom, &word);
+                                        atom.push(']');
+                                        parts.push(atom);
+                                    }
+                                }
+                            }
+                            "get" | "set" => {
+                                let mut atom = String::from("[\"n\",");
+                                push_string(&mut atom, &self.text_string(child));
+                                atom.push(']');
+                                parts.push(atom);
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !parts.is_empty() {
+                        self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                    }
                 }
             }
             "return_statement" => self.return_statement(id),
