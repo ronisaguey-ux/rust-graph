@@ -1622,6 +1622,26 @@ impl<'a> Walker<'a> {
                     self.arguments(list);
                 }
             }
+            // `constructor(x: Int) : this(x)` / `: super(x)`: a secondary
+            // constructor's delegation is a call to `self` or `super` with its
+            // arguments, not a `call_expression`, so no arm recorded the call.
+            "constructor_delegation" if self.is_kotlin() => {
+                let children = self.children(id);
+                if let Some(&target) = children.iter().find(|&&child| !self.is_layout(child)) {
+                    let kind = self.kind(target);
+                    if matches!(kind, "this" | "super") {
+                        let path = if kind == "this" { "self" } else { kind };
+                        self.push_call(path.to_string(), self.line(target));
+                    }
+                }
+                if let Some(list) = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                {
+                    self.arguments(list);
+                }
+            }
             // `fun f(): T = expr` writes the body as a `function_body` whose
             // child is the expression itself; a block body is the other
             // alternative. The lexer writes the expression's value as the
