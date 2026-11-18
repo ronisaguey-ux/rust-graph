@@ -1275,25 +1275,6 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
-            // `@file:OptIn(InternalAPI::class)` before the package header: the
-            // target is `file` and the annotation's name is the identifier
-            // after it, which is the call the lexer reads. Taking the first
-            // identifier named the call `file` and lost `OptIn` in every file
-            // that opted in at file scope.
-            "file_annotation" if self.kinds.family == Family::Plain => {
-                let names: Vec<u32> = self.children(id).into_iter().filter(|&child| self.kind(child) == "identifier").collect();
-                if let Some(&node) = names.last() {
-                    let name = self.text_string(node);
-                    let line = self.line(id);
-                    let index = self.push_call(name, line);
-                    if let Some(list) = self.children(id).into_iter().find(|&child| self.kind(child) == "annotation_arguments") {
-                        if self.children(list).iter().any(|&child| !self.is_layout(child)) {
-                            let args = self.arguments(list);
-                            self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
-                        }
-                    }
-                }
-            }
             // `[MarshalAs(UnmanagedType.LPStr)]`, `[TestCase(1, 2)]`: the
             // one-pass reader has no idea an attribute section is a
             // declaration, so it files the attribute's name as a call and the
@@ -1354,7 +1335,7 @@ impl<'a> Walker<'a> {
                     self.facts.symbols[target].calls.push(Call { path: name, line });
                 }
             }
-            "annotation" if self.kinds.family == Family::Plain => {
+            "annotation" | "file_annotation" if self.kinds.family == Family::Plain => {
                 // `@kotlin.jvm.JvmName("x")`: a qualified annotation is a run of
                 // identifier children, and the first one alone is `kotlin`. The
                 // lexer records the whole path as the call, so every qualified
@@ -1403,10 +1384,8 @@ impl<'a> Walker<'a> {
                     // event holding the call's form, as it does for any other
                     // call written as a statement.
                     if let Some(list) = self.children(id).into_iter().find(|&child| self.kind(child) == "annotation_arguments") {
-                        if self.children(list).iter().any(|&child| !self.is_layout(child)) {
-                            let args = self.arguments(list);
-                            self.event(&format!("[\"x\",{line},[\"c\",{index},{receiver},{args}]]"));
-                        }
+                        let args = self.arguments(list);
+                        self.event(&format!("[\"x\",{line},[\"c\",{index},{receiver},{args}]]"));
                     }
                 }
             }
