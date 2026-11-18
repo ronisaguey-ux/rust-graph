@@ -504,16 +504,20 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
-            // `class X(...) :` newline `Super(...)`: a heritage clause cannot
-            // end at the colon, so the newline is inside the declaration.
-            // Ended there, the supertype's constructor call became a value of
-            // its own on the continuation line, where the CST writes the class
-            // declaration on the header line instead (6 rows in one file).
+            // `class X(...) :` newline `Super(...)` or `fun f():` newline `T`:
+            // a heritage or return-type clause cannot end at the colon, so the
+            // newline is inside the declaration. Also `fun f()` newline `= e`:
+            // a leading `=` continues the declaration rather than starting a
+            // statement.
             if self.lang.tag == "KT"
-                && self.is_op(last, b":")
-                && self.stmt.iter().any(|token| {
-                    token.kind == Kind::Ident && matches!(self.raw(token), b"class" | b"interface")
-                })
+                && ((self.is_op(last, b":")
+                    && self.stmt.iter().any(|token| {
+                        token.kind == Kind::Ident
+                            && matches!(self.raw(token), b"class" | b"interface" | b"fun" | b"val" | b"var")
+                    }))
+                    || self.next_line_start(last.end as usize).is_some_and(|at| {
+                        self.src.get(at) == Some(&b'=') && self.src.get(at + 1) != Some(&b'=')
+                    }))
             {
                 return;
             }
