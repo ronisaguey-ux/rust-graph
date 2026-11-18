@@ -12,7 +12,8 @@ ts **453/2000**.
 
 | when | commit | what it fixed | measured |
 |---|---|---|---|
-| 11-18 | `h-argon` | C++ `const`-qualified methods (`int sides() const {`) open function blocks instead of hitting JS `VALUE_FOLLOWS` (`is_block`) | repro `cpp_const_min` 1 → 0, `classes.cpp`+`containers.cpp` gain 4 `const` method symbols (C++ corpus not on box); kt 1034/1103 held |
+| 11-18 | `h-argon` | C# commas inside generic `<...>` types do not split assignment targets (`unpack_targets`) | repro `Cache.cs` + `x.cs` 2/2 → 0, C# fixtures 3 → 4 deep (C# corpus not on box); kt 1034/1103 held |
+| 11-18 | `efa2da9` | C++ `const`-qualified methods (`int sides() const {`) open function blocks instead of hitting JS `VALUE_FOLLOWS` (`is_block`) | repro `cpp_const_min` 1 → 0, `classes.cpp`+`containers.cpp` gain 4 `const` method symbols (C++ corpus not on box); kt 1034/1103 held |
 | 11-18 | `9902a5f` | Java `array_access` (`shapes[i].area()`) keeps its receiver path in `decl_path` | repro `Shapes.java` 1 → 0, Java fixtures 8/8 valid deep (Java corpus not on box); kt 1034/1103 held |
 | 11-18 | `6c687ef` | C/C++/ObjC `_Static_assert(...)` and `static_assert(...)` compile-time declarations emit no call or event (`end_statement`) | repro 2/2 → 0, C fixtures 8/8 valid deep (C/C++ corpora not on box); kt 1034/1103 held |
 | 11-18 | `bde91fd` | C/C++/ObjC `__attribute__((...))` / `__declspec(...)` prototypes skip calls and attributed definitions keep their own function name (`c_declaration`, `c_style_head`) | repro `c_attributes.c` + `vis_def.c` 2/2 → 0 (`twice`/`foo`/`bar`/`baz` named; C corpus not on box); kt 1034/1103 held |

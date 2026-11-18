@@ -5182,11 +5182,17 @@ impl<'a> Parser<'a> {
         let mut targets = Vec::new();
         let mut depth = 0i32;
         let mut start = 0;
+        // `Dictionary<TKey, Entry> items = new()`: in C# a comma inside a
+        // generic type argument list is not a declarator separator.
+        let angles = self.lang.tag == "CS";
         for (index, token) in inner.iter().enumerate() {
             if token.kind == Kind::Op {
                 match self.raw(token) {
                     b"(" | b"[" | b"{" => depth += 1,
                     b")" | b"]" | b"}" => depth -= 1,
+                    b"<" if angles => depth += 1,
+                    b">" if angles && depth > 0 => depth -= 1,
+                    b">>" if angles && depth > 0 => depth = (depth - 2).max(0),
                     b"," if depth == 0 => {
                         targets.extend(self.unpack_one(&inner[start..index]));
                         start = index + 1;
