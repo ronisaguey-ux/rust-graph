@@ -96,3 +96,28 @@ fn kotlin_annotation_files_the_same_call() {
     }
     assert!(failures.is_empty(), "kotlin annotation calls disagree:\n{}", failures.join("\n"));
 }
+/// `@SinceKotlin("1.1") public actual typealias Error = java.lang.Error`: the
+/// annotation in front of a declaration is not a name, so the line declares and
+/// assigns nothing. Read as an assignment it filed `a Error = java.lang.Error`,
+/// a row the CST never writes (57 rows and 9 files of the kotlin dump).
+const DECLARATIONS: &[&str] = &[
+    "@SinceKotlin(\"1.1\") public actual typealias Error = java.lang.Error\n",
+    "@Deprecated(\"d\") public actual typealias E = java.lang.Error\n",
+];
+
+#[test]
+fn kotlin_annotated_declaration_is_not_an_assignment() {
+    let mut failures: Vec<String> = Vec::new();
+    for source in DECLARATIONS {
+        let language = langs::by_content("kt", source.as_bytes()).expect("a Kotlin row");
+        let lexer = parser::parse(source.as_bytes(), language);
+        let mut events = String::new();
+        for symbol in &lexer.symbols {
+            events.push_str(&symbol.events);
+        }
+        if events.contains("[\"a\",") {
+            failures.push(format!("{source:?}: the lexer filed an assignment for a declaration: {events}"));
+        }
+    }
+    assert!(failures.is_empty(), "kotlin annotated declarations disagree:\n{}", failures.join("\n"));
+}

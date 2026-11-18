@@ -4292,13 +4292,59 @@ impl<'a> Parser<'a> {
     /// assignment, and the initialiser is read as one.
     fn kotlin_declares_only(&self, stmt: &[Token]) -> bool {
         let mut index = 0;
-        while self.word_at(stmt, index).is_some_and(|word| KOTLIN_MODIFIERS.contains(&word.as_str())) {
-            index += 1;
+        // `@SinceKotlin("1.1") public actual typealias Error = java.lang.Error`:
+        // the annotation in front of a declaration is not a name, and reading
+        // the line as an assignment invented the `a Error = java.lang.Error`
+        // row the CST never writes (15 rows of the kotlin dump; the same line
+        // without the annotation was already a declaration). The annotation's
+        // dotted name, its use-site target (`@get:`) and its argument list are
+        // one item, and there may be more than one.
+        while index < stmt.len() {
+            let token = &stmt[index];
+            if self.is_op(token, b"@") {
+                index += 1;
+                while index < stmt.len() && stmt[index].kind == Kind::Ident {
+                    index += 1;
+                    if index < stmt.len() && self.is_op(&stmt[index], b":") {
+                        index += 1;
+                        continue;
+                    }
+                    if index < stmt.len() && self.is_op(&stmt[index], b".") {
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+                if index < stmt.len() && self.is_op(&stmt[index], b"(") {
+                    let mut depth = 0usize;
+                    while index < stmt.len() {
+                        if self.is_op(&stmt[index], b"(") {
+                            depth += 1;
+                        } else if self.is_op(&stmt[index], b")") {
+                            depth -= 1;
+                        }
+                        index += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            if token.kind == Kind::Ident {
+                let word = self.text(token);
+                if KOTLIN_MODIFIERS.contains(&word.as_str()) {
+                    index += 1;
+                    continue;
+                }
+                return matches!(
+                    word.as_str(),
+                    "val" | "var" | "fun" | "class" | "interface" | "object" | "companion" | "enum" | "typealias" | "init"
+                );
+            }
+            return false;
         }
-        matches!(
-            self.word_at(stmt, index).as_deref(),
-            Some("val" | "var" | "fun" | "class" | "interface" | "object" | "companion" | "enum" | "typealias" | "init")
-        )
+        false
     }
 
     fn java_declares_only(&self, stmt: &[Token]) -> bool {
