@@ -74,9 +74,14 @@ fn kotlin_block_comment_closes_at_its_last_marker() {
             );
         }
     }
-    // The annotation is a fact on its own line, 9.
-    assert!(lexer.contains("[\"x\",9,") || lexer.contains("[\"a\",9,"), "the annotation lost its line: {lexer}");
+    // The annotation states no value of its own, and it must not inherit the
+    // fence's line either. Measured on the kotlin corpus: emitting an event for a
+    // line of `@Name(...)` annotations cost five files and won two (the CST
+    // writes one only when the annotation decorates a declaration it can see),
+    // so silence is what the other reader agrees with; the line check here is
+    // the half that matters — the comment fence must not move the annotation.
     assert!(!lexer.contains("[\"x\",7,"), "the annotation carried the fence's line: {lexer}");
+    assert!(!lexer.contains("Suppress") && !lexer.contains("Target"), "the annotation was read as a value: {lexer}");
     assert!(!deep.is_empty(), "the cst read nothing at all");
 }
 

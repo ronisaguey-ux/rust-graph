@@ -4552,9 +4552,17 @@ impl<'a> Parser<'a> {
         // statement fell through to the expression reader, which filed the
         // annotation as a CALL named `Suppress` that the CST never has
         // (stdlib Maps.kt and Comparisons.kt).
+        // `@[Suppress("DEPRECATION") OptIn(ExperimentalContextReceivers::class)]`
+        // is the same statement written as a bracketed list, and
+        // `OptIn(ExperimentalContextReceivers::class)` brings a `::` the
+        // matcher also left out. Whatever the form, a line of annotations
+        // states no value (kotlinx-metadata Readers.kt, Writers.kt).
         stmt.iter().all(|token| match token.kind {
             Kind::Ident | Kind::Str => true,
-            Kind::Op => matches!(self.raw(token), b"@" | b":" | b"." | b"(" | b")" | b","),
+            Kind::Op => matches!(
+                self.raw(token),
+                b"@" | b":" | b"::" | b"." | b"(" | b")" | b"," | b"[" | b"]"
+            ),
             _ => false,
         })
     }
