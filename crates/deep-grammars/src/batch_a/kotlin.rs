@@ -451,9 +451,10 @@ rust_graph_deep::grammar! { KOTLIN {
     /// name of its own. Without a rule the star was an ERROR inside the list.
     _argument: &(_name "=") named_argument | spread_argument | _expression,
     spread_argument: STAR _expression,
-    named_argument: _name "=" _expression,
+    named_argument: _name "=" (collection_literal | _expression),
     annotation_arguments: "(" (_annotation_argument %? ",") ")",
-    _annotation_argument: _expression,
+    _annotation_argument: &(_name "=") named_argument | spread_argument | collection_literal | _expression,
+    collection_literal: "[" (_expression %? ",") "]",
 
     // ---- expressions ----
 
