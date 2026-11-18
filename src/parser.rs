@@ -1267,7 +1267,7 @@ impl<'a> Parser<'a> {
                 && matches!(
                     word.as_str(),
                     "actual" | "expect" | "suspend" | "operator" | "infix" | "tailrec" | "lateinit" | "noinline"
-                        | "crossinline" | "vararg" | "reified" | "annotation"
+                        | "crossinline" | "vararg" | "reified" | "annotation" | "enum" | "inner" | "value"
                 );
             if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier {
                 break;
