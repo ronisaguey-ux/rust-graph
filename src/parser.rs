@@ -532,6 +532,19 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `-jvmMain` newline `-nativeMain { … }`: Kotlin lets an operator
+            // open the continuation line, so a leading `-` or `+` after a value
+            // continues the expression. Ended here, the two lines became two
+            // statements and the second one a call the CST never writes (20
+            // rows in the kotlin corpus, all `-name {` lines in kts blocks).
+            if self.lang.tag == "KT"
+                && matches!(last.kind, Kind::Ident | Kind::Num | Kind::Str)
+                && self
+                    .next_line_start(last.end as usize)
+                    .is_some_and(|at| matches!(self.src.get(at), Some(b'-') | Some(b'+')))
+            {
+                return;
+            }
             // `interface A extends B` newline `{` or `interface A<T>` newline
             // `extends B`: the header of a type declaration spans the line
             // break; ending here leaves `{` in `<module>` and turns its type
