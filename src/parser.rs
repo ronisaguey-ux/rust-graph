@@ -3801,6 +3801,27 @@ impl<'a> Parser<'a> {
                 at = equal + 1;
             }
         }
+        // `public inline fun <reified R> Iterable<*>.filterIsInstance()`: the
+        // receiver carries type arguments, and name_chain stops at `<`, so the
+        // declaration took the receiver type as its name and every call in its
+        // body was filed under it (kotlin 1 row).
+        if self.lang.tag == "KT" {
+            at = self.skip_generics(toks, at);
+            loop {
+                if !toks.get(at).is_some_and(|token| token.kind == Kind::Ident) {
+                    break;
+                }
+                let after = self.skip_generics(toks, at + 1);
+                if after > at + 1
+                    && toks.get(after).is_some_and(|t| self.is_op(t, b".") || self.is_op(t, b"?."))
+                    && toks.get(after + 1).is_some_and(|t| t.kind == Kind::Ident)
+                {
+                    at = after + 1;
+                    continue;
+                }
+                break;
+            }
+        }
         // `public actual inline fun <T> arrayOf(vararg elements: T): Array<T>`:
         // the type parameters sit exactly where the name does, so the head had
         // no name at all and the declaration opened an anonymous frame that

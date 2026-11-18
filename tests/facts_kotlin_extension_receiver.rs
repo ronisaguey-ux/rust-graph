@@ -87,3 +87,18 @@ fn type_parameters_before_the_name_keep_the_declaration() {
         "the declaration opened an anonymous frame: {rows:?}"
     );
 }
+
+const GENERIC_RECEIVER: &str = "public inline fun <reified R> Iterable<*>.filterIsInstance(): List<R> {\n    return filterIsInstanceTo(ArrayList<R>())\n}\n";
+
+#[test]
+fn a_generic_receiver_still_names_the_member() {
+    let rows = symbols(GENERIC_RECEIVER);
+    assert!(
+        rows.iter().any(|(name, _)| name == "filterIsInstance"),
+        "the member lost its name: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|(name, _)| name == "Iterable"),
+        "the receiver type became the name: {rows:?}"
+    );
+}
