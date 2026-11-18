@@ -56,15 +56,16 @@
 //! `&(_lambda_parameters "->")`; a plain optional parameter list would swallow
 //! the first expression of an implicit-`it` lambda.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
 
 thread_local! {
-    /// Parenthesis and bracket depth, for Kotlin's "a newline inside
-    /// parentheses is not a statement end" rule. Reset at the start of a file.
-    static DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// Parenthesis and bracket depth per brace frame, for Kotlin's "a newline
+    /// inside parentheses is not a statement end" rule while newlines inside
+    /// nested `{ ... }` lambdas and object bodies still end statements.
+    static PARENS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     /// Whether each string the `STRING` mode is inside is triple-quoted,
     /// innermost last: a nested string restores the outer one on the way out.
     static QUOTES: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
@@ -578,7 +579,11 @@ rust_graph_deep::grammar! { KOTLIN {
 /// One token at the cursor.
 pub fn lex(c: &mut Cursor) -> Kind {
     if c.pos() == 0 {
-        DEPTH.with(|depth| depth.set(0));
+        PARENS.with(|parens| {
+            let mut p = parens.borrow_mut();
+            p.clear();
+            p.push(0);
+        });
         QUOTES.with(|quotes| quotes.borrow_mut().clear());
         FIELDS.with(|fields| fields.borrow_mut().clear());
     }
@@ -592,7 +597,7 @@ pub fn lex(c: &mut Cursor) -> Kind {
                 matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c')
             });
             if (line_break || anonymous)
-                && DEPTH.with(|depth| depth.get()) == 0
+                && PARENS.with(|parens| parens.borrow().last().copied().unwrap_or(0)) == 0
                 && ends_statement(c.previous())
                 && !continues(c)
             {
@@ -1014,11 +1019,30 @@ fn operator(c: &mut Cursor) -> Kind {
             return UNKNOWN;
         }
     };
-    // Parenthesis depth, for the newline rule. Braces are not counted: a
-    // newline inside a class body still ends statements.
+    // Parenthesis depth per brace frame, for the newline rule: newlines inside
+    // `{ ... }` still end statements even when the brace is inside `(...)`.
     match kind {
-        LPAREN | LBRACKET => DEPTH.with(|depth| depth.set(depth.get() + 1)),
-        RPAREN | RBRACKET => DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1))),
+        LPAREN | LBRACKET => PARENS.with(|parens| {
+            let mut p = parens.borrow_mut();
+            if p.is_empty() {
+                p.push(0);
+            }
+            if let Some(top) = p.last_mut() {
+                *top += 1;
+            }
+        }),
+        RPAREN | RBRACKET => PARENS.with(|parens| {
+            if let Some(top) = parens.borrow_mut().last_mut() {
+                *top = top.saturating_sub(1);
+            }
+        }),
+        LBRACE => PARENS.with(|parens| parens.borrow_mut().push(0)),
+        RBRACE => PARENS.with(|parens| {
+            let mut p = parens.borrow_mut();
+            if p.len() > 1 {
+                p.pop();
+            }
+        }),
         _ => {}
     }
     c.bump_n(width);
