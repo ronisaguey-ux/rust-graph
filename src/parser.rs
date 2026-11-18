@@ -3695,10 +3695,22 @@ impl<'a> Parser<'a> {
 
     fn name_chain(&self, toks: &[Token], mut at: usize) -> (String, String, usize) {
         let mut parts = Vec::new();
+        // `fun Recv?.name(…)` spells the receiver separator as one token. Left
+        // out of the separator set the chain stopped at the receiver, so the
+        // declaration took the receiver type as its name (`String`);
+        // `fun Recv.name(…)` already read as a chain.
+        let mut nullable_receiver = false;
         while let Some(word) = self.word_at(toks, at) {
             parts.push(word);
             at += 1;
-            let joined = toks.get(at).is_some_and(|t| t.kind == Kind::Op && matches!(self.raw(t), b"." | b"::" | b":"));
+            let joined = toks.get(at).is_some_and(|t| {
+                t.kind == Kind::Op
+                    && (matches!(self.raw(t), b"." | b"::" | b":")
+                        || (self.lang.tag == "KT" && self.raw(t) == b"?."))
+            });
+            if joined && self.raw(&toks[at]) == b"?." {
+                nullable_receiver = true;
+            }
             let next_is_word = self.word_at(toks, at + 1).is_some();
             if joined && next_is_word && self.lang.tag != "SCALA" {
                 at += 1;
@@ -3707,7 +3719,13 @@ impl<'a> Parser<'a> {
             }
         }
         let name = parts.pop().unwrap_or_default();
-        let owner = parts.into_iter().filter(|part| !matches!(part.as_str(), "exports" | "module" | "prototype" | "self")).last();
+        // An extension's receiver is a type, not an owner: the CST files
+        // `fun String?.plus(…)` as `plus` and nothing else.
+        let owner = if nullable_receiver {
+            None
+        } else {
+            parts.into_iter().filter(|part| !matches!(part.as_str(), "exports" | "module" | "prototype" | "self")).last()
+        };
         (name, owner.unwrap_or_default(), at)
     }
 
