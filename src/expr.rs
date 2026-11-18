@@ -1249,6 +1249,14 @@ impl Emit<'_> {
             self.chain(out, "0".to_string(), String::new(), line);
             return;
         }
+        // Go `func(params) ...`: `func` opens a function literal or type, not
+        // a call whose arguments are the parameter list.
+        if self.lang.tag == "GO" && word == "func" && self.op_byte(1) == b'(' {
+            if let Some(after) = self.skip_balanced(self.pos + 1, b"(", b")") {
+                self.pos = after;
+                return;
+            }
+        }
         // `{} as Record<string, number>`: a type assertion's type is not a
         // value. `as` is already noise, but the type that followed it was read
         // like an expression, so the lexer's value carried the type arguments
