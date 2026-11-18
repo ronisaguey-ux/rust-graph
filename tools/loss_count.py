@@ -27,7 +27,7 @@ import os
 import subprocess
 import sys
 
-CORPORA = ("js", "ts", "python", "rust")
+CORPORA = ("js", "ts", "python", "rust", "kotlin")
 DEFAULT_ROOT = "/tmp/opencode/sweep-local"
 DEFAULT_BIN = "/home/roni/Roni_workspace/rg-kbuilds/release/x86_64-unknown-linux-musl/release/rust-graph"
 
