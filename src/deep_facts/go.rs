@@ -3272,7 +3272,7 @@ fn dotted_piece(text: &str) -> bool {
             // `x ?? throw new ArgumentNullException(nameof(x))`: a throw
             // expression is its operand, and the call the lexer reads on that
             // line is inside it.
-            "throw_expression" => match self.expression_child(id) {
+            "throw_expression" | "throw_statement" => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
             },
@@ -3288,11 +3288,11 @@ fn dotted_piece(text: &str) -> bool {
             // `x as Foo`, `x as? Foo.Bar`: Kotlin's cast names both the value
             // and the target type to the one-pass reader; the shared unary arm
             // kept only the operand and dropped the type.
-            "as_expression" if self.is_kotlin() => {
+            "as_expression" | "is_expression" if self.is_kotlin() => {
                 let items: Vec<u32> = self
                     .children(id)
                     .into_iter()
-                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "as" | "?"))
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "as" | "is" | "!is" | "?"))
                     .collect();
                 match items.len() {
                     0 => "0".to_string(),
