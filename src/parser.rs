@@ -387,43 +387,6 @@ impl<'a> Parser<'a> {
         saw_newline.then_some(at)
     }
 
-    /// Whether the line after `end` declares a class with a heritage clause on
-    /// that same line — `class Foo : Bar() {`. A star import above such a line
-    /// has to end at the newline: continuing it folds the class into the import
-    /// statement, so the class loses its own symbol and its supertype is read
-    /// as a function — 11 korpus files.
-    fn next_line_opens_a_class_with_heritage(&self, end: usize) -> bool {
-        let Some(at) = self.next_line_start(end) else { return false };
-        let line_end = self.src[at..]
-            .iter()
-            .position(|&byte| byte == b'\n')
-            .map_or(self.src.len(), |newline| at + newline);
-        let line = &self.src[at..line_end];
-        let mut depth = 0usize;
-        let mut saw_class = false;
-        let mut at = 0usize;
-        while at < line.len() {
-            match line[at] {
-                b'(' | b'[' => depth += 1,
-                b')' | b']' => depth = depth.saturating_sub(1),
-                b'{' => return false,
-                b'/' if line.get(at + 1) == Some(&b'/') => return false,
-                byte if byte.is_ascii_alphabetic() || byte == b'_' => {
-                    let start = at;
-                    while at < line.len() && (line[at].is_ascii_alphanumeric() || line[at] == b'_') {
-                        at += 1;
-                    }
-                    saw_class |= &line[start..at] == b"class";
-                    continue;
-                }
-                b':' if depth == 0 && saw_class => return true,
-                _ => {}
-            }
-            at += 1;
-        }
-        false
-    }
-
     /// Whether the next bytes after `end` are a member access that begins a
     /// new line, ignoring spaces and tabs: `.name` or `?.name`.
     fn next_is_member_access(&self, end: usize) -> bool {
@@ -496,17 +459,14 @@ impl<'a> Parser<'a> {
         if self.lang.semicolons || self.lang.period_only {
             return;
         }
-        // `import kotlin.test.*` above `class X : Base() {`: a star import is a
-        // whole declaration, and the newline ends it. Continuing it (a trailing
-        // `*` reads as an operator) folded the class into the import statement,
-        // which cost the class its symbol and made its supertype a function.
-        // Deliberately narrow: only a star import whose next declaration is a
-        // class with a same-line heritage clause. Splitting the other shapes
-        // changed files whose remaining mismatches the CST still has.
+        // `import kotlin.test.*` above a declaration: a star import is a whole
+        // declaration, and the newline ends it. Continuing it (a trailing `*`
+        // reads as an operator) folded the next declaration into the import
+        // statement, which cost a class its symbol and made a primary
+        // constructor or supertype a function.
         if self.lang.tag == "KT"
             && self.word_at(&self.stmt, 0).as_deref() == Some("import")
             && self.stmt.last().is_some_and(|last| self.raw(last) == b"*")
-            && self.next_line_opens_a_class_with_heritage(self.stmt.last().map_or(0, |last| last.end as usize))
         {
             self.declaring = false;
             self.end_statement();
