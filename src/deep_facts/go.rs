@@ -2444,15 +2444,21 @@ fn dotted_piece(text: &str) -> bool {
             if kind == "ERROR" || kind.starts_with("ERROR") || kind.contains("MISSING") {
                 recovered = true;
             }
-            if self.is_layout(child) || kind == "=" {
+            if self.is_layout(child) || kind == "=" || kind == "type_arguments" {
                 continue;
             }
-            if kind == "arguments" || kind == "argument_list" {
+            if (kind == "arguments" || kind == "argument_list") && arguments.is_none() && value.is_none() {
                 arguments = Some(child);
                 continue;
             }
-            if value.is_none() && matches!(kind, "identifier" | "simple_identifier") {
+            if arguments.is_none() && value.is_none() && matches!(kind, "identifier" | "simple_identifier") {
                 names.push(self.text_string(child));
+                continue;
+            }
+            if arguments.is_some()
+                && value.is_none()
+                && !matches!(kind, "lambda_literal" | "annotated_lambda" | "lambda_expression")
+            {
                 continue;
             }
             value = Some(child);
@@ -2469,14 +2475,22 @@ fn dotted_piece(text: &str) -> bool {
         // own (`… = this == null || isEmpty()`) or one the grammar recovered
         // (`RoutingContext.()` after a broken typealias) keeps the arm below,
         // which walks that value and records the calls inside it.
-        if let Some(args) = arguments.filter(|_| value.is_none() && !recovered) {
+        let emit_script_call = |this: &mut Self, args: u32| {
             let path = names.join(".");
-            let index = self.push_call(path, line);
-            // The event is the call itself, not an assignment: the one-pass
-            // reader files `include(":x")` as `c(0;[0])` on that line, so a
-            // merge of the name and the argument value paired with nothing.
-            let args_form = self.arguments(args);
-            self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args_form}]]"));
+            let index = this.push_call(path, line);
+            let receiver = if names.len() > 1 {
+                let mut r = "[\"n\",".to_string();
+                push_string(&mut r, &names[..names.len() - 1].join("."));
+                r.push(']');
+                r
+            } else {
+                "0".to_string()
+            };
+            let args_form = this.arguments(args);
+            this.event(&format!("[\"x\",{line},[\"c\",{index},{receiver},{args_form}]]"));
+        };
+        if let Some(args) = arguments.filter(|_| value.is_none() && !recovered) {
+            emit_script_call(self, args);
             return;
         }
         match value {
@@ -2485,10 +2499,14 @@ fn dotted_piece(text: &str) -> bool {
             // walked here because this arm claims the node.
             Some(node) if matches!(self.kind(node), "lambda_literal" | "annotated_lambda" | "lambda_expression") => {
                 self.kt_lambda_statements(node);
-                let mut text = "[[\"n\",".to_string();
-                push_string(&mut text, &names.join("."));
-                text.push_str("]]");
-                self.event(&format!("[\"x\",{line},[\"m\",{text}]]"));
+                if let Some(args) = arguments.filter(|_| !recovered) {
+                    emit_script_call(self, args);
+                } else {
+                    let mut text = "[[\"n\",".to_string();
+                    push_string(&mut text, &names.join("."));
+                    text.push_str("]]");
+                    self.event(&format!("[\"x\",{line},[\"m\",{text}]]"));
+                }
             }
             Some(node) => self.assignment_parts(vec![names.join(".")], node, line, false),
             None => {
@@ -3226,6 +3244,13 @@ fn dotted_piece(text: &str) -> bool {
                     1 => self.form(items[0]),
                     _ => self.tuple_form(&items),
                 }
+            }
+            "return_statement" if self.is_kotlin() => {
+                let value = self
+                    .children(id)
+                    .into_iter()
+                    .rfind(|&child| !self.is_layout(child) && self.kind(child) != "return");
+                value.map(|child| self.form(child)).unwrap_or_else(|| "0".to_string())
             }
             "binary_operator" | "comparison_operator" | "boolean_operator" | "binary_expression" | "ternary_expression"
             // `f() ?: g()`: the elvis holds two values the way a binary
@@ -4314,7 +4339,7 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
-            "as_expression" | "satisfies_expression" | "type_assertion" | "non_null_expression" => {
+            "as_expression" | "satisfies_expression" | "type_assertion" | "non_null_expression" | "generic_type" => {
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
             // A call has no name of its own: `f().x` names `.x`.

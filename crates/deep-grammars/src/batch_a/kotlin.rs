@@ -260,7 +260,14 @@ rust_graph_deep::grammar! { KOTLIN {
     /// and every declaration in it is recovered inside an error. The guard is
     /// the use-site colon, which no declaration annotation has.
     file_annotation: "@" _annotation_target _qualified_name [annotation_arguments],
-    script_statement: _script_head [arguments] [lambda_literal] ["=" _expression],
+    script_statement: _script_head [_script_tail] ["=" _expression],
+    _script_tail:
+        &(type_arguments arguments) type_arguments arguments ("." _name [_script_chain])* [lambda_literal]
+        | arguments [lambda_literal]
+        | lambda_literal,
+    _script_chain:
+        &(type_arguments arguments) type_arguments arguments
+        | arguments,
     /// A plain identifier starts a script statement. A contextual keyword does
     /// not: `data class X` and `abstract class X` are declarations, and a start
     /// set that both shares cannot be decided.
@@ -398,7 +405,7 @@ rust_graph_deep::grammar! { KOTLIN {
         | "reified" _name [":" _type]
         | [annotations] _name [":" _type],
     type_arguments: "<" (_type_argument %? ",") _gt,
-    _type_argument: "*" | _type,
+    _type_argument: "*" | "in" _type | "out" _type | _type,
     _gt: ">" | GT_JOINED,
 
     // ---- statements ----
