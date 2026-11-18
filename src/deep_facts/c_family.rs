@@ -1543,10 +1543,14 @@ impl<'a> Walker<'a> {
             // to the lexer under another word: nothing read it, so every
             // `#import "Local.h"` in the corpus lost its import (464 rows on
             // the Objective-C corpus alone).
-            let trimmed = line.trim_start();
-            let Some(rest) = trimmed
-                .strip_prefix("#include")
-                .or_else(|| trimmed.strip_prefix("#import"))
+            let Some(after_hash) = line.trim_start().strip_prefix('#') else {
+                continue;
+            };
+            let directive = after_hash.trim_start();
+            let Some(rest) = directive
+                .strip_prefix("include")
+                .or_else(|| directive.strip_prefix("import"))
+                .filter(|rest| rest.starts_with(|c: char| c.is_ascii_whitespace() || c == '"'))
             else {
                 continue;
             };
