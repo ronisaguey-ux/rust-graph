@@ -1595,6 +1595,35 @@ impl<'a> Walker<'a> {
             // child is the expression itself. Nothing read that node, so a call
             // in an expression-bodied def never reached the record.
             "def_body" => self.expression_statement(id),
+            // Scala's `val IN = RecordClass(1, "IN")`: the initialiser after
+            // `=` is an expression whose calls and assignment event the lexer
+            // files, and nothing read `val_definition`, so 125+ files lost
+            // calls inside `val`/`var` initialisers.
+            "val_definition" => {
+                let children = self.children(id);
+                let line = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "val" | "var"))
+                    .map(|child| self.line(child))
+                    .unwrap_or_else(|| self.line(id));
+                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
+                    if let Some(&value) = children.get(at + 1) {
+                        let name = children[..at]
+                            .iter()
+                            .copied()
+                            .take_while(|&child| self.kind(child) != ":")
+                            .filter(|&child| matches!(self.kind(child), "identifier" | "simple_identifier"))
+                            .last()
+                            .map(|child| self.text_string(child));
+                        if let Some(name) = name {
+                            self.assignment_parts(vec![name], value, line, false);
+                        } else {
+                            self.form(value);
+                        }
+                    }
+                }
+            }
             // `companion object { … }`: the one-pass lexer files the introducer
             // as a header statement (`m:[n:companion,n:object,n:Name]`), and no
             // arm wrote an event for the tree's `companion_object`, so every
