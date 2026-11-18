@@ -1337,7 +1337,45 @@ impl<'a> Walker<'a> {
                     self.facts.symbols[target].calls.push(Call { path: name, line });
                 }
             }
-            "annotation" | "file_annotation" | "annotation_item" if self.kinds.family == Family::Plain => {
+            // `@file:JvmName("Test")` heads a file and states no value: the
+            // one-pass reader reads a statement of annotations as layout
+            // (`kotlin_annotation_alone` accepts `(`, `)`, `,` and strings but
+            // no `=` and no nested call), so filing the call `JvmName` invents
+            // one the lexer never has and the `kotlin_file_calls_agree` gate
+            // fails. The walk visits the nested `annotation_item` on its own,
+            // so it is consumed here and the arm below skips it.
+            // Only the bare literal form: `@file:WasmCoroutineMode(isStack
+            // SwitchingMode = true)` and `@file:DependsOn("…", options =
+            // arrayOf(…))` carry an `=` or a nested call, fall through the
+            // matcher, and the lexer DOES file a call for them — silencing
+            // those cost four corpus files (kotlin 480 -> 484).
+            "file_annotation" if self.kinds.family == Family::Plain => {
+                let text = self.text(id);
+                let nested_call = {
+                    let mut pending = self.children(id);
+                    let mut found = false;
+                    while let Some(child) = pending.pop() {
+                        if self.kind(child) == "call_expression" {
+                            found = true;
+                            break;
+                        }
+                        pending.extend(self.children(child));
+                    }
+                    found
+                };
+                if !nested_call && !text.contains(&b'=') {
+                    let items: Vec<u32> = self
+                        .children(id)
+                        .into_iter()
+                        .filter(|&child| matches!(self.kind(child), "annotation_item" | "annotation"))
+                        .collect();
+                    self.consumed.extend(items);
+                }
+            }
+            "annotation" | "annotation_item" if self.kinds.family == Family::Plain => {
+                if self.consumed.contains(&id) {
+                    return;
+                }
                 // `@kotlin.jvm.JvmName("x")`: a qualified annotation is a run of
                 // identifier children, and the first one alone is `kotlin`. The
                 // lexer records the whole path as the call, so every qualified
