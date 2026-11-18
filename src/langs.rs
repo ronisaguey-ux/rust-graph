@@ -294,6 +294,10 @@ pub const LANGUAGES: &[Language] = &[
         tag: "KT",
         extensions: &["kt", "kts"],
         interp: Interp::Dollar,
+        // `const val CSS = """…"""`: a raw string spans lines, and read as a
+        // single-line string it ended at the first newline and handed the
+        // rest of the block to the reader as code (`th {`, `border: 1px …`).
+        triple_quotes: true,
         semicolons: false,
         global_names: true,
         defs: &["fun"],
