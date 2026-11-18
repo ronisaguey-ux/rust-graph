@@ -1335,7 +1335,7 @@ impl<'a> Walker<'a> {
                     self.facts.symbols[target].calls.push(Call { path: name, line });
                 }
             }
-            "annotation" | "file_annotation" if self.kinds.family == Family::Plain => {
+            "annotation" | "file_annotation" | "annotation_item" if self.kinds.family == Family::Plain => {
                 // `@kotlin.jvm.JvmName("x")`: a qualified annotation is a run of
                 // identifier children, and the first one alone is `kotlin`. The
                 // lexer records the whole path as the call, so every qualified

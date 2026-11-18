@@ -259,7 +259,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// without one, an annotated file has no alternative that starts with `@`
     /// and every declaration in it is recovered inside an error. The guard is
     /// the use-site colon, which no declaration annotation has.
-    file_annotation: "@" _annotation_target _qualified_name [annotation_arguments],
+    file_annotation: "@" _annotation_target (annotation_list | annotation_item),
     script_statement: _script_head [arguments] [lambda_literal] ["=" _expression],
     /// A plain identifier starts a script statement. A contextual keyword does
     /// not: `data class X` and `abstract class X` are declarations, and a start
@@ -282,7 +282,9 @@ rust_graph_deep::grammar! { KOTLIN {
         // match, so every class with an `init` block recovered as a broken
         // typealias and lost the calls inside it.
         | "dynamic" | "delegate",
-    annotation: "@" (&(_annotation_target) _annotation_target _qualified_name [annotation_arguments] | _qualified_name [annotation_arguments]),
+    annotation: "@" (&(_annotation_target) _annotation_target (annotation_list | annotation_item) | annotation_list | annotation_item),
+    annotation_item: _qualified_name [annotation_arguments],
+    annotation_list: "[" annotation_item+ "]",
     /// A use-site target (`@file:`, `@get:`) is a name and a colon; nothing else
     /// is one. It is guarded by a lookahead at the start of the alternative the
     /// way C#'s `[return: ...]` is, because the optional form `[_name ":"]` took
