@@ -1373,6 +1373,13 @@ impl<'a> Walker<'a> {
                         // every `@get:`-targeted annotation lost the call the
                         // lexer files (20 files of the kotlin corpus).
                         "get" | "set" | "field" | "param" | "property" | "receiver" | "file" | "delegate" if parts.is_empty() => {}
+                        "annotation_arguments" => break,
+                        // `@kotlin.internal.RequireKotlin(…)`: the segment
+                        // `internal` is also a Kotlin modifier, so it arrives
+                        // as a keyword leaf of its own instead of an
+                        // identifier. Breaking there wrote the call `kotlin`
+                        // and lost the path the lexer files.
+                        _ if self.children(child).is_empty() => parts.push(self.text_string(child)),
                         _ => break,
                     }
                 }
