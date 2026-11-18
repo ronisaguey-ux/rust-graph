@@ -1415,9 +1415,121 @@ impl Emit<'_> {
         } else {
             word
         };
+        // `returns() implies (condition)`, `a shl (b)`: in Kotlin an infix
+        // function whose right operand is parenthesised is an infix expression,
+        // not a call to `implies(...)` or `shl(...)`. Leave the `(` for
+        // `group()` so both readers record the name and the operand without a
+        // spurious call.
+        if self.lang.tag == "KT" && self.op_byte(0) == b'(' && self.kt_infix_before(self.pos - 1) {
+            out.push_str("[\"n\",");
+            push_string(out, &head);
+            out.push(']');
+            return;
+        }
         self.chain(out, String::new(), head, line);
         if self.lang.command_calls || self.lang.apply_calls {
             self.juxtaposed(out, close, line);
+        }
+    }
+
+    /// Whether the Kotlin identifier at `ident_pos` sits immediately after a
+    /// same-line expression, making `ident (...)` an infix call rather than a
+    /// parenthesised function call.
+    fn kt_infix_before(&self, ident_pos: usize) -> bool {
+        let Some(prev_pos) = ident_pos.checked_sub(1) else {
+            return false;
+        };
+        self.toks[prev_pos].line == self.toks[ident_pos].line && self.kt_is_expr_end(prev_pos)
+    }
+
+    /// Whether the token at `pos` ends a Kotlin expression (and is not itself
+    /// an infix operator or keyword).
+    fn kt_is_expr_end(&self, pos: usize) -> bool {
+        let tok = &self.toks[pos];
+        match tok.kind {
+            Kind::Num | Kind::Str => true,
+            Kind::Ident => {
+                let word = lexeme(self.src, tok, self.lang);
+                if matches!(
+                    word.as_str(),
+                    "return"
+                        | "throw"
+                        | "else"
+                        | "in"
+                        | "is"
+                        | "as"
+                        | "do"
+                        | "by"
+                        | "where"
+                        | "if"
+                        | "when"
+                        | "try"
+                        | "catch"
+                        | "finally"
+                        | "for"
+                        | "while"
+                        | "fun"
+                        | "val"
+                        | "var"
+                        | "object"
+                        | "class"
+                        | "interface"
+                        | "typealias"
+                        | "import"
+                        | "package"
+                ) {
+                    return false;
+                }
+                // Two adjacent identifiers on the same line alternate:
+                // `expr infix_op expr ...`. If `pos - 1` ended an expression on
+                // the same line, then `pos` is an infix operator, not an
+                // expression end.
+                !pos
+                    .checked_sub(1)
+                    .is_some_and(|prev| self.toks[prev].line == tok.line && self.kt_is_expr_end(prev))
+            }
+            Kind::Op => {
+                let raw = &self.src[tok.start as usize..tok.end as usize];
+                if matches!(raw, b"]" | b"!!") {
+                    return true;
+                }
+                if raw != b")" {
+                    return false;
+                }
+                let mut depth = 0usize;
+                let mut j = pos;
+                loop {
+                    let t = &self.toks[j];
+                    if t.kind == Kind::Op {
+                        let r = &self.src[t.start as usize..t.end as usize];
+                        if r == b")" {
+                            depth += 1;
+                        } else if r == b"(" {
+                            depth -= 1;
+                            if depth == 0 {
+                                if let Some(before) = j.checked_sub(1) {
+                                    let bt = &self.toks[before];
+                                    if bt.kind == Kind::Ident {
+                                        let bw = lexeme(self.src, bt, self.lang);
+                                        if matches!(bw.as_str(), "if" | "for" | "while" | "catch" | "when") {
+                                            return false;
+                                        }
+                                        if before > 0 && self.raw_is(&self.toks[before - 1], b"@") {
+                                            return false;
+                                        }
+                                    }
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                    if j == 0 {
+                        return false;
+                    }
+                    j -= 1;
+                }
+            }
+            _ => false,
         }
     }
 
