@@ -72,3 +72,18 @@ fn a_plain_receiver_still_names_the_member() {
         "the member lost its name: {rows:?}"
     );
 }
+
+const TYPE_PARAMETERS: &str = "public actual inline fun <T> arrayOf(vararg elements: T): Array<T> = elements as Array<T>\n";
+
+#[test]
+fn type_parameters_before_the_name_keep_the_declaration() {
+    let rows = symbols(TYPE_PARAMETERS);
+    assert!(
+        rows.iter().any(|(name, _)| name == "arrayOf"),
+        "the declaration lost its name: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|(name, _)| name.starts_with("<anonymous>")),
+        "the declaration opened an anonymous frame: {rows:?}"
+    );
+}

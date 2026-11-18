@@ -3801,6 +3801,12 @@ impl<'a> Parser<'a> {
                 at = equal + 1;
             }
         }
+        // `public actual inline fun <T> arrayOf(vararg elements: T): Array<T>`:
+        // the type parameters sit exactly where the name does, so the head had
+        // no name at all and the declaration opened an anonymous frame that
+        // swallowed every declaration after it (kotlin 1 row, and the file's
+        // later functions lost their symbols with it).
+        at = self.skip_generics(toks, at);
         if toks.get(at).is_some_and(|token| token.kind == Kind::Ident) {
             let (name, owner, next) = self.name_chain(toks, at);
             head.name = name;
