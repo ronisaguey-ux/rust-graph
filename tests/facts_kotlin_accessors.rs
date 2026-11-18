@@ -75,6 +75,11 @@ const ROWS: &[(&str, &str, u32)] = &[
         "class A {\n    val port: Int\n        get() = readPort()\n\n    fun other() {}\n}\n",
         3,
     ),
+    (
+        "a top-level extension property's getter",
+        "public actual val Char.category: CharCategory\n    get() = CharCategory.valueOf(Character.getType(this))\n\nfun other() {}\n",
+        2,
+    ),
 ];
 
 #[test]
