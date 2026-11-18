@@ -4546,9 +4546,15 @@ impl<'a> Parser<'a> {
         if !stmt.first().is_some_and(|token| self.is_op(token, b"@")) {
             return false;
         }
+        // `@Suppress("EXTENSION_SHADOWED_BY_MEMBER")` is the same annotation
+        // with arguments: its parentheses and the string are part of it, and a
+        // statement that is only annotations states no value. Left out, the
+        // statement fell through to the expression reader, which filed the
+        // annotation as a CALL named `Suppress` that the CST never has
+        // (stdlib Maps.kt and Comparisons.kt).
         stmt.iter().all(|token| match token.kind {
-            Kind::Ident => true,
-            Kind::Op => matches!(self.raw(token), b"@" | b":" | b"."),
+            Kind::Ident | Kind::Str => true,
+            Kind::Op => matches!(self.raw(token), b"@" | b":" | b"." | b"(" | b")" | b","),
             _ => false,
         })
     }
