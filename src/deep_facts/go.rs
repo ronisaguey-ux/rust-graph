@@ -3296,6 +3296,10 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.merge_form(&items),
                 }
             }
+            "not_null_expression" if self.is_kotlin() => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
             "not_operator" | "unary_operator" | "unary_expression" | "await" | "await_expression" | "yield" | "yield_expression"
             | "typeof" | "void" | "non_null_expression" | "as_expression" | "satisfies_expression" | "type_assertion" | "delete_expression" => {
                 match self.expression_child(id) {
@@ -4341,7 +4345,7 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
-            "as_expression" | "satisfies_expression" | "type_assertion" | "non_null_expression" => {
+            "as_expression" | "satisfies_expression" | "type_assertion" | "non_null_expression" | "not_null_expression" => {
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
             // A call has no name of its own: `f().x` names `.x`.
