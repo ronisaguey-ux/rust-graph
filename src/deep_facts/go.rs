@@ -3127,6 +3127,19 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            // `.utf8`, `.prettyPrinted`: an implicit member expression names its
+            // member in value position, just as it does as a callee.
+            "implicit_member_expression" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
             "lifetime" => {
                 let text = self.text_string(id);
                 let text = text.trim_start_matches('\'').trim_start_matches("r#");
