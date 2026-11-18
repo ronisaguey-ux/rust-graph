@@ -260,7 +260,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// and every declaration in it is recovered inside an error. The guard is
     /// the use-site colon, which no declaration annotation has.
     file_annotation: "@" _annotation_target _qualified_name [annotation_arguments],
-    script_statement: _script_head [arguments] [lambda_literal] ["=" _expression],
+    script_statement: _script_head [arguments | subscript] [lambda_literal] ["=" _expression],
     /// A plain identifier starts a script statement. A contextual keyword does
     /// not: `data class X` and `abstract class X` are declarations, and a start
     /// set that both shares cannot be decided.
