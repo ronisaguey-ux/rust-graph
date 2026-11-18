@@ -379,8 +379,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// segment — receiver and name alike — because the name is the last one and
     /// a parser that cannot backtrack cannot tell where the receiver ends. The
     /// walk names the symbol after the last segment.
-    receiver_head: receiver_type ("." _name [type_arguments])+,
-    receiver_type: _type_head [type_arguments] ["?"],
+    receiver_head: _type_head [type_arguments] ((["?"] "." | "?.") _name [type_arguments])+,
     parameter_list: "(" (parameter %? ",") ")",
     parameter: [parameter_modifiers] _name ":" _type ["=" _expression],
     parameter_modifiers: (annotation | "public" | "private" | "protected" | "internal" | "final" | "open" | "vararg" | "noinline" | "crossinline" | "out" | "override")+,
@@ -393,12 +392,13 @@ rust_graph_deep::grammar! { KOTLIN {
     /// last segment as the name. The old `&(_type ".") receiver_head` lookahead
     /// could never match - `_type` eats every dotted segment and then wants one
     /// more - so every extension property stopped at its first dot.
-    property_head: _type_head [type_arguments] ("." _name [type_arguments])*,
+    property_head: _type_head [type_arguments] ((["?"] "." | "?.") _name [type_arguments])*,
     /// `override var size: Int = 0` / `private set`: a bare accessor has no
     /// body at all, and requiring one turned the whole property into a recovery
     /// (ArrayDeque.kt's every `private set`).
     accessor: [modifiers] ("get" | "set") [accessor_parameters] [":" _type] [("=" _expression | block)],
-    accessor_parameters: "(" [parameter] ")",
+    accessor_parameters: "(" [accessor_parameter] ")",
+    accessor_parameter: [parameter_modifiers] _name [":" _type],
 
     enum_body: "{" (enum_entry %? ",") [";" _member*] "}",
     enum_entry: [annotations] _name [arguments] [class_body],
@@ -575,6 +575,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// row. The guard is the `(` after the dot, which a qualified name never
     /// has, so `A.B` still reads as a qualified type.
     _type: precedence _type_head {
+        left "&" => intersection_type,
         postfix "?" => nullable_type,
         postfix type_arguments => generic_type,
         postfix &("." function_parameters "->") "." function_parameters "->" _type => receiver_function_type,
