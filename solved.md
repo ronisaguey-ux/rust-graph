@@ -12,7 +12,8 @@ ts **453/2000**.
 
 | when | commit | what it fixed | measured |
 |---|---|---|---|
-| 11-18 | `h-argon` | JS/TS leading binary operators (`==`, `!=`, `<=`, `<<`, `**`, `/`, `%`, `\|`, `&`, `^`, `<`) continue a multi-line statement | repro 4/6 → 0 (JS/TS corpora not on box); kt 1053/1123 held |
+| 11-18 | `h-argon` | Rust attributed `const fn` / `extern "C" fn` keep their name instead of the attribute's (`skip_modifiers` + `c_style_head`) | repro 4/4 symbol mismatch → 0, own `src/` 0/33 (Rust corpus not on box); kt 1053/1123 held |
+| 11-18 | `db22f1e` | JS/TS leading binary operators (`==`, `!=`, `<=`, `<<`, `**`, `/`, `%`, `\|`, `&`, `^`, `<`) continue a multi-line statement | repro 4/6 → 0 (JS/TS corpora not on box); kt 1053/1123 held |
 | 11-18 | `6bad7d7` | Go `func(...)` literal is not a call to `func` | repro 2 → 0, Go fixtures 8/8 deep (Go corpus not on box); kt 1053/1123 held |
 | 11-11 19:36 | `72b3807` | an object literal keeps its boolean values | own-tree goal closed: 0/33 |
 | 11-11 21:37 | `9127ff1` | a declaration header is not a call | ts 1375 → 869 |

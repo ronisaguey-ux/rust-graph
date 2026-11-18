@@ -1271,7 +1271,10 @@ impl<'a> Parser<'a> {
                     "actual" | "expect" | "suspend" | "operator" | "infix" | "tailrec" | "lateinit" | "noinline"
                         | "crossinline" | "vararg" | "reified" | "annotation"
                 );
-            if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier {
+            // `pub const fn` and `pub const unsafe extern "C" fn`: in Rust
+            // `const` qualifies a function item just like `async` and `unsafe`.
+            let rust_modifier = self.lang.tag == "RS" && word == "const";
+            if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier && !rust_modifier {
                 break;
             }
             index += 1;
@@ -1281,6 +1284,11 @@ impl<'a> Parser<'a> {
                 } else {
                     break;
                 }
+            } else if self.lang.tag == "RS"
+                && word == "extern"
+                && toks.get(index).is_some_and(|t| t.kind == Kind::Str)
+            {
+                index += 1;
             }
         }
         index
@@ -4018,7 +4026,7 @@ impl<'a> Parser<'a> {
         if let Some(head) = self.assigned_head(toks) {
             return Some(head);
         }
-        (at_block && self.uses_braces()).then(|| self.c_style_head(toks)).flatten()
+        (at_block && self.uses_braces()).then(|| self.c_style_head(&toks[start..])).flatten()
     }
 
     /// A statement of constants, braces and commas alone: no name, no call,

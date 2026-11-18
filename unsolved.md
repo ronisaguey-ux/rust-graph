@@ -133,6 +133,12 @@ The next fix is therefore the guard — compare an unpaired lexer symbol's event
 against the file's rows instead of skipping the symbol — and only then the
 lexer. Both edits were reverted with `git checkout -- src/parser.rs`.
 
+**Update (2026-11-18):** `skip_modifiers` and `function_head` (`261a215`, `320ab65`)
+now skip leading `#[...]` attributes for plain `fn` and `mod`, and `h-argon`
+closed the remaining `const fn` and `extern "C" fn` cases so `c_style_head` never
+reads a Rust attribute's `(` as a function name. The guard's skip of unpaired
+lexer symbols (`src/pipeline.rs`) remains open.
+
 ## 5. TypeScript: a `.d.ts` declaration is not a runtime call — 4 rows
 
 `is_type_property_line` now excuses a *call* on a `.d.ts` member line the same
