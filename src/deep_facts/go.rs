@@ -2444,15 +2444,15 @@ fn dotted_piece(text: &str) -> bool {
             if kind == "ERROR" || kind.starts_with("ERROR") || kind.contains("MISSING") {
                 recovered = true;
             }
+            if value.is_none() && arguments.is_none() && matches!(kind, "identifier" | "simple_identifier" | "file") {
+                names.push(self.text_string(child));
+                continue;
+            }
             if self.is_layout(child) || kind == "=" {
                 continue;
             }
             if kind == "arguments" || kind == "argument_list" {
                 arguments = Some(child);
-                continue;
-            }
-            if value.is_none() && matches!(kind, "identifier" | "simple_identifier") {
-                names.push(self.text_string(child));
                 continue;
             }
             value = Some(child);
