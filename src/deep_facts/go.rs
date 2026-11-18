@@ -700,6 +700,26 @@ impl<'a> Walker<'a> {
             };
         }
         if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression") {
+            let callee = self.decl_callee(id);
+            // `NewBuilder(foo).WithCount(count(baz)).Build()`, `makeFn(prep(a))(b)`,
+            // `getItems(makeKey(x))[pickIdx(x)].Render()`: when the receiver chain
+            // carries calls of its own, form that receiver expression directly so
+            // every intermediate call, its arguments, and its names reach the record.
+            let receiver = match self.decl_receiver_expr(id, callee) {
+                Some(expr) => self.decl_value(expr),
+                None => {
+                    let path = self.decl_path(callee);
+                    match path.rsplit_once('.') {
+                        Some((head, _)) if !head.is_empty() => {
+                            let mut out = "[\"n\",".to_string();
+                            push_string(&mut out, head);
+                            out.push(']');
+                            out
+                        }
+                        _ => "0".to_string(),
+                    }
+                }
+            };
             let index = self.decl_call(id);
             let args = self
                 .children(id)
@@ -707,22 +727,6 @@ impl<'a> Walker<'a> {
                 .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
                 .map(|list| self.arguments(list))
                 .unwrap_or_else(|| "[]".to_string());
-            let callee = self.decl_callee(id);
-            // `ts.Listener.Addr().String()`: the receiver is a call of its own,
-            // and the lexer records it as one. Reading only the outer call lost
-            // every chained call in Go (57 of the 96 remaining fallbacks on
-            // net/http were exactly this shape).
-            self.record_receiver_calls(callee);
-            let path = self.decl_path(callee);
-            let receiver = match path.rsplit_once('.') {
-                Some((head, _)) if !head.is_empty() => {
-                    let mut out = "[\"n\",".to_string();
-                    push_string(&mut out, head);
-                    out.push(']');
-                    out
-                }
-                _ => "0".to_string(),
-            };
             return format!("[\"c\",{index},{receiver},{args}]");
         }
         // C# `[Attr(…)]`: the lexer reads an attribute section as a value with
@@ -1005,28 +1009,37 @@ impl<'a> Walker<'a> {
     }
 
 
-    /// Record every call that sits in a callee's receiver chain.
-    pub(crate) fn record_receiver_calls(&mut self, callee: u32) {
-        let mut node = callee;
-        for _ in 0..8 {
+    /// The receiver expression of a chained call when it contains a call of its
+    /// own (`a(x).b(y)`, `f(x)(y)`, `getItems(k)[idx()].Render()`).
+    pub(crate) fn decl_receiver_expr(&self, call: u32, callee: u32) -> Option<u32> {
+        if callee == call {
+            return None;
+        }
+        match self.kind(callee) {
+            "call_expression" | "method_invocation" | "object_creation_expression" => Some(callee),
+            "selector_expression" | "member_expression" | "field_access" => {
+                let object = self.children(callee).into_iter().find(|&child| !self.is_layout(child))?;
+                (object != call && self.decl_has_call(object)).then_some(object)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `id` contains a call node outside nested closures/blocks.
+    fn decl_has_call(&self, id: u32) -> bool {
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
             match self.kind(node) {
-                // `reflect.New(t).Elem().Interface()`: the receiver of a call is
-                // a call of its own, and the chain continues through its callee -
-                // the walk stopped at that call before, so the innermost call
-                // kept no row while the lexer wrote one.
-                "call_expression" | "method_invocation" | "object_creation_expression" => {
-                    self.decl_call(node);
-                    node = self.decl_callee(node);
+                "call_expression" | "method_invocation" | "object_creation_expression" => return true,
+                "func_literal" | "block" | "lambda_expression" | "arrow_function" => {}
+                _ => {
+                    for child in self.children(node) {
+                        stack.push(child);
+                    }
                 }
-                "selector_expression" | "member_expression" | "field_access" => {
-                    let Some(object) = self.children(node).into_iter().find(|&child| !self.is_layout(child)) else {
-                        return;
-                    };
-                    node = object;
-                }
-                _ => return,
             }
         }
+        false
     }
 
     /// The callee of a call node: the expression before the argument list.
@@ -4142,7 +4155,8 @@ fn dotted_piece(text: &str) -> bool {
             // lines - `RemoteExecutor.Invoke(x,\n  new Options { .. })
             // .DisposeAsync();` - was dated to the receiver's first line, and the
             // one-pass reader dates a call to its name (84 files).
-            "attribute" | "member_expression" | "navigation_expression" | "member_access" => {
+            "attribute" | "member_expression" | "navigation_expression" | "member_access"
+            | "selector_expression" | "field_access" => {
                 let children = self.children(callee);
                 if let Some(&name) = children.iter().rev().find(|&&child| {
                     self.node(child).first_child == NONE && !self.is_layout(child)
