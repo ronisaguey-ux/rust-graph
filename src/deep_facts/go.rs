@@ -3369,7 +3369,7 @@ fn dotted_piece(text: &str) -> bool {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
-            "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern" | "array_pattern" => {
+            "collection_literal" | "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern" | "array_pattern" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 if items.is_empty() {
                     "0".to_string()
