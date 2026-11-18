@@ -1599,6 +1599,26 @@ impl<'a> Walker<'a> {
             // as a header statement (`m:[n:companion,n:object,n:Name]`), and no
             // arm wrote an event for the tree's `companion_object`, so every
             // class that declares one lost that line.
+            // `when (x) { f<T>() -> ... }`: a `when_entry` condition is not an
+            // `expression_statement`, so calls in the condition were never
+            // visited by `form`.
+            "when_entry" if self.is_kotlin() => {
+                for child in self.children(id) {
+                    if self.is_layout(child) || matches!(self.kind(child), "else" | "->" | "expression_statement" | "block") {
+                        continue;
+                    }
+                    self.form(child);
+                }
+            }
+            "constructor_delegation" if self.is_kotlin() => {
+                if let Some(list) = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                {
+                    let _ = self.arguments(list);
+                }
+            }
             "companion_object" if self.is_kotlin() => self.java_header_event(id),
             // `val x = object : B() { }`: a supertype constructor is not a
             // `call_expression`, so no arm recorded the call the lexer reads
