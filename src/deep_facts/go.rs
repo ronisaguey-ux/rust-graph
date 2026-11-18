@@ -3232,6 +3232,7 @@ fn dotted_piece(text: &str) -> bool {
             // expression does, and read as a wrapper the right operand left the
             // record - every `?: error("...")` lost the call in its fallback.
             | "elvis_expression"
+            | "is_expression"
             // `a if c else b` holds three values and every one is read; the
             // condition is where `x if p(v) else y` calls `p`. `(n := f())` is
             // the same: the value is on the right, the name on the left.
@@ -4167,7 +4168,7 @@ fn dotted_piece(text: &str) -> bool {
         starts_a_word
             && !matches!(
                 text.as_str(),
-                "in" | "instanceof" | "of" | "as" | "satisfies" | "typeof" | "void" | "delete" | "new" | "await" | "yield"
+                "in" | "is" | "instanceof" | "of" | "as" | "satisfies" | "typeof" | "void" | "delete" | "new" | "await" | "yield"
             )
     }
 
