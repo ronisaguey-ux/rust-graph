@@ -12,7 +12,8 @@ ts **453/2000**.
 
 | when | commit | what it fixed | measured |
 |---|---|---|---|
-| 11-18 | `h-argon` | Go/Java chained calls form receiver call expressions (keeping intermediate args, nested calls, long chains, indexed calls) and stamp `selector_expression`/`field_access` calls on the member line (`decl_value`, `decl_receiver_expr`, `call_line`) | repro 7/7 → 0, Go fixtures 8/8 deep (Go corpus not on box); kt 1053/1123 → **1034/1103** (-19 files, 0 regressions) |
+| 11-18 | `h-argon` | Go `type (...)` / `type T ...` declarations do not emit fake calls for `type` or interface method signatures (`statement`) | repro 4/7 → 7/7 deep (1 fallback + 2 lexer:more → 0), Go fixtures 8/8 deep (Go corpus not on box); kt 1034/1103 held |
+| 11-18 | `e5440cb` | Go/Java chained calls form receiver call expressions (keeping intermediate args, nested calls, long chains, indexed calls) and stamp `selector_expression`/`field_access` calls on the member line (`decl_value`, `decl_receiver_expr`, `call_line`) | repro 7/7 → 0, Go fixtures 8/8 deep (Go corpus not on box); kt 1053/1123 → **1034/1103** (-19 files, 0 regressions) |
 | 11-18 | `65b6930` | Rust `match` inside a macro token tree (`json!({ "a": match … })`) emits `n:match` like `match_expression` (`rust_tt_value`) | repro 2 → 0, own `src/`+`tests/` 0 fallbacks (Rust corpus not on box); kt 1053/1123 held |
 | 11-18 | `7ed44a6` | Rust `=` inside call/macro arguments (`cfg!(all(feature = "deep"))`, `g(x = 1)`) is a merge, not a keyword arg (`Emit::argument`) | repro 2/2 → 0, own `tests/` 56/56 deep (`benchmark.rs` 1 → 0), `src/` 0 fallbacks (Rust corpus not on box); kt 1053/1123 held |
 | 11-18 | `82bce87` | TS braced/mapped types inside a function's open `<...>` type-arg or type-param list do not open a body (`angle_depth` + `is_block`) | repro 3/10 → 0, TS fixtures 12/12 deep (TS corpus not on box); kt 1053/1123 held |

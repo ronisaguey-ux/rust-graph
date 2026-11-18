@@ -4225,6 +4225,13 @@ impl<'a> Parser<'a> {
         if matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(stmt) {
             return;
         }
+        // Go's `type (...)` and `type T ...` declarations bind types, never
+        // runtime calls. Read as an expression, a grouped `type ( Reader
+        // interface { Read(p []byte) (int, error) } )` turned `type` and every
+        // interface method specification into a call the CST never writes.
+        if self.lang.tag == "GO" && self.word_at(stmt, 0).as_deref() == Some("type") {
+            return;
+        }
         // A type body writes no facts: its statements are members, not values.
         if self.frames.iter().any(|frame| frame.type_only) {
             return;
