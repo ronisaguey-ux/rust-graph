@@ -1632,12 +1632,12 @@ impl<'a> Walker<'a> {
             // `get() = foo()` writes the same expression straight onto the
             // accessor, with no `function_body` between them.
             "accessor" if self.is_kotlin() => {
-                let body = self.children(id).into_iter().rev().find(|&child| {
-                    !matches!(
-                        self.kind(child),
-                        "block" | "=" | "get" | "set" | "modifiers" | "accessor_parameters"
-                    )
-                });
+                let children = self.children(id);
+                let body = children
+                    .iter()
+                    .position(|&child| self.kind(child) == "=")
+                    .and_then(|at| children.get(at + 1).copied())
+                    .filter(|&child| !self.is_layout(child));
                 if let Some(body) = body {
                     let line = self.line(body);
                     let value = self.form(body);

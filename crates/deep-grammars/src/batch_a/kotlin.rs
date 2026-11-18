@@ -378,7 +378,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// `override var size: Int = 0` / `private set`: a bare accessor has no
     /// body at all, and requiring one turned the whole property into a recovery
     /// (ArrayDeque.kt's every `private set`).
-    accessor: [modifiers] ("get" | "set") [accessor_parameters] [("=" _expression | block)],
+    accessor: [modifiers] ("get" | "set") [accessor_parameters] [":" _type] [("=" _expression | block)],
     accessor_parameters: "(" [parameter] ")",
 
     enum_body: "{" (enum_entry %? ",") [";" _member*] "}",
