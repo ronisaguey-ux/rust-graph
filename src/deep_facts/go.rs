@@ -2368,6 +2368,9 @@ impl<'a> Walker<'a> {
 /// (an identifier in the source's own language). A node whose text fails this is
 /// not a segment — an argument list, a star, an `as` clause.
 fn dotted_piece(text: &str) -> bool {
+    if text.starts_with('`') && text.ends_with('`') && text.len() > 2 {
+        return true;
+    }
     !text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || c == '_' || !c.is_ascii())
 }
 
@@ -4096,7 +4099,7 @@ fn dotted_piece(text: &str) -> bool {
             if text.is_empty() {
                 continue;
             }
-            if text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'#' || text[0] == b'$' {
+            if text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'#' || text[0] == b'$' || text[0] == b'`' {
                 return String::from_utf8_lossy(text).trim_start_matches('#').to_string();
             }
         }
