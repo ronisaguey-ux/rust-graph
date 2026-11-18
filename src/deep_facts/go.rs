@@ -1126,7 +1126,9 @@ impl<'a> Walker<'a> {
                 }
                 self.decl_path(callee)
             }
-            "index_expression" => self.children(id).first().map(|&base| self.decl_path(base)).unwrap_or_default(),
+            "index_expression" | "array_access" => {
+                self.children(id).first().map(|&base| self.decl_path(base)).unwrap_or_default()
+            }
             // `[]byte(x)`, `*T`, `map[K]V`: a conversion names its type, and the
             // lexer reads the type's own name as the callee.
             "array_type" | "pointer_type" | "map_type" | "slice_type" | "channel_type" => self
