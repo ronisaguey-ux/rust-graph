@@ -4314,7 +4314,17 @@ impl<'a> Parser<'a> {
             && !(self.lang.tag == "SWIFT" && self.swift_declares_only(stmt))
             && !(self.lang.tag == "KT" && self.kotlin_declares_only(stmt))
         {
-            self.expression_event("x", stmt);
+            let expr = if self.lang.tag == "KT"
+                && stmt.len() > 3
+                && self.is_op(&stmt[0], b"@")
+                && stmt[1].kind == Kind::Ident
+                && self.is_op(&stmt[2], b":")
+            {
+                &stmt[3..]
+            } else {
+                stmt
+            };
+            self.expression_event("x", expr);
         }
     }
 
