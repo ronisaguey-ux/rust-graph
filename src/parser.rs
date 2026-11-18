@@ -4327,6 +4327,52 @@ impl<'a> Parser<'a> {
     /// keyword is the declaration itself (`@objc func f()`) and keeps its
     /// event.
     fn swift_declares_only(&self, stmt: &[Token]) -> bool {
+        let mut index = 0;
+        while index < stmt.len() {
+            let token = &stmt[index];
+            if self.is_op(token, b"@") {
+                index += 1;
+                while index < stmt.len() && stmt[index].kind == Kind::Ident {
+                    index += 1;
+                    if index < stmt.len() && self.is_op(&stmt[index], b".") {
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+                if index < stmt.len() && self.is_op(&stmt[index], b"(") {
+                    if let Some(close) = self.matching_close(stmt, index) {
+                        index = close + 1;
+                    } else {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            if token.kind == Kind::Ident {
+                let word = self.text(token);
+                if matches!(
+                    word.as_str(),
+                    "public" | "private" | "internal" | "fileprivate" | "open" | "package"
+                        | "static" | "class" | "final" | "override" | "required" | "convenience"
+                        | "dynamic" | "mutating" | "nonmutating" | "lazy" | "weak" | "unowned"
+                        | "nonisolated" | "async" | "indirect" | "consuming" | "borrowing"
+                        | "distributed" | "optional"
+                ) {
+                    index += 1;
+                    if index < stmt.len() && self.is_op(&stmt[index], b"(") {
+                        if let Some(close) = self.matching_close(stmt, index) {
+                            index = close + 1;
+                        } else {
+                            return false;
+                        }
+                    }
+                    continue;
+                }
+                return matches!(word.as_str(), "let" | "var" | "deinit" | "associatedtype" | "import");
+            }
+            return false;
+        }
         stmt.first().is_some_and(|token| self.is_op(token, b"@"))
     }
 
@@ -4453,7 +4499,7 @@ impl<'a> Parser<'a> {
             }
             return false;
         }
-        false
+        stmt.first().is_some_and(|token| self.is_op(token, b"@"))
     }
 
     fn java_declares_only(&self, stmt: &[Token]) -> bool {
