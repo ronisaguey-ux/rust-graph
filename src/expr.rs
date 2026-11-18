@@ -250,22 +250,44 @@ impl Emit<'_> {
 
     fn skip_return_type(&self, mut index: usize) -> Option<usize> {
         let mut depth = 0usize;
+        let mut body = None;
         loop {
-            let token = self.toks.get(index)?;
+            let Some(token) = self.toks.get(index) else {
+                return body;
+            };
             if token.kind == Kind::Op {
                 let raw = &self.src[token.start as usize..token.end as usize];
                 match raw {
                     b"(" | b"[" | b"<" => depth += 1,
                     b")" | b"]" | b">" => {
                         if depth == 0 {
-                            return None;
+                            return body;
                         }
                         depth -= 1;
                     }
-                    b"{" if depth == 0 => return Some(index),
+                    b"{" if depth == 0 => {
+                        body = Some(index);
+                        // A braced return type (`: { x: number } | null { … }`) is
+                        // followed by type continuations and the method body `{`; a
+                        // method body is followed by `,` or `}`.
+                        let Some(after) = self.skip_balanced(index, b"{", b"}") else {
+                            return body;
+                        };
+                        let continues = self.toks.get(after).is_some_and(|next| {
+                            let next_raw = &self.src[next.start as usize..next.end as usize];
+                            (next.kind == Kind::Op
+                                && matches!(next_raw, b"{" | b"|" | b"&" | b"[" | b"?" | b":"))
+                                || (next.kind == Kind::Ident && next_raw == b"extends")
+                        });
+                        if !continues {
+                            return body;
+                        }
+                        index = after;
+                        continue;
+                    }
                     b"{" => depth += 1,
                     b"}" if depth > 0 => depth -= 1,
-                    b"," | b";" | b"=" | b"}" if depth == 0 => return None,
+                    b"," | b";" | b"=" | b"}" if depth == 0 => return body,
                     _ => {}
                 }
             }
