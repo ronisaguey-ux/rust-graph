@@ -698,6 +698,13 @@ impl<'a> Parser<'a> {
             })
     }
 
+    /// `enum class Kind {` in Kotlin: the body holds entries, and an entry
+    /// with a body (`A { … }`) states no value of its own.
+    fn kotlin_enum_body(&self) -> bool {
+        self.lang.tag == "KT"
+            && self.stmt.iter().any(|token| token.kind == Kind::Ident && self.raw(token) == b"enum")
+    }
+
     fn on_open_brace(&mut self, token: Token) {
         let opens_block = self.uses_braces() && self.is_block();
         if opens_block {
@@ -713,7 +720,12 @@ impl<'a> Parser<'a> {
                     self.word_at(&self.stmt, index).is_some_and(|w| matches!(w.as_str(), "struct" | "enum" | "union"))
                 })
                 || self.c_enum_body()
-                || self.go_type_body();
+                || self.go_type_body()
+                // `enum class Kind { A { … }, B { … } }`: an entry's body is a
+                // type body too, and the entry itself (`A {`) is a member, not
+                // a value. Read as a statement it wrote `x n:A`, which the CST
+                // never writes (12 files of the kotlin dump).
+                || self.kotlin_enum_body();
             // The header is a declaration and a type: `declare var M: typeof
             // globalThis extends`. Only the declarator is a name the CST writes;
             // `globalThis` and `extends` are type text here, and writing them
