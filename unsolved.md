@@ -55,7 +55,11 @@ that window is load-bearing: it is what stops a duplicate target on another line
 standing in for the event that lost its value (`covers`'s `Miss::Line` comment).
 
 Widening the window is the only mechanical fix and it trades a false negative
-for a false positive in both directions. **Not attempted.**
+for a false positive in both directions. **Not attempted.** Instead, the lexer
+now continues JS/TS statements across leading binary/comparison operators on the
+next line (`next_starts_with_ternary` in `src/parser.rs`: `||`, `&&`, `??`,
+`==`, `!=`, `<=`, `<<`, `**`, `* `, `+ `, `- `, `/ `, `% `, `| `, `& `, `^ `,
+`< `), keeping multi-line chains on one statement line without touching the guard.
 
 Not every row in this clause is that mechanism. `000032_index.js:783-786`
 (`exports.Browser = capabilities.Browser`) is inside a function body the CST
