@@ -41,6 +41,11 @@ const RS_NOISE: [&str; 20] = [
     "ref", "unsafe", "pub", "move", "try", "use",
 ];
 const NAMED_ARGS_WITH_COLON: [&str; 5] = ["RB", "CR", "SWIFT", "DART", "EX"];
+/// Words [`NOISE`] lists for another language that are ordinary Kotlin names.
+/// `my` is Perl's declarator and `let` is a stdlib function Kotlin calls:
+/// skipping them lost the first segment of `package my.qa.noname` (`qa.noname`
+/// against `my.qa.noname`) and the callee of `text.let { … }`.
+const KT_NAMES: [&str; 4] = ["my", "local", "our", "let"];
 /// Kotlin keywords that take a parenthesised header without being a call.
 /// `when` is a keyword in Kotlin and a name nowhere, so `when (x) { … }` read as
 /// the call `when(x)` in every file that used it as a value (`val p = when (x) …`),
@@ -1303,7 +1308,8 @@ impl Emit<'_> {
         } else if self.lang.tag == "PY" {
             PY_NOISE.contains(&word.as_str())
         } else if self.lang.tag == "KT" {
-            NOISE.contains(&word.as_str()) || KT_NOISE.contains(&word.as_str())
+            (NOISE.contains(&word.as_str()) && !KT_NAMES.contains(&word.as_str()))
+                || KT_NOISE.contains(&word.as_str())
         } else if self.lang.tag == "RS" {
             // `async move { … }` / `move ||`: `move` names a closure, not a
             // binding; the CST writes no value for it.
