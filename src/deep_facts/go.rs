@@ -2914,7 +2914,11 @@ fn dotted_piece(text: &str) -> bool {
             // name, not as a call, so the value is the name and the call below
             // is still recorded for the resolver.
             if self.is_kotlin() {
-                if let Some(name) = self.kotlin_dsl_name(id) {
+                if self.in_kotlin_expr_body {
+                    if let Some(out) = self.kotlin_expr_call_form(id) {
+                        return out;
+                    }
+                } else if let Some(name) = self.kotlin_dsl_name(id) {
                     let _ = self.call_form_link(id);
                     let mut out = "[\"n\",".to_string();
                     push_string(&mut out, &name);
@@ -3292,6 +3296,26 @@ fn dotted_piece(text: &str) -> bool {
                     .children(id)
                     .into_iter()
                     .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "as" | "?"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            "lambda_literal" | "annotated_lambda" | "labeled_lambda" | "lambda_body" | "lambda_items" | "destructuring_parameter"
+                if self.is_kotlin() =>
+            {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| {
+                        !self.is_layout(child)
+                            && !matches!(
+                                self.kind(child),
+                                "{" | "}" | "(" | ")" | "->" | "," | ":" | ";" | "LINE_END" | "@"
+                            )
+                    })
                     .collect();
                 match items.len() {
                     0 => "0".to_string(),
@@ -3946,6 +3970,38 @@ fn dotted_piece(text: &str) -> bool {
         }
         out.push_str("]]");
         out
+    }
+
+    /// A Kotlin call with a trailing lambda inside an expression body: the
+    /// one-pass reader merges the callee (or parenthesized call) with the
+    /// lambda body rather than dropping the trailing lambda.
+    fn kotlin_expr_call_form(&mut self, id: u32) -> Option<String> {
+        let children = self.children(id);
+        let lam = children
+            .iter()
+            .copied()
+            .find(|&child| matches!(self.kind(child), "lambda_literal" | "annotated_lambda" | "labeled_lambda"))?;
+        let has_args = children
+            .iter()
+            .any(|&child| matches!(self.kind(child), "argument_list" | "arguments"));
+        let head = if has_args {
+            self.call_form(id)
+        } else {
+            let callee = children.iter().copied().find(|&child| {
+                !matches!(
+                    self.kind(child),
+                    "argument_list" | "arguments" | "type_arguments" | "(" | ")" | "lambda_literal" | "annotated_lambda" | "labeled_lambda"
+                )
+            })?;
+            let form = self.form(callee);
+            let path = self.path_of(callee);
+            if !path.is_empty() {
+                self.push_call(path, self.call_line(callee, id));
+            }
+            form
+        };
+        let lam_form = self.form(lam);
+        Some(format!("[\"m\",[{head},{lam_form}]]"))
     }
 
     /// The name of a Kotlin DSL call: an identifier followed by a single

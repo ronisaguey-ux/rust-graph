@@ -499,6 +499,7 @@ struct Walker<'a> {
     /// one call and one index, which is what the text in the event refers to
     /// (P5-11).
     call_texts: std::collections::HashMap<u32, String>,
+    in_kotlin_expr_body: bool,
 }
 
 /// The deep language for a lexer tag (`langs::Language::tag`), or `None` when
@@ -574,6 +575,7 @@ impl<'a> Walker<'a> {
             macro_prefix: None,
             statement_lines: std::collections::HashMap::new(),
             call_texts: std::collections::HashMap::new(),
+            in_kotlin_expr_body: false,
         }
     }
 
@@ -1639,7 +1641,10 @@ impl<'a> Walker<'a> {
                     .filter(|&child| !self.is_layout(child));
                 if let Some(body) = body {
                     let line = self.line(body);
+                    let was = self.in_kotlin_expr_body;
+                    self.in_kotlin_expr_body = true;
                     let value = self.form(body);
+                    self.in_kotlin_expr_body = was;
                     // A property's accessor is an assignment to the lexer — it
                     // files the body on that line as an `x` event — while a
                     // function's expression body is its `r` value. Written as
