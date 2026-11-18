@@ -1680,10 +1680,92 @@ impl Emit<'_> {
         None
     }
 
+    /// The offset just past a Kotlin annotation at the cursor: `@Name`,
+    /// `@get:Name`, `@a.b.Name("arg")`, or a bracketed list
+    /// `@[Suppress("x") OptIn(Y::class)]`.
+    fn kt_annotation_end(&self) -> Option<usize> {
+        let text = |token: &Token| -> String {
+            String::from_utf8_lossy(&self.src[token.start as usize..token.end as usize]).into_owned()
+        };
+        let mut index = self.pos + 1;
+        let first = self.toks.get(index)?;
+        if first.kind == Kind::Op && text(first) == "[" {
+            let mut depth = 0usize;
+            while let Some(token) = self.toks.get(index) {
+                if token.kind == Kind::Op {
+                    match text(token).as_str() {
+                        "[" => depth += 1,
+                        "]" => {
+                            depth -= 1;
+                            index += 1;
+                            if depth == 0 {
+                                return Some(index);
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                index += 1;
+            }
+            return None;
+        }
+        let mut named = false;
+        while let Some(token) = self.toks.get(index) {
+            if token.kind != Kind::Ident {
+                break;
+            }
+            named = true;
+            index += 1;
+            match self.toks.get(index) {
+                Some(op) if op.kind == Kind::Op && matches!(text(op).as_str(), "." | ":") => {
+                    index += 1
+                }
+                _ => break,
+            }
+        }
+        if !named {
+            return None;
+        }
+        if self.toks.get(index).is_some_and(|token| token.kind == Kind::Op && text(token) == "(") {
+            let mut depth = 0usize;
+            while let Some(token) = self.toks.get(index) {
+                if token.kind == Kind::Op {
+                    match text(token).as_str() {
+                        "(" => depth += 1,
+                        ")" => depth -= 1,
+                        _ => {}
+                    }
+                }
+                index += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        Some(index)
+    }
+
     fn chain(&mut self, out: &mut String, mut value: String, mut path: String, line: u32) {
         let mut constructed = None;
         let mut type_arg_line = None;
         loop {
+            // `-> @Suppress("UNCHECKED_CAST") (ReverseOrderComparator as
+            // Comparator<T>)`: in Kotlin an annotation decorates an expression
+            // as well as a declaration. Read as a value its name became a call
+            // the CST never writes (`call Suppress line 302 in reversed`,
+            // stdlib Comparisons.kt); the annotated expression is the value and
+            // the annotation names nothing. Only in front of a value: a label
+            // (`return@f`) follows a word, not an operator.
+            if self.lang.tag == "KT"
+                && self.is_op(0, b"@")
+                && (self.pos == 0 || self.toks[self.pos - 1].kind == Kind::Op)
+            {
+                if let Some(after) = self.kt_annotation_end() {
+                    self.pos = after;
+                    continue;
+                }
+            }
             // `.collect::<Vec<_>>()`: a turbofish names a type, not a value.
             // Reading its words as names put `Vec` and `_` in the record where
             // the CST has a call and nothing else.
