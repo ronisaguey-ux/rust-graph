@@ -1582,9 +1582,10 @@ impl Emit<'_> {
                 self.pos += 1;
                 continue;
             }
-            // `z.string().brand<"username">()`: TypeScript type arguments before
-            // `(` are types, not `< ... >` comparisons or runtime constants.
-            if matches!(self.lang.tag, "TS" | "TSX") && self.is_op(0, b"<") {
+            // `z.string().brand<"username">()`, `tasks.withType<Jar>()`: type
+            // arguments before `(` are types, not `< ... >` comparisons or
+            // runtime constants.
+            if matches!(self.lang.tag, "TS" | "TSX" | "KT") && self.is_op(0, b"<") {
                 if let Some(after) = self.skip_ts_type_args(self.pos) {
                     type_arg_line = Some(self.toks[self.pos].line);
                     self.pos = after;
