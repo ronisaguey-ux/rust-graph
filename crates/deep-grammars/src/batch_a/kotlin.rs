@@ -401,7 +401,12 @@ rust_graph_deep::grammar! { KOTLIN {
         | "reified" _name [":" _type]
         | [annotations] _name [":" _type],
     type_arguments: "<" (_type_argument %? ",") _gt,
-    _type_argument: "*" | _type,
+    /// `Array<out T>`, `MutableList<in T>`: a type argument carries a variance
+    /// modifier, and without one `Array<out T>` stopped the receiver at `Array`
+    /// — the declaration took the receiver's name and its body was never walked
+    /// (the stdlib wasm/generated files).
+    _type_argument: "*" | (_variance)? _type,
+    _variance: "out" | "in",
     _gt: ">" | GT_JOINED,
 
     // ---- statements ----
