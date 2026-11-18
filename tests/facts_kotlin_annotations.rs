@@ -78,6 +78,18 @@ const ROWS: &[(&str, &str)] = &[
         "a qualified annotation with no arguments",
         "@kotlin.Suppress\nfun a() {}\n",
     ),
+    (
+        "annotation with collection literal and named arg",
+        "@JdkVersions(versions = [JavaVersion.VERSION_11], compatibleWithGradle = false)\nfun a() {}\n",
+    ),
+    (
+        "file annotation with empty args",
+        "@file:kotlin.jvm.JvmMultifileClass()\npackage p\n",
+    ),
+    (
+        "bracketed file annotation list",
+        "@file:[JvmName(\"MCF\") JvmMultifileClass]\npackage p\n",
+    ),
 ];
 
 #[test]
