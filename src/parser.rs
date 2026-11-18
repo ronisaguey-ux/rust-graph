@@ -4042,6 +4042,15 @@ impl<'a> Parser<'a> {
         if self.lang.tag == "KT" && self.kotlin_declares_only(stmt) {
             return;
         }
+        // `_intercepted` / `?: (context[ContinuationInterceptor]?.…)` and
+        // `this === other || other is Instant` / `&& this.nanosecondsOfSecond
+        // == other.nanosecondsOfSecond`: a line that opens with the operator
+        // continuing the statement above it belongs to that statement. The CST
+        // folds it in and writes no event, so reading it as a statement of its
+        // own invented one `x` per continuation (24 rows of the kotlin dump).
+        if self.lang.tag == "KT" && self.kotlin_continues(stmt) {
+            return;
+        }
         // A C header's data tables are fragments of an initializer, not
         // statements. musl includes `ctype/alpha.h` inside a declaration
         // (`static const unsigned char table[] = {` … `};`) and
@@ -4290,6 +4299,15 @@ impl<'a> Parser<'a> {
     /// corpus lost its line.
     /// A statement with a top-level `=` never reaches this: it is an
     /// assignment, and the initialiser is read as one.
+    /// A line that opens with the operator continuing the statement above it:
+    /// `?:`, `&&`, `||`, a chained `.`, or the `?` of a safe call. Such a line
+    /// states no value of its own.
+    fn kotlin_continues(&self, stmt: &[Token]) -> bool {
+        stmt.first().is_some_and(|token| {
+            token.kind == Kind::Op && matches!(self.raw(token), b"?" | b"&&" | b"||" | b".")
+        })
+    }
+
     fn kotlin_declares_only(&self, stmt: &[Token]) -> bool {
         let mut index = 0;
         // `@SinceKotlin("1.1") public actual typealias Error = java.lang.Error`:
