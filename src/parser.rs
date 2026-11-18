@@ -425,18 +425,23 @@ impl<'a> Parser<'a> {
                 .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
     }
 
-    /// How many `<` the open statement has not closed. A type-parameter or
-    /// type-argument list is the only reason TS leaves one open across a line.
+    /// How many `<` the open statement has not closed outside `(...)`/`[...]`/`{...}`.
+    /// A type-parameter or type-argument list is the only reason TS leaves one
+    /// open across a line; ignoring grouped `<`/`>` keeps default-parameter
+    /// comparisons like `function f(x = a < b) {` from looking like a type list.
     fn angle_depth(&self) -> i32 {
         let mut depth = 0;
+        let mut group = 0i32;
         for token in &self.stmt {
             if token.kind != Kind::Op {
                 continue;
             }
             match self.raw(token) {
-                b"<" => depth += 1,
-                b">" => depth -= 1,
-                b">>" => depth -= 2,
+                b"(" | b"[" | b"{" => group += 1,
+                b")" | b"]" | b"}" if group > 0 => group -= 1,
+                b"<" if group == 0 => depth += 1,
+                b">" if group == 0 => depth -= 1,
+                b">>" if group == 0 => depth -= 2,
                 _ => {}
             }
         }
@@ -1007,11 +1012,14 @@ impl<'a> Parser<'a> {
         // not the function body. `declare function f(...): { ... }` has no
         // body and stays handled by `on_open_brace` as `type_only`.
         // `export interface encodeKeys<` newline `  S extends Top & { … },`
-        // newline `> extends decodeTo<…> {`: the object type written inside a
-        // type-parameter list is not the declaration's body. Read as one, the
-        // header ended at the member's `}` and every line after it became a
-        // statement the CST never writes.
-        if matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(&self.stmt) && self.angle_depth() > 0 {
+        // newline `> extends decodeTo<…> {` and `export declare function req<T>(x: T): ZodObject<{ … }>;`:
+        // an object or mapped type inside an open `<…>` type-parameter or
+        // type-argument list is not the declaration's body. Read as one, its
+        // members became runtime statements the CST never writes.
+        if matches!(self.lang.tag, "TS" | "TSX")
+            && (self.type_declaration(&self.stmt) || self.has_def_word(&self.stmt))
+            && self.angle_depth() > 0
+        {
             return false;
         }
         // `[A] extends [B] ? { … } : …` — a brace after the `?` of a conditional
