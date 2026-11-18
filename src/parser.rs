@@ -1112,6 +1112,10 @@ impl<'a> Parser<'a> {
     /// above; what is left to rule out is a block in expression position, whose
     /// body can read as a shorthand list but carries a statement separator.
     fn field_key_ahead(&mut self) -> bool {
+        // Kotlin has no struct/object literals; `{ ... }` is always a block or lambda.
+        if self.lang.tag == "KT" {
+            return false;
+        }
         if self.peek_word(0).kind != Kind::Ident {
             return false;
         }

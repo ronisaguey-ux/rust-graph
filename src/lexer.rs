@@ -666,6 +666,19 @@ impl<'a> Lexer<'a> {
             }
             return self.token(Kind::Ident, start, line, col);
         }
+        // A Kotlin backticked identifier (`in`, `java-library`,
+        // `implementation(npm(decamelize))`) is one identifier, not backtick
+        // operators around inner tokens.
+        if self.lang.tag == "KT" && byte == b'`' {
+            let mut end = start + 1;
+            while end < self.src.len() && !matches!(self.src[end], b'`' | b'\n' | b'\r') {
+                end += 1;
+            }
+            if end > start + 1 && end < self.src.len() && self.src[end] == b'`' {
+                self.pos = end + 1;
+                return self.token(Kind::Ident, start, line, col);
+            }
+        }
         if is_ident_start(byte) || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS")) {
             while self.is_ident(self.peek(0)) {
                 self.pos += 1;
