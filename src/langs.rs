@@ -55,6 +55,8 @@ pub struct Language {
     pub block_comments: &'static [(&'static str, &'static str)],
     pub quotes: &'static [u8],
     pub triple_quotes: bool,
+    /// `/* a /* b */ c */` closes at the last `*/`, not the first.
+    pub nested_comments: bool,
     pub interp: Interp,
     /// `$x`, `@x`, `%x` name the same variable as `x`.
     pub sigils: bool,
@@ -113,6 +115,7 @@ const BASE: Language = Language {
     block_comments: &[("/*", "*/")],
     quotes: b"\"'",
     triple_quotes: false,
+    nested_comments: false,
     interp: Interp::None,
     sigils: false,
     ident_extra: b"",
@@ -298,6 +301,8 @@ pub const LANGUAGES: &[Language] = &[
         // single-line string it ended at the first newline and handed the
         // rest of the block to the reader as code (`th {`, `border: 1px …`).
         triple_quotes: true,
+        // Kotlin nests block comments, and a KDoc's code fence holds one.
+        nested_comments: true,
         semicolons: false,
         global_names: true,
         defs: &["fun"],

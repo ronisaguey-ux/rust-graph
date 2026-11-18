@@ -102,6 +102,36 @@ impl<'a> Lexer<'a> {
             || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS"))
     }
 
+    /// `/* outer /* inner */ outer */` nests in Kotlin and Rust: the first
+    /// `*/` closes the inner comment only. Stopping there handed the rest of a
+    /// KDoc to the statement reader, so the code fence
+    /// (`public fun uiTest() { /* … */ }`) and every line after it up to the
+    /// next statement were read as code, and the annotation following the KDoc
+    /// carried the fence's line number (6 files of the kotlin dump).
+    fn skip_block_nested(&mut self, open: &[u8], close: &[u8]) {
+        let mut depth = 1usize;
+        while self.pos < self.src.len() {
+            if self.src[self.pos..].starts_with(open) {
+                depth += 1;
+                self.pos += open.len();
+                continue;
+            }
+            if self.src[self.pos..].starts_with(close) {
+                depth -= 1;
+                self.pos += close.len();
+                if depth == 0 {
+                    return;
+                }
+                continue;
+            }
+            if self.src[self.pos] == b'\n' {
+                self.newline();
+            } else {
+                self.pos += 1;
+            }
+        }
+    }
+
     fn skip_to_newline(&mut self) {
         while self.pos < self.src.len() && self.src[self.pos] != b'\n' {
             self.pos += 1;
@@ -225,7 +255,11 @@ impl<'a> Lexer<'a> {
                 let needs_line_start = open.starts_with('=');
                 if !needs_line_start || self.pos == self.line_start {
                     self.pos += open.len();
-                    self.skip_until(close.as_bytes());
+                    if self.lang.nested_comments && *open == "/*" {
+                        self.skip_block_nested(open.as_bytes(), close.as_bytes());
+                    } else {
+                        self.skip_until(close.as_bytes());
+                    }
                     self.at_line_start = false;
                     continue;
                 }
