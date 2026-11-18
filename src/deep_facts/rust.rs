@@ -1233,7 +1233,13 @@ impl<'a> Walker<'a> {
                 continue;
             }
             let node = kids[start];
-            if !self.is_layout(node) {
+            // `match_expression` writes `["n","match"]` (matching `expr.rs`),
+            // and inside a macro token tree (`json!({ "a": match … })`) the
+            // grammar keeps `match` as a keyword leaf; without this arm the
+            // layout filter drops it and the lexer's `n:match` has no match.
+            if self.kind(node) == "match" {
+                parts.push("[\"n\",\"match\"]".to_string());
+            } else if !self.is_layout(node) {
                 parts.push(self.form(node));
             }
             at = start + 1;
