@@ -3299,6 +3299,18 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.merge_form(&items),
                 }
             }
+            "labeled_this" if self.is_kotlin() => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != "@")
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
             "not_null_expression" if self.is_kotlin() => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
@@ -3632,6 +3644,7 @@ fn dotted_piece(text: &str) -> bool {
                     if self.kind(child) == "template_name" {
                         let text = self.text_string(child);
                         let name = text.trim_start_matches('$');
+                        let name = if name == "this" { "self" } else { name };
                         if !name.is_empty() {
                             let mut out = "[\"n\",".to_string();
                             push_string(&mut out, name);
