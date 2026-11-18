@@ -2152,7 +2152,9 @@ impl<'a> Parser<'a> {
         {
             return false;
         }
-        let Some(head) = stmt.get(at) else { return false };
+        // `} __attribute__((packed));`: a standalone attribute after a struct
+        // or union body is compiler metadata, not a runtime call or value.
+        let Some(head) = stmt.get(at) else { return at > 0 };
         if head.kind != Kind::Ident {
             return false;
         }
