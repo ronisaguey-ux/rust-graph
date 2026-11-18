@@ -4071,6 +4071,12 @@ impl<'a> Parser<'a> {
         if self.lang.tag == "KT" && self.kotlin_entry_list(stmt) {
             return;
         }
+        // `context(KaSession)` in front of a declaration is a receiver list,
+        // not a call: the CST reads it as the declaration's context and writes
+        // nothing, while the expression reader filed `c context`.
+        if self.lang.tag == "KT" && self.kotlin_context_head(stmt) {
+            return;
+        }
         // A C header's data tables are fragments of an initializer, not
         // statements. musl includes `ctype/alpha.h` inside a declaration
         // (`static const unsigned char table[] = {` … `};`) and
@@ -4319,6 +4325,12 @@ impl<'a> Parser<'a> {
     /// corpus lost its line.
     /// A statement with a top-level `=` never reaches this: it is an
     /// assignment, and the initialiser is read as one.
+    /// `context(KaSession)`: the receiver list in front of a declaration.
+    fn kotlin_context_head(&self, stmt: &[Token]) -> bool {
+        self.word_at(stmt, 0).as_deref() == Some("context")
+            && stmt.get(1).is_some_and(|token| self.is_op(token, b"("))
+    }
+
     /// A statement that is only names separated by commas and closed by `;`:
     /// the entry list of an enum, which the CST reads as entries and never as
     /// a comma expression.
