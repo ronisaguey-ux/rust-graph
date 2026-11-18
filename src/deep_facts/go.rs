@@ -3184,6 +3184,17 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            "qualified_type" if self.is_kotlin() => {
+                let path = self.path_of(id);
+                if path.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    out
+                }
+            }
             // `longStrings[toInt()]`: Kotlin's indexed access is the base's
             // value, and a call written in the subscript is a fact of its own.
             // With no arm the node formed the constant 0 and the call in the
@@ -3270,6 +3281,21 @@ fn dotted_piece(text: &str) -> bool {
                 Some(value) => self.form(value),
                 None => "0".to_string(),
             },
+            // `x as Foo`, `x as? Foo.Bar`: Kotlin's cast names both the value
+            // and the target type to the one-pass reader; the shared unary arm
+            // kept only the operand and dropped the type.
+            "as_expression" if self.is_kotlin() => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "as" | "?"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
             "not_operator" | "unary_operator" | "unary_expression" | "await" | "await_expression" | "yield" | "yield_expression"
             | "typeof" | "void" | "non_null_expression" | "as_expression" | "satisfies_expression" | "type_assertion" | "delete_expression" => {
                 match self.expression_child(id) {
@@ -4279,7 +4305,8 @@ fn dotted_piece(text: &str) -> bool {
             // Kotlin spells `x.y` as `navigation_expression`. Read through the
             // default arm it named only its first leaf, so `DeprecationLevel.ERROR`
             // in a value formed as `DeprecationLevel`.
-            | "navigation_expression" => {
+            | "navigation_expression"
+            | "qualified_type" => {
                 let children = self.children(id);
                 let name = self.member_name(id);
                 let base = children.first().map(|&child| self.path_of(child)).unwrap_or_default();
