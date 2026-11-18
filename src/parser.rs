@@ -115,6 +115,10 @@ pub struct Parser<'a> {
     facts: Facts,
     /// A branch whose block just closed; the next word decides if it goes on.
     closed_branch: bool,
+    /// The line of the block that just closed, so a bare `name { … }` opening
+    /// a block on that same line continues the expression above it
+    /// (`} builder {`).
+    closed_line: u32,
     /// The next `{` belongs to an arm of the open branch.
     rearmed: bool,
     /// Pascal: a header waiting for its `begin`.
@@ -149,6 +153,7 @@ pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
         frames: Vec::with_capacity(8),
         facts: Facts { tag: lang.tag.to_string(), ..Facts::default() },
         closed_branch: false,
+        closed_line: 0,
         rearmed: false,
         pending: None,
         last_line: 1,
@@ -496,6 +501,19 @@ impl<'a> Parser<'a> {
                     token.kind == Kind::Ident && self.raw(token) == b"function"
                 })
                 && self.next_starts_with_brace(last.end as usize)
+            {
+                return;
+            }
+            // `class X(...) :` newline `Super(...)`: a heritage clause cannot
+            // end at the colon, so the newline is inside the declaration.
+            // Ended there, the supertype's constructor call became a value of
+            // its own on the continuation line, where the CST writes the class
+            // declaration on the header line instead (6 rows in one file).
+            if self.lang.tag == "KT"
+                && self.is_op(last, b":")
+                && self.stmt.iter().any(|token| {
+                    token.kind == Kind::Ident && matches!(self.raw(token), b"class" | b"interface")
+                })
             {
                 return;
             }
@@ -1341,6 +1359,14 @@ impl<'a> Parser<'a> {
     }
 
     fn open_block(&mut self) {
+        // A bare name opening a block right after a lambda block closed is the
+        // infix call that continues the expression above it (`} builder {` in
+        // `fn("x") { … } builder { … }`): the CST folds it in and writes
+        // nothing, while the one-pass reader filed `x n:builder` — 20 files of
+        // the kotlin dump.
+        let closed_line = std::mem::take(&mut self.closed_line);
+        let after_lambda = closed_line != 0
+            && self.stmt.first().is_some_and(|token| token.line == closed_line);
         let mut stmt = std::mem::take(&mut self.stmt);
         // `'descend: loop { … }` and `'label: { … }`: the label names the loop
         // or block for `continue`/`break` and is not its value. The CST writes
@@ -1523,7 +1549,13 @@ impl<'a> Parser<'a> {
         } else {
             let typedef_block = matches!(self.lang.tag, "C" | "CPP" | "OBJC")
                 && self.head_word(&stmt).as_deref() == Some("typedef");
-            self.statement(&stmt);
+            let infix_tail = self.lang.tag == "KT"
+                && after_lambda
+                && stmt.len() == 1
+                && stmt[0].kind == Kind::Ident;
+            if !infix_tail {
+                self.statement(&stmt);
+            }
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
@@ -1841,6 +1873,7 @@ impl<'a> Parser<'a> {
         if self.frames.len() <= 1 {
             return;
         }
+        self.closed_line = self.last_line;
         if self.top().kind == FrameKind::Control {
             self.closed_branch = true;
             return;
