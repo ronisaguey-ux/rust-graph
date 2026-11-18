@@ -192,6 +192,7 @@ rust_graph_deep::grammar! { OBJC {
         // one-pass reader - the macro's name, then the type and the name it
         // declares - and with no rule the macro was the whole item and the
         // declaration under it was recovered.
+        | &(plain_type_name _type_qualifier+ _declarator) declaration_statement
         | &(IDENT declaration_specifiers _declarator) export_macro_declaration
         | declaration_statement
         // `NS_ASSUME_NONNULL_BEGIN`, and every other bare macro that stands as
@@ -228,9 +229,10 @@ rust_graph_deep::grammar! { OBJC {
     /// open a private helper with - was two error nodes.
     static_user_function: "static" plain_type_name _declarator compound_statement,
 
-    declaration_statement: _user_type_declaration | &(declaration_specifiers plain_type_name _declarator) _qualified_user_declaration | _default_declaration,
-    _qualified_user_declaration: declaration_specifiers plain_type_name (_init_declarator % ",") ";",
-    _user_type_declaration: plain_type_name [_type_arguments] (_init_declarator % ",") ";",
+    declaration_statement: _user_type_declaration | &(declaration_specifiers plain_type_name _type_qualifier* _declarator) _qualified_user_declaration | _default_declaration,
+    _qualified_user_declaration: declaration_specifiers plain_type_name _type_qualifier* (_init_declarator % ",") ";",
+    _user_type_declaration: plain_type_name [_type_arguments] _type_qualifier* (_init_declarator % ",") ";",
+    _type_qualifier: "const" | "volatile" | KW_WEAK | KW_STRONG | KW_UNSAFE_UNRETAINED | KW_AUTORELEASING,
     _default_declaration: declaration_specifiers (_init_declarator % ",") ";",
     _init_declarator: _declarator ["=" _initializer],
     _initializer: designated_field | &(array_suffix "=") designated_index | _expression@assign | initializer_list,
@@ -318,6 +320,7 @@ rust_graph_deep::grammar! { OBJC {
         | objc_dynamic
         | &(declaration_specifiers) declaration_statement
         | &(plain_type_name _type_arguments) declaration_statement
+        | &(plain_type_name _type_qualifier+ _declarator) declaration_statement
         // `Foo f;`, `Foo *p = 0;`, `Foo a, b;`: a declaration whose type is a
         // class name. The guard names the line end, because `expect(command)
         // .notTo(beNil());` is also a name and a parenthesised declarator - and
