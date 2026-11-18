@@ -12,7 +12,8 @@ ts **453/2000**.
 
 | when | commit | what it fixed | measured |
 |---|---|---|---|
-| 11-18 | `h-argon` | TS braced/mapped types inside a function's open `<...>` type-arg or type-param list do not open a body (`angle_depth` + `is_block`) | repro 3/10 → 0, TS fixtures 12/12 deep (TS corpus not on box); kt 1053/1123 held |
+| 11-18 | `h-argon` | Rust `=` inside call/macro arguments (`cfg!(all(feature = "deep"))`, `g(x = 1)`) is a merge, not a keyword arg (`Emit::argument`) | repro 2/2 → 0, own `tests/` 56/56 deep (`benchmark.rs` 1 → 0), `src/` 0 fallbacks (Rust corpus not on box); kt 1053/1123 held |
+| 11-18 | `82bce87` | TS braced/mapped types inside a function's open `<...>` type-arg or type-param list do not open a body (`angle_depth` + `is_block`) | repro 3/10 → 0, TS fixtures 12/12 deep (TS corpus not on box); kt 1053/1123 held |
 | 11-18 | `c9e02fd` | TS object-literal methods with a braced return type (`: { ... } { ... }`, unions, arrays, conditionals) skip the full return type (`skip_return_type`) | repro 1/1 → 0, TS fixtures 12/12 deep (TS corpus not on box); kt 1053/1123 held |
 | 11-18 | `6e8438c` | Rust attributed `const fn` / `extern "C" fn` keep their name instead of the attribute's (`skip_modifiers` + `c_style_head`) | repro 4/4 symbol mismatch → 0, own `src/` 0/33 (Rust corpus not on box); kt 1053/1123 held |
 | 11-18 | `db22f1e` | JS/TS leading binary operators (`==`, `!=`, `<=`, `<<`, `**`, `/`, `%`, `\|`, `&`, `^`, `<`) continue a multi-line statement | repro 4/6 → 0 (JS/TS corpora not on box); kt 1053/1123 held |

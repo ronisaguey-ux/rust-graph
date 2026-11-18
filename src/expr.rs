@@ -298,11 +298,11 @@ impl Emit<'_> {
     fn argument(&mut self, out: &mut String, close: u8) {
         if let Some(name) = self.word(0) {
             let colon = self.op_byte(1) == b':' && NAMED_ARGS_WITH_COLON.contains(&self.lang.tag);
-            // `isNaN(it = +it)`: in JavaScript an `=` in an argument is an
-            // assignment expression, not a keyword argument — the CST writes
-            // the merge `m:[n:it,m:[n:it]]`, and `k(it)` was a shape the source
-            // never had.
-            let assigned = self.op_byte(1) == b'=' && !matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
+            // `isNaN(it = +it)` in JS/TS and `g(x = 1)` / `cfg!(all(feature = "deep"))`
+            // in Rust: `=` in an argument is an assignment expression or macro key-value
+            // token, not a keyword argument — the CST writes a merge, never `k(...)`.
+            let assigned =
+                self.op_byte(1) == b'=' && !matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX" | "RS");
             if assigned || colon {
                 self.pos += 2;
                 out.push_str("[\"k\",");
