@@ -2346,18 +2346,29 @@ impl<'a> Walker<'a> {
             return;
         }
         let module = parts.join(".");
-        for selector in selectors {
+        let mut index = 0;
+        while index < selectors.len() {
+            let selector = selectors[index];
             if self.is_layout(selector) || matches!(self.kind(selector), "import_selectors" | "," | "{" | "}") {
+                index += 1;
                 continue;
             }
             let name = self.text_string(selector);
+            let mut alias = name.clone();
+            if selectors.get(index + 1).is_some_and(|&next| self.kind(next) == "=>") {
+                if let Some(&target) = selectors.get(index + 2) {
+                    alias = self.text_string(target);
+                    index += 2;
+                }
+            }
             self.facts.imports.push(Import {
                 line,
                 module: module.clone(),
-                name: name.clone(),
-                alias: name,
+                name,
+                alias,
                 kind: IMPORT_MODULE,
             });
+            index += 1;
         }
     }
 
