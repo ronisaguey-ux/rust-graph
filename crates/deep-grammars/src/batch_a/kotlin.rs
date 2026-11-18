@@ -264,7 +264,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// A plain identifier starts a script statement. A contextual keyword does
     /// not: `data class X` and `abstract class X` are declarations, and a start
     /// set that both shares cannot be decided.
-    _script_head: IDENT ("." _name)*,
+    _script_head: (IDENT | "file") ("." _name)*,
 
     package_header: "package" _qualified_name,
     import_header: "import" _qualified_name ["as" _name],
@@ -291,7 +291,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// `@file:`, `@get:`, `@param:`: a use-site target is a word and a colon.
     /// `file` is a keyword token of its own (it is the one target that annotates
     /// the file rather than a declaration), so it is spelled out here.
-    _annotation_target: (_name | KW_FILE) ":",
+    _annotation_target: _name ":",
 
     // ---- declarations ----
 
@@ -569,7 +569,7 @@ rust_graph_deep::grammar! { KOTLIN {
     _name:
         IDENT | "abstract" | "actual" | "annotation" | "by" | "companion" | "const"
         | "constructor" | "context" | "crossinline" | "data" | "delegate" | "dynamic" | "enum"
-        | "expect" | "external" | "field" | "final" | "get" | "infix" | "init" | "inline"
+        | "expect" | "external" | "field" | "file" | "final" | "get" | "infix" | "init" | "inline"
         | "inner" | "internal" | "lateinit" | "noinline" | "open" | "operator" | "out"
         | "override" | "private" | "protected" | "public" | "reified" | "sealed" | "set"
         | "tailrec" | "value" | "vararg" | "where",
@@ -697,7 +697,7 @@ fn is_name(kind: Kind) -> bool {
         kind,
         IDENT | KW_ABSTRACT | KW_ACTUAL | KW_ANNOTATION | KW_BY | KW_COMPANION | KW_CONST
             | KW_CONSTRUCTOR | KW_CONTEXT | KW_CROSSINLINE | KW_DATA | KW_DELEGATE | KW_DYNAMIC
-            | KW_ENUM | KW_EXPECT | KW_EXTERNAL | KW_FIELD | KW_FINAL | KW_GET | KW_INFIX
+            | KW_ENUM | KW_EXPECT | KW_EXTERNAL | KW_FIELD | KW_FILE | KW_FINAL | KW_GET | KW_INFIX
             | KW_INIT | KW_INLINE | KW_INNER | KW_INTERNAL | KW_LATEINIT | KW_NOINLINE | KW_OPEN
             | KW_OPERATOR | KW_OUT | KW_OVERRIDE | KW_PRIVATE | KW_PROTECTED | KW_PUBLIC
             | KW_REIFIED | KW_SEALED | KW_SET | KW_SUSPEND | KW_TAILREC | KW_VALUE | KW_VARARG
