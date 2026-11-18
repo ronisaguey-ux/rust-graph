@@ -1082,7 +1082,11 @@ impl<'a> Parser<'a> {
             }
         }
         let last_word = self.word_at(&self.stmt, self.stmt.len() - 1);
-        if last_word.is_some_and(|word| VALUE_FOLLOWS.contains(&word.as_str())) {
+        // `int sides() const {`: in C++ a trailing `const` before `{` qualifies
+        // a member function, never a JS-style `const { a } = x` destructuring.
+        if last_word.is_some_and(|word| {
+            VALUE_FOLLOWS.contains(&word.as_str()) && !(self.lang.tag == "CPP" && word == "const")
+        }) {
             return false;
         }
         !(self.top_level_assign(&self.stmt).is_some() && !self.is_op(&last, b")"))
