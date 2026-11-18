@@ -1252,6 +1252,26 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+            if self.lang.tag == "KT" && toks.get(index).is_some_and(|t| self.is_op(t, b"@")) {
+                let mut next = index + 1;
+                if toks.get(next).is_some_and(|t| t.kind == Kind::Ident) {
+                    next += 1;
+                    while toks.get(next).is_some_and(|t| self.is_op(t, b"."))
+                        && toks.get(next + 1).is_some_and(|t| t.kind == Kind::Ident)
+                    {
+                        next += 2;
+                    }
+                    if toks.get(next).is_some_and(|t| self.is_op(t, b"(")) {
+                        if let Some((_, close)) = self.group_at(toks, next) {
+                            next = close + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    index = next;
+                    continue;
+                }
+            }
             let Some(word) = self.word_at(toks, index) else { break };
             if self.lang.defs.contains(&word.as_str()) || self.lang.classes.contains(&word.as_str()) {
                 break;
