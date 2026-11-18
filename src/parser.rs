@@ -4391,7 +4391,7 @@ impl<'a> Parser<'a> {
     /// states no value of its own.
     fn kotlin_continues(&self, stmt: &[Token]) -> bool {
         stmt.first().is_some_and(|token| {
-            token.kind == Kind::Op && matches!(self.raw(token), b"?" | b"&&" | b"||" | b".")
+            token.kind == Kind::Op && matches!(self.raw(token), b"?" | b"?." | b"&&" | b"||" | b".")
         })
     }
 
