@@ -1331,6 +1331,13 @@ impl Emit<'_> {
             return;
         }
         self.pos += 1;
+        // `strings.FieldsFunc(line, func(r rune) bool { … })`: in Go `func`
+        // introduces a function literal or type, never a call. Left to
+        // `chain()` it read the parameter list as arguments to a callee named
+        // `func`, adding a call atom the CST never writes.
+        if self.lang.tag == "GO" && word == "func" && self.op_byte(0) == b'(' {
+            return;
+        }
         // `typealias H = suspend (Int) -> Unit`, `val w: suspend C.() -> Unit`:
         // a suspend function *type*. The group is its parameter list and the
         // type after `->` is its result, so the construct names no value at all;
