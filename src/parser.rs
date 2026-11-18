@@ -4051,6 +4051,14 @@ impl<'a> Parser<'a> {
         if self.lang.tag == "KT" && self.kotlin_continues(stmt) {
             return;
         }
+        // `A,` / `B;` / `}`: an enum's entry list arriving as one statement,
+        // because the `;` that closes it ends the statement the entry lines
+        // began. No Kotlin statement is a bare comma-separated list of names,
+        // and the expression reader wrote it as a tuple the CST never writes
+        // (`KmVersionRequirementVersionKind` and the rest of the `Jvm,` rows).
+        if self.lang.tag == "KT" && self.kotlin_entry_list(stmt) {
+            return;
+        }
         // A C header's data tables are fragments of an initializer, not
         // statements. musl includes `ctype/alpha.h` inside a declaration
         // (`static const unsigned char table[] = {` … `};`) and
@@ -4299,6 +4307,28 @@ impl<'a> Parser<'a> {
     /// corpus lost its line.
     /// A statement with a top-level `=` never reaches this: it is an
     /// assignment, and the initialiser is read as one.
+    /// A statement that is only names separated by commas and closed by `;`:
+    /// the entry list of an enum, which the CST reads as entries and never as
+    /// a comma expression.
+    fn kotlin_entry_list(&self, stmt: &[Token]) -> bool {
+        let mut names = 0usize;
+        let mut comma = false;
+        for token in stmt {
+            if self.is_op(token, b",") {
+                comma = true;
+                continue;
+            }
+            if self.is_op(token, b";") {
+                continue;
+            }
+            if token.kind != Kind::Ident {
+                return false;
+            }
+            names += 1;
+        }
+        comma && names > 1
+    }
+
     /// A line that opens with the operator continuing the statement above it:
     /// `?:`, `&&`, `||`, a chained `.`, or the `?` of a safe call. Such a line
     /// states no value of its own.
