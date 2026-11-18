@@ -2110,6 +2110,19 @@ impl<'a> Parser<'a> {
             self.stmt.clear();
             return;
         }
+        // `_Static_assert(...)` (C11) and `static_assert(...)` (C23/C++11) are
+        // compile-time assertion declarations with no runtime call or value;
+        // the CST writes nothing for them.
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && matches!(
+                self.word_at(&self.stmt, 0).as_deref(),
+                Some("_Static_assert" | "static_assert")
+            )
+        {
+            self.brackets.clear();
+            self.stmt.clear();
+            return;
+        }
         if matches!(self.lang.tag, "C" | "CPP" | "OBJC") && self.c_declaration() {
             self.brackets.clear();
             self.stmt.clear();
