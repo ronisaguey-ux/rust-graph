@@ -575,11 +575,26 @@ impl<'a> Walker<'a> {
                     return true;
                 }
             }
-            // `static_assert(sizeof(T) == 4, "…")`: the lexer reads a call, the
-            // grammar gives it a declaration node, and nothing read it.
-            "static_assert_declaration" | "static_assert" => {
+            // `static_assert(sizeof(T) == 4, "…")` / `_Static_assert(...)`: the
+            // lexer reads a call, the grammar gives it a `static_assert_statement`
+            // node, and nothing read it.
+            "static_assert_statement" | "static_assert_declaration" | "static_assert" => {
                 let line = self.line(id);
-                self.push_call("static_assert".to_string(), line);
+                let name = self
+                    .children(id)
+                    .into_iter()
+                    .map(|child| self.kind(child))
+                    .find(|&kind| matches!(kind, "_Static_assert" | "static_assert"))
+                    .unwrap_or("static_assert")
+                    .to_string();
+                let index = self.push_call(name, line);
+                let args = self
+                    .child_of_kind(id, "static_assert_arguments")
+                    .or_else(|| self.child_of_kind(id, "arguments"))
+                    .map(|list| self.arguments(list))
+                    .unwrap_or_else(|| "[]".to_string());
+                self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args}]]"));
+                return true;
             }
             // `char buf[BUF];` / `int x = 0;`: the lexer reads the declaration
             // as the run of names on its line (plus the initializer's value when
