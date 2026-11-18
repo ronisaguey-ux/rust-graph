@@ -1732,6 +1732,17 @@ impl Emit<'_> {
                     continue;
                 }
             }
+            // `this@asList.isEmpty()`: a labelled receiver names the enclosing
+            // scope, not a member. Left in the chain the label became part of
+            // the callee (`asList.isEmpty`) where the CST names `self.isEmpty`.
+            if self.lang.tag == "KT"
+                && matches!(path.as_str(), "self" | "super")
+                && self.is_op(0, b"@")
+                && self.word(1).is_some()
+            {
+                self.pos += 2;
+                continue;
+            }
             // `client.borrow()?` newline `.core_client`: in Rust `?` is a
             // postfix operator between the call and its member, and the CST
             // keeps the chain whole. Ending the value there split one chain into
