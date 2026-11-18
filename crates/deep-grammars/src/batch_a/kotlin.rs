@@ -503,6 +503,7 @@ rust_graph_deep::grammar! { KOTLIN {
         | "this"
         | "super"
         | parenthesized_expression
+        | collection_literal
         | lambda_literal
         | absolute_reference
         | &("this" "@") labeled_this
@@ -518,6 +519,7 @@ rust_graph_deep::grammar! { KOTLIN {
     _string_part: STRING_TEXT | interpolation | SIMPLE_TEMPLATE,
     interpolation: TEMPLATE_OPEN _expression TEMPLATE_CLOSE,
     subscript: "[" _expression ("," _expression)* "]",
+    collection_literal: "[" (_expression %? ",") "]",
     /// `{}` is a lambda with no body - a no-op extension, an empty receiver
     /// block, and the parameter a default argument supplies most often
     /// (`onClick = {}`). Requiring one item made every empty lambda an ERROR
