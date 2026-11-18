@@ -3296,6 +3296,30 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.merge_form(&items),
                 }
             }
+            "if_statement" if self.is_kotlin() => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "if" | "else"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            "block" if self.is_kotlin() => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "{" | "}" | ";" | "LINE_END"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
             "labeled_this" if self.is_kotlin() => {
                 let items: Vec<u32> = self
                     .children(id)
