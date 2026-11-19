@@ -86,3 +86,16 @@ fn kotlin_unary_statement_still_states_its_name() {
     assert!(lexer.contains("x"), "the name was lost: {lexer}");
     assert!(deep.contains("x"), "the cst lost the name too: {deep}");
 }
+
+const AFTER_BRACE: &str = "commonMain {\n    -appleMain {\n        -macosMain\n    }\n    -linuxMain {\n        -linuxArm64Main\n    }\n}\n";
+
+#[test]
+fn kotlin_unary_after_closing_brace_starts_a_new_statement() {
+    let (lexer, deep) = both(AFTER_BRACE);
+    for (side, events) in [("the lexer", &lexer), ("the cst", &deep)] {
+        assert!(
+            events.contains("[\"x\",5,") && events.contains("linuxMain"),
+            "{side} did not start a new statement on line 5: {events}"
+        );
+    }
+}

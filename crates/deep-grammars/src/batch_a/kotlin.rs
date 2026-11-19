@@ -709,10 +709,13 @@ fn ends_statement(kind: Kind) -> bool {
 /// Whether the token at the cursor continues the previous line, so that no
 /// statement ends before it. `is` and `in` are deliberately absent: a `when`
 /// entry starts with one, and Kotlin style never breaks a line before either.
+/// A leading `+` or `-` after `}` starts a new unary statement rather than
+/// continuing a block as a binary operand.
 fn continues(c: &Cursor) -> bool {
     match c.peek() {
-        b'.' | b'?' | b':' | b',' | b'=' | b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>'
+        b'.' | b'?' | b':' | b',' | b'=' | b'*' | b'/' | b'%' | b'<' | b'>'
         | b'!' | b'&' | b'|' | b')' | b']' | b'}' | b';' | b'{' => true,
+        b'+' | b'-' => c.previous() != RBRACE,
         byte if is_word_start(byte) => matches!(
             word_at(c.rest()),
             b"else" | b"catch" | b"finally" | b"where" | b"by" | b"as"
