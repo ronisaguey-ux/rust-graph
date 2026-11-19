@@ -406,6 +406,40 @@ impl Emit<'_> {
             if self.lang.tag == "RS" && kind == Kind::Ident && self.word(0).as_deref() == Some("let") {
                 in_let = true;
             }
+            // Inside a Kotlin `{ ... }` lambda body, `val x = rhs` / `var x = rhs`
+            // and `prop = rhs` are declarations/assignments whose LHS names are
+            // not part of the lambda's value; only the RHS expression is.
+            if self.lang.tag == "KT" && close == b'}' && kind == Kind::Ident {
+                if matches!(self.word(0).as_deref(), Some("val" | "var")) {
+                    let mut at = 1usize;
+                    let mut depth = 0i32;
+                    let mut eq_at = None;
+                    while let Some(next) = self.tok(at) {
+                        if next.kind == Kind::Op {
+                            if depth == 0 && self.raw_is(next, b"=") {
+                                eq_at = Some(at);
+                                break;
+                            }
+                            if depth == 0 && (self.raw_is(next, b";") || self.raw_is(next, b"}")) {
+                                break;
+                            }
+                            match &self.src[next.start as usize..next.end as usize] {
+                                b"(" | b"[" | b"<" | b"{" => depth += 1,
+                                b")" | b"]" | b">" | b"}" if depth > 0 => depth -= 1,
+                                _ => {}
+                            }
+                        }
+                        at += 1;
+                    }
+                    if let Some(at) = eq_at {
+                        self.pos += at + 1;
+                        continue;
+                    }
+                } else if self.is_op(1, b"=") {
+                    self.pos += 2;
+                    continue;
+                }
+            }
             // `pub(crate) meter: u64` — a visibility restriction is not a value:
             // the CST writes the field's name and type only, and `crate` in the
             // value lost every pub(crate) field line.
@@ -2108,6 +2142,30 @@ impl Emit<'_> {
                 constructed = capitalised(&target);
                 let id = self.new_call(target, t_line);
                 let args = if inner == "0" { String::new() } else { inner };
+                value = format!("[\"c\",{id},{receiver},[{args}]]");
+                path.clear();
+                continue;
+            }
+            // `ServletHandler().apply { ... }`: in Kotlin, a trailing `{ ... }`
+            // after a chained member call is a lambda argument of that call,
+            // not a separate map/block literal merged beside the receiver.
+            if self.lang.tag == "KT"
+                && self.op_byte(0) == b'{'
+                && !value.is_empty()
+                && path.starts_with('.')
+            {
+                let line = type_arg_line.take().unwrap_or(self.toks[self.pos].line);
+                self.pos += 1;
+                let (receiver, mut target) = self.split_receiver(&value, &path);
+                if target.starts_with('.') {
+                    if let Some(class) = constructed.take() {
+                        target = format!("{class}(){target}");
+                    }
+                }
+                constructed = capitalised(&target);
+                let id = self.new_call(target, line);
+                let mut args = String::new();
+                self.display(&mut args, b'}', "m");
                 value = format!("[\"c\",{id},{receiver},[{args}]]");
                 path.clear();
                 continue;
