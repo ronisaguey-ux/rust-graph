@@ -481,6 +481,17 @@ impl<'a> Parser<'a> {
             if self.next_is_member_access(last.end as usize) {
                 return;
             }
+            // `Pattern.UNIX_LINES or` newline `Pattern.CASE_INSENSITIVE or` newline
+            // `Pattern.COMMENTS`: a binary operator at the end of a line means the
+            // expression continues, and the CST keeps it one statement. Ended at the
+            // break, the lexer invented one name per continuation line - 93 of the
+            // 158 remaining kotlin rows are this shape.
+            if self.lang.tag == "KT"
+                && self.word_at(&self.stmt, 0).as_deref() != Some("import")
+                && self.kotlin_trailing_operator(last)
+            {
+                return;
+            }
             // A ternary written over three lines puts `?` and `:` at the start
             // of the continuation lines. A statement cannot begin with either,
             // so the newline is inside the expression: the CST writes one value
@@ -4712,6 +4723,23 @@ impl<'a> Parser<'a> {
     /// A line that opens with the operator continuing the statement above it:
     /// `?:`, `&&`, `||`, `<`, a chained `.`, or the `?` of a safe call. Such a
     /// line states no value of its own (in Kotlin, `<` cannot begin a statement).
+    /// A token that cannot end a statement in Kotlin: the expression goes on.
+    fn kotlin_trailing_operator(&self, token: &Token) -> bool {
+        match token.kind {
+            Kind::Ident => matches!(
+                self.text(token).as_str(),
+                "or" | "and" | "xor" | "shl" | "shr" | "ushr" | "inv" | "plus" | "minus"
+                    | "times" | "div" | "rem"
+            ),
+            Kind::Op => matches!(
+                self.raw(token),
+                b"+" | b"-" | b"*" | b"/" | b"%" | b"&&" | b"||" | b"==" | b"!=" | b"==="
+                    | b"!==" | b"?:"
+            ),
+            _ => false,
+        }
+    }
+
     fn kotlin_continues(&self, stmt: &[Token]) -> bool {
         stmt.first().is_some_and(|token| {
             token.kind == Kind::Op && matches!(self.raw(token), b"?" | b"?." | b"&&" | b"||" | b"." | b"<")
