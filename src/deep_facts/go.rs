@@ -1053,9 +1053,13 @@ impl<'a> Walker<'a> {
                 .find(|&child| !matches!(self.kind(child), "new" | "arguments" | "type_arguments"))
                 .unwrap_or(id);
         }
+        // Stop at the call's argument list, not `type_arguments`: Java's
+        // `Foo.<T>bar(x)` places `type_arguments` before the method name, and
+        // the reverse scan below already skips `type_arguments` when it follows
+        // the callee (e.g. `foo<T>(x)`).
         let args = children
             .iter()
-            .position(|&child| matches!(self.kind(child), "arguments" | "argument_list" | "type_arguments"));
+            .position(|&child| matches!(self.kind(child), "arguments" | "argument_list"));
         let end = args.unwrap_or(children.len());
         // The callee is read by its text, so a member this grammar gives a
         // keyword kind (`Mockito.when(x)`, `obj.record`) still has a name.
