@@ -3455,6 +3455,23 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 self.merge_form(&items)
             }
+            // `val a = if (c) f(0) else g`: Scala's `if` is an expression
+            // whose value is either branch. Read through the default arm the
+            // value was the condition alone, so both branches' names and calls
+            // left the record (`acc.history(0)` and `acc.current`, 8 rows in
+            // the scala corpus's jdk accumulators). The `if` and `else`
+            // keywords are not operands.
+            "if_statement" if self.language.name == "scala" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.binary_operand(child) && !matches!(self.text_string(child).as_str(), "if" | "else"))
+                    .collect();
+                if items.len() == 1 {
+                    return self.form(items[0]);
+                }
+                self.merge_form(&items)
+            }
             // `x ?? throw new ArgumentNullException(nameof(x))`: a throw
             // expression is its operand, and the call the lexer reads on that
             // line is inside it.
