@@ -4532,6 +4532,9 @@ fn dotted_piece(text: &str) -> bool {
                 let base = self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default();
                 base
             }
+            // `AbstractList<String>()` in a supertype constructor: the path of
+            // a generic type is its base type's path without type arguments.
+            "generic_type" => self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default(),
             "parenthesized_expression" | "try_expression" | "await_expression" => {
                 // `(a, b)[i]`: parens around a comma list hold a value, not a
                 // name. Reading the first item as a path dropped the rest of the
