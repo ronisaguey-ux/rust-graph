@@ -556,6 +556,17 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `internal constructor` newline `(...) : Iterable<Char> {`: the
+            // parameter list on the next line belongs to the constructor header.
+            // Ending here turned `(...) : Iterable<Char>` into a standalone
+            // value expression statement that the CST never writes.
+            if self.lang.tag == "KT"
+                && last.kind == Kind::Ident
+                && self.raw(last) == b"constructor"
+                && self.next_line_start(last.end as usize).is_some_and(|at| self.src.get(at) == Some(&b'('))
+            {
+                return;
+            }
             // `-jvmMain` newline `-nativeMain { … }`: Kotlin lets an operator
             // open the continuation line, so a leading `-` or `+` after a value
             // continues the expression. Ended here, the two lines became two
