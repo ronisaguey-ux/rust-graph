@@ -4015,6 +4015,23 @@ fn dotted_piece(text: &str) -> bool {
                         }
                     }
                 }
+                // Scala's `s"...${f(x)}"` names its interpolator: the lexer
+                // reads the `s` as a name ahead of the fields, so the value is
+                // `m:[n:s,...]`. Without it the one field was the whole value.
+                if self.language.name == "scala" && !parts.is_empty() {
+                    let prefix = self
+                        .children(id)
+                        .into_iter()
+                        .find(|&child| self.kind(child) == "string_start")
+                        .map(|child| self.text_string(child).trim_end_matches('"').to_string())
+                        .unwrap_or_default();
+                    if !prefix.is_empty() {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, &prefix);
+                        out.push(']');
+                        parts.insert(0, out);
+                    }
+                }
                 match parts.len() {
                     0 => "0".to_string(),
                     1 => parts.remove(0),
