@@ -33,16 +33,32 @@ DEFAULT_BIN = "/home/roni/Roni_workspace/rg-kbuilds/release/x86_64-unknown-linux
 
 
 def measure(binary: str, path: str) -> tuple[int, int, int]:
+    """Every loss row the deep reader reports, not only the files that fell back.
+
+    `deep_fallback` is set when a file loses completely, so a corpus whose reader
+    is mostly right reports zero files and still drops real events (kotlin was
+    quoted as 0 files while 549 event rows failed). RG_AUDIT=1 RG_LOSSES=1 dumps the rows
+    themselves, and a row is what a lane fixes.
+    """
+    env = dict(os.environ, RG_LOSSES="1", RG_AUDIT="1")
     result = subprocess.run(
-        [binary, "build", path, "--no-cache", "--stdout"],
+        [binary, "build", path, "--no-cache"],
         capture_output=True,
+        text=True,
         check=True,
+        env=env,
     )
-    pack = json.loads(result.stdout)
-    rows = pack["sources"]
-    fallbacks = [row for row in rows if row.get("deep_fallback")]
-    losses = sum(row.get("deep_losses", 0) for row in fallbacks)
-    return len(fallbacks), losses, len(rows)
+    files: set[str] = set()
+    losses = 0
+    # The dump is written to stderr, so a stdout-only read counts nothing.
+    for line in (result.stdout + result.stderr).splitlines():
+        if not line.startswith("loss\t"):
+            continue
+        parts = line.split("\t")
+        if len(parts) > 2:
+            files.add(parts[1])
+            losses += 1
+    return len(files), losses, len(files)
 
 
 def main() -> int:
