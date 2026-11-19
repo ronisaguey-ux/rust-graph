@@ -255,7 +255,12 @@ rust_graph_deep::grammar! { KOTLIN {
     /// plain assignment — and never a bare block, so a broken declaration is
     /// recovered inside itself instead of being re-read as a top-level
     /// statement.
-    _top: package_header | import_header | &("@" _annotation_target) file_annotation | _declaration | &(accessor) accessor | &(_script_head (type_arguments (arguments | lambda_literal) | (arguments | lambda_literal) ("." | "?.") | subscript)) expression_statement | script_statement | LINE_END | ";",
+    _top: package_header | import_header | &("@" _annotation_target) file_annotation | &("@" _name annotation_arguments LINE_END _name) annotated_script_statement | _declaration | &(accessor) accessor | &(_script_head (type_arguments (arguments | lambda_literal) | (arguments | lambda_literal) ("." | "?.") | subscript)) expression_statement | script_statement | LINE_END | ";",
+    /// `@Suppress("…")` above a Gradle DSL block: the annotation is a modifier
+    /// of the script statement, not of a declaration. The lookahead names the
+    /// shape — an annotation with a parenthesised argument, a line break, then
+    /// a head and a brace — so it cannot steal an annotated declaration.
+    annotated_script_statement: annotation+ [LINE_END] script_statement,
     /// `@file:OptIn(...)` stands before the package header and annotates the
     /// file, not the declaration under it, so it is its own top-level item:
     /// without one, an annotated file has no alternative that starts with `@`
