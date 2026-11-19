@@ -2684,14 +2684,21 @@ fn dotted_piece(text: &str) -> bool {
                 // the receiver first, so the name is the last segment.
                 self.children(head)
                     .into_iter()
-                    .filter(|&child| matches!(self.kind(child), "identifier") || self.kinds.soft.contains(&self.kind(child)))
+                    // `val file = …`: the Kotlin grammar keeps `file` as a
+                    // keyword token (a use-site target and a script head), but
+                    // it is a legal property name. Without it a property named
+                    // `file` had no head, so its initialiser's call never
+                    // reached the record (MavenVerifierExtensions.kt).
+                    .filter(|&child| {
+                        matches!(self.kind(child), "identifier" | "file") || self.kinds.soft.contains(&self.kind(child))
+                    })
                     .next_back()
             })
             .map(|node| self.text_string(node))
             .or_else(|| {
                 self.children(id)
                     .into_iter()
-                    .find(|&child| matches!(self.kind(child), "identifier" | "simple_identifier"))
+                    .find(|&child| matches!(self.kind(child), "identifier" | "simple_identifier" | "file"))
                     .map(|node| self.text_string(node))
             });
         let Some(name) = name else { return };
