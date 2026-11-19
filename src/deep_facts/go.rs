@@ -4524,6 +4524,16 @@ fn dotted_piece(text: &str) -> bool {
             // with no receiver. Read as a leaf the call lost its name entirely.
             "implicit_member_expression" => self.leaf_name(id).unwrap_or_default(),
             "meta_property" => self.text_string(id).chars().filter(|ch| !ch.is_whitespace()).collect(),
+            // `MainKtsScript::class.java`: a class literal as a navigation
+            // receiver names `<base>.class`, not empty.
+            "class_literal" if self.is_kotlin() => {
+                let base = self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default();
+                if base.is_empty() {
+                    String::new()
+                } else {
+                    format!("{base}.class")
+                }
+            }
             // A subscript is transparent in a path: `elements[i].innerHTML`
             // names `elements.innerHTML`, and `x[0].y` names `x.y`. Rust spells
             // it `index_expression`, and reading it as a leaf dropped the
