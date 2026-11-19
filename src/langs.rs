@@ -367,6 +367,7 @@ pub const LANGUAGES: &[Language] = &[
         tag: "SCALA",
         extensions: &["scala", "sc"],
         interp: Interp::Dollar,
+        ident_extra: b"$",
         semicolons: false,
         defs: &["def"],
         classes: &["class", "object", "trait"],
