@@ -3047,11 +3047,11 @@ fn dotted_piece(text: &str) -> bool {
             out.push(']');
             return out;
         }
-        // Kotlin's `true`, `false` and `null` are keyword leaves here, and the
-        // lexer reads each of them as a name: `enableSsl = false` is
-        // `a:[n:enableSsl,:n:false]` there and formed as the constant 0 here,
-        // which lost every boolean assignment in the corpus.
-        if self.is_kotlin() && matches!(kind, "true" | "false" | "null") {
+        // Kotlin's and Scala's `true`, `false` and `null` are keyword leaves
+        // here, and the lexer reads each of them as a name: `channel = null`
+        // is `a:[n:channel,n:null]` there and formed as the constant 0 here,
+        // which lost every such assignment.
+        if (self.is_kotlin() || self.language.name == "scala") && matches!(kind, "true" | "false" | "null") {
             let text = self.text_string(id);
             let mut out = "[\"n\",".to_string();
             push_string(&mut out, &text);
@@ -3339,6 +3339,25 @@ fn dotted_piece(text: &str) -> bool {
                     // `f(x)[0].y`: the base is a call, so there is no path, and
                     // the value is the base's — a subscript of a value is that
                     // value. Writing 0 here lost the call's argument.
+                    match self.children(id).first().copied() {
+                        Some(base) => self.form(base),
+                        None => "0".to_string(),
+                    }
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    out
+                }
+            }
+            // `val Normal = FSM.Normal`: Scala spells a dotted name as a
+            // `select` node. It is not in the member-access list above, so the
+            // default arm formed it as the constant 0 and every binding to a
+            // qualified name lost its value (`FSM.Normal`, `java.lang.Math.PI`,
+            // `ManagedActorEventBus.this.system`).
+            "select" if self.language.name == "scala" => {
+                let path = self.form_path(id);
+                if path.is_empty() || path.starts_with('.') {
                     match self.children(id).first().copied() {
                         Some(base) => self.form(base),
                         None => "0".to_string(),
