@@ -1115,7 +1115,39 @@ impl<'a> Parser<'a> {
         }) {
             return false;
         }
+        // Kotlin has no struct/object literals: `{ ... }` after a call target
+        // in an assignment (`server.handler = ServletContextHandler().apply { ... }`)
+        // is a trailing lambda block, not an aggregate value. Keep `val`/`var`
+        // initializers, `get()`/`set()` accessors, and `object :` expressions on
+        // their existing path.
+        if self.lang.tag == "KT" && self.is_kotlin_assign_trailing_lambda() {
+            return true;
+        }
         !(self.top_level_assign(&self.stmt).is_some() && !self.is_op(&last, b")"))
+    }
+
+    /// Whether `self.stmt` is a Kotlin assignment (`lhs = rhs`) whose RHS ends
+    /// in a call target followed by a trailing lambda `{ ... }` (not a
+    /// `val`/`var` declaration, `get()`/`set()` accessor, or `object :` expr).
+    fn is_kotlin_assign_trailing_lambda(&self) -> bool {
+        let Some(eq) = self.top_level_assign(&self.stmt) else {
+            return true;
+        };
+        let lhs = &self.stmt[..eq];
+        let rhs = &self.stmt[eq + 1..];
+        if lhs.iter().any(|t| t.kind == Kind::Ident && matches!(self.raw(t), b"val" | b"var")) {
+            return false;
+        }
+        if lhs
+            .windows(2)
+            .any(|w| w[0].kind == Kind::Ident && matches!(self.raw(&w[0]), b"get" | b"set") && self.is_op(&w[1], b"("))
+        {
+            return false;
+        }
+        if rhs.iter().any(|t| t.kind == Kind::Ident && self.raw(t) == b"object") {
+            return false;
+        }
+        true
     }
 
     /// Whether the statement so far ends inside the pattern of a `let`
