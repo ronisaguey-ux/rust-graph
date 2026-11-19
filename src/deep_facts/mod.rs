@@ -616,6 +616,9 @@ impl<'a> Walker<'a> {
         if self.facts.tag == "OBJC" {
             self.objc_method_lines();
         }
+        if self.language.name == "scala" {
+            self.scala_import_lines();
+        }
         // The lexer's `lines` is the line of its EOF token, which is one past
         // the last line break: `"a\n"` is two lines to it.
         let line = self.line_starts.len() as u32;
@@ -2210,6 +2213,62 @@ impl<'a> Walker<'a> {
     /// The ObjC method declarations the CST could not hold: a line that opens
     /// with `-` or `+` and is a declaration (no body) is read as `x` with its
     /// words, and only where no other reader wrote an event.
+    /// The tree-sitter Scala grammar gives a nested import no node: `import`
+    /// inside a class or object body comes back as an ERROR whose `import`
+    /// child has no children, and the rest of the line is read as expressions.
+    /// The one-pass reader still files the import, so every file with one lost
+    /// its line (76 files, one row each, in the scala corpus). Read those
+    /// imports off the source, the way the Objective-C declarations are, and
+    /// spell them exactly as the lexer does.
+    fn scala_import_lines(&mut self) {
+        let taken: std::collections::HashSet<u32> = self.facts.imports.iter().map(|imp| imp.line).collect();
+        let count = self.line_starts.len();
+        for index in 0..count {
+            let start = self.line_starts[index] as usize;
+            let end = self.line_starts.get(index + 1).map(|&at| at as usize).unwrap_or(self.src.len());
+            let line = index as u32 + 1;
+            if taken.contains(&line) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&self.src[start..end]);
+            let trimmed = text.trim();
+            let Some(rest) = trimmed.strip_prefix("import ").map(str::trim) else { continue };
+            if let Some(open) = rest.find('{') {
+                let prefix = rest[..open].trim_end_matches('.').trim().to_string();
+                let Some(close) = rest[open..].find('}').map(|at| open + at) else { continue };
+                for selector in rest[open + 1..close].split(',') {
+                    let selector = selector.trim();
+                    if selector.is_empty() {
+                        continue;
+                    }
+                    let (name, alias) = match selector.split_once("=>") {
+                        Some((name, alias)) => (name.trim().to_string(), alias.trim().to_string()),
+                        None => (selector.to_string(), selector.to_string()),
+                    };
+                    self.facts.imports.push(Import {
+                        line,
+                        module: prefix.clone(),
+                        name,
+                        alias,
+                        kind: IMPORT_MODULE,
+                        ..Import::default()
+                    });
+                }
+            } else {
+                let module = rest.trim_end_matches(';').trim().to_string();
+                let alias = module.rsplit('.').next().unwrap_or("").to_string();
+                self.facts.imports.push(Import {
+                    line,
+                    module,
+                    name: String::new(),
+                    alias,
+                    kind: IMPORT_MODULE,
+                    ..Import::default()
+                });
+            }
+        }
+    }
+
     fn objc_method_lines(&mut self) {
         // A tree with an unbalanced end can leave the walk with no frame, and
         // an event needs one to belong to: the module's own frame is restored
