@@ -670,6 +670,27 @@ pub fn lex(c: &mut Cursor) -> Kind {
             }
             COMMENT
         }
+        // Kotlin 2.2 multi-dollar strings: `$"` and `$$"""` open a literal whose
+        // interpolation needs that many dollars. Read as code, the `$` produced a
+        // stray token, the string that followed lost its start, and every call on
+        // the lines after it fell out of the CST (`` $$"""`` in a lambda body cost
+        // the whole enclosing test function). The dollars are part of the opening
+        // token and the body keeps them as text.
+        b'$' if c.peek_at(1) == b'$' || c.peek_at(1) == b'"' => {
+            let mut dollars = 0;
+            while c.peek() == b'$' {
+                dollars += 1;
+                c.bump();
+            }
+            if c.peek() != b'"' {
+                return operator(c);
+            }
+            let triple = c.starts_with(b"\"\"\"");
+            c.bump_n(if triple { 3 } else { 1 });
+            QUOTES.with(|quotes| quotes.borrow_mut().push(triple));
+            let _ = dollars;
+            STRING_START
+        }
         b'"' => {
             let triple = c.starts_with(b"\"\"\"");
             c.bump_n(if triple { 3 } else { 1 });
