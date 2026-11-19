@@ -242,6 +242,11 @@ impl Emit<'_> {
                     if depth == 0 {
                         return Some(index + 1);
                     }
+                } else if close == b">" && matches!(raw, b">>" | b">>>") {
+                    depth = depth.saturating_sub(raw.len());
+                    if depth == 0 {
+                        return Some(index + 1);
+                    }
                 }
             }
             index += 1;
@@ -264,6 +269,12 @@ impl Emit<'_> {
                             return body;
                         }
                         depth -= 1;
+                    }
+                    b">>" | b">>>" => {
+                        if depth == 0 {
+                            return body;
+                        }
+                        depth = depth.saturating_sub(raw.len());
                     }
                     b"{" if depth == 0 => {
                         body = Some(index);
@@ -2124,6 +2135,7 @@ mod tests {
         assert_eq!(form("js", r#"{ get "a"() { return a; } }"#).0, r#"["m",[0]]"#);
         assert_eq!(form("js", r#"{ *"a"() { return a; } }"#).0, r#"["m",[0]]"#);
         assert_eq!(form("js", "{ 1() { return a; } }").0, r#"["m",[0]]"#);
+        assert_eq!(form("ts", "{ m<T extends R<A>>(x: T): R<A<B>, C<D>> { return g(x); } }").0, r#"["m",[0]]"#);
     }
 
     #[test]
