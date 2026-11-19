@@ -4297,7 +4297,14 @@ fn dotted_piece(text: &str) -> bool {
         // dictionary (and everything in it) lives; the outer call has no name
         // of its own, so it adds none. `callee != id` keeps a recovered call
         // whose own callee is itself from descending forever.
-        if callee != id && matches!(self.kind(callee), "call" | "call_expression" | "new_expression") {
+        // Scala's `new X(args)` is a `call` whose callee is a `new_expression`
+        // holding only `new` and the type name; the arguments live on the outer
+        // node. Unwrapping to the inner form dropped every argument, so each
+        // construction read as `c(0;[])` against the lexer's `c(0;[n:arg])`.
+        // Read it as a plain call named after the type instead.
+        let nested_callee = matches!(self.kind(callee), "call" | "call_expression")
+            || (self.kind(callee) == "new_expression" && self.language.name != "scala");
+        if callee != id && nested_callee {
             let inner = self.form(callee);
             if let Some(list) = children.iter().copied().find(|&child| matches!(self.kind(child), "argument_list" | "arguments")) {
                 self.arguments(list);

@@ -1440,14 +1440,33 @@ impl<'a> Parser<'a> {
                     "actual" | "expect" | "suspend" | "operator" | "infix" | "tailrec" | "lateinit" | "noinline"
                         | "crossinline" | "vararg" | "reified" | "annotation" | "enum" | "inner" | "value"
                 );
+            // Scala writes `case class`, `implicit class` and `case object`:
+            // `case` and `implicit` bind nothing, and leaving them in front of
+            // the head made `class_head` miss the declaration, so the one-pass
+            // reader opened a function symbol where the CST wrote a class.
+            let scala_modifier = self.lang.tag == "SCALA" && matches!(word.as_str(), "case" | "implicit");
             // `pub const fn` and `pub const unsafe extern "C" fn`: in Rust
             // `const` qualifies a function item just like `async` and `unsafe`.
             let rust_modifier = self.lang.tag == "RS" && word == "const";
-            if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier && !rust_modifier {
+            if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier && !rust_modifier && !scala_modifier {
                 break;
             }
             index += 1;
             if self.lang.tag == "RS" && word == "pub" && toks.get(index).is_some_and(|t| self.is_op(t, b"(")) {
+                if let Some((_, close)) = self.group_at(toks, index) {
+                    index = close + 1;
+                } else {
+                    break;
+                }
+            } else if self.lang.tag == "SCALA"
+                && matches!(word.as_str(), "private" | "protected")
+                && toks.get(index).is_some_and(|t| self.is_op(t, b"["))
+            {
+                // `private[akka] class X`, `protected[this] val x`: the
+                // qualifier is a modifier, not a type argument. Left in front
+                // of the head it stopped `class_head` from seeing `class`, so
+                // every such declaration was filed as a function (`kind 1`)
+                // and lost its symbol against the CST's class.
                 if let Some((_, close)) = self.group_at(toks, index) {
                     index = close + 1;
                 } else {
