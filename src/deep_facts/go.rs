@@ -180,6 +180,20 @@ impl<'a> Walker<'a> {
         true
     }
 
+    /// Calls written in a Scala lambda body. The generic walk reaches the
+    /// lambda node but nothing forms its expression body, so a call there
+    /// (`(x: T) => self.apply(x)`) stayed out of the call table. A nested
+    /// lambda is left to its own visit so a call is not recorded twice.
+    pub(crate) fn scala_calls_in_lambda(&self, id: u32, out: &mut Vec<u32>) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "call" | "call_expression" => out.push(child),
+                "lambda_expression" => {}
+                _ => self.scala_calls_in_lambda(child, out),
+            }
+        }
+    }
+
     /// Every call inside `id`, for readers that own the node in another file.
     pub(crate) fn c_calls_in_pub(&self, id: u32, out: &mut Vec<u32>) {
         for child in self.children(id) {
@@ -4383,7 +4397,7 @@ fn dotted_piece(text: &str) -> bool {
             // access as `field_expression`, and read through the default arm
             // the call had no name at all.
             "attribute" | "member_expression" | "member_access_expression" | "member_access"
-            | "conditional_member_access" | "navigation_expression" | "field_expression" => {
+            | "conditional_member_access" | "navigation_expression" | "field_expression" | "select" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
                 let object = children.first().copied();
@@ -4627,6 +4641,9 @@ fn dotted_piece(text: &str) -> bool {
             // `_reader?.Close()` - the null-conditional member access names the
             // same path as a plain one.
             "attribute" | "member_expression" | "member_access" | "conditional_member_access"
+            // Scala spells `x.y` as `select`; without it a dotted call callee
+            // path was empty, so every `a.b(c)` call lost its name.
+            | "select"
             // Kotlin spells `x.y` as `navigation_expression`. Read through the
             // default arm it named only its first leaf, so `DeprecationLevel.ERROR`
             // in a value formed as `DeprecationLevel`.
