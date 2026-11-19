@@ -5590,7 +5590,10 @@ impl<'a> Parser<'a> {
             go_decl = names;
             targets = &go_decl;
         }
-        if matches!(self.lang.tag, "RS" | "TS" | "TSX") {
+        // `implicit val s: Foo[Int, Bar] = ..`: the Scala annotation is a type,
+        // and the comma inside its type arguments split the binder from its
+        // type, so the statement named the type instead of `s`.
+        if matches!(self.lang.tag, "RS" | "TS" | "TSX" | "SCALA") {
             let mut depth = 0i32;
             for (index, token) in targets.iter().enumerate() {
                 if token.kind != Kind::Op {

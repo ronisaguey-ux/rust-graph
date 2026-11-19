@@ -1640,16 +1640,19 @@ impl<'a> Walker<'a> {
                         // folded the whole body into one `x` on the header
                         // line, so every binding lost its line (21 rows in
                         // AnsiColor.scala alone).
-                        // The first identifier is the binder: a type
-                        // annotation (`val A: RecordType = …`) puts another
-                        // identifier after it, and taking the last one named
-                        // the type instead of the value (21 rows in
-                        // RecordType.scala).
-                        let name = children[..at]
+                        // The binders are the identifiers before the type
+                        // annotation: `var a, b: T = …` declares both, and a
+                        // type annotation (`val A: RecordType = …`) puts
+                        // another identifier after the colon, which is not a
+                        // binder (21 rows in RecordType.scala). Only the first
+                        // was read, so `b` was missing from every such line.
+                        let colon = children[..at].iter().position(|&child| self.text_string(child) == ":").unwrap_or(at);
+                        let names: Vec<String> = children[..colon]
                             .iter()
-                            .find(|&&child| self.kind(child) == "identifier")
-                            .map(|&child| self.text_string(child));
-                        if let Some(name) = name {
+                            .filter(|&&child| self.kind(child) == "identifier")
+                            .map(|&child| self.text_string(child))
+                            .collect();
+                        if !names.is_empty() {
                             let line = self.line(id);
                             // The lexer also binds a val whose initialiser is a
                             // constructor call to the class it builds
@@ -1657,9 +1660,11 @@ impl<'a> Walker<'a> {
                             // `JLSBuilder`). Reading only the event left every
                             // such typed member as a variable the CST missed.
                             if let Some(class) = self.constructed(value) {
-                                self.facts.vars.push((name.clone(), class));
+                                for name in &names {
+                                    self.facts.vars.push((name.clone(), class.clone()));
+                                }
                             }
-                            self.lexer_event(b'a', line, &[name], &form, false);
+                            self.lexer_event(b'a', line, &names, &form, false);
                         }
                     }
                 }
