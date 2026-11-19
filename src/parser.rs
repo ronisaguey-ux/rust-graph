@@ -590,6 +590,16 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `fun f() =` newline `@Suppress("UNCHECKED_CAST")` newline
+            // `aggregate { ... }`: an annotation on the RHS of `=` prefixes the
+            // expression on the next line, never ending the declaration.
+            if self.lang.tag == "KT"
+                && self
+                    .top_level_assign(&self.stmt)
+                    .is_some_and(|eq| self.kotlin_annotation_alone(&self.stmt[eq + 1..]))
+            {
+                return;
+            }
             // `interface A extends B` newline `{` or `interface A<T>` newline
             // `extends B`: the header of a type declaration spans the line
             // break; ending here leaves `{` in `<module>` and turns its type
