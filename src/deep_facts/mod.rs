@@ -254,7 +254,7 @@ const SC_DEFS: &[Def] = &[
     Def { kind: "object_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "def_definition", name: &["identifier"], params: Some("parameter_clause"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
-const SC_CALLS: &[&str] = &["call", "call_expression"];
+const SC_CALLS: &[&str] = &["call", "call_expression", "new_expression"];
 const SC_IMPORTS: &[&str] = &["import_declaration"];
 
 const SW_DEFS: &[Def] = &[
@@ -715,6 +715,17 @@ impl<'a> Walker<'a> {
     /// `match`, `type` and `case` the same), and a name is what the source
     /// says it is. A leaf whose text is an identifier is a name whatever label
     /// the grammar put on it; punctuation, string literals and numbers are not.
+    /// The source text of a 1-based line, used to name a declaration whose
+    /// grammar node lost its head (`def this` in Scala).
+    fn scala_source_line(&self, line: u32) -> &str {
+        let start = self.line_starts.get(line.saturating_sub(1) as usize).copied().unwrap_or(0) as usize;
+        let end = self.line_starts.get(line as usize).copied().unwrap_or(self.src.len() as u32) as usize;
+        if start > end || end > self.src.len() {
+            return "";
+        }
+        std::str::from_utf8(&self.src[start..end]).unwrap_or("")
+    }
+
     pub(crate) fn leaf_name(&self, id: u32) -> Option<String> {
         let node = self.node(id);
         if node.first_child != NONE {
@@ -1600,6 +1611,16 @@ impl<'a> Walker<'a> {
                 }
             }
             "expression_statement" => self.expression_statement(id),
+            // `(x: T) => self.apply(x)`: Scala's lambda body is an expression,
+            // and nothing formed it, so every call written there was missing
+            // from the call table. A nested lambda is visited on its own.
+            "lambda_expression" if self.language.name == "scala" => {
+                let mut calls = Vec::new();
+                self.scala_calls_in_lambda(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
             // `Assert.Throws<X>(() => new Foo());`: a lambda's expression body
             // holds a call, and no arm read the node, so every call written in
             // a lambda passed as an argument was missing from the CST's record
@@ -2571,7 +2592,16 @@ impl<'a> Walker<'a> {
                 let at = self.bound.iter().position(|(node, _)| *node == id)?;
                 Some(self.bound.remove(at).1)
             });
-        let name = named.unwrap_or_else(|| format!("<anonymous>@{line}"));
+        let name = named.unwrap_or_else(|| {
+            // Scala's secondary constructor `def this(...) = this(...)`: the
+            // grammar cannot name the `this` keyword, but the lexer opens a
+            // function symbol under it. Name it from the source line.
+            if self.language.name == "scala" && self.scala_source_line(line).contains("def this") {
+                "this".to_string()
+            } else {
+                format!("<anonymous>@{line}")
+            }
+        });
         let owner = if self.frame().container { self.frame().class.clone() } else { String::new() };
         // Go: a method's receiver decides its owner, and the receiver's name is
         // what the lexer spells `self` for inside the body.
