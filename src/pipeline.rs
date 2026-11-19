@@ -2673,8 +2673,10 @@ fn is_method_declaration_line(tag: &str, src: &Lines<'_>, line: u32) -> bool {
     // A function-typed return is still a signature: `f(x: unknown): (y:
     // unknown) => y is string;` contains `=>`, and the arrow is not an
     // assignment, so it must not disqualify the line.
+    // `apply(e) throws Exception {` is a declaration too: a call never has a
+    // `throws` clause after its parentheses.
     let without_arrows = rest.replace("=>", ">");
-    rest.starts_with(':') && !without_arrows.contains('=') || rest.starts_with('{')
+    rest.starts_with(':') && !without_arrows.contains('=') || rest.starts_with('{') || rest.starts_with("throws ")
 }
 
 /// The parameter list the callee writes itself, when something else on the line
