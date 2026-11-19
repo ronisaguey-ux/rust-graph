@@ -1641,6 +1641,14 @@ impl<'a> Walker<'a> {
                             .map(|&child| self.text_string(child));
                         if let Some(name) = name {
                             let line = self.line(id);
+                            // The lexer also binds a val whose initialiser is a
+                            // constructor call to the class it builds
+                            // (`val bldr = new JLSBuilder(..)` binds `bldr` to
+                            // `JLSBuilder`). Reading only the event left every
+                            // such typed member as a variable the CST missed.
+                            if let Some(class) = self.constructed(value) {
+                                self.facts.vars.push((name.clone(), class));
+                            }
                             self.lexer_event(b'a', line, &[name], &form, false);
                         }
                     }
