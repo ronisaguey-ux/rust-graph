@@ -4456,10 +4456,33 @@ impl<'a> Parser<'a> {
             return;
         }
         if let Some(equal) = self.top_level_assign(stmt) {
+            // In Kotlin, `->` separates a `when` arm or lambda parameter header
+            // from its body: `pat -> lhs = rhs` assigns `lhs`, not `pat.lhs`.
+            let (targets, line) = if self.lang.tag == "KT" {
+                let mut depth = 0i32;
+                let mut arrow = None;
+                for (index, token) in stmt[..equal].iter().enumerate() {
+                    if token.kind != Kind::Op {
+                        continue;
+                    }
+                    match self.raw(token) {
+                        b"(" | b"[" | b"{" => depth += 1,
+                        b")" | b"]" | b"}" => depth -= 1,
+                        b"->" if depth == 0 => arrow = Some(index),
+                        _ => {}
+                    }
+                }
+                match arrow.and_then(|at| stmt[at + 1..equal].first().map(|first| (&stmt[at + 1..equal], first.line))) {
+                    Some((after, line)) => (after, line),
+                    None => (&stmt[..equal], line),
+                }
+            } else {
+                (&stmt[..equal], line)
+            };
             let augmented = self.raw(&stmt[equal]) != b"=" && !matches!(self.raw(&stmt[equal]), b":=" | b"<-");
-            let value = self.c_initialiser(&stmt[..equal], &stmt[equal + 1..]);
-            self.note_class(&stmt[..equal], value);
-            self.assignment(&stmt[..equal], value, line, augmented);
+            let value = self.c_initialiser(targets, &stmt[equal + 1..]);
+            self.note_class(targets, value);
+            self.assignment(targets, value, line, augmented);
         } else if !(self.lang.tag == "JAVA" && self.java_declares_only(stmt))
             && !(self.lang.tag == "SWIFT" && self.swift_declares_only(stmt))
             && !(self.lang.tag == "KT" && self.kotlin_declares_only(stmt))
@@ -4997,7 +5020,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let token = &toks[start - 1];
-            let joins = token.kind == Kind::Op && matches!(self.raw(token), b"." | b"->" | b"::");
+            let joins = self.is_join(token);
             if token.kind == Kind::Ident
                 && (start == at || self.raw(&toks[start]) != b".")
                 && start != at
@@ -5115,7 +5138,9 @@ impl<'a> Parser<'a> {
     }
 
     fn is_join(&self, token: &Token) -> bool {
-        token.kind == Kind::Op && matches!(self.raw(token), b"." | b"->" | b"::")
+        token.kind == Kind::Op
+            && (matches!(self.raw(token), b"." | b"::")
+                || (self.raw(token) == b"->" && self.lang.tag != "KT"))
     }
 
     /// True when a parenthesised group's top-level tokens form a path/call chain
