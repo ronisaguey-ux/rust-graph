@@ -1654,6 +1654,7 @@ return verdict(Some("symbol"), detail, accepted);
                     && (is_declaration_line(&lines, call.line)
                         || is_method_declaration_line(&lexer.tag, &lines, call.line)
                         || is_member_signature_line(&lexer.tag, &lines, call.line, &name)
+                        || (lexer.tag == "JAVA" && is_java_method_declaration(&lines, call.line, &name))
                         || (matches!(lexer.tag.as_str(), "JAVA" | "SCALA" | "KT") && is_annotation_line(&lines, call.line))
                         // `error?: (e: any) => void`, `readonly x: T`,
                         // `constructor(...): Base`: a `.d.ts` member declares
@@ -2269,6 +2270,20 @@ fn is_attribute_call(src: &Lines<'_>, line: u32) -> bool {
             attribute && text.contains(']')
         })
         .unwrap_or(false)
+}
+
+/// `public void apply(FSM.StopEvent e) throws Exception {`: a Java method
+/// implementation has a modifier and a return type before the name, so the
+/// generic method-declaration test (which expects `:`/`{` right after the
+/// parameter list) misses it and the lexer files the name as a call.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_java_method_declaration(src: &Lines<'_>, line: u32, name: &str) -> bool {
+    let Some(text) = src.get(line) else { return false };
+    let text = text.trim_start();
+    if !["public ", "private ", "protected ", "static ", "final "].iter().any(|m| text.starts_with(m)) {
+        return false;
+    }
+    text.contains(&format!("{}(", name))
 }
 
 /// `@SuppressWarnings("unchecked")`, `@InternalApi`: an annotation on its own
