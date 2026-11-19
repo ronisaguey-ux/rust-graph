@@ -1334,7 +1334,24 @@ impl<'a> Walker<'a> {
     // -- statements ---------------------------------------------------------
 
     pub(crate) fn expression_statement(&mut self, id: u32) {
-        let Some(child) = self.expression_child(id) else { return };
+        let Some(mut child) = self.expression_child(id) else { return };
+        // `@Suppress("DEPRECATION") coreLibrariesVersion = ...`: Kotlin's
+        // annotation wraps the statement in an `annotated_expression` whose
+        // line is the annotation's. Unwrap it so the inner assignment (and its
+        // line) dispatches as an assignment instead of a generic expression.
+        if self.is_kotlin() {
+            while self.kind(child) == "annotated_expression" {
+                let Some(inner) = self
+                    .children(child)
+                    .into_iter()
+                    .rev()
+                    .find(|&c| !self.is_layout(c) && !matches!(self.kind(c), "annotation" | "annotation_item"))
+                else {
+                    return;
+                };
+                child = inner;
+            }
+        }
         if let Some((lhs, module)) = self.require_assignment(child) {
             let line = self.line(id);
             if matches!(self.kind(lhs), "object_pattern" | "object") {
