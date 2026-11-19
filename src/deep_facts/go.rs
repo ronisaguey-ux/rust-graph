@@ -4215,22 +4215,30 @@ fn dotted_piece(text: &str) -> bool {
             self.form(call);
         }
         let index = self.push_call(path, line);
-        let mut out = format!("[\"c\",{index},{receiver},");
-        match args {
-            Some(list) if self.kind(list) == "template_string" => {
-                out.push_str(targ.as_deref().unwrap_or("[]"));
-            }
-            Some(list) => out.push_str(&self.arguments(list)),
-            None => out.push_str("[]"),
-        }
-        out.push(']');
+        let mut arg_list = match args {
+            Some(list) if self.kind(list) == "template_string" => targ.unwrap_or_else(|| "[]".to_string()),
+            Some(list) => self.arguments(list),
+            None => "[]".to_string(),
+        };
         if self.is_kotlin() && !self.in_kotlin_expr_body {
+            let mut trailing = Vec::new();
             for &child in &children {
                 if matches!(self.kind(child), "lambda_literal" | "annotated_lambda" | "labeled_lambda") {
-                    self.form(child);
+                    trailing.push(self.form(child));
+                }
+            }
+            if !trailing.is_empty() {
+                if arg_list == "[]" {
+                    arg_list = format!("[{}]", trailing.join(","));
+                } else if arg_list.ends_with(']') {
+                    arg_list.pop();
+                    arg_list.push(',');
+                    arg_list.push_str(&trailing.join(","));
+                    arg_list.push(']');
                 }
             }
         }
+        let out = format!("[\"c\",{index},{receiver},{arg_list}]");
         let _ = is_new;
         let link = (index as u32, receiver);
         (out, Some(link))
