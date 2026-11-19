@@ -4497,6 +4497,31 @@ fn dotted_piece(text: &str) -> bool {
                 };
                 (path, receiver)
             }
+            // Scala spells a qualified type in a `new` as flat children
+            // (`new` / `java` / `.` / `util` / `.` / `ArrayList` /
+            // `type_arguments`). Reading only the first identifier named the
+            // call `java`, so every `new java.util.X[T](..)` lost its call.
+            "new_expression" if self.language.name == "scala" => {
+                let parts: Vec<String> = self
+                    .children(callee)
+                    .into_iter()
+                    .filter(|&child| matches!(self.kind(child), "identifier" | "type_identifier"))
+                    .map(|child| self.text_string(child))
+                    .collect();
+                let path = parts.join(".");
+                // The lexer writes a qualified constructor with the owner in
+                // the receiver slot (`c(n:java.util;[..])`), so split the dotted
+                // type the same way a `select` callee is split.
+                let receiver = if parts.len() > 1 {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &parts[..parts.len() - 1].join("."));
+                    out.push(']');
+                    out
+                } else {
+                    "0".to_string()
+                };
+                (path, receiver)
+            }
             "call" | "call_expression" | "new_expression" => {
                 // `f()(...)`: the callee is an inner call, and the name is the
                 // inner call's own callee. It has to be looked for *inside*
