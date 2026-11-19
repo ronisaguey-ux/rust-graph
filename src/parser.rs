@@ -4710,11 +4710,11 @@ impl<'a> Parser<'a> {
     }
 
     /// A line that opens with the operator continuing the statement above it:
-    /// `?:`, `&&`, `||`, a chained `.`, or the `?` of a safe call. Such a line
-    /// states no value of its own.
+    /// `?:`, `&&`, `||`, `<`, a chained `.`, or the `?` of a safe call. Such a
+    /// line states no value of its own (in Kotlin, `<` cannot begin a statement).
     fn kotlin_continues(&self, stmt: &[Token]) -> bool {
         stmt.first().is_some_and(|token| {
-            token.kind == Kind::Op && matches!(self.raw(token), b"?" | b"?." | b"&&" | b"||" | b".")
+            token.kind == Kind::Op && matches!(self.raw(token), b"?" | b"?." | b"&&" | b"||" | b"." | b"<")
         })
     }
 
