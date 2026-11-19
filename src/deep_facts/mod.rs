@@ -1433,13 +1433,23 @@ impl<'a> Walker<'a> {
                         "0".to_string()
                     };
                     let line = self.line(id);
-                    let index = self.push_call(name, line);
+                    let index = self.push_call(name.clone(), line);
                     // The lexer files the annotation's own arguments as an
                     // event holding the call's form, as it does for any other
                     // call written as a statement.
                     if let Some(list) = self.children(id).into_iter().find(|&child| self.kind(child) == "annotation_arguments") {
                         let args = self.arguments(list);
                         self.event(&format!("[\"x\",{line},[\"c\",{index},{receiver},{args}]]"));
+                    } else if self.language.name == "scala" {
+                        // `@tailrec`, `@InternalApi`, `@inline`: a bare Scala
+                        // annotation states just its name. The lexer files an
+                        // `x` event for it, and writing only the call above
+                        // left every such line with no value the guard could
+                        // pair (`n:tailrec` against no event).
+                        let mut value = "[\"n\",".to_string();
+                        push_string(&mut value, &name);
+                        value.push(']');
+                        self.event(&format!("[\"x\",{line},{value}]"));
                     }
                 }
             }
