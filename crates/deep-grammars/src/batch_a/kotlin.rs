@@ -961,7 +961,7 @@ pub fn lex_template_field(c: &mut Cursor) -> Kind {
 }
 
 /// Decimal, hexadecimal and binary numbers with `_` separators, fractions and
-/// exponents, and the `f`, `F`, `L` and `u` suffixes.
+/// exponents, and the `f`, `F`, `L`, `u`, `U`, `uL` and `UL` suffixes.
 fn number(c: &mut Cursor) -> Kind {
     let mut kind = INTEGER;
     let hex = c.peek() == b'0' && matches!(c.peek_at(1), b'x' | b'X');
@@ -993,6 +993,9 @@ fn number(c: &mut Cursor) -> Kind {
         }
         b'u' | b'U' => {
             c.bump();
+            if c.peek() == b'L' {
+                c.bump();
+            }
             kind
         }
         b'L' => {
@@ -1229,6 +1232,13 @@ mod tests {
     #[test]
     fn if_statement_allows_line_break_before_branch() {
         let src = "class C {\n    fun writeReplace(): Any =\n        if (isReadOnly)\n            SerializedCollection(this)\n        else\n            throw Exception()\n}\n";
+        assert!(fixtures::clean(&KOTLIN, src));
+    }
+
+    /// Unsigned long integer literals (`uL` / `UL`) are a single number token.
+    #[test]
+    fn unsigned_long_literals_parse_cleanly() {
+        let src = "class C {\n    private val Uuid.isIetfVariant: Boolean\n        get() = toULongs { _, leastSignificantBits -> (leastSignificantBits shr 62) == 2uL }\n    private val mask = 0xFuL + 10UL\n}\n";
         assert!(fixtures::clean(&KOTLIN, src));
     }
 
