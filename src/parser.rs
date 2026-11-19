@@ -3993,6 +3993,13 @@ impl<'a> Parser<'a> {
             return None;
         }
         let equal = self.top_level_assign(toks)?;
+        // Scala's `val f = () => x` binds a value that holds a function; only
+        // `def` declares one. The CST writes no symbol for a val, so a head here
+        // named a function the CST never had (`val doNothing: () => Unit = …`
+        // was named `Unit`).
+        if self.lang.tag == "SCALA" && toks[..equal].iter().any(|token| token.kind == Kind::Ident && matches!(self.raw(token), b"val" | b"var")) {
+            return None;
+        }
         // Only the chain touching the `=`: `export const f`, `const f: T` name `f`.
         let mut start = equal.checked_sub(1).filter(|at| toks[*at].kind == Kind::Ident)?;
         while start >= 2
