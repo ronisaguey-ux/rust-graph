@@ -1619,7 +1619,27 @@ impl<'a> Walker<'a> {
                 let children = self.children(id);
                 if let Some(at) = children.iter().position(|&child| self.text_string(child) == "=") {
                     if let Some(&value) = children.get(at + 1) {
-                        self.form(value);
+                        let form = self.form(value);
+                        // The one-pass reader files a `val`/`var` with an
+                        // initialiser as an `a` event naming the bound
+                        // identifier. Reading only the value left every member
+                        // of a trait/object body without that event: the CST
+                        // folded the whole body into one `x` on the header
+                        // line, so every binding lost its line (21 rows in
+                        // AnsiColor.scala alone).
+                        // The first identifier is the binder: a type
+                        // annotation (`val A: RecordType = …`) puts another
+                        // identifier after it, and taking the last one named
+                        // the type instead of the value (21 rows in
+                        // RecordType.scala).
+                        let name = children[..at]
+                            .iter()
+                            .find(|&&child| self.kind(child) == "identifier")
+                            .map(|&child| self.text_string(child));
+                        if let Some(name) = name {
+                            let line = self.line(id);
+                            self.lexer_event(b'a', line, &[name], &form, false);
+                        }
                     }
                 }
             }
