@@ -320,6 +320,10 @@ impl<'a> Walker<'a> {
                 self.event("[\"e\"]");
                 false
             }
+            "ERROR" => {
+                self.rust_recovered_calls(id);
+                false
+            }
             _ => false,
         }
     }
@@ -330,6 +334,40 @@ impl<'a> Walker<'a> {
     pub(crate) fn leave_rust(&mut self, id: u32) {
         if matches!(self.kind(id), "if_expression" | "while_expression" | "loop_expression" | "for_expression" | "match_expression") {
             self.event("[\"j\"]");
+        }
+    }
+
+    /// Calls visible in the raw tokens of an `ERROR` region: `name(`,
+    /// `a.b(`, or `a::b(`. Nothing is invented — the name and the argument list
+    /// are both in the source, and the region is only reached where the
+    /// grammar failed to build a node for them.
+    pub(crate) fn rust_recovered_calls(&mut self, id: u32) {
+        let tokens: Vec<u32> = self.children(id);
+        let mut at = 0;
+        while at < tokens.len() {
+            if !matches!(self.kind(tokens[at]), "identifier" | "self" | "Self" | "super" | "crate") {
+                at += 1;
+                continue;
+            }
+            if at > 0 && matches!(self.kind(tokens[at - 1]), "fn" | "struct" | "enum" | "union") {
+                at += 1;
+                continue;
+            }
+            let mut end = at;
+            let mut name = self.text_string(tokens[at]);
+            while end + 2 < tokens.len()
+                && matches!(self.kind(tokens[end + 1]), "." | "::")
+                && matches!(self.kind(tokens[end + 2]), "identifier" | "self" | "Self" | "super" | "crate")
+            {
+                name.push('.');
+                name.push_str(&self.text_string(tokens[end + 2]));
+                end += 2;
+            }
+            if end + 1 < tokens.len() && self.kind(tokens[end + 1]) == "(" {
+                let line = self.line(tokens[at]);
+                self.push_call(name, line);
+            }
+            at = end + 1;
         }
     }
 
