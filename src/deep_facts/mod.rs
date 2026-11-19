@@ -2147,6 +2147,21 @@ impl<'a> Walker<'a> {
                         self.event(&text);
                     }
                 }
+                // `finally close()`: Scala's finally takes one expression, and
+                // the grammar wraps it in a `try_body` that no arm forms, so the
+                // call and its line were lost (akka: 3 call losses). A braced
+                // body is a block the walk already reads.
+                if kind == "finally_clause" && self.language.name == "scala" {
+                    let body = self.children(id).into_iter().find(|&c| self.kind(c) == "try_body");
+                    let expr = body.and_then(|body| self.children(body).into_iter().find(|&c| !self.is_layout(c)));
+                    if let Some(expr) = expr.filter(|&c| !matches!(self.kind(c), "block" | "statement_block")) {
+                        let form = self.form(expr);
+                        if form != "0" {
+                            let line = self.line(expr);
+                            self.event(&format!("[\"x\",{line},{form}]"));
+                        }
+                    }
+                }
                 if kind == "except_clause" {
                     if let Some((targets, value)) = self.loop_binding(id) {
                         self.assignment_event(targets, value, self.line(id), false);
