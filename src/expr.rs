@@ -1233,6 +1233,45 @@ impl Emit<'_> {
             }
             return;
         }
+        // Scala's `new Foo { ... }` and `new A with B { ... }` build an
+        // anonymous class: a constructor call on the first type, not a run of
+        // type words and template members. The lexer read the `with` chain and
+        // the body as values (`m:[n:A,n:with,...]`), where the CST writes one
+        // call with no arguments and records the type as a call.
+        if word == "new" && self.lang.tag == "SCALA" {
+            if let Some(name) = self.word(1) {
+                let line = self.toks[self.pos + 1].line;
+                let mut at = 2usize;
+                let mut anonymous = false;
+                loop {
+                    while self.op_byte(at) == b'.' {
+                        match self.word(at + 1) {
+                            Some(_) => at += 2,
+                            None => break,
+                        }
+                    }
+                    if self.word(at).as_deref() == Some("with") && self.word(at + 1).is_some() {
+                        anonymous = true;
+                        at += 2;
+                    } else {
+                        break;
+                    }
+                }
+                let mut end = self.pos + at;
+                if self.op_byte(at) == b'{' {
+                    if let Some(close) = self.skip_balanced(self.pos + at, b"{", b"}") {
+                        anonymous = true;
+                        end = close;
+                    }
+                }
+                if anonymous {
+                    self.pos = end;
+                    let id = self.new_call(name, line);
+                    out.push_str(&format!("[\"c\",{id},0,[]]"));
+                    return;
+                }
+            }
+        }
         // `new ArrayList<>()`, `new HashMap<K, V>()`: Java's diamond and a
         // constructor's type arguments sit between the class name and its
         // argument list. The one-pass reader dropped `new` as noise and then
