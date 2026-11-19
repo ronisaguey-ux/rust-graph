@@ -2992,6 +2992,7 @@ fn dotted_piece(text: &str) -> bool {
     /// ```
     pub(crate) fn form(&mut self, id: u32) -> String {
         let kind = self.kind(id);
+
         if self.is_rust() {
             if let Some(out) = self.rust_form(id) {
                 return out;
@@ -3621,6 +3622,30 @@ fn dotted_piece(text: &str) -> bool {
                     .into_iter()
                     .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "if" | "else"))
                     .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `x match { case A => a; case B => b }`: Scala's `match_expression`
+            // has the scrutinee, the `match` keyword and the `match_block`, and
+            // the default arm read only the scrutinee. A binding initialised
+            // with a match wrote the constant 0 against the lexer's merge.
+            "match_expression" if self.language.name == "scala" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !matches!(self.kind(child), "{" | "}"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            "match_block" if self.language.name == "scala" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 match items.len() {
                     0 => "0".to_string(),
                     1 => self.form(items[0]),
