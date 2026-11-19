@@ -3974,6 +3974,19 @@ fn dotted_piece(text: &str) -> bool {
                     self.merge_form(&items)
                 }
             }
+            // `minBackoff * math.pow(2, n)`: Scala spells an infix expression as
+            // a `binary` node. The default arm read only its first operand, so
+            // a call on the right (`math.pow`, `a * f(b)`) was never recorded
+            // and the binding lost the value the lexer wrote as a merge of both
+            // operands. Form both sides like Kotlin's infix expression.
+            "binary" if self.language.name == "scala" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.merge_form(&items)
+                }
+            }
             // `UnsafeCell<State>`, `Vec<Entry>`: a generic type holds the base
             // and the type arguments, and both are names the lexer reads.
             "generic_type" | "type_arguments" | "type_parameter_list" => {
