@@ -3564,16 +3564,35 @@ fn raw_events(events: &str) -> Vec<RawEvent<'_>> {
 fn element_end(bytes: &[u8], start: usize) -> usize {
     let mut depth = 0usize;
     let mut at = start;
+    // A `[` or `]` inside a quoted string is data, not a bracket: the value
+    // `m:[n:Expected object value for ["]` carries one, and counting it left
+    // the depth open so this event swallowed every event after it on the line.
+    // The escape state follows the writer in `push_string`, which escapes both
+    // the quote and the backslash.
+    let mut in_string = false;
+    let mut escaped = false;
     while at < bytes.len() {
-        match bytes[at] {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return at + 1;
-                }
+        let byte = bytes[at];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
             }
-            _ => {}
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at + 1;
+                    }
+                }
+                _ => {}
+            }
         }
         at += 1;
     }
