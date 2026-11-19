@@ -254,7 +254,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// arguments, its trailing lambda, or a plain assignment — and never a bare
     /// block, so a broken declaration is recovered inside itself instead of
     /// being re-read as a top-level statement.
-    _top: package_header | import_header | &("@" _annotation_target) file_annotation | _declaration | &(accessor) accessor | &(_script_head (arguments | lambda_literal) ("." | "?.")) expression_statement | script_statement | LINE_END | ";",
+    _top: package_header | import_header | &("@" _annotation_target) file_annotation | _declaration | &(accessor) accessor | &(_script_head (type_arguments (arguments | lambda_literal) | (arguments | lambda_literal) ("." | "?."))) expression_statement | script_statement | LINE_END | ";",
     /// `@file:OptIn(...)` stands before the package header and annotates the
     /// file, not the declaration under it, so it is its own top-level item:
     /// without one, an annotated file has no alternative that starts with `@`
