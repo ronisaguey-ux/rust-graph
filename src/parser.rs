@@ -1064,6 +1064,16 @@ impl<'a> Parser<'a> {
                 && last.kind == Kind::Op
                 && matches!(self.raw(&last), b":" | b"&" | b"|")
                 && !self.is_declare_function(&self.stmt));
+        // `fun f(x: T): Boolean = ...?.let { ... } == true`: an expression-body
+        // function already opened its body at `=`, so a `{` later in the
+        // expression is a lambda or block expression inside that body, not the
+        // function's own block. Opening the function frame here made `}` close
+        // the function early and left the tail (`== true`) outside it.
+        if self.lang.tag == "KT"
+            && self.function_head(&self.stmt, false).is_some_and(|head| head.body.is_some())
+        {
+            return false;
+        }
         if (!ts_return_type_brace && self.has_def_word(&self.stmt)) || self.assigned_class(&self.stmt).is_some() {
             return true;
         }
