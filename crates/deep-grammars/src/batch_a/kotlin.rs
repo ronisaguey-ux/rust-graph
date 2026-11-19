@@ -453,7 +453,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// `return` and `throw` are primaries as well as statements: `a ?: return x`
     /// and `list.map { it ?: throw ... }` put them where an expression goes.
     labeled_statement: _name "@" _statement,
-    if_statement: "if" parenthesized_expression _statement ["else" _statement],
+    if_statement: "if" parenthesized_expression [LINE_END] _statement ["else" _statement],
     while_statement: "while" parenthesized_expression _statement,
     do_statement: "do" _statement "while" parenthesized_expression,
     for_statement: "for" for_header _statement,
@@ -1222,6 +1222,13 @@ mod tests {
         assert!(fixtures::clean(&KOTLIN, src));
         let kinds = fixtures::tokens(&KOTLIN, src);
         assert!(kinds.iter().any(|kind| *kind == "template_name"), "{kinds:?}");
+    }
+
+    /// An `if` expression or statement may break the line before its branch.
+    #[test]
+    fn if_statement_allows_line_break_before_branch() {
+        let src = "class C {\n    fun writeReplace(): Any =\n        if (isReadOnly)\n            SerializedCollection(this)\n        else\n            throw Exception()\n}\n";
+        assert!(fixtures::clean(&KOTLIN, src));
     }
 
     /// Malformed and truncated input must give a tree with the error inside it,
