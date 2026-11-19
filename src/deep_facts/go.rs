@@ -3542,7 +3542,10 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.merge_form(&items),
                 }
             }
-            "if_statement" if self.is_kotlin() => {
+            // `val M = if (h <= 0) 0L else acc.cumulative(h-1)`: Scala's `if`
+            // is a value too, and the default arm read only its condition, so
+            // both branches (and the calls in them) left the CST's value.
+            "if_statement" if self.is_kotlin() || self.language.name == "scala" => {
                 let items: Vec<u32> = self
                     .children(id)
                     .into_iter()
