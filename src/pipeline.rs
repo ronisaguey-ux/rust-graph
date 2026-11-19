@@ -1874,7 +1874,7 @@ fn uncovered(
             || is_type_property_line(lines, event.line)
             || is_export_statement_line(lines, event.line)
             || is_import_alias_line(lines, event.line)
-            || is_type_continuation_line(lines, event.line)
+            || is_type_continuation_line(&lexer.tag, lines, event.line)
             || is_tail_expression_line(lines, event.line)
             || is_yield_line(lines, event.line)
             // `Bound(Bound),` in an enum body: the variants are declarations,
@@ -2467,11 +2467,19 @@ fn is_tail_expression_line(src: &Lines<'_>, line: u32) -> bool {
 /// The union is one declaration, and the one-pass lexer reads each branch as an
 /// expression of its own.
 #[cfg(all(feature = "deep", feature = "parser"))]
-fn is_type_continuation_line(src: &Lines<'_>, line: u32) -> bool {
+fn is_type_continuation_line(tag: &str, src: &Lines<'_>, line: u32) -> bool {
     let Some(text) = src.get(line) else {
         return false;
     };
     let text = text.trim_start();
+    // A Scala heritage clause continues with `with` over several lines:
+    // `class X extends A` / `  with B with C {`. The lexer reads each `with`
+    // line as an expression, but the CST records the whole clause on the
+    // header, so the fragment states no fact of its own (21 rows in
+    // JavaCollectionWrappers.scala alone).
+    if tag == "SCALA" && text.starts_with("with ") {
+        return true;
+    }
     // `interface A` on one line and `extends B, Pick<C, "x">` on the next: the
     // heritage clause is not a statement, and no statement starts with
     // `extends` or `implements`, so the lexer's event on that line is its own
