@@ -3445,7 +3445,15 @@ impl<'a> Parser<'a> {
     }
 
     fn class_head(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {
-        let index = self.skip_modifiers(toks);
+        let mut index = self.skip_modifiers(toks);
+        // `public @interface Foo {`: in Java `@interface` declares an annotation
+        // type, just like `interface` declares an interface.
+        if self.lang.tag == "JAVA"
+            && toks.get(index).is_some_and(|t| self.is_op(t, b"@"))
+            && self.word_at(toks, index + 1).as_deref() == Some("interface")
+        {
+            index += 1;
+        }
         let keyword = self.word_at(toks, index)?;
         if !self.lang.classes.contains(&keyword.as_str()) {
             return None;
