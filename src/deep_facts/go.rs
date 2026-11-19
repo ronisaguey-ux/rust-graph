@@ -3092,6 +3092,42 @@ fn dotted_piece(text: &str) -> bool {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
+            // `object : Base by delegate()`: a delegation call is the fact the
+            // lexer records on the object's line. The grammar builds a
+            // `supertype_delegation` node whose delegate is a name plus an
+            // argument list, not a `call_expression`, so no arm walked it and
+            // the call was missing from the CST's record. Keep the value 0 —
+            // the object's own event already reads as `n:object` — and only
+            // record the call.
+            "supertype_delegation" if self.is_kotlin() => {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.kind(child) == "by") {
+                    let rest = &children[at + 1..];
+                    if let Some(&call) = rest.iter().find(|&&child| self.kind(child) == "call_expression") {
+                        let _ = self.form(call);
+                    } else {
+                        let args = rest.iter().copied().find(|&child| matches!(self.kind(child), "arguments" | "argument_list"));
+                        let mut name = String::new();
+                        for &child in rest {
+                            if matches!(self.kind(child), "arguments" | "argument_list") {
+                                break;
+                            }
+                            match self.kind(child) {
+                                "." | "?." => name.push('.'),
+                                k if self.is_layout(child) || k == "by" => {}
+                                _ => name.push_str(&self.text_string(child)),
+                            }
+                        }
+                        if !name.is_empty() {
+                            self.push_call(name, self.line(id));
+                            if let Some(list) = args {
+                                let _ = self.arguments(list);
+                            }
+                        }
+                    }
+                }
+                "0".to_string()
+            }
             // `object : Base()`, `class C : Base()`: a supertype constructor is
             // a call of its type's name with its own arguments.
             "superclass_constructor" if self.is_kotlin() => self.call_form(id),
