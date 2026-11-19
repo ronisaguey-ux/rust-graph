@@ -742,6 +742,10 @@ fn ends_statement(kind: Kind) -> bool {
             | BAD_LITERAL | RPAREN | RBRACKET | RBRACE | KW_RETURN | KW_BREAK
             | KW_CONTINUE | KW_THIS | KW_SUPER | KW_NULL | KW_TRUE | KW_FALSE
             | INCREMENT | DECREMENT | BANG_BANG
+            // `val x = f() as T?` then `check(x)`: the `?` closes a nullable
+            // type and ends the statement. Without it the next line folded
+            // into the declaration and its call was read as a name.
+            | QUESTION
     )
 }
 

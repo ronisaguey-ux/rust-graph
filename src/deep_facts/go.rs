@@ -3481,6 +3481,17 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.merge_form(&items),
                 }
             }
+            // `if (p) null else f()`: a branch is an `expression_statement`
+            // whose child may be a bare literal. The generic default only
+            // reads a child that has children, so a `null` branch became the
+            // constant 0 and the getter's merged value lost the name the lexer
+            // reads for it (`get() = if (…) null else f()`).
+            "expression_statement" if self.is_kotlin() => {
+                match self.children(id).into_iter().find(|&child| !self.is_layout(child)) {
+                    Some(child) => self.form(child),
+                    None => "0".to_string(),
+                }
+            }
             "block" if self.is_kotlin() => {
                 let items: Vec<u32> = self
                     .children(id)
