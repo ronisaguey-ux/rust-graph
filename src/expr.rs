@@ -1964,7 +1964,7 @@ impl Emit<'_> {
                 continue;
             }
             let separator = self.is_op(0, b".")
-                || self.is_op(0, b"->")
+                || (self.is_op(0, b"->") && self.lang.tag != "KT")
                 || self.is_op(0, b"::")
                 || self.is_op(0, b"?.")
                 || (self.is_op(0, b":") && self.op_byte(2) == b'(' && self.lang.tag == "LUA");
