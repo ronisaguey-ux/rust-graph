@@ -1430,14 +1430,27 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn return_statement(&mut self, id: u32) {
         let line = self.line(id);
-        let value = match self.expression_child(id) {
-            Some(child) => {
-                if let Some(module) = self.require_module(child) {
+        let exprs: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+        let value = match exprs.as_slice() {
+            [] => "0".to_string(),
+            [child] => {
+                if let Some(module) = self.require_module(*child) {
                     self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
                 }
-                self.form(child)
+                self.form(*child)
             }
-            None => "0".to_string(),
+            many => {
+                let parts: Vec<String> = many
+                    .iter()
+                    .map(|&child| {
+                        if let Some(module) = self.require_module(child) {
+                            self.facts.imports.push(Import { line, module, kind: IMPORT_STAR, ..Import::default() });
+                        }
+                        self.form(child)
+                    })
+                    .collect();
+                format!("[\"m\",[{}]]", parts.join(","))
+            }
         };
         self.event(&format!("[\"r\",{line},{value}]"));
     }
