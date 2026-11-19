@@ -311,13 +311,19 @@ rust_graph_deep::grammar! { KOTLIN {
         | &([modifiers] "init") init_block
         | typealias_declaration,
 
-    class_declaration: [modifiers] "class" _name [type_parameters] [primary_constructor] [":" supertypes] [type_constraints] [class_body],
+    class_declaration:
+        &([modifiers] "class" _name [type_parameters] LINE_END primary_constructor)
+            [modifiers] "class" _name [type_parameters] LINE_END primary_constructor [":" supertypes] [type_constraints] [class_body]
+        | [modifiers] "class" _name [type_parameters] [primary_constructor] [":" supertypes] [type_constraints] [class_body],
     /// `fun interface Plugin { fun intercept() }`: a functional interface is a
     /// declaration of its own, and read as a function it took the whole file's
     /// declaration with it.
     fun_interface_declaration: [modifiers] "fun" "interface" _name [type_parameters] [":" supertypes] [class_body],
     interface_declaration: [modifiers] "interface" _name [type_parameters] [":" supertypes] [type_constraints] [class_body],
-    enum_class_declaration: [modifiers] ["enum"] "class" _name [type_parameters] [primary_constructor] [":" supertypes] [type_constraints] enum_body,
+    enum_class_declaration:
+        &([modifiers] ["enum"] "class" _name [type_parameters] LINE_END primary_constructor)
+            [modifiers] ["enum"] "class" _name [type_parameters] LINE_END primary_constructor [":" supertypes] [type_constraints] enum_body
+        | [modifiers] ["enum"] "class" _name [type_parameters] [primary_constructor] [":" supertypes] [type_constraints] enum_body,
     object_declaration: [modifiers] "object" _name [":" supertypes] [class_body],
     companion_object: [modifiers] "companion" "object" [_name] [":" supertypes] [class_body],
     typealias_declaration: [modifiers] "typealias" _name [type_parameters] "=" _type,
@@ -1133,6 +1139,7 @@ mod tests {
             "class S {\n    @Transactional(readOnly = true)\n    fun read(): String = \"x\"\n}\n",
             "@file:JvmName(\"X\")\nclass S\n",
             "class S {\n    @get:JvmName(\"x\")\n    val a = 1\n}\n",
+            "public value class UByteArray\n@PublishedApi\ninternal constructor(val storage: ByteArray) : Collection<UByte> {\n    private class Iterator(private val array: ByteArray) {}\n}\n",
         ];
         for source in rows {
             assert!(fixtures::clean(&KOTLIN, source), "{source:?}");
