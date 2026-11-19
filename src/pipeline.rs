@@ -2076,7 +2076,10 @@ fn uncovered(
         // statement is still in the CST's record, with the real name and the
         // same value, so the fact is there and only the invented binder is set
         // aside.
-        if annotation_targets(lexer, &want, &found, lines) || type_as_target(lines, &want, &found, &lexer.tag) {
+        if annotation_targets(lexer, &want, &found, lines)
+            || type_as_target(lines, &want, &found, &lexer.tag)
+            || scala_typed_val_target(lines, &want, &found, &lexer.tag)
+        {
             accepted.annotation_targets += 1;
             // Both checks require a covering row before they say yes, so the
             // statement is in the record either way; the row is retired when it
@@ -3146,6 +3149,38 @@ fn type_as_target(src: &Lines<'_>, want: &(u8, Shape), found: &[(u8, Shape)], ta
             (Some(binder), Some(annotation)) => binder < colon && annotation > colon && line[annotation..].contains('='),
             _ => false,
         }
+    })
+}
+
+/// `implicit val intStepperShape: StepperShape[Int, IntStepper] = new
+/// StepperShape[..] { .. }`: the one-pass reader binds the type written after
+/// the colon, while the CST binds the declared name. The values can differ
+/// widely (the lexer folds the anonymous class body into its value), so the
+/// name and the source line are the evidence that both read the same binding.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn scala_typed_val_target(src: &Lines<'_>, want: &(u8, Shape), found: &[(u8, Shape)], tag: &str) -> bool {
+    if tag != "SCALA" || want.0 != b'a' || src.is_empty() {
+        return false;
+    }
+    let Some(line) = src.get(want.1.line) else { return false };
+    let invented = name_list(&want.1.targets);
+    let Some(invented) = invented.last() else { return false };
+    let text = line.trim_start();
+    let rest = ["implicit val ", "implicit var ", "val ", "var "]
+        .into_iter()
+        .find_map(|prefix| text.strip_prefix(prefix))
+        .unwrap_or(text);
+    found.iter().any(|row| {
+        if row.0 != b'a' || (row.1.line as i64 - want.1.line as i64).abs() > 1 || row.1.targets == want.1.targets {
+            return false;
+        }
+        let binder = name_list(&row.1.targets);
+        let Some(binder) = binder.first() else { return false };
+        if !rest.starts_with(binder.as_str()) {
+            return false;
+        }
+        let after = rest[binder.len()..].trim_start();
+        after.starts_with(':') && after.contains(invented.as_str())
     })
 }
 
