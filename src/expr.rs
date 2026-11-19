@@ -1393,6 +1393,14 @@ impl Emit<'_> {
             }
             return;
         }
+        // `override fun visitMethod(...): MethodVisitor = ...`, `fun(x: Int) = x`:
+        // in Kotlin `fun` introduces a function declaration or anonymous
+        // function, never a call. Left to `chain()`, the declared name was
+        // read as a callee (`call visitMethod` inside `object : ... { ... }`).
+        if self.lang.tag == "KT" && word == "fun" {
+            self.skip_kt_fun_header();
+            return;
+        }
         // `pick: fn(&Corners) -> f64`: a function *type*. `fn` is a keyword that
         // names no value, its parentheses are a parameter list, and the type
         // after `->` is a type. Read as a value chain the two words `fn` and
@@ -1469,6 +1477,67 @@ impl Emit<'_> {
         self.chain(out, String::new(), head, line);
         if self.lang.command_calls || self.lang.apply_calls {
             self.juxtaposed(out, close, line);
+        }
+    }
+
+    /// Skip a Kotlin `<...>` type-argument or type-parameter list at `self.pos`.
+    fn skip_kt_angles(&mut self) {
+        if !self.is_op(0, b"<") && !self.is_op(0, b"<<") {
+            return;
+        }
+        let mut depth = 0i32;
+        while let Some(token) = self.tok(0) {
+            if token.kind == Kind::Op {
+                match &self.src[token.start as usize..token.end as usize] {
+                    b"<" => depth += 1,
+                    b"<<" => depth += 2,
+                    b">" => depth -= 1,
+                    b">>" => depth -= 2,
+                    _ => {}
+                }
+            }
+            self.pos += 1;
+            if depth <= 0 {
+                break;
+            }
+        }
+    }
+
+    /// Skip a Kotlin `fun` header (type params, receiver/name, parameter list,
+    /// and optional `: ReturnType`) so `object : ... { override fun f() = ... }`
+    /// does not emit a call for `f` while still walking its body.
+    fn skip_kt_fun_header(&mut self) {
+        self.skip_kt_angles();
+        while let Some(token) = self.tok(0) {
+            if token.kind == Kind::Ident || self.is_op(0, b".") || self.is_op(0, b"?") {
+                self.pos += 1;
+                self.skip_kt_angles();
+            } else {
+                break;
+            }
+        }
+        if self.op_byte(0) == b'(' {
+            if let Some(after) = self.skip_balanced(self.pos, b"(", b")") {
+                self.pos = after;
+            }
+        }
+        if self.is_op(0, b":") {
+            self.pos += 1;
+            let mut depth = 0i32;
+            while let Some(token) = self.tok(0) {
+                if token.kind == Kind::Op {
+                    match &self.src[token.start as usize..token.end as usize] {
+                        b"(" | b"[" | b"<" => depth += 1,
+                        b"<<" => depth += 2,
+                        b")" | b"]" if depth > 0 => depth -= 1,
+                        b">" if depth > 0 => depth -= 1,
+                        b">>" if depth > 0 => depth -= 2,
+                        b"{" | b"=" | b")" | b"]" | b"}" | b"," | b";" if depth <= 0 => break,
+                        _ => {}
+                    }
+                }
+                self.pos += 1;
+            }
         }
     }
 
