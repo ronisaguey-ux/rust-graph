@@ -2296,13 +2296,18 @@ fn is_bracketed_attribute(src: &Lines<'_>, name: &str, line: u32) -> bool {
 fn is_declaration_line(src: &Lines<'_>, line: u32) -> bool {
     // The header is what is written before the name's parenthesis or the body's
     // brace: `pub const fn new`, `pub(crate) struct Cache`, `def parse`.
-    const INTRODUCERS: [&str; 19] = [
+    const INTRODUCERS: [&str; 20] = [
         "fn", "func", "def", "struct", "enum", "trait", "union", "type", "impl", "class", "interface", "module",
         // Scala's `object IndexedSeq extends SeqFactory.Delegate[IndexedSeq](..)`:
         // the lexer reads the supertype's constructor as a call on the header.
         // Without `object` here every such line lost that call - the four
         // `*.Delegate` factories and `NoAck` among them.
         "object",
+        // Scala writes a class's supertype on its own line:
+        // `class C(..)\n  extends Base[T](args)\n  with Trait`. The `extends`
+        // line is part of the declaration, and the lexer reads the base's
+        // constructor there as a call the CST does not write.
+        "extends",
         // `namespace NodeJS {` and `declare global {`: both declare a scope, and
         // the one-pass lexer reads the header as an expression.
         "namespace", "global",
