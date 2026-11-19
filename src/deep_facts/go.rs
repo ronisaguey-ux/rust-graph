@@ -3397,6 +3397,21 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.merge_form(&items),
                 }
             }
+            // `val x = f()`: a property declaration inside an expression-valued
+            // lambda or block still evaluates its initializer, so `form` must
+            // walk the expression after `=` or `by` rather than stopping at
+            // `property_head` through the default child fallback.
+            "property_declaration" if self.is_kotlin() => {
+                let children = self.children(id);
+                match children
+                    .iter()
+                    .position(|&child| matches!(self.kind(child), "=" | "by"))
+                    .and_then(|at| children.get(at + 1).copied())
+                {
+                    Some(value) => self.form(value),
+                    None => "0".to_string(),
+                }
+            }
             "not_null_expression" if self.is_kotlin() => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
@@ -4174,6 +4189,13 @@ fn dotted_piece(text: &str) -> bool {
             None => out.push_str("[]"),
         }
         out.push(']');
+        if self.is_kotlin() && !self.in_kotlin_expr_body {
+            for &child in &children {
+                if matches!(self.kind(child), "lambda_literal" | "annotated_lambda" | "labeled_lambda") {
+                    self.form(child);
+                }
+            }
+        }
         let _ = is_new;
         let link = (index as u32, receiver);
         (out, Some(link))
