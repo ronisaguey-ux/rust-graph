@@ -4137,6 +4137,16 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         "KT" => &[
             "if", "when", "while", "for", "do", "else", "try", "catch", "finally", "return", "throw", "is", "as", "in",
         ],
+        // Scala's declaration and control words are not values. The one-pass
+        // reader folds a whole member header (`val`, `object`, `final`,
+        // `override`, `match`, `with`, …) into its value, and the CST names
+        // the underlying expression instead, so these words never denote a
+        // fact the CST dropped.
+        "SCALA" => &[
+            "if", "else", "while", "for", "do", "match", "case", "try", "catch", "finally", "return", "throw",
+            "new", "with", "extends", "val", "var", "def", "type", "class", "object", "trait", "implicit",
+            "final", "private", "protected", "override", "abstract", "sealed", "lazy", "this", "super",
+        ],
         // C#: the operator words are spellings, not callees. `unchecked(a + b)`,
         // `default(DateTime)`, `nameof(x)`, `checked(n)` and `typeof(T)` put a
         // keyword in front of a group, and the one-pass reader read the keyword
