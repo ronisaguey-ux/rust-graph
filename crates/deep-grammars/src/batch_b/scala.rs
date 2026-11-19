@@ -183,6 +183,8 @@ rust_graph_deep::grammar! { SCALA {
         PERCENT_EQ = "%=",
         AMP_EQ = "&=",
         PIPE_EQ = "|=",
+        OROR_EQ = "||=",
+        ANDAND_EQ = "&&=",
         CARET_EQ = "^=",
         SHL_EQ = "<<=",
         SHR_EQ = ">>=",
@@ -345,7 +347,7 @@ rust_graph_deep::grammar! { SCALA {
     // ---- expressions ----
 
     _expression: precedence _primary {
-        assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" => assignment,
+        assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "||=" | "&&=" | "^=" | "<<=" | GT_JOINED ">=" => assignment,
         lambda: right "=>" => lambda_expression,
         match: postfix "match" match_block => match_expression,
         or: left "||" => binary,
@@ -740,6 +742,8 @@ fn operator(c: &mut Cursor) -> Kind {
         (b'>', b':', _) => (LOWER_BOUND, 2),
         (b':', b':', _) => (COLONCOLON, 2),
         (b'<', b'<', b'=') => (SHL_EQ, 3),
+        (b'|', b'|', b'=') => (OROR_EQ, 3),
+        (b'&', b'&', b'=') => (ANDAND_EQ, 3),
         (b'>', b'>', b'=') => (SHR_EQ, 3),
         (b'=', b'=', _) => (EQ, 2),
         (b'!', b'=', _) => (NE, 2),
