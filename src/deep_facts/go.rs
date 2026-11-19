@@ -4521,6 +4521,7 @@ fn dotted_piece(text: &str) -> bool {
                     text.trim_start_matches('#').to_string()
                 }
             }
+            "labeled_this" if self.is_kotlin() => "self".to_string(),
             // `JObject.Parse`: the C# grammar spells a member access with two
             // name leaves, and read as a leaf the whole receiver vanished -
             // every call through a type in the corpus lost its dotted name.

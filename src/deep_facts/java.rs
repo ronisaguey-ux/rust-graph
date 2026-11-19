@@ -10,7 +10,7 @@ impl<'a> Walker<'a> {
             "package_declaration" | "module_declaration" | "requires_module_directive"
             | "exports_module_directive" | "opens_module_directive" | "uses_module_directive"
             | "provides_module_directive" => self.java_dotted_declaration(id),
-            "block" | "class_body" | "enum_body" | "interface_body" | "constructor_body" | "module_body" => {
+            "block" | "class_body" | "enum_body" | "enum_body_declarations" | "interface_body" | "constructor_body" | "module_body" => {
                 self.java_statements(id)
             }
             "if_statement" | "for_statement" | "enhanced_for_statement" | "while_statement" | "do_statement"
