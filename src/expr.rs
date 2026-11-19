@@ -1408,6 +1408,16 @@ impl Emit<'_> {
             }
             return;
         }
+        // `override fun visitMethod(...): MethodVisitor = ...`, `fun(x: Int) = x`:
+        // in Kotlin `fun` introduces a function declaration or anonymous
+        // function, never a call. Left to `chain()`, the declared name was
+        // read as a callee (`call visitMethod` inside `object : ... { ... }`).
+        // Checked before `noise` because `"fun"` is in `NOISE`.
+        if self.lang.tag == "KT" && word == "fun" {
+            self.pos += 1;
+            self.skip_kt_fun_header();
+            return;
+        }
         let go_word = matches!(word.as_str(), "go" | "defer") && self.lang.tag != "GO";        // `new` is a keyword in the JavaScript family and an ordinary name in
         // Rust: reading it as noise left `new.is_none()` calling nothing, and
         // the record differed by a constant that was never there.
@@ -1472,14 +1482,6 @@ impl Emit<'_> {
                     self.pos += 1;
                 }
             }
-            return;
-        }
-        // `override fun visitMethod(...): MethodVisitor = ...`, `fun(x: Int) = x`:
-        // in Kotlin `fun` introduces a function declaration or anonymous
-        // function, never a call. Left to `chain()`, the declared name was
-        // read as a callee (`call visitMethod` inside `object : ... { ... }`).
-        if self.lang.tag == "KT" && word == "fun" {
-            self.skip_kt_fun_header();
             return;
         }
         // `pick: fn(&Corners) -> f64`: a function *type*. `fn` is a keyword that
@@ -2155,7 +2157,6 @@ impl Emit<'_> {
                 && path.starts_with('.')
             {
                 let line = type_arg_line.take().unwrap_or(self.toks[self.pos].line);
-                self.pos += 1;
                 let (receiver, mut target) = self.split_receiver(&value, &path);
                 if target.starts_with('.') {
                     if let Some(class) = constructed.take() {

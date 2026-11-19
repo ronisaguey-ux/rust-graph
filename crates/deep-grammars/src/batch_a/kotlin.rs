@@ -362,7 +362,8 @@ rust_graph_deep::grammar! { KOTLIN {
 
     class_body: "{" _member* "}",
     _member:
-        &([modifiers] "fun") function_declaration
+        &([modifiers] "fun" "interface") fun_interface_declaration
+        | &([modifiers] "fun") function_declaration
         | &([modifiers] ("val" | "var")) property_declaration
         | &([modifiers] "constructor") secondary_constructor
         | &([modifiers] "init") init_block
