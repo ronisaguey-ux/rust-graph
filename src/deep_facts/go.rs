@@ -3451,6 +3451,13 @@ fn dotted_piece(text: &str) -> bool {
             // `z: "Thing"` with no value: the statement is the annotation, and
             // the name in it is what the lexer reads as the expression. With a
             // value (`z: "Thing" = f()`) the value is what the statement is.
+            "annotated_expression" => self
+                .children(id)
+                .into_iter()
+                .rev()
+                .find(|&child| !self.is_layout(child) && self.kind(child) != "annotation")
+                .map(|child| self.form(child))
+                .unwrap_or_else(|| "0".to_string()),
             "annotated" => {
                 let children = self.children(id);
                 let has_value = children.iter().any(|&child| self.kind(child) == "=");

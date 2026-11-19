@@ -532,6 +532,8 @@ rust_graph_deep::grammar! { KOTLIN {
         | "super"
         | parenthesized_expression
         | lambda_literal
+        | &(_name "@" lambda_literal) labeled_lambda
+        | &("@") annotated_expression
         | absolute_reference
         | &("this" "@") labeled_this
         | &("super" "@") labeled_this
@@ -556,6 +558,7 @@ rust_graph_deep::grammar! { KOTLIN {
     /// the brace pair could not follow it, so every labeled lambda recovered
     /// and took the statements inside it with it.
     labeled_lambda: _name "@" lambda_literal,
+    annotated_expression: annotation [LINE_END] _expression,
     lambda_body: &(_lambda_parameters "->") _lambda_parameters "->" _block_item* | lambda_items,
     lambda_items: _block_item+,
     _lambda_parameters: _lambda_parameter ("," _lambda_parameter)*,
