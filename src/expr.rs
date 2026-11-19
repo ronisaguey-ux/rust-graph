@@ -471,19 +471,24 @@ impl Emit<'_> {
                 }
                 continue;
             }
-            if self.is_arrow(0) {
+            if self.is_arrow(0) || (self.lang.tag == "KT" && self.is_op(0, b"->")) {
                 // In Rust `=>` opens a match arm: the pattern is not part of the
                 // value, so it is dropped and the arm's expression stands (the
                 // constant form below cost rust 100 files there).
+                // In Kotlin `->` opens a `when` arm or lambda body: the
+                // condition or parameter list before `->` is not part of the
+                // body's value, though any call in a `when` condition is kept.
                 if !matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") {
                     out.truncate(start);
-                    if guard_seen {
-                        // The pattern's calls sit between the item's start and the
-                        // guard's `if`; the guard's own calls follow it and are real.
-                        let end = calls_after_pattern.min(self.calls.len());
-                        self.calls.drain(calls_at_start.min(end)..end);
-                    } else {
-                        self.calls.truncate(calls_at_start);
+                    if self.lang.tag != "KT" {
+                        if guard_seen {
+                            // The pattern's calls sit between the item's start and the
+                            // guard's `if`; the guard's own calls follow it and are real.
+                            let end = calls_after_pattern.min(self.calls.len());
+                            self.calls.drain(calls_at_start.min(end)..end);
+                        } else {
+                            self.calls.truncate(calls_at_start);
+                        }
                     }
                     count = 0;
                     self.pos += 1;
