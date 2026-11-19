@@ -4567,11 +4567,33 @@ impl<'a> Parser<'a> {
     /// declaration under it and binds no value: the CST marks the following
     /// declaration with its modifiers and writes no event of its own for the
     /// attribute, so reading the attribute's name as an expression invented an
-    /// `n:inlinable` on 123 lines. A statement that carries a declaration
-    /// keyword is the declaration itself (`@objc func f()`) and keeps its
-    /// event.
+    /// `n:inlinable` on 123 lines. An uninitialised `var` or `let` binding
+    /// (`var window: UIWindow?`) also declares a property without assigning a
+    /// value, so reading it as an expression invented `m:[n:window,n:UIWindow]`.
+    /// A statement that carries a declaration keyword is the declaration itself
+    /// (`@objc func f()`) and keeps its event.
     fn swift_declares_only(&self, stmt: &[Token]) -> bool {
-        stmt.first().is_some_and(|token| self.is_op(token, b"@"))
+        if stmt.first().is_some_and(|token| self.is_op(token, b"@")) {
+            return true;
+        }
+        let mut index = 0;
+        while let Some(token) = stmt.get(index) {
+            if token.kind != Kind::Ident {
+                return false;
+            }
+            let word = self.text(token);
+            if matches!(
+                word.as_str(),
+                "private" | "fileprivate" | "internal" | "public" | "open" | "static" | "class" | "final"
+                    | "override" | "required" | "convenience" | "dynamic" | "lazy" | "weak" | "unowned"
+                    | "nonmutating" | "mutating" | "nonisolated" | "isolated" | "indirect" | "optional"
+            ) {
+                index += 1;
+                continue;
+            }
+            return matches!(word.as_str(), "var" | "let");
+        }
+        false
     }
 
     /// A Java member that declares and assigns nothing: a signature with no
