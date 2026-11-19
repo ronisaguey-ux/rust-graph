@@ -306,6 +306,42 @@ impl Emit<'_> {
         }
     }
 
+    /// If `index` (right after `:`) starts a TypeScript arrow return type
+    /// (`(params): ReturnType => ...`), return the token index of `=>`.
+    fn ts_arrow_after_return_type(&self, mut index: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        while let Some(token) = self.toks.get(index) {
+            if token.kind == Kind::Op {
+                let raw = &self.src[token.start as usize..token.end as usize];
+                match raw {
+                    b"(" | b"[" | b"{" | b"<" => depth += 1,
+                    b")" | b"]" | b"}" | b">" => {
+                        if depth == 0 {
+                            return None;
+                        }
+                        depth -= 1;
+                    }
+                    b">>" | b">>>" => {
+                        if depth == 0 {
+                            return None;
+                        }
+                        depth = depth.saturating_sub(raw.len());
+                    }
+                    b"=>" if depth == 0 => return Some(index),
+                    b"," | b";" | b"=" | b"&&" | b"||" | b"??" | b"==" | b"===" | b"!="
+                    | b"!==" | b"<=" | b">=" | b"+=" | b"-=" | b"*=" | b"/=" | b"%="
+                        if depth == 0 =>
+                    {
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
     fn argument(&mut self, out: &mut String, close: u8) {
         if let Some(name) = self.word(0) {
             let colon = self.op_byte(1) == b':' && NAMED_ARGS_WITH_COLON.contains(&self.lang.tag);
@@ -659,6 +695,12 @@ impl Emit<'_> {
                             }
                             let before = out.len();
                             self.group(out);
+                            if matches!(self.lang.tag, "TS" | "TSX") && self.op_byte(0) == b':' {
+                                if let Some(arrow) = self.ts_arrow_after_return_type(self.pos + 1) {
+                                    self.pos = arrow;
+                                    continue;
+                                }
+                            }
                             if self.op_byte(0) == b'(' && &out[before..] == "0" {
                                 self.pos += 1;
                                 let mut args = String::new();
