@@ -3115,7 +3115,12 @@ fn type_as_target(src: &Lines<'_>, want: &(u8, Shape), found: &[(u8, Shape)], ta
         // as a substring, `self.dict: dict[str, Any] = {}` matched the `dict`
         // inside the binder, which sits before the colon, so the invented
         // binder was reported as a loss on a statement the CST read correctly.
-        match (line.find(deep.as_str()), whole_word_after(line, lexer_names[0].as_str(), colon)) {
+        // The invented binder is the LAST lexer target: Scala's
+        // `var x: Type = value` writes `["x","Type"]`, so looking for the
+        // first name after the colon searched for `x`, which sits before it,
+        // and every typed Scala var was blamed for a target it did not invent.
+        // Go's single-name list has last == first, so this stays the same.
+        match (line.find(deep.as_str()), whole_word_after(line, lexer_names.last().unwrap().as_str(), colon)) {
             (Some(binder), Some(annotation)) => binder < colon && annotation > colon && line[annotation..].contains('='),
             _ => false,
         }
