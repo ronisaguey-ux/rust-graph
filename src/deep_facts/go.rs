@@ -741,7 +741,19 @@ impl<'a> Walker<'a> {
                 .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
                 .map(|list| self.arguments(list))
                 .unwrap_or_else(|| "[]".to_string());
-            return format!("[\"c\",{index},{receiver},{args}]");
+            let call = format!("[\"c\",{index},{receiver},{args}]");
+            // `new X() { … }`: the anonymous class body is part of the creation,
+            // and the lexer merges it with the call (`m:[c(X), body]`, `0` for an
+            // empty body). Dropping it lost every java `new` with a body that sat
+            // in an argument list.
+            if self.language.name == "java" && kind == "object_creation_expression" {
+                if let Some(body) = self.children(id).into_iter().find(|&child| self.kind(child) == "class_body") {
+                    let body = self.decl_value(body);
+                    let body = if body.is_empty() { "0".to_string() } else { body };
+                    return format!("[\"m\",[{call},{body}]]");
+                }
+            }
+            return call;
         }
         // C# `[Attr(…)]`: the lexer reads an attribute section as a value with
         // one element per attribute - a call when the attribute has arguments,
