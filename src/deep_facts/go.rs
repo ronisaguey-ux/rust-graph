@@ -4548,6 +4548,10 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
+            // `(this as Foo).bar()` / `(this as? Foo)?.bar`: Kotlin's cast
+            // includes the target type in its value, so collapsing `as_expression`
+            // to its operand path drops the target type from the receiver.
+            "as_expression" if self.is_kotlin() => String::new(),
             "as_expression" | "satisfies_expression" | "type_assertion" | "non_null_expression" | "not_null_expression" => {
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }

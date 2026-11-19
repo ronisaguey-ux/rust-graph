@@ -612,8 +612,16 @@ impl<'a> Parser<'a> {
             return;
         }
         if let Some(last) = self.stmt.last() {
+            // `as Class<T>` / `List<Map<K, V>>`: a closing type-argument `>`
+            // attached to the preceding token ends the expression rather than
+            // continuing onto the next line like a binary comparison `a >`.
+            let kotlin_closing_angle = self.lang.tag == "KT"
+                && matches!(self.raw(last), b">" | b">>")
+                && self.stmt.len() >= 2
+                && self.stmt[self.stmt.len() - 2].end == last.start;
             let continues = self.lang.operator_continues
                 && last.kind == Kind::Op
+                && !kotlin_closing_angle
                 && !matches!(self.raw(last), b")" | b"]" | b"}" | b":" | b"++" | b"--" | b"=" | b"!" | b"?");
             let trailing_equal = last.kind == Kind::Op && self.raw(last) == b"=" && self.lang.blocks != Blocks::Indent;
             let trailing_nullish = self.stmt.len() >= 2
