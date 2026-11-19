@@ -1611,6 +1611,18 @@ impl<'a> Walker<'a> {
                 }
             }
             "expression_statement" => self.expression_statement(id),
+            // `val x = f()`: a Scala val/var is not a definition node the walk
+            // opens, so nothing formed the initializer and every call written
+            // there (`new Array[T](n)`) was missing from the call table. Form
+            // only the value after `=` - the type and modifiers are not calls.
+            "val_definition" if self.language.name == "scala" => {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.text_string(child) == "=") {
+                    if let Some(&value) = children.get(at + 1) {
+                        self.form(value);
+                    }
+                }
+            }
             // `(x: T) => self.apply(x)`: Scala's lambda body is an expression,
             // and nothing formed it, so every call written there was missing
             // from the call table. A nested lambda is visited on its own.
