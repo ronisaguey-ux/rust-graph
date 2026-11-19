@@ -3902,6 +3902,13 @@ fn dotted_piece(text: &str) -> bool {
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment"
             | "arrow_function" | "function_expression" | "generator_function" => "0".to_string(),
+            // `WindowGroup { ... }`: Swift's trailing closure call has the
+            // callee as its first expression child; when the callee is a bare
+            // identifier leaf (`WindowGroup`), the generic fallback skips it
+            // because `first_child == NONE`.
+            "trailing_closure" => self
+                .expression_child(id)
+                .map_or_else(|| "0".to_string(), |child| self.form(child)),
             // `class Action extends _AttributeHolder(Function) {}`: the body is
             // deferred, but the `extends` heritage expression is evaluated when
             // the class expression is evaluated.
