@@ -3568,6 +3568,21 @@ impl<'a> Parser<'a> {
 
     fn class_head(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {
         let mut index = self.skip_modifiers(toks);
+        // `@InternalApi private[akka] class Foo(ns: Int) {`: Scala writes the
+        // annotation in front of the head on the same line. It names nothing,
+        // so skip it and any modifiers after it. Left in place, the `@` read as
+        // the keyword and the class fell through to a function symbol.
+        while self.lang.tag == "SCALA" && toks.get(index).is_some_and(|t| self.is_op(t, b"@")) {
+            index += 1;
+            if toks.get(index).is_some_and(|t| t.kind == Kind::Ident) {
+                index += 1;
+            }
+            if toks.get(index).is_some_and(|t| self.is_op(t, b"(")) {
+                let (_, close) = self.group_at(toks, index)?;
+                index = close + 1;
+            }
+            index += self.skip_modifiers(&toks[index..]);
+        }
         // `public @interface Foo {`: in Java `@interface` declares an annotation
         // type, just like `interface` declares an interface.
         if self.lang.tag == "JAVA"
