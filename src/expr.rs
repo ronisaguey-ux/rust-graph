@@ -1273,6 +1273,27 @@ impl Emit<'_> {
                 }
             }
         }
+        // Scala's `new ConcurrentHashMap[String, X]` with no argument list is a
+        // constructor call: the type arguments sit between the class name and
+        // the call. The CST writes an anonymous call there, where the lexer read
+        // the bare class name, which names the class and not the instance built.
+        // Only when the constructor ends its statement: `new ArrayBuffer[T] ++=
+        // xs` continues with an operator, and a class body or mixin is not this.
+        if word == "new" && self.lang.tag == "SCALA" && self.word(1).is_some() && self.op_byte(2) == b'[' {
+            if let Some(after) = self.skip_balanced(self.pos + 2, b"[", b"]") {
+                let line = self.toks[self.pos + 1].line;
+                let ends = self.toks.get(after).map_or(true, |t| t.line != line)
+                    || matches!(self.op_byte_at(after), b';' | b')' | b'}' | b',');
+                let mixin = matches!(self.word(after - self.pos).as_deref(), Some("with" | "extends"));
+                if ends && !mixin {
+                    let name = self.word(1).unwrap_or_default();
+                    self.pos = after;
+                    let id = self.new_call(name, line);
+                    out.push_str(&format!("[\"c\",{id},0,[]]"));
+                    return;
+                }
+            }
+        }
         // `new Fab;` with no parentheses is still a constructor call: the
         // grammar writes the call, the lexer dropped `new` as layout and left
         // the callee standing as a name. `new.target` is not a call, and a
