@@ -2490,11 +2490,19 @@ fn dotted_piece(text: &str) -> bool {
         if let Some(args) = arguments.filter(|_| value.is_none() && !recovered) {
             let path = names.join(".");
             let index = self.push_call(path, line);
+            let receiver = if names.len() > 1 {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &names[..names.len() - 1].join("."));
+                out.push(']');
+                out
+            } else {
+                "0".to_string()
+            };
             // The event is the call itself, not an assignment: the one-pass
             // reader files `include(":x")` as `c(0;[0])` on that line, so a
             // merge of the name and the argument value paired with nothing.
             let args_form = self.arguments(args);
-            self.event(&format!("[\"x\",{line},[\"c\",{index},0,{args_form}]]"));
+            self.event(&format!("[\"x\",{line},[\"c\",{index},{receiver},{args_form}]]"));
             return;
         }
         match value {
