@@ -4705,11 +4705,13 @@ fn dotted_piece(text: &str) -> bool {
             // (`path.Join(os.Getenv(..))`) would come back as `0`.
             let value = if ellipsis {
                 "0".to_string()
-            } else if kind == "labeled_argument" || (kind == "named_argument" && self.is_kotlin()) {
+            } else if kind == "labeled_argument" || (kind == "named_argument" && (self.is_kotlin() || self.language.name == "scala")) {
                 // `Package(name: "x", platforms: [.macOS("10")])`: a Swift
                 // labeled argument is a keyword argument to the lexer -
                 // `[\"k\",name,value]` - and read as a plain form it came back
-                // as `0`, which every manifest line failed on.
+                // as `0`, which every manifest line failed on. Scala's
+                // `copy(c = g(y))` is the same keyword form to the lexer, and
+                // read as a plain form the call on the right of `=` was lost.
                 let parts = self.children(child);
                 let name = parts.first().map(|&node| self.path_of(node)).unwrap_or_default();
                 let inner = parts.last().map(|&node| self.form(node)).unwrap_or_else(|| "0".to_string());
