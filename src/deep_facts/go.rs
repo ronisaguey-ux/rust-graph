@@ -3611,6 +3611,22 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.merge_form(&items),
                 }
             }
+            // `if (acc.hIndex > 0) acc.history(0) else acc.current`: Scala's
+            // `if_expression` is not a `conditional_expression`, so the default
+            // arm read only its first child (the condition) and every name and
+            // call in the branches was missing from the value the guard checks.
+            "if_statement" if self.language.name == "scala" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "if" | "else"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
             // `xs[1:min(len(xs), n)]`, `for x in a, b`: a slice or an
             // expression list is a run of expressions and every one of them
             // can carry a call. Reading only the first would drop the bound.
