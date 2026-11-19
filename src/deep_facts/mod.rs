@@ -2112,6 +2112,19 @@ impl<'a> Walker<'a> {
                 self.condition_before(id);
                 self.event("[\"b\"]");
             }
+            // Scala's `try f() finally g()`: the clause's body is an expression,
+            // not a block, so no statement walk reads it and `g()` was lost (the
+            // try statement's value reads only its first child). A block body is
+            // walked statement by statement and needs nothing here.
+            "finally_clause" if self.language.name == "scala" => {
+                let body = self.children(id).into_iter().find(|&child| self.kind(child) == "try_body");
+                if let Some(inner) = body.and_then(|body| self.children(body).into_iter().find(|&child| !self.is_layout(child))) {
+                    if self.kind(inner) != "block" {
+                        self.form(inner);
+                    }
+                }
+                self.event("[\"e\"]");
+            }
             "catch_clause" | "finally_clause" | "except_clause" | "switch_case" | "case_clause" => {
                 // `except ValueError:` names a type the one-pass reader files
                 // as a value on the clause's line; the clause emits only its
