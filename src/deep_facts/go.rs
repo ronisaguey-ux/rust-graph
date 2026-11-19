@@ -3046,6 +3046,29 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            // `get() = ::periodPatternCategory`: a bare callable reference has
+            // no receiver, so the grammar files it as `absolute_reference`
+            // rather than `callable_reference`. The lexer reads the reference
+            // name as the accessor's value; read as the constant 0 the getter
+            // line lost its only name (`override val … get() = ::name`).
+            "absolute_reference" if self.is_kotlin() => {
+                let children = self.children(id);
+                let mut text = String::new();
+                for child in children {
+                    if self.is_layout(child) || self.kind(child) == "::" {
+                        continue;
+                    }
+                    text.push_str(&self.text_string(child));
+                }
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &text);
+                    out.push(']');
+                    out
+                }
+            }
             // `object : Base()`: an anonymous object is the name `object`
             // merged with its supertype constructor's call, which is how the
             // lexer writes it. Nothing read the node, so the value was the
