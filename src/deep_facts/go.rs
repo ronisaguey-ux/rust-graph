@@ -2399,6 +2399,28 @@ impl<'a> Walker<'a> {
             if self.is_layout(selector) || matches!(self.kind(selector), "import_selectors" | "," | "{" | "}") {
                 continue;
             }
+            // `{Failure => Bad}`: one selector node carrying both names. Emitted as
+            // two imports before, which is not what the source states and left every
+            // Scala rename disagreeing with the lexer.
+            if self.kind(selector) == "import_selector" {
+                let names: Vec<String> = self
+                    .children(selector)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != "=>")
+                    .map(|child| self.text_string(child))
+                    .collect();
+                if let Some(name) = names.first().cloned() {
+                    let alias = names.get(1).cloned().unwrap_or_else(|| name.clone());
+                    self.facts.imports.push(Import {
+                        line,
+                        module: module.clone(),
+                        name,
+                        alias,
+                        kind: IMPORT_MODULE,
+                    });
+                    continue;
+                }
+            }
             let name = self.text_string(selector);
             self.facts.imports.push(Import {
                 line,

@@ -226,8 +226,11 @@ rust_graph_deep::grammar! { SCALA {
     _import_expr: _name ("." (_name | "*" | import_selectors))*,
     /// `import scala.util.{Failure, Success, Try}` and the rename form
     /// `{Failure => Bad}`.
-    import_selectors: "{" (_import_selector %? ",") "}",
-    _import_selector: _name ["=>" _name],
+    import_selectors: "{" (import_selector %? ",") "}",
+    /// A selector keeps its own node so a rename (`{Failure => Bad}`) stays one
+    /// selector with an alias. Flattened into the list, `Failure` and `Bad` read
+    /// as two separate imports and every Scala 3 rename became a lost row.
+    import_selector: _name ["=>" _name],
     _qualified_name: _name ("." _name)*,
 
     _member: _definition | _statement,
