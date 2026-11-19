@@ -1868,6 +1868,11 @@ fn uncovered(
         }
         if macro_lines.get(event.line.saturating_sub(1) as usize).copied().unwrap_or(false)
             || is_attribute_call(lines, event.line)
+            // An `@Annotation` line decorates the declaration below it. The
+            // one-pass reader files the annotation (and, in Java, the whole
+            // declaration it prefixes) as a value; the CST writes only the
+            // declaration, so the line states nothing both readers can mean.
+            || (matches!(lexer.tag.as_str(), "JAVA" | "SCALA" | "KT") && is_annotation_line(lines, event.line))
             || (lexer.tag == "CS" && is_csharp_attribute(lines, event.line))
             || is_declaration_line(lines, event.line)
             || is_method_declaration_line(&lexer.tag, lines, event.line)
@@ -2260,6 +2265,13 @@ fn is_attribute_call(src: &Lines<'_>, line: u32) -> bool {
             attribute && text.contains(']')
         })
         .unwrap_or(false)
+}
+
+/// `@SuppressWarnings("unchecked")`, `@InternalApi`: an annotation on its own
+/// line decorates the declaration below it and states no value of its own.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_annotation_line(src: &Lines<'_>, line: u32) -> bool {
+    src.get(line).is_some_and(|text| text.trim_start().starts_with('@'))
 }
 
 /// `[Fact]`, `[MethodImpl(MethodImplOptions.AggressiveInlining)]`: C# spells an
