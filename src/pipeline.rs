@@ -3416,6 +3416,12 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str, tag: &str) -> Result<(),
             .collect::<Vec<_>>()
             .join(" ");
         let line_text = window.as_str();
+        // `s"...${hole}.."` is a Scala interpolated string: the one-pass
+        // reader files the `s` prefix as `n:s`, while the CST names only the
+        // holes. Only where the source actually writes an `s"` prefix.
+        if tag == "SCALA" && line_text.contains("s\"") {
+            missing.retain(|name| name.as_str() != "n:s");
+        }
         // `raise ConfigError(...) from error`: `from` is a keyword where that
         // line writes it, and no reader of the record wants a value called
         // `from`. The one-pass lexer has no keyword table and reads it as one.

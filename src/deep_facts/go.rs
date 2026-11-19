@@ -3948,7 +3948,7 @@ fn dotted_piece(text: &str) -> bool {
             // string reader does see them, so the hole is the fact.
             "f_string" | "template_string" | "string_literal"
                 if matches!(kind, "f_string" | "template_string")
-                    || matches!(self.language.name, "kotlin" | "swift") =>
+                    || matches!(self.language.name, "kotlin" | "swift" | "scala") =>
             {
                 // Python's replacement field is `interpolation`, JavaScript's
                 // is `template_substitution`; everything else is the same
