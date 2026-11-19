@@ -332,8 +332,24 @@ rust_graph_deep::grammar! { KOTLIN {
     constructor_delegation: ("this" | "super") arguments,
     init_block: [modifiers] "init" block,
     supertypes: _supertype ("," _supertype)*,
-    _supertype: &(superclass_constructor) superclass_constructor | _type,
+    _supertype:
+        &(superclass_constructor) superclass_constructor
+        | &(supertype_delegation) supertype_delegation
+        | _type,
     superclass_constructor: _type arguments,
+    supertype_delegation: _type "by" _delegate_expression,
+    _delegate_expression:
+        _delegate_atom ("." _name | "?." _name | arguments | type_arguments arguments | subscript)*,
+    _delegate_atom:
+        _literal
+        | _name
+        | "this"
+        | "super"
+        | parenthesized_expression
+        | absolute_reference
+        | &("this" "@") labeled_this
+        | &("super" "@") labeled_this
+        | object_expression,
     type_constraints: "where" type_constraint ("," type_constraint)*,
     type_constraint: _name ":" _type,
 
@@ -367,7 +383,7 @@ rust_graph_deep::grammar! { KOTLIN {
     receiver_type: _type_head [type_arguments] ["?"],
     parameter_list: "(" (parameter %? ",") ")",
     parameter: [parameter_modifiers] _name ":" _type ["=" _expression],
-    parameter_modifiers: (annotation | "public" | "private" | "protected" | "internal" | "vararg" | "noinline" | "crossinline" | "out" | "override")+,
+    parameter_modifiers: (annotation | "public" | "private" | "protected" | "internal" | "final" | "open" | "vararg" | "noinline" | "crossinline" | "out" | "override")+,
     property_declaration:
         [modifiers] ("val" | "var") [type_parameters] property_head [":" _type]
         (["by" _expression | "=" _expression])? [accessor],
