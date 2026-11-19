@@ -400,7 +400,10 @@ rust_graph_deep::grammar! { KOTLIN {
     /// last segment as the name. The old `&(_type ".") receiver_head` lookahead
     /// could never match - `_type` eats every dotted segment and then wants one
     /// more - so every extension property stopped at its first dot.
-    property_head: _type_head [type_arguments] ((["?"] "." | "?.") _name [type_arguments])*,
+    /// `val [a, b] = pair` and `val (a, b) = pair`: a destructuring head is
+    /// not a name, and without the bracket form every bracket destructuring
+    /// recovered and took the calls in its initialiser with it.
+    property_head: bracket_destructuring | _type_head [type_arguments] ((["?"] "." | "?.") _name [type_arguments])*,
     /// `override var size: Int = 0` / `private set`: a bare accessor has no
     /// body at all, and requiring one turned the whole property into a recovery
     /// (ArrayDeque.kt's every `private set`).
@@ -460,7 +463,9 @@ rust_graph_deep::grammar! { KOTLIN {
     for_statement: "for" for_header _statement,
     for_header: "(" _for_variable "in" _expression ")",
     _for_variable: _name | destructuring_declaration,
-    destructuring_declaration: "(" (_name %? ",") ")",
+    destructuring_declaration: bracket_destructuring | paren_destructuring,
+    bracket_destructuring: "[" (_name %? ",") "]",
+    paren_destructuring: "(" (_name %? ",") ")",
     when_statement: "when" [when_subject] when_body,
     when_subject: "(" _when_subject_body ")",
     _when_subject_body: ("val" | "var") _name "=" _expression | _expression,
@@ -571,7 +576,7 @@ rust_graph_deep::grammar! { KOTLIN {
     lambda_items: _block_item+,
     _lambda_parameters: _lambda_parameter ("," _lambda_parameter)*,
     _lambda_parameter: destructuring_parameter | _name [":" _type],
-    destructuring_parameter: "(" (_name %? ",") ")",
+    destructuring_parameter: bracket_destructuring | paren_destructuring,
     object_expression: "object" [":" supertypes] [class_body],
 
     // ---- types ----
