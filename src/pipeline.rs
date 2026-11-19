@@ -1654,6 +1654,7 @@ return verdict(Some("symbol"), detail, accepted);
                     && (is_declaration_line(&lines, call.line)
                         || is_method_declaration_line(&lexer.tag, &lines, call.line)
                         || is_member_signature_line(&lexer.tag, &lines, call.line, &name)
+                        || (matches!(lexer.tag.as_str(), "JAVA" | "SCALA" | "KT") && is_annotation_line(&lines, call.line))
                         // `error?: (e: any) => void`, `readonly x: T`,
                         // `constructor(...): Base`: a `.d.ts` member declares
                         // a type, and the lexer reads the property word as a
