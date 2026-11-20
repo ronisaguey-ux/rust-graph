@@ -1209,6 +1209,15 @@ impl<'a> Parser<'a> {
         // Cloned, not borrowed: deciding what the brace opens reads past the
         // cursor, and that needs the parser itself.
         let Some(last) = self.stmt.last().cloned() else { return !self.declaring };
+        // `guard let url = URL(string: self) else {`: the `else` opens the
+        // divergence block, as Rust's let-else does. Read as a value, the throw
+        // in that block merged into the binding, which Swift never binds.
+        if self.lang.tag == "SWIFT"
+            && self.raw(&last) == b"else"
+            && self.word_at(&self.stmt, 0).as_deref() == Some("guard")
+        {
+            return true;
+        }
         if self.lang.tag == "TCL" && last.kind == Kind::Ident && self.has_def_word(&self.stmt) {
             return false;
         }
