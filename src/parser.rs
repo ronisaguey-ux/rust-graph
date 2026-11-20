@@ -4380,6 +4380,15 @@ impl<'a> Parser<'a> {
                 return;
             }
         }
+        // A Swift line that opens with `->` continues a function header onto the
+        // next line (`func f(x: T)` / `  -> Slice<U> {`). No Swift expression
+        // starts with `->`, and the CST writes no event for a return type, on
+        // one line or two (`func f(x: T) -> Slice<U> {` already writes none).
+        // Read as an expression, the return type invented an `x` event with
+        // the type as its value on every wrapped signature.
+        if self.lang.tag == "SWIFT" && self.is_op(first, b"->") {
+            return;
+        }
         // `@Test` on a line of its own annotates the declaration below it and
         // states no value: the CST files an annotation's event only when the
         // annotation carries arguments (`@Suppress("x")`), so reading the bare
