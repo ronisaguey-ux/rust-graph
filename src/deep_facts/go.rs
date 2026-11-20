@@ -3724,6 +3724,23 @@ fn dotted_piece(text: &str) -> bool {
                     None => "0".to_string(),
                 }
             }
+            // `f() ? "a" : "b"`: the condition and both branches are the value,
+            // as the one-pass reader merges them. The default arm read only the
+            // condition, so the branches (and any call in them) were lost.
+            // The grammar also files an optional type's `?` (`-> UInt8? in`) as a
+            // ternary; only a node with its `:` is a conditional.
+            "ternary" if self.language.name == "swift" && self.children(id).iter().any(|&child| self.kind(child) == ":") => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "?" | ":"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
             // `a if p(x) else b`: the condition is an expression of its own and
             // the call in it is a fact. The lexer's flow form reads the whole
             // conditional, so the CST must too.
