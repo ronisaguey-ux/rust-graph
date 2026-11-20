@@ -4262,7 +4262,7 @@ fn dotted_piece(text: &str) -> bool {
             }
             // `UnsafeCell<State>`, `Vec<Entry>`: a generic type holds the base
             // and the type arguments, and both are names the lexer reads.
-            "generic_type" | "type_arguments" | "type_parameter_list" => {
+            "generic_type" | "generic_specialization" | "type_arguments" | "type_parameter_list" => {
                 let mut parts = Vec::new();
                 for child in self.children(id) {
                     if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | "," | "::") {
