@@ -396,6 +396,7 @@ rust_graph_deep::grammar! { CPP {
         | &(declaration_specifiers) declaration_statement
         | &(scoped_type_name _declarator) declaration_statement
         | &(plain_type_name IDENT) declaration_statement
+        | &(plain_type_name "*" IDENT) declaration_statement
         | expression_statement,
 
     if_statement: "if" parenthesized_expression _statement ["else" _statement],
