@@ -1881,6 +1881,7 @@ fn uncovered(
             || is_type_property_line(lines, event.line)
             || is_export_statement_line(lines, event.line)
             || is_import_alias_line(lines, event.line)
+            || (lexer.tag == "SWIFT" && is_typealias_line(lines, event.line))
             || is_type_continuation_line(&lexer.tag, lines, event.line)
             || is_tail_expression_line(lines, event.line)
             || is_yield_line(lines, event.line)
@@ -2574,6 +2575,19 @@ fn is_import_alias_line(src: &Lines<'_>, line: u32) -> bool {
     };
     let text = text.trim_start();
     text.starts_with("import ") && text.contains(" = ") && text.trim_end().ends_with(';')
+}
+
+/// `typealias ThreadLocalData = Void`: a Swift type alias binds a name to a type
+/// and assigns no value. The one-pass lexer reads it as an assignment of the
+/// alias to the type, and the CST records the alias as a type declaration, so
+/// the assignment is the lexer's invention.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_typealias_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
+        return false;
+    };
+    let header = text.split('=').next().unwrap_or(text);
+    header.split_whitespace().any(|word| word == "typealias")
 }
 
 /// `export = escape;` and `export {};`: the lexer writes an assignment or an
