@@ -1512,6 +1512,13 @@ impl Emit<'_> {
             self.pos += 1;
             return;
         }
+        // `private nonisolated(unsafe) var value`: `nonisolated` is a Swift
+        // declaration modifier and `(unsafe)` its argument, so neither is a
+        // call. The CST still writes a call here, a separate grammar gap.
+        if self.lang.tag == "SWIFT" && word == "nonisolated" && self.op_byte(1) == b'(' && self.word(2).is_some() && self.op_byte(3) == b')' {
+            self.pos += 4;
+            return;
+        }
         // A C declaration's specifiers are not values. `static int h(int x);`
         // read `static` as a name, `LUAI_FUNC const TValue *luaH_getnum(..)`
         // read the annotation macro, and `extern hidden void j(int);` read

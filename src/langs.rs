@@ -352,11 +352,14 @@ pub const LANGUAGES: &[Language] = &[
         tag: "SWIFT",
         extensions: &["swift"],
         quotes: b"\"",
+        // `"""` opens a multi-line literal: its body is text, and only a `\(…)`
+        // inside it is code. Read as a one-line `""`, the body's `Small(…)` was a call.
+        triple_quotes: true,
         interp: Interp::Swift,
         semicolons: false,
         global_names: true,
         defs: &["func"],
-        classes: &["class", "struct", "enum", "protocol", "extension"],
+        classes: &["class", "struct", "enum", "protocol", "extension", "actor"],
         imports: Imports::Path,
         import_words: &["import"],
         ..BASE
