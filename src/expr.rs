@@ -1478,7 +1478,14 @@ impl Emit<'_> {
             self.skip_kt_fun_header();
             return;
         }
-        let go_word = matches!(word.as_str(), "go" | "defer") && self.lang.tag != "GO";        // `new` is a keyword in the JavaScript family and an ordinary name in
+        // Swift's `defer { … }` is a statement keyword, never a name: the CST
+        // writes the block's calls and nothing for the word itself.
+        let go_word = match word.as_str() {
+            "go" => self.lang.tag != "GO",
+            "defer" => !matches!(self.lang.tag, "GO" | "SWIFT"),
+            _ => false,
+        };
+        // `new` is a keyword in the JavaScript family and an ordinary name in
         // Rust: reading it as noise left `new.is_none()` calling nothing, and
         // the record differed by a constant that was never there.
         let js_family = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
