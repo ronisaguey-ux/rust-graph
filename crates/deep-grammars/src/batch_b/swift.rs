@@ -248,6 +248,7 @@ rust_graph_deep::grammar! { SWIFT {
         | &([declaration_modifiers] "init") initializer_declaration
         | &([declaration_modifiers] "subscript") subscript_declaration
         | &([declaration_modifiers] ("let" | "var")) property_declaration
+        | &("nonmutating" | "mutating") accessor_modifier
         | &("deinit") deinitializer_declaration
         | &([declaration_modifiers] "import") import_declaration
         | &("typealias") typealias_declaration
@@ -329,6 +330,9 @@ rust_graph_deep::grammar! { SWIFT {
     /// `label name: Type`: the label comes first and shadows nothing.
     labeled_parameter: _argument_label simple_parameter,
     property_declaration: [declaration_modifiers] ("let" | "var") (_binding % ","),
+    /// `nonmutating set { … }` inside a computed property: the accessor's own
+    /// mutation modifier leads its block, so the accessor is read as one.
+    accessor_modifier: ("nonmutating" | "mutating") _statement,
     /// A binding names one value or destructures a tuple: `let (a, b) = pair`.
     _binding: _binding_target [":" _type] [block | "=" _expression@assign],
     _binding_target: _name | parenthesized_expression,
@@ -411,7 +415,6 @@ rust_graph_deep::grammar! { SWIFT {
         mul: left "*" | "/" | "%" => binary,
         try: prefix "try" ["?" | "!"] => try_expression,
         await: prefix "await" => await_expression,
-        unsafe: prefix "unsafe" => prefix_expression,
         unary: prefix "-" | "+" | "!" | "~" | "&" => prefix_expression,
         postfix "!" => force_unwrap,
         postfix "?." _property => optional_chaining_expression,
@@ -430,7 +433,12 @@ rust_graph_deep::grammar! { SWIFT {
         | collection_literal
         | closure
         | implicit_member_expression
-        | key_path_expression,
+        | key_path_expression
+        | unsafe_expression,
+
+    /// `unsafe x = y` marks the whole expression after it, assignment included,
+    /// so its operand is read at the assignment level, not as a prefix.
+    unsafe_expression: "unsafe" _expression@assign,
 
     /// `Endpoint<Item>(...)`: a type list written in expression position.
     generic_specialization: _name (_generic_open (_type %? ",") _gt)+,

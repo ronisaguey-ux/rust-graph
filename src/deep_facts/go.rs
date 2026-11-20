@@ -1365,6 +1365,12 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn expression_statement(&mut self, id: u32) {
         let Some(mut child) = self.expression_child(id) else { return };
+        // `unsafe x = y` (Swift 6.2): the marker wraps the whole assignment, so
+        // the statement is the assignment inside it, as `try` would be.
+        while self.language.name == "swift" && self.kind(child) == "unsafe_expression" {
+            let Some(inner) = self.expression_child(child) else { return };
+            child = inner;
+        }
         // `@Suppress("DEPRECATION") coreLibrariesVersion = ...`: Kotlin's
         // annotation wraps the statement in an `annotated_expression` whose
         // line is the annotation's. Unwrap it so the inner assignment (and its
