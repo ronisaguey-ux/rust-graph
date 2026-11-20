@@ -1513,7 +1513,15 @@ impl<'a> Parser<'a> {
                 }
             }
             let Some(word) = self.word_at(toks, index) else { break };
-            if self.lang.defs.contains(&word.as_str()) || self.lang.classes.contains(&word.as_str()) {
+            // Swift writes `class var x`, `class func f` and `class subscript`: here `class` is a
+            // modifier of the member behind it, not a class declaration. Read as one, `var` became
+            // the name of a class symbol the CST never writes.
+            let swift_class_modifier = self.lang.tag == "SWIFT"
+                && word == "class"
+                && self.word_at(toks, index + 1).is_some_and(|next| {
+                    matches!(next.as_str(), "var" | "func" | "subscript" | "final" | "override" | "required" | "convenience" | "dynamic")
+                });
+            if !swift_class_modifier && (self.lang.defs.contains(&word.as_str()) || self.lang.classes.contains(&word.as_str())) {
                 break;
             }
             // Kotlin writes `actual fun`, `expect class`, `suspend fun` and
@@ -1542,7 +1550,7 @@ impl<'a> Parser<'a> {
             // `pub const fn` and `pub const unsafe extern "C" fn`: in Rust
             // `const` qualifies a function item just like `async` and `unsafe`.
             let rust_modifier = self.lang.tag == "RS" && word == "const";
-            if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier && !rust_modifier && !scala_modifier && !swift_modifier {
+            if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier && !rust_modifier && !scala_modifier && !swift_modifier && !swift_class_modifier {
                 break;
             }
             index += 1;
