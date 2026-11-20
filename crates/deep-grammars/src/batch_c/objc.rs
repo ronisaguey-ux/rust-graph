@@ -456,6 +456,7 @@ rust_graph_deep::grammar! { OBJC {
         &(cast_type) cast_expression
         | sizeof_expression
         | selector_expression
+        | protocol_expression
         | at_macro_expression
         | dictionary_literal
         | array_literal
@@ -497,6 +498,12 @@ rust_graph_deep::grammar! { OBJC {
     sizeof_expression: "sizeof" sizeof_operand,
     sizeof_operand: &(cast_type) cast_type | _expression@unary,
     selector_expression: "@selector" selector_arguments,
+    /// `@protocol(NSObject)`: a directive that names a protocol, like
+    /// `@selector`. With no rule it was an error node, and the call the lexer
+    /// files for it went missing - every `conformsToProtocol:@protocol(…)`
+    /// assertion in the NSObject tests lost a call.
+    protocol_expression: "@protocol" protocol_arguments,
+    protocol_arguments: "(" _name ")",
     /// `@weakify(self)`, `@keypath(self.enabled)`: a macro that opens with an
     /// `@word` and takes arguments. The one-pass reader files it as a call of
     /// the word without the `@`, so the tree has to see a call here.

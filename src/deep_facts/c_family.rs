@@ -246,6 +246,12 @@ impl<'a> Walker<'a> {
                 let line = self.line(id);
                 self.push_call("selector".to_string(), line);
             }
+            // `@protocol(NSObject)`: the same directive shape, read as a call of
+            // `protocol` by the lexer.
+            "protocol_expression" => {
+                let line = self.line(id);
+                self.push_call("protocol".to_string(), line);
+            }
             // `@property (nonatomic, strong) UILabel *label;`: the lexer reads
             // `property` as a call of that name, and the node was never read -
             // 155 one-loss files on the Objective-C corpus.
