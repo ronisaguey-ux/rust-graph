@@ -1365,6 +1365,34 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn expression_statement(&mut self, id: u32) {
         let Some(mut child) = self.expression_child(id) else { return };
+        // Swift `var x: T { get set }`: the grammar reads `get` as a statement
+        // and leaves `set` beside it as an ERROR leaf; the lexer files both
+        // accessors as one event, so the pair is written here.
+        if self.language.name == "swift" && matches!(self.kind(child), "identifier") {
+            let next = self.node(id).next_sibling;
+            if next != NONE
+                && self.kind(next) == "ERROR"
+                && self.children(next).len() == 1
+            {
+                let word = self.children(next)[0];
+                let first = self.text_string(child);
+                let second = self.text_string(word);
+                if matches!((first.as_str(), second.as_str()), ("get", "set") | ("set", "get")) {
+                    let line = self.line(id);
+                    let mut atoms = String::new();
+                    for text in [&first, &second] {
+                        if !atoms.is_empty() {
+                            atoms.push(',');
+                        }
+                        atoms.push_str("[\"n\",");
+                        push_string(&mut atoms, text);
+                        atoms.push(']');
+                    }
+                    self.event(&format!("[\"x\",{line},[\"m\",[{atoms}]]]"));
+                    return;
+                }
+            }
+        }
         // `unsafe x = y` (Swift 6.2): the marker wraps the whole assignment, so
         // the statement is the assignment inside it, as `try` would be.
         while self.language.name == "swift" && self.kind(child) == "unsafe_expression" {
