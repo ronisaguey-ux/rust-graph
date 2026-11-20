@@ -3071,6 +3071,20 @@ fn dotted_piece(text: &str) -> bool {
             out.push(']');
             return out;
         }
+        // `resiliencyChecks.creatingOutOfBoundsIndicesBehavior = .trap`: Swift's
+        // `.trap` is an implicit member, a bare name with no receiver. The lexer
+        // reads it as the name `n:trap`; read through the default arm it was the
+        // constant 0. A call on one (`.macOS("10")`) is a call_expression, so it
+        // never reaches this arm.
+        if self.language.name == "swift" && kind == "implicit_member_expression" {
+            let name = self.member_name(id);
+            if !name.is_empty() {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &name);
+                out.push(']');
+                return out;
+            }
+        }
         if let Some(name) = self.soft_name(id) {
             let mut out = "[\"n\",".to_string();
             push_string(&mut out, &name);
