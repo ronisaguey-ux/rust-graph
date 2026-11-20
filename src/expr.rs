@@ -2010,6 +2010,7 @@ impl Emit<'_> {
     fn chain(&mut self, out: &mut String, mut value: String, mut path: String, line: u32) {
         let mut constructed = None;
         let mut type_arg_line = None;
+        let mut generic_callee = false;
         loop {
             // `-> @Suppress("UNCHECKED_CAST") (ReverseOrderComparator as
             // Comparator<T>)`: in Kotlin an annotation decorates an expression
@@ -2068,9 +2069,10 @@ impl Emit<'_> {
             }
             // `z.string().brand<"username">()`: TypeScript/Kotlin type arguments before
             // `(` are types, not `< ... >` comparisons or runtime constants.
-            if matches!(self.lang.tag, "TS" | "TSX" | "KT") && self.is_op(0, b"<") {
+            if matches!(self.lang.tag, "TS" | "TSX" | "KT" | "SWIFT") && self.is_op(0, b"<") {
                 if let Some(after) = self.skip_ts_type_args(self.pos) {
                     type_arg_line = Some(self.toks[self.pos].line);
+                    generic_callee = self.lang.tag == "SWIFT";
                     self.pos = after;
                     continue;
                 }
@@ -2213,6 +2215,11 @@ impl Emit<'_> {
                 // that happens to be named `call`.
                 let applied = path.is_empty();
                 let (receiver, mut target) = self.split_receiver(&value, &path);
+                // `Foo<Int8>(x)`: the CST writes the type as the callee and an anonymous call,
+                // so a bare name that carried type arguments names no call.
+                if generic_callee && value.is_empty() && !path.is_empty() && !path.contains('.') {
+                    target.clear();
+                }
                 if target.starts_with('.') {
                     if let Some(class) = constructed.take().filter(|_| !applied) {
                         target = format!("{class}(){target}");
