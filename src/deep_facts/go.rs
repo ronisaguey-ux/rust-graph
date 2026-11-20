@@ -4111,6 +4111,16 @@ fn dotted_piece(text: &str) -> bool {
                     self.merge_form(&items)
                 }
             }
+            // `reportConnectFailure { … }`: Scala's argument block is a call to
+            // the name before the brace, and the lexer files the line as that
+            // name. The default arm read the node as nothing, so the event was
+            // lost; the block's own statements are read by the walk.
+            "block_argument" if self.language.name == "scala" => {
+                match self.children(id).into_iter().find(|&child| !self.is_layout(child)) {
+                    Some(callee) => self.form(callee),
+                    None => "0".to_string(),
+                }
+            }
             // `UnsafeCell<State>`, `Vec<Entry>`: a generic type holds the base
             // and the type arguments, and both are names the lexer reads.
             "generic_type" | "type_arguments" | "type_parameter_list" => {
