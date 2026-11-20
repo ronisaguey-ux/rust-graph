@@ -3396,6 +3396,38 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 None => "0".to_string(),
             },
+            // `MemoryLayout<Int>.size`: a member of a specialized type. Its base
+            // is a generic specialization that has no path, so the default arm
+            // below formed only the type arguments and dropped the member. The
+            // lexer reads the type's names and the member, so both are kept.
+            "navigation_expression"
+                if self.language.name == "swift"
+                    && self.children(id).first().is_some_and(|&base| self.kind(base) == "generic_specialization") =>
+            {
+                let base = self.children(id)[0];
+                let mut parts = Vec::new();
+                for child in self.children(base) {
+                    if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | ",") {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        parts.push(value);
+                    }
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             "attribute" | "member_expression" | "member_access_expression" | "member_access" | "subscript" | "subscript_expression" | "field_expression" | "meta_property"
             // `Ordering::Acquire` in an argument list is a path, not a constant.
             | "scoped_identifier" | "scoped_type_identifier"
