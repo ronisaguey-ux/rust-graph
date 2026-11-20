@@ -3382,6 +3382,20 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            // `resiliencyChecks.x = .trap`: a leading-dot member has no
+            // receiver, so it is a name, not the constant 0 the default arm
+            // wrote. The lexer names it by its member alone (`n:trap`).
+            "implicit_member_expression" if self.language.name == "swift" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
             "qualified_type" if self.is_kotlin() => {
                 let path = self.path_of(id);
                 if path.is_empty() {
