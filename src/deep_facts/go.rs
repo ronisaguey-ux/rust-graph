@@ -3598,6 +3598,21 @@ fn dotted_piece(text: &str) -> bool {
                 Some(value) => self.form(value),
                 None => "0".to_string(),
             },
+            // `"Foo" as NSString`: Swift's cast names the value and its target
+            // type, as the one-pass reader does; the default arm kept only the
+            // literal and dropped the type.
+            "cast" if self.language.name == "swift" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "as" | "is" | "?" | "!"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
             // `x as Foo`, `x as? Foo.Bar`: Kotlin's cast names both the value
             // and the target type to the one-pass reader; the shared unary arm
             // kept only the operand and dropped the type.
@@ -3906,6 +3921,57 @@ fn dotted_piece(text: &str) -> bool {
                     0 => "0".to_string(),
                     1 => parts.remove(0),
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `["a": "1", "b": "Foo"]`: Swift's grammar leaves a pair's key and
+            // value as siblings with the `:` between them, so each pair is
+            // read as one merged item, as the one-pass reader does. Groups are
+            // split on the `,` and a group of two is a `key: value` pair.
+            "collection_literal" if self.language.name == "swift" && self.swift_has_pair_colon(id) => {
+                let mut groups: Vec<Vec<u32>> = Vec::new();
+                let mut current: Vec<u32> = Vec::new();
+                for child in self.swift_collection_children(id) {
+                    match self.kind(child) {
+                        "," => {
+                            if !current.is_empty() {
+                                groups.push(std::mem::take(&mut current));
+                            }
+                        }
+                        ":" => {}
+                        _ if self.is_layout(child) => {}
+                        _ => current.push(child),
+                    }
+                }
+                if !current.is_empty() {
+                    groups.push(current);
+                }
+                if groups.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut forms: Vec<String> = Vec::new();
+                    for group in &groups {
+                        if group.len() == 1 {
+                            forms.push(self.form(group[0]));
+                            continue;
+                        }
+                        // A pair's cast value is spliced into the pair, as the
+                        // one-pass reader writes `"b": "Foo" as NSString`.
+                        let mut parts: Vec<String> = Vec::new();
+                        for &item in group {
+                            if self.kind(item) == "cast" {
+                                let inner: Vec<u32> = self
+                                    .children(item)
+                                    .into_iter()
+                                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "as" | "is" | "?" | "!"))
+                                    .collect();
+                                parts.extend(inner.into_iter().map(|child| self.form(child)));
+                            } else {
+                                parts.push(self.form(item));
+                            }
+                        }
+                        forms.push(format!("[\"m\",[{}]]", parts.join(",")));
+                    }
+                    format!("[\"t\",[{}]]", forms.join(","))
                 }
             }
             "collection_literal" | "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern" | "array_pattern" => {
@@ -4481,6 +4547,27 @@ fn dotted_piece(text: &str) -> bool {
         }
         out.push_str("]]");
         out
+    }
+
+    /// A Swift literal's elements in order, with the `,` and `:` separators
+    /// kept: Swift wraps them in one `collection_body` node.
+    fn swift_collection_children(&self, id: u32) -> Vec<u32> {
+        self.children(id)
+            .into_iter()
+            .flat_map(|child| {
+                if self.kind(child) == "collection_body" {
+                    self.children(child)
+                } else {
+                    vec![child]
+                }
+            })
+            .collect()
+    }
+
+    /// Whether a Swift literal holds a `key: value` pair, i.e. a `:` among its
+    /// direct elements. `[:]` is an empty dictionary and has no key.
+    fn swift_has_pair_colon(&self, id: u32) -> bool {
+        self.swift_collection_children(id).into_iter().any(|child| self.kind(child) == ":")
     }
 
     pub(crate) fn merge_form(&mut self, items: &[u32]) -> String {
