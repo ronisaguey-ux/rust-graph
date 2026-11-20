@@ -4659,6 +4659,26 @@ fn dotted_piece(text: &str) -> bool {
             // read here without forming it again (a second form would record
             // its calls twice).
             "closure" if self.language.name == "swift" => {
+                // `{ (position, _, _) in serialize(v, at: &position) }`: with a
+                // tuple head the lexer writes the head as a tuple and the body
+                // statements as their own values, not as a flat run of names.
+                // The body is formed only to read its value: its calls are
+                // dropped again, because the statement walk records them.
+                if let Some(head) = self.swift_closure_head(id) {
+                    let symbol = self.frame().symbol;
+                    let before = self.facts.symbols[symbol].calls.len();
+                    let statements: Vec<u32> = self
+                        .children(id)
+                        .into_iter()
+                        .filter(|&child| !self.is_layout(child) && self.kind(child) != "closure_signature")
+                        .collect();
+                    let mut parts = vec![head];
+                    for statement in statements {
+                        parts.push(self.form(statement));
+                    }
+                    self.facts.symbols[symbol].calls.truncate(before);
+                    return format!("[\"m\",[{}]]", parts.join(","));
+                }
                 let mut names: Vec<String> = Vec::new();
                 let mut stack: Vec<u32> = self.children(id);
                 stack.reverse();
@@ -4781,6 +4801,28 @@ fn dotted_piece(text: &str) -> bool {
         }
         out.push_str("]]");
         out
+    }
+
+    /// The tuple form of a Swift closure head of two or more plain names.
+    fn swift_closure_head(&mut self, id: u32) -> Option<String> {
+        let signature = self.child_of_kind(id, "closure_signature")?;
+        let source = self.child_of_kind(signature, "closure_parameter_group").unwrap_or(signature);
+        let items: Vec<u32> = self
+            .children(source)
+            .into_iter()
+            .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")" | "," | "in"))
+            .collect();
+        if items.len() < 2 || !items.iter().all(|&child| self.kind(child) == "identifier") {
+            return None;
+        }
+        let mut names = Vec::new();
+        for child in items {
+            let mut form = String::from("[\"n\",");
+            push_string(&mut form, &self.text_string(child));
+            form.push(']');
+            names.push(form);
+        }
+        Some(format!("[\"t\",[{}]]", names.join(",")))
     }
 
     /// A Swift literal's elements in order, with the `,` and `:` separators
