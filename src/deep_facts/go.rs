@@ -3799,7 +3799,21 @@ fn dotted_piece(text: &str) -> bool {
                 }
             }
             "collection_literal" | "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern" | "array_pattern" => {
-                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                // Swift wraps a literal's elements in one `collection_body`
+                // node, so `[1, 2, 3]` had one child and formed as `[0]`. The
+                // elements are that node's children, one per element.
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .flat_map(|child| {
+                        if self.kind(child) == "collection_body" {
+                            self.children(child)
+                        } else {
+                            vec![child]
+                        }
+                    })
+                    .filter(|&child| !self.is_layout(child))
+                    .collect();
                 if items.is_empty() {
                     "0".to_string()
                 } else {
