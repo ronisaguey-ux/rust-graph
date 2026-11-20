@@ -4474,6 +4474,16 @@ impl<'a> Parser<'a> {
         {
             return;
         }
+        // `get async throws {` is a computed property's accessor head, and the CST folds the
+        // effect specifier into the same value: `m:[n:get,n:throws]`. Read as a plain expression
+        // the reader kept only `get`, which cost every async-throwing getter in the swift corpus
+        // (73 rows in the shape table, plus 30 where only the effect word was missing).
+        if self.lang.tag == "SWIFT" {
+            if let Some(value) = self.swift_accessor_head(stmt) {
+                self.event(&format!("[\"x\",{},{value}]", first.line));
+                return;
+            }
+        }
         // `#![allow(unused)]` and a `#[derive(Debug)]` written on its own line
         // are layout: the CST writes nothing for them. Read as a value, the inner
         // attribute became the call `allow(unused)` on the module symbol. A
@@ -4787,6 +4797,30 @@ impl<'a> Parser<'a> {
     /// value, so reading it as an expression invented `m:[n:window,n:UIWindow]`.
     /// A statement that carries a declaration keyword is the declaration itself
     /// (`@objc func f()`) and keeps its event.
+    /// `get async throws` / `set throws` / `willSet async`: an accessor keyword with its effect
+    /// specifiers. The CST writes one value containing both, so the reader must too.
+    fn swift_accessor_head(&self, stmt: &[Token]) -> Option<String> {
+        let head = self.word_at(stmt, 0)?;
+        if !matches!(head.as_str(), "get" | "set" | "willSet" | "didSet") {
+            return None;
+        }
+        let mut names = vec![head];
+        for token in stmt.iter().skip(1) {
+            if token.kind != Kind::Ident {
+                continue;
+            }
+            let word = self.text(token);
+            if word == "throws" || word == "rethrows" {
+                names.push(word);
+            }
+        }
+        if names.len() < 2 {
+            return None;
+        }
+        let joined = names.iter().map(|name| format!("n:{name}")).collect::<Vec<_>>().join(",");
+        Some(format!("m:[{joined}]"))
+    }
+
     fn swift_declares_only(&self, stmt: &[Token]) -> bool {
         if stmt.first().is_some_and(|token| self.is_op(token, b"@")) {
             return true;
