@@ -3581,8 +3581,16 @@ fn dotted_piece(text: &str) -> bool {
                     .filter(|&child| self.binary_operand(child))
                     .collect();
                 if kind == "binary" {
+                    // An operand is its own event only when the operator that
+                    // joins it sits on its own line (`+ x` leading a line); an
+                    // operator that trails the first line (`a &&` then `b`)
+                    // keeps the operand in the expression that starts there.
+                    let all = self.children(id);
                     let first = items.first().map(|&child| self.line(child));
-                    let (here, below): (Vec<u32>, Vec<u32>) = items.into_iter().partition(|&child| Some(self.line(child)) == first);
+                    let (here, below): (Vec<u32>, Vec<u32>) = items.into_iter().partition(|&child| {
+                        let joined_by = all.iter().position(|&c| c == child).and_then(|at| at.checked_sub(1)).map(|at| all[at]);
+                        Some(self.line(child)) == first || joined_by.is_some_and(|op| Some(self.line(op)) == first)
+                    });
                     for child in below {
                         let value = self.form(child);
                         if value != "0" {
