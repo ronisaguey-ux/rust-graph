@@ -3304,6 +3304,20 @@ fn dotted_piece(text: &str) -> bool {
             // `return { type, value, line }`: a shorthand property whose name
             // is a keyword in another position carries that keyword's kind, so
             // it read as a leaf and the property vanished from the value.
+            // `resiliencyChecks.x = .trap`: an implicit member names the member
+            // the lexer reads (`n:trap`). Its children are the `.` and the name,
+            // so the default arm found no value child and wrote the constant 0.
+            "implicit_member_expression" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
             "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" | "_" | "type" | "from"
             | "of" | "satisfies" => {
                 let text = self.text_string(id);
