@@ -527,6 +527,14 @@ impl<'a> Parser<'a> {
             if self.next_is_member_access(last.end as usize) {
                 return;
             }
+            // `func f<C>(a: C) where` newline `C: Collection {`: a `where` that
+            // ends the line introduces the constraints on the next line. Ended
+            // here, the constraints became an `x` event of their own (a tuple
+            // of pairs) that the CST never writes - the CST keeps the clause
+            // inside the declaration and writes no value for it.
+            if self.lang.tag == "SWIFT" && self.raw(last) == b"where" {
+                return;
+            }
             // `Pattern.UNIX_LINES or` newline `Pattern.CASE_INSENSITIVE or` newline
             // `Pattern.COMMENTS`: a binary operator at the end of a line means the
             // expression continues, and the CST keeps it one statement. Ended at the
@@ -1683,7 +1691,7 @@ impl<'a> Parser<'a> {
         if !stmt.last().is_some_and(|token| self.is_op(token, b")")) {
             return false;
         }
-        if self.head_word(stmt).is_some_and(|word| CONTROL.contains(&word.as_str())) {
+        if self.head_word(stmt).is_some_and(|word| self.is_control(word.as_str())) {
             return false;
         }
         if self.function_head(stmt, true).is_some() {
@@ -1912,7 +1920,7 @@ impl<'a> Parser<'a> {
                     frame.saved = Some(SavedStmt::Assigned(std::mem::take(&mut stmt), std::mem::take(&mut self.brackets)));
                 }
             }
-        } else if self.head_word(&stmt).is_some_and(|word| CONTROL.contains(&word.as_str())) {
+        } else if self.head_word(&stmt).is_some_and(|word| self.is_control(word.as_str())) {
             self.open_control(&stmt, start_col);
         } else {
             let typedef_block = matches!(self.lang.tag, "C" | "CPP" | "OBJC")
@@ -2166,6 +2174,12 @@ impl<'a> Parser<'a> {
             }
         }
         start
+    }
+
+    /// A word that opens a control header. Swift's `guard` is one, like `if`:
+    /// its condition is an expression, not a `guard count` declaration.
+    fn is_control(&self, word: &str) -> bool {
+        CONTROL.contains(&word) || (self.lang.tag == "SWIFT" && word == "guard")
     }
 
     fn head_word(&self, toks: &[Token]) -> Option<String> {
@@ -2812,10 +2826,10 @@ impl<'a> Parser<'a> {
         } else if let Some(mut head) = self.function_head(header, true) {
             head.body = None;
             self.push_function(head, col, None);
-        } else if word.as_deref().is_some_and(|word| CONTROL.contains(&word)) && colon.is_some() {
+        } else if word.as_deref().is_some_and(|word| self.is_control(word)) && colon.is_some() {
             self.open_control(header, col);
         } else if word.as_deref() == Some("async")
-            && self.word_at(header, 1).as_deref().is_some_and(|word| CONTROL.contains(&word))
+            && self.word_at(header, 1).as_deref().is_some_and(|word| self.is_control(word))
             && colon.is_some()
         {
             self.open_control(&header[1..], col);
@@ -2861,7 +2875,7 @@ impl<'a> Parser<'a> {
                 b":" if depth == 0 && lambda > 0 => lambda -= 1,
                 b":" if depth == 0 && self.lang.tag != "NIM" => {
                     let first = self.head_word(stmt)?;
-                    let opens = CONTROL.contains(&first.as_str())
+                    let opens = self.is_control(first.as_str())
                         || self.lang.defs.contains(&first.as_str())
                         || self.lang.classes.contains(&first.as_str())
                         || first == "async"
@@ -4415,7 +4429,7 @@ impl<'a> Parser<'a> {
                 && (self
                     .word_at(toks, open - 1)
                     .is_some_and(|name| {
-                        !CONTROL.contains(&name.as_str())
+                        !self.is_control(name.as_str())
                             && !NOT_A_NAME.contains(&name.as_str())
                             && !(matches!(self.lang.tag, "C" | "CPP" | "OBJC")
                                 && matches!(name.as_str(), "__attribute__" | "__attribute" | "__declspec"))
@@ -4428,12 +4442,12 @@ impl<'a> Parser<'a> {
             String::new()
         } else {
             let name = self.word_at(toks, name_at)?;
-            if CONTROL.contains(&name.as_str()) || NOT_A_NAME.contains(&name.as_str()) {
+            if self.is_control(name.as_str()) || NOT_A_NAME.contains(&name.as_str()) {
                 return None;
             }
             name
         };
-        if self.head_word(toks).is_some_and(|word| CONTROL.contains(&word.as_str())) {
+        if self.head_word(toks).is_some_and(|word| self.is_control(word.as_str())) {
             return None;
         }
         // `go func() { … }()` and `defer f.Close()`: the Go statement keyword
@@ -4950,8 +4964,10 @@ impl<'a> Parser<'a> {
                 continue;
             }
             // `deinit { ... }` is a declaration keyword with no name or value,
-            // so the bare keyword line is not an expression statement.
-            return matches!(word.as_str(), "var" | "let" | "deinit");
+            // so the bare keyword line is not an expression statement. So is a
+            // bare `init(...)` line: a protocol requirement, since a call needs
+            // `self.init` or `super.init`.
+            return matches!(word.as_str(), "var" | "let" | "deinit" | "init");
         }
         // Only modifiers on this line (`public // SPI` then `func f()` on the
         // next): the declaration follows on a later line and binds no value.
