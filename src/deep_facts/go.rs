@@ -4966,7 +4966,8 @@ fn dotted_piece(text: &str) -> bool {
             // access as `field_expression`, and read through the default arm
             // the call had no name at all.
             "attribute" | "member_expression" | "member_access_expression" | "member_access"
-            | "conditional_member_access" | "navigation_expression" | "field_expression" | "select" => {
+            | "conditional_member_access" | "navigation_expression" | "optional_chaining_expression"
+            | "field_expression" | "select" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
                 let object = children.first().copied();
@@ -5100,7 +5101,7 @@ fn dotted_piece(text: &str) -> bool {
             // .DisposeAsync();` - was dated to the receiver's first line, and the
             // one-pass reader dates a call to its name (84 files).
             "attribute" | "member_expression" | "navigation_expression" | "member_access"
-            | "selector_expression" | "field_access" => {
+            | "selector_expression" | "field_access" | "optional_chaining_expression" => {
                 let children = self.children(callee);
                 if let Some(&name) = children.iter().rev().find(|&&child| {
                     self.node(child).first_child == NONE && !self.is_layout(child)
@@ -5236,6 +5237,8 @@ fn dotted_piece(text: &str) -> bool {
             // every call through a type in the corpus lost its dotted name.
             // `_reader?.Close()` - the null-conditional member access names the
             // same path as a plain one.
+            // Swift's `a?.f()` is an `optional_chaining_expression`; read through
+            // the default arm the call lost its name and was written as `""`.
             "attribute" | "member_expression" | "member_access" | "conditional_member_access"
             // Scala spells `x.y` as `select`; without it a dotted call callee
             // path was empty, so every `a.b(c)` call lost its name.
@@ -5244,6 +5247,7 @@ fn dotted_piece(text: &str) -> bool {
             // default arm it named only its first leaf, so `DeprecationLevel.ERROR`
             // in a value formed as `DeprecationLevel`.
             | "navigation_expression"
+            | "optional_chaining_expression"
             | "qualified_type" => {
                 let children = self.children(id);
                 let name = self.member_name(id);
