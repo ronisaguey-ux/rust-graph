@@ -622,6 +622,17 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `func f(x: [Int])` newline `-> Slice<T> {`: a Swift return type
+            // on its own line is still the function's header. Ended here, the
+            // arrow line became a module-level value (`x`) the CST never writes.
+            if self.lang.tag == "SWIFT"
+                && self.word_at(&self.stmt, 0).as_deref() == Some("func")
+                && self.next_line_start(last.end as usize).is_some_and(|at| {
+                    self.src.get(at) == Some(&b'-') && self.src.get(at + 1) == Some(&b'>')
+                })
+            {
+                return;
+            }
             // `interface A extends B` newline `{` or `interface A<T>` newline
             // `extends B`: the header of a type declaration spans the line
             // break; ending here leaves `{` in `<module>` and turns its type
