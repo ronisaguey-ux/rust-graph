@@ -4704,7 +4704,9 @@ impl<'a> Parser<'a> {
             }
             return matches!(word.as_str(), "var" | "let");
         }
-        false
+        // Only modifiers on this line (`public // SPI` then `func f()` on the
+        // next): the declaration follows on a later line and binds no value.
+        index > 0
     }
 
     /// A Java member that declares and assigns nothing: a signature with no
