@@ -1510,7 +1510,7 @@ impl Emit<'_> {
         // read the annotation macro, and `extern hidden void j(int);` read
         // both; the CST writes the type and the declared name and nothing else,
         // so each was a name the source never had as a value (c corpus).
-        if self.lang.tag == "C" && self.c_specifier(&word) {
+        if matches!(self.lang.tag, "C" | "CPP") && self.c_specifier(&word) {
             self.pos += 1;
             return;
         }
