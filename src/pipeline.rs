@@ -4179,6 +4179,10 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
             "if", "else", "while", "for", "do", "match", "case", "try", "catch", "finally", "return", "throw",
             "new", "with", "extends", "val", "var", "def", "type", "class", "object", "trait", "implicit",
             "final", "private", "protected", "override", "abstract", "sealed", "lazy", "this", "super",
+            // Infix method words (`n max 0`, `a to b`) are operator spellings;
+            // the one-pass reader folds them into the value, the CST names the
+            // operands. They are not a fact the CST dropped.
+            "max", "min", "to", "until", "mod", "xor",
         ],
         // C#: the operator words are spellings, not callees. `unchecked(a + b)`,
         // `default(DateTime)`, `nameof(x)`, `checked(n)` and `typeof(T)` put a
