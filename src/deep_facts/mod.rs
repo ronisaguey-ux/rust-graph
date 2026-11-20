@@ -263,7 +263,7 @@ const SW_DEFS: &[Def] = &[
     Def { kind: "enum_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "protocol_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "extension_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
-    Def { kind: "function_declaration", name: &["identifier"], params: Some("parameter_clause"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "function_declaration", name: &["identifier", "set"], params: Some("parameter_clause"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 const SW_CALLS: &[&str] = &["call_expression"];
 const SW_IMPORTS: &[&str] = &["import_declaration"];
@@ -2015,7 +2015,9 @@ impl<'a> Walker<'a> {
             // `guard cond else { … }` is an `if` whose body runs when the
             // condition fails: the same condition event and block as `if`.
             "if_statement" | "guard_statement" => {
-                self.condition_before(id);
+                if !(self.language.name == "swift" && self.swift_binding_then_call(id)) {
+                    self.condition_before(id);
+                }
                 self.event("[\"b\"]");
             }
             // `guard let member = transform(m) else { return nil }` binds
@@ -2039,6 +2041,30 @@ impl<'a> Walker<'a> {
                     // every case. The lexer writes it for a bare `else`; the
                     // events are the same fact either way.
                     self.event("[\"f\"]");
+                }
+            }
+            // `strings.forEach { (string, contiguous) in`: two plain names in a
+            // closure head are one tuple event on the header line, which the
+            // one-pass lexer writes; the CST wrote nothing for the head. A single
+            // name is folded into the body's value by the closure form instead,
+            // so only two or more names are an event here.
+            "closure_signature" if self.language.name == "swift" => {
+                let source = self.child_of_kind(id, "closure_parameter_group").unwrap_or(id);
+                let items: Vec<u32> = self
+                    .children(source)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")" | "," | "in"))
+                    .collect();
+                if items.len() >= 2 && items.iter().all(|&child| self.kind(child) == "identifier") {
+                    let mut names = Vec::new();
+                    for child in items {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &self.text_string(child));
+                        form.push(']');
+                        names.push(form);
+                    }
+                    let line = self.line(id);
+                    self.event(&format!("[\"x\",{line},[\"t\",[{}]]]", names.join(",")));
                 }
             }
             "with_statement" => {

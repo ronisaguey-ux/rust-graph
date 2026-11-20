@@ -2186,6 +2186,38 @@ impl<'a> Walker<'a> {
         (!targets.is_empty()).then_some((targets, value))
     }
 
+    /// `if let x = value, cond(x) {`: the binding and the call that follows it
+    /// in the same condition list. `condition_before` reads only the first
+    /// condition, and a binding forms as nothing, so the call was lost.
+    pub(crate) fn swift_binding_then_call(&mut self, id: u32) -> bool {
+        let items: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .take_while(|&child| !matches!(self.kind(child), "block" | "else_clause"))
+            .filter(|&child| !self.is_layout(child) && self.kind(child) != ",")
+            .collect();
+        let [binding, call] = items[..] else { return false };
+        if self.kind(binding) != "binding_condition" || self.kind(call) != "call_expression" {
+            return false;
+        }
+        let Some(condition) = self.child_of_kind(binding, "condition_binding") else { return false };
+        let parts = self.children(condition);
+        let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") else { return false };
+        let Some(&value) = parts.get(at + 1) else { return false };
+        let targets = self.pattern_names(parts[0]);
+        if targets.len() != 1 {
+            return false;
+        }
+        let bound = self.form(value);
+        let mut name = "[\"n\",".to_string();
+        push_string(&mut name, &targets[0]);
+        name.push(']');
+        let test = self.form(call);
+        let line = self.line(binding);
+        self.event(&format!("[\"x\",{line},[\"t\",[[\"m\",[{name},{bound}]],{test}]]]"));
+        true
+    }
+
     /// `for a, b in xs` / `for (const a of xs)` -> targets and iterable.
     pub(crate) fn loop_binding(&mut self, id: u32) -> Option<(Vec<String>, u32)> {
         let children = self.children(id);
@@ -3466,6 +3498,60 @@ fn dotted_piece(text: &str) -> bool {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
+            // `ducetExtract[scalars]!.collationElements`: a member read through a
+            // force unwrap has no dotted path, so the path arm below formed only
+            // the base and dropped the member. The lexer reads the base and the
+            // member as a pair, so both are kept.
+            "navigation_expression"
+                if self.language.name == "swift"
+                    && self.children(id).first().is_some_and(|&base| self.kind(base) == "force_unwrap") =>
+            {
+                let base = self.children(id)[0];
+                let mut parts = Vec::new();
+                let value = self.form(base);
+                if value != "0" {
+                    parts.push(value);
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `ducetExtract[scalars]!.collationElements`: a member read through a
+            // force unwrap has no dotted path, so the path arm below formed only
+            // the base and dropped the member. The lexer reads the base and the
+            // member as a pair, so both are kept.
+            "navigation_expression"
+                if self.language.name == "swift"
+                    && self.children(id).first().is_some_and(|&base| self.kind(base) == "force_unwrap") =>
+            {
+                let base = self.children(id)[0];
+                let mut parts = Vec::new();
+                let value = self.form(base);
+                if value != "0" {
+                    parts.push(value);
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             "attribute" | "member_expression" | "member_access_expression" | "member_access" | "subscript" | "subscript_expression" | "field_expression" | "meta_property"
             // `Ordering::Acquire` in an argument list is a path, not a constant.
             | "scoped_identifier" | "scoped_type_identifier"
@@ -3605,9 +3691,13 @@ fn dotted_piece(text: &str) -> bool {
             // `xs[lo():hi():st()]`: a slice and a subscript list are lists of
             // values, not wrappers, so nothing may be dropped.
             | "slice" | "subscript_list"
+            // Swift's `a..<b` and `a...b` are a `range` node with two operands;
+            // read through the default arm it wrote `0`, so `return start..<end`
+            // lost its value (the lexer reads `m:[n:start,n:end]`).
+            // Ruby names its range `range` too, so only Swift's reads here.
             // Ruby and Scala name their binary expression `binary` too, and
             // keep the default arm; only Swift's reads through this one.
-            | "binary" if kind != "binary" || self.language.name == "swift" => {
+            | "range" | "binary" if (kind != "binary" && kind != "range") || self.language.name == "swift" => {
                 // `type + 'x'`: `type` is a keyword in this grammar, so the
                 // layout filter drops it and the binary expression keeps only
                 // its right operand — the lexer reads `m:[n:type,0]` and the
@@ -4397,8 +4487,10 @@ fn dotted_piece(text: &str) -> bool {
             // and the binding lost the value the lexer wrote as a merge of both
             // operands. Form both sides like Kotlin's infix expression. Swift's
             // `a == f(b)` is the same node: an `if` on it lost its condition
-            // and every call in it (`if lhs == Unicode.Scalar(x)`).
-            "binary" if matches!(self.language.name, "scala" | "swift") => {
+            // and every call in it (`if lhs == Unicode.Scalar(x)`). Swift's
+            // `a..<b` is a `range` node with the same two operands: the default
+            // arm wrote `0` for `return start..<end`, the lexer `m:[start,end]`.
+            "binary" | "range" if matches!(self.language.name, "scala" | "swift") => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 if items.is_empty() {
                     "0".to_string()
