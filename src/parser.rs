@@ -4377,6 +4377,27 @@ impl<'a> Parser<'a> {
 
     fn statement(&mut self, stmt: &[Token]) {
         let Some(first) = stmt.first() else { return };
+        // `pub extern crate grep_cli as cli;` is a crate alias, not an exported name: the lexer
+        // wrote an `x` event the CST never had, and ripgrep's facade lost every alias line
+        // (2 rows in crates/grep/src/lib.rs, and the same shape across cargo workspaces).
+        if self.lang.tag == "RS" {
+            let mut at = 0usize;
+            while self.word_at(stmt, at).as_deref() == Some("pub") {
+                at += 1;
+                if stmt.get(at).is_some_and(|token| self.is_op(token, b"(")) {
+                    if let Some((_, close)) = self.group_at(stmt, at) {
+                        at = close + 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if self.word_at(stmt, at).as_deref() == Some("extern")
+                && self.word_at(stmt, at + 1).as_deref() == Some("crate")
+            {
+                return;
+            }
+        }
         // A Java member declares; it never assigns by expression. An enum
         // constant with arguments (`ALL(Integer.MIN_VALUE),`) and an annotation
         // with arguments (`@SuppressWarnings("unchecked")`) are declarations,
