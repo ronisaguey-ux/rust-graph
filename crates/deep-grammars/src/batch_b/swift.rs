@@ -320,7 +320,7 @@ rust_graph_deep::grammar! { SWIFT {
     labeled_enum_case_value: _name ":" _type,
     associated_type_declaration: "associatedtype" _name [":" _type] [where_clause],
 
-    function_declaration: [declaration_modifiers] "func" _name [generic_parameters] parameter_clause ["async"] ["throws" | "rethrows"] ["->" _type] [where_clause] [(block | ";")],
+    function_declaration: [declaration_modifiers] "func" (_name | "set") [generic_parameters] parameter_clause ["async"] ["throws" | "rethrows"] ["->" _type] [where_clause] [(block | ";")],
     initializer_declaration: [declaration_modifiers] "init" ["?" | "!"] parameter_clause ["async"] ["throws"] [where_clause] (block | ";"),
     deinitializer_declaration: "deinit" block,
     subscript_declaration: [declaration_modifiers] "subscript" parameter_clause "->" _type (block | ";"),

@@ -524,7 +524,9 @@ impl<'a> Walker<'a> {
             // `return (void *)a_cas((volatile int *)p, (int)t, (int)s);`: the
             // call sits behind a cast and nothing descended into that node, so
             // every cast-receiver call in musl lost its call (3 shapes, 8 rows).
-            "cast_expression" | "user_cast_expression" => {
+            // C++ `static_cast<T>(f(x))` is a `named_cast` in this grammar, and
+            // `return static_cast<T>(f(x));` lost `f` the same way (swap header).
+            "cast_expression" | "user_cast_expression" | "named_cast" => {
                 let mut calls = Vec::new();
                 self.c_calls_in_pub(id, &mut calls);
                 for call in calls {
