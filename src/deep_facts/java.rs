@@ -30,7 +30,7 @@ impl<'a> Walker<'a> {
         for child in self.children(id) {
             if matches!(
                 self.kind(child),
-                "class_body" | "enum_body" | "interface_body" | "annotation_type_body" | "record_body" | "constructor_body"
+                "class_body" | "enum_body" | "interface_body" | "annotation_type_body" | "record_body" | "constructor_body" | "type_body"
                     // A C# property's body is statements of its own.
                     | "property_body"
             ) {
@@ -46,7 +46,15 @@ impl<'a> Walker<'a> {
             1 => parts.pop().unwrap_or_default(),
             _ => format!("[\"m\",[{}]]", parts.join(",")),
         };
-        let line = self.line(id);
+        let mut line = self.line(id);
+        // Swift: `@frozen` on its own line is an attribute call of its own, so the
+        // header starts at the keyword after the modifiers, as the lexer's does.
+        if self.language.name == "swift" {
+            let first = self.children(id).into_iter().find(|&child| !matches!(self.kind(child), "modifiers" | "declaration_modifiers"));
+            if let Some(first) = first {
+                line = self.line(first);
+            }
+        }
         self.lexer_event(b'x', line, &[], &value, false);
     }
 
@@ -93,7 +101,15 @@ impl<'a> Walker<'a> {
             1 => parts.pop().unwrap_or_default(),
             _ => format!("[\"m\",[{}]]", parts.join(",")),
         };
-        let line = self.line(id);
+        let mut line = self.line(id);
+        // Swift: `@frozen` on its own line is an attribute call of its own, so the
+        // header starts at the keyword after the modifiers, as the lexer's does.
+        if self.language.name == "swift" {
+            let first = self.children(id).into_iter().find(|&child| !matches!(self.kind(child), "modifiers" | "declaration_modifiers"));
+            if let Some(first) = first {
+                line = self.line(first);
+            }
+        }
         self.lexer_event(b'x', line, &[], &value, false);
     }
 
