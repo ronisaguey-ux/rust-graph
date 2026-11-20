@@ -4163,6 +4163,11 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         "GO" => &["func", "go", "defer", "range", "select", "switch", "if", "for", "type", "var", "const", "return"],
         "JAVA" => &[
             "new", "if", "while", "for", "switch", "return", "throw", "synchronized", "assert", "try", "catch", "instanceof",
+            // Java modifiers, annotation names and primitive types the one-pass
+            // reader folds into an anonymous class's value; the CST names the
+            // members instead.
+            "public", "private", "protected", "static", "final", "abstract", "Override", "Deprecated", "Object",
+            "boolean", "int", "long", "double", "float", "void", "class", "interface", "extends", "implements",
         ],
         // `val x = when (this) { … }`: the header of a control form is a
         // keyword and a group, and the one-pass reader names the keyword a
@@ -4183,6 +4188,9 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
             // the one-pass reader folds them into the value, the CST names the
             // operands. They are not a fact the CST dropped.
             "max", "min", "to", "until", "mod", "xor",
+            // A literal the CST wrote as the constant 0 carries no name: both
+            // readers agree on the value, only one spells it as a word.
+            "null", "true", "false",
         ],
         // C#: the operator words are spellings, not callees. `unchecked(a + b)`,
         // `default(DateTime)`, `nameof(x)`, `checked(n)` and `typeof(T)` put a
