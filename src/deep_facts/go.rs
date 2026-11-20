@@ -4316,6 +4316,39 @@ fn dotted_piece(text: &str) -> bool {
             "trailing_closure" => self
                 .expression_child(id)
                 .map_or_else(|| "0".to_string(), |child| self.form(child)),
+            // `.init({ _ in stringCtx })`: a Swift closure is its parameters and
+            // the names its body reads, which is how the lexer writes it. Read
+            // as the default arm the whole closure was the constant 0, so every
+            // name a closure body read dropped out of the call that took it.
+            // The body is walked as statements of its own, so its names are
+            // read here without forming it again (a second form would record
+            // its calls twice).
+            "closure" if self.language.name == "swift" => {
+                let mut names: Vec<String> = Vec::new();
+                let mut stack: Vec<u32> = self.children(id);
+                stack.reverse();
+                while let Some(child) = stack.pop() {
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    if self.kind(child) == "identifier" {
+                        let text = self.text_string(child);
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &text);
+                        form.push(']');
+                        names.push(form);
+                        continue;
+                    }
+                    let mut kids = self.children(child);
+                    kids.reverse();
+                    stack.extend(kids);
+                }
+                match names.len() {
+                    0 => "0".to_string(),
+                    1 => names.remove(0),
+                    _ => format!("[\"m\",[{}]]", names.join(",")),
+                }
+            }
             // `class Action extends _AttributeHolder(Function) {}`: the body is
             // deferred, but the `extends` heritage expression is evaluated when
             // the class expression is evaluated.
