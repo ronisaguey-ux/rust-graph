@@ -4798,7 +4798,9 @@ impl<'a> Parser<'a> {
                 index += 1;
                 continue;
             }
-            return matches!(word.as_str(), "var" | "let");
+            // `deinit { ... }` is a declaration keyword with no name or value,
+            // so the bare keyword line is not an expression statement.
+            return matches!(word.as_str(), "var" | "let" | "deinit");
         }
         // Only modifiers on this line (`public // SPI` then `func f()` on the
         // next): the declaration follows on a later line and binds no value.
