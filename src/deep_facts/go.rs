@@ -3417,6 +3417,21 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            // `register: .rflags`: a Swift implicit member names a member of
+            // the contextual type, so it is a name, not a constant. Formed as
+            // the default 0, every labeled argument written with a leading dot
+            // lost its value on the CST path only.
+            "implicit_member_expression" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
             // `val Normal = FSM.Normal`: Scala spells a dotted name as a
             // `select` node. It is not in the member-access list above, so the
             // default arm formed it as the constant 0 and every binding to a
@@ -3688,6 +3703,14 @@ fn dotted_piece(text: &str) -> bool {
                 }
             }
             "not_null_expression" if self.is_kotlin() => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
+            // `into: &thread`: Swift's `&` on an argument marks it inout, and
+            // the value is the operand itself. The one-pass lexer reads the
+            // bare name, so wrapping it as a merge left every inout argument
+            // a loss on the CST path only.
+            "prefix_expression" if self.language.name == "swift" && self.text_string(id).starts_with('&') => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
             },
