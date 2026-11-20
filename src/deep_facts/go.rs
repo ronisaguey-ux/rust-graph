@@ -3534,17 +3534,32 @@ fn dotted_piece(text: &str) -> bool {
             | "conditional_expression" | "named_expression"
             // `xs[lo():hi():st()]`: a slice and a subscript list are lists of
             // values, not wrappers, so nothing may be dropped.
-            | "slice" | "subscript_list" => {
+            | "slice" | "subscript_list"
+            // Ruby and Scala name their binary expression `binary` too, and
+            // keep the default arm; only Swift's reads through this one.
+            | "binary" if kind != "binary" || self.language.name == "swift" => {
                 // `type + 'x'`: `type` is a keyword in this grammar, so the
                 // layout filter drops it and the binary expression keeps only
                 // its right operand — the lexer reads `m:[n:type,0]` and the
                 // CST wrote `0`. A word that is not one of this arm's operators
                 // is an operand.
-                let items: Vec<u32> = self
+                let mut items: Vec<u32> = self
                     .children(id)
                     .into_iter()
                     .filter(|&child| self.binary_operand(child))
                     .collect();
+                if kind == "binary" {
+                    let first = items.first().map(|&child| self.line(child));
+                    let (here, below): (Vec<u32>, Vec<u32>) = items.into_iter().partition(|&child| Some(self.line(child)) == first);
+                    for child in below {
+                        let value = self.form(child);
+                        if value != "0" {
+                            let line = self.line(child);
+                            self.event(&format!("[\"x\",{line},{value}]"));
+                        }
+                    }
+                    items = here;
+                }
                 if items.len() == 1 {
                     return self.form(items[0]);
                 }
