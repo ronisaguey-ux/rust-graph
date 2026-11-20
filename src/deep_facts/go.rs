@@ -3367,6 +3367,21 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            // Swift's `.trap` as a value (`x.mode = .trap`) is an implicit
+            // member: a name with no receiver. The lexer writes it as the
+            // member's name, and read through the default arm it was the
+            // constant 0, so every assignment of an enum case lost its value.
+            "implicit_member_expression" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
             // `field_expression` is Rust's spelling of the same path; without
             // this arm `self.skipped_groups == 0` read both sides as the
             // constant and the name left the record.
