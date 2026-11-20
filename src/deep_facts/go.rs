@@ -3356,6 +3356,17 @@ fn dotted_piece(text: &str) -> bool {
             // `field_expression` is Rust's spelling of the same path; without
             // this arm `self.skipped_groups == 0` read both sides as the
             // constant and the name left the record.
+            // Swift's `.trap` names a member of the contextual type: the lexer
+            // reads the name, and the constant 0 here lost every such value.
+            "implicit_member_expression" => match self.children(id).iter().rev().find_map(|&child| self.leaf_name(child)) {
+                Some(name) => {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+                None => "0".to_string(),
+            },
             "attribute" | "member_expression" | "member_access_expression" | "member_access" | "subscript" | "subscript_expression" | "field_expression" | "meta_property"
             // `Ordering::Acquire` in an argument list is a path, not a constant.
             | "scoped_identifier" | "scoped_type_identifier"
