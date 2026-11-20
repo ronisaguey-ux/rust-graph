@@ -3372,14 +3372,22 @@ fn covers_value(deep: &Shape, lexer: &Shape, src: &str, tag: &str) -> Result<(),
     if deep.value == "0" {
         return Err(Miss::Constant);
     }
-    // `val q = new TaskQueue`: with no argument list the one-pass reader names
-    // the value after the type (`n:TaskQueue`) while the CST writes a call with
-    // an empty argument list (`c(0;[])`). The source line proves both read the
-    // same construction, so the shape difference is not a lost name.
-    if tag == "SCALA" && lexer.value.starts_with("n:") && deep.value.starts_with("c(") && deep.value.ends_with(";[])") {
+    // `val q = new TaskQueue` / `implicit val s = new Shape[T] { .. }`: the
+    // one-pass reader names a bare construction (`n:TaskQueue`) or merges the
+    // type with an anonymous class body (`m:[n:Shape,..]`), while the CST writes
+    // a call with an empty argument list (`c(0;[])`). The source line proves
+    // both read the same construction, so the shape difference is not a fact
+    // the CST dropped.
+    if tag == "SCALA" && deep.value.starts_with("c(") && deep.value.ends_with(";[])") {
         if let Some(text) = src.lines().nth(lexer.line.saturating_sub(1) as usize) {
-            let name = &lexer.value[2..];
-            if text.contains(&format!("new {name}")) {
+            let name = if let Some(rest) = lexer.value.strip_prefix("n:") {
+                rest
+            } else if let Some(rest) = lexer.value.strip_prefix("m:[n:") {
+                rest.split([',', ']']).next().unwrap_or("")
+            } else {
+                ""
+            };
+            if !name.is_empty() && text.contains(&format!("new {name}")) {
                 return Ok(());
             }
         }
