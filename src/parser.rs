@@ -1197,6 +1197,15 @@ impl<'a> Parser<'a> {
                 return true;
             }
         }
+        // `guard let rawPtr = TlsGetValue(key) else {`: the else's brace opens
+        // the divergence block, as Rust's let-else does. Read as a value, the
+        // block's calls merged into the binding (BacktracerThreadLocals.swift:64).
+        if self.lang.tag == "SWIFT"
+            && self.stmt.last().is_some_and(|token| self.raw(token) == b"else")
+            && self.stmt.first().is_some_and(|token| self.raw(token) == b"guard")
+        {
+            return true;
+        }
         // Cloned, not borrowed: deciding what the brace opens reads past the
         // cursor, and that needs the parser itself.
         let Some(last) = self.stmt.last().cloned() else { return !self.declaring };
