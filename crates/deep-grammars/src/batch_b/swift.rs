@@ -443,7 +443,9 @@ rust_graph_deep::grammar! { SWIFT {
         | "switch" | "func" | "class" | "struct" | "enum" | "protocol" | "extension"
         | "import" | "return" | "while" | "do" | "catch" | "defer" | "guard" | "break"
         | "continue" | "throw" | "try" | "as" | "is" | "nil" | "true" | "false" | "self"
-        | "super" | "static" | "private" | "public" | "init" | "subscript" | "typealias",
+        | "super" | "static" | "private" | "public" | "init" | "subscript" | "typealias"
+        | "mutating" | "nonmutating" | "override" | "final" | "lazy" | "weak" | "unowned"
+        | "required" | "convenience" | "dynamic" | "indirect" | "open" | "fileprivate" | "internal",
     labeled_argument: _argument_label ":" _argument_value,
     _argument_value: ("let" | "var") _name | _expression@assign,
     subscript: "[" (_argument %? ",") "]",
