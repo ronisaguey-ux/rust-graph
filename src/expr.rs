@@ -2076,6 +2076,13 @@ impl Emit<'_> {
                 self.pos += 1;
                 continue;
             }
+            // `remainingPath!.count`: Swift's postfix force-unwrap is the same
+            // kind of marker, and the CST names the chain `remainingPath.count`.
+            // Ending the value at `!` split it into two merged names.
+            if self.lang.tag == "SWIFT" && self.is_op(0, b"!") && self.is_op(1, b".") {
+                self.pos += 1;
+                continue;
+            }
             // `z.string().brand<"username">()`: TypeScript/Kotlin type arguments before
             // `(` are types, not `< ... >` comparisons or runtime constants.
             if matches!(self.lang.tag, "TS" | "TSX" | "KT" | "SWIFT") && self.is_op(0, b"<") {

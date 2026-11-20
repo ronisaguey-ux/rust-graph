@@ -3825,6 +3825,11 @@ fn dotted_piece(text: &str) -> bool {
             },
             // `unsafe (a, b)` (Swift 6.2): a marker on its operand, which is the
             // value, as `&` and `!` are. The one-pass reader reads the operand.
+            // `x!`: the postfix force-unwrap is its operand, as the prefix `!` is.
+            "force_unwrap" if self.language.name == "swift" => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
             "unsafe_expression" if self.language.name == "swift" => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
@@ -5296,6 +5301,10 @@ fn dotted_piece(text: &str) -> bool {
             "as_expression" | "satisfies_expression" | "type_assertion" | "non_null_expression" | "not_null_expression" => {
                 self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default()
             }
+            // Swift's `x!` is a postfix force-unwrap: `x!.count` names `x.count`.
+            // Read as a leaf, the receiver vanished and the call or member lost
+            // its name, so the member access formed as `0`.
+            "force_unwrap" => self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default(),
             // A call has no name of its own: `f().x` names `.x`.
             "call" | "call_expression" | "new_expression" | "invocation_expression" => String::new(),
             // `match.group`, `type.name`: a keyword reused as an identifier.
