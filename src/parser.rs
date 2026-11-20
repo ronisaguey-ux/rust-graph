@@ -611,6 +611,17 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `def tryAdvance(c: Int): Boolean =` newline `if (i <= 0) false`
+            // newline `else {`: the `if` is the body of the definition and the
+            // `else` block belongs to it. Ending at the first break closed the
+            // function on the `if` line, and the block's statements were filed
+            // under the enclosing symbol the CST never writes them to.
+            if self.lang.tag == "SCALA"
+                && self.next_starts_with_word(last.end as usize, b"else")
+                && self.function_head(&self.stmt, false).is_some_and(|head| head.body.is_some())
+            {
+                return;
+            }
             // `interface A extends B` newline `{` or `interface A<T>` newline
             // `extends B`: the header of a type declaration spans the line
             // break; ending here leaves `{` in `<module>` and turns its type
