@@ -1900,6 +1900,7 @@ fn uncovered(
             || (event.tag == b'x' && is_else_if_let_line(lines, event.line))
             || (event.tag == b'x' && is_closure_block_line(lines, event.line))
             || (event.tag == b'a' && is_control_header_line(lines, event.line))
+            || (lexer.tag == "SCALA" && event.tag == b'x' && is_scala_control_header(lines, event.line))
         {
             accepted.positional_events += 1;
             continue;
@@ -2253,6 +2254,17 @@ fn is_control_header_line(src: &Lines<'_>, line: u32) -> bool {
     };
     let text = text.trim_start();
     ["if ", "elif ", "while ", "for "].iter().any(|head| text.starts_with(head)) && text.contains(" in ")
+}
+
+/// `while (!terminal) bump()` / `if (cond) f()`: a Scala control header is not
+/// a value statement. The one-pass reader files the condition as an `x` event;
+/// the CST records the call in the body and no event for the header itself.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_scala_control_header(src: &Lines<'_>, line: u32) -> bool {
+    src.get(line).is_some_and(|text| {
+        let text = text.trim_start();
+        ["while ", "if ", "for ", "else "].iter().any(|head| text.starts_with(head))
+    })
 }
 
 /// `#[cfg(feature = "deep")]`, `#![allow(dead_code)]`: the tokens inside an
