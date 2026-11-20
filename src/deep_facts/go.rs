@@ -4327,6 +4327,22 @@ fn dotted_piece(text: &str) -> bool {
                     None => "0".to_string(),
                 }
             }
+            // `ResettableValue<(Int, Int) -> Bool>`: a tuple type in a type
+            // list is its element types, which the lexer reads as a tuple. The
+            // generic arm below read the node as nothing, so `Int, Int` were
+            // lost from the value.
+            "tuple_type" if self.language.name == "swift" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")" | ","))
+                    .collect();
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.tuple_form(&items)
+                }
+            }
             // `UnsafeCell<State>`, `Vec<Entry>`: a generic type holds the base
             // and the type arguments, and both are names the lexer reads.
             "generic_type" | "generic_specialization" | "type_arguments" | "type_parameter_list" => {
@@ -4792,6 +4808,16 @@ fn dotted_piece(text: &str) -> bool {
                     arg_list.push(']');
                 }
             }
+        }
+        // `ResettableValue<(Int, Int) -> Bool>({ $0 == $1 })`: a generic
+        // specialization called with arguments is not a call to the lexer. It
+        // writes the type's names and the arguments' values as one value, so
+        // the form is that value and no `c`.
+        if self.language.name == "swift" && self.kind(callee) == "generic_specialization" && arg_list.len() > 2 {
+            let base = self.form(callee);
+            let inner = arg_list[1..arg_list.len() - 1].to_string();
+            let out = format!("[\"m\",[{base},{inner}]]");
+            return (out, Some((index as u32, receiver)));
         }
         let out = format!("[\"c\",{index},{receiver},{arg_list}]");
         let _ = is_new;
