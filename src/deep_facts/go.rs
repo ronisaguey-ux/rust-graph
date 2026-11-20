@@ -4492,7 +4492,9 @@ fn dotted_piece(text: &str) -> bool {
             // and every call in it (`if lhs == Unicode.Scalar(x)`). Swift's
             // `a..<b` is a `range` node with the same two operands: the default
             // arm wrote `0` for `return start..<end`, the lexer `m:[start,end]`.
-            "binary" | "range" if matches!(self.language.name, "scala" | "swift") => {
+            // `a ?? b` is its own `nil_coalescing` node over the same two operands, so the
+            // default arm wrote `0` where the lexer read both names.
+            "binary" | "range" | "nil_coalescing" if matches!(self.language.name, "scala" | "swift") => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 if items.is_empty() {
                     "0".to_string()
