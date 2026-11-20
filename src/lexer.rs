@@ -99,7 +99,7 @@ impl<'a> Lexer<'a> {
             || byte == b'_'
             || byte >= 0x80
             || self.lang.ident_extra.contains(&byte)
-            || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS"))
+            || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS" | "SWIFT"))
     }
 
     /// `/* outer /* inner */ outer */` nests in Kotlin and Rust: the first
@@ -692,7 +692,7 @@ impl<'a> Lexer<'a> {
                 return self.token(Kind::Ident, start, line, col);
             }
         }
-        if is_ident_start(byte) || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS")) {
+        if is_ident_start(byte) || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS" | "SWIFT")) {
             while self.is_ident(self.peek(0)) {
                 self.pos += 1;
             }
