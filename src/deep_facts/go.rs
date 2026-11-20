@@ -2168,6 +2168,18 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// `guard let x = value else { … }`: the name the condition binds and its
+    /// initialiser. A guard with no initialiser binds nothing to a value.
+    pub(crate) fn swift_guard_binding(&mut self, id: u32) -> Option<(Vec<String>, u32)> {
+        let condition = self.child_of_kind(id, "binding_condition")?;
+        let binding = self.child_of_kind(condition, "condition_binding")?;
+        let children = self.children(binding);
+        let at = children.iter().position(|&child| self.kind(child) == "=")?;
+        let value = *children.get(at + 1)?;
+        let targets = self.pattern_names(*children.first()?);
+        (!targets.is_empty()).then_some((targets, value))
+    }
+
     /// `for a, b in xs` / `for (const a of xs)` -> targets and iterable.
     pub(crate) fn loop_binding(&mut self, id: u32) -> Option<(Vec<String>, u32)> {
         let children = self.children(id);
@@ -2749,7 +2761,27 @@ fn dotted_piece(text: &str) -> bool {
                     .find(|&child| matches!(self.kind(child), "identifier" | "simple_identifier" | "file"))
                     .map(|node| self.text_string(node))
             });
-        let Some(name) = name else { return };
+        let Some(name) = name else {
+            // Swift `let (pointer, count) = (a, b)`: the pattern is a tuple with
+            // no head or identifier, and the lexer writes the statement under
+            // the names it binds, so the event carries those targets.
+            if self.language.name == "swift" {
+                let pattern = children.iter().copied().find(|&child| self.kind(child) == "parenthesized_expression");
+                let value = children
+                    .iter()
+                    .copied()
+                    .skip_while(|&child| self.kind(child) != "=")
+                    .skip(1)
+                    .find(|&child| !self.is_layout(child));
+                if let (Some(pattern), Some(value)) = (pattern, value) {
+                    let targets = self.assignment_targets(pattern);
+                    if !targets.is_empty() {
+                        self.assignment_parts(targets, value, line, false);
+                    }
+                }
+            }
+            return;
+        };
         // The initialiser is the child after `=` (or `by`), and nothing else.
         // Taking "the last child that is not a type word" made the type of a
         // property that has no initialiser (`val x: String`) read as its
@@ -3782,6 +3814,12 @@ fn dotted_piece(text: &str) -> bool {
             // a loss on the CST path only. `!` is the same: `!$Embedded` and
             // `!foo` read the operand, and the default arm read nothing.
             "prefix_expression" if self.language.name == "swift" && matches!(self.text_string(id).chars().next(), Some('&' | '!')) => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
+            // `unsafe (a, b)` (Swift 6.2): a marker on its operand, which is the
+            // value, as `&` and `!` are. The one-pass reader reads the operand.
+            "unsafe_expression" if self.language.name == "swift" => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
             },
@@ -5196,7 +5234,9 @@ fn dotted_piece(text: &str) -> bool {
             }
             // `AbstractList<String>()` in a supertype constructor: the path of
             // a generic type is its base type's path without type arguments.
-            "generic_type" => self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default(),
+            // Swift's `Endpoint<Item>(...)` is a `generic_specialization` callee;
+            // unnamed, the CST dropped the call's arguments from the value.
+            "generic_type" | "generic_specialization" => self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default(),
             "parenthesized_expression" | "try_expression" | "await_expression" => {
                 // `(a, b)[i]`: parens around a comma list hold a value, not a
                 // name. Reading the first item as a path dropped the rest of the

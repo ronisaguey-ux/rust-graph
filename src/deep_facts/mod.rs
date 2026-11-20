@@ -2016,6 +2016,15 @@ impl<'a> Walker<'a> {
                 self.condition_before(id);
                 self.event("[\"b\"]");
             }
+            // `guard let member = transform(m) else { return nil }` binds
+            // `member` to its initialiser, as `for` does. Nothing read the
+            // condition's binding, so the line had a return and no assignment,
+            // and the call in the initialiser was lost with it.
+            "guard_statement" => {
+                if let Some((targets, value)) = self.swift_guard_binding(id) {
+                    self.assignment_event(targets, value, self.line(id), false);
+                }
+            }
             "elif_clause" | "else_clause" => {
                 self.event("[\"e\"]");
                 if kind == "elif_clause" {
