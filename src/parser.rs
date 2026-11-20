@@ -3414,6 +3414,14 @@ impl<'a> Parser<'a> {
                         index += 1;
                     }
                 }
+                // `import var Darwin.errno` names the kind of symbol imported,
+                // not the first segment of the module. Glued on, it read as
+                // `varDarwin.errno`, a module nothing could mean.
+                Kind::Ident
+                    if module.is_empty()
+                        && self.lang.tag == "SWIFT"
+                        && matches!(self.text(token).as_str(), "var" | "let" | "func" | "class" | "struct" | "enum" | "protocol" | "typealias") =>
+                {}
                 Kind::Ident => module.push_str(&self.text(token)),
                 Kind::Op if self.is_op(token, b"{") => {
                     let prefix = module.trim_end_matches('.').to_string();
