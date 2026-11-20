@@ -1615,6 +1615,30 @@ impl Emit<'_> {
             out.push('0');
             return;
         }
+        // Swift's `@convention(c)` and `@convention(block)` are type attributes:
+        // the parentheses name the convention, not a call. The CST writes none
+        // (`_type_attribute: "@" _name`), so the one-pass reader must not file
+        // a `convention` call for every such typealias.
+        if self.lang.tag == "SWIFT"
+            && word == "convention"
+            && self.op_byte(0) == b'('
+            && self.pos >= 2
+            && self.raw_is(&self.toks[self.pos - 2], b"@")
+        {
+            if let Some(after) = self.skip_balanced(self.pos, b"(", b")") {
+                // The function type's parameter list follows the attribute:
+                // `(UnsafeMutablePointer<T>) -> Int`. It is a type, not the
+                // arguments of a call on the attribute's value.
+                self.pos = after;
+                if self.op_byte(0) == b'(' {
+                    if let Some(params) = self.skip_balanced(self.pos, b"(", b")") {
+                        self.pos = params;
+                    }
+                }
+                out.push('0');
+                return;
+            }
+        }
         let head = if word == "this" || word == "self" || (!self.receiver.is_empty() && word == self.receiver) {
             "self".to_string()
         } else {
