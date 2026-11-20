@@ -4433,7 +4433,10 @@ fn dotted_piece(text: &str) -> bool {
         // `TaintAnalyzer(a, b(), c).run()` the argument `b()` is recorded
         // between the two — and the path keeps the name the source spells.
         let mut receiver_call = None;
-        if matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access" | "navigation_expression") {
+        // Scala's `select` is `object.name`: `s"...$x".format(y)` has the
+        // interpolated string as its receiver, and that receiver is a value.
+        let scala_select = self.language.name == "scala" && self.kind(callee) == "select";
+        if scala_select || matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access" | "navigation_expression") {
             if let Some(&object) = self.children(callee).first() {
                 if self.named_call(object) {
                     // `new URL(x).toString()`, `A().b()`, `A().b().c()`: a
