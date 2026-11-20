@@ -576,6 +576,24 @@ impl Emit<'_> {
             let body = out.len();
             match kind {
                 Kind::Ident => {
+                    // Swift `@Sendable (…) -> Void` and `@escaping (…) -> Void`: the word behind the
+                    // `@` is an attribute on a closure type, never a call. Read as a call it invented
+                    // `call Sendable` / `call escaping` on every closure-typed parameter and alias.
+                    if self.lang.tag == "SWIFT" {
+                        let start = self.toks[self.pos].start as usize;
+                        let after_at = start > 0 && self.src[start - 1] == b'@';
+                        if after_at {
+                            self.pos += 1;
+                            if self.op_byte(0) == b'(' {
+                                let mut skipped = String::new();
+                                self.list(&mut skipped, close, false);
+                            }
+                            if count > 0 {
+                                out.truncate(at);
+                            }
+                            break;
+                        }
+                    }
                     // `x as T` and `x satisfies T`: everything after the keyword
                     // is a type, erased at runtime, so the value ends there.
                     // Left as a name it became a merge item beside the value and
