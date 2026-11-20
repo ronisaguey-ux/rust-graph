@@ -1476,10 +1476,15 @@ impl<'a> Parser<'a> {
             // the head made `class_head` miss the declaration, so the one-pass
             // reader opened a function symbol where the CST wrote a class.
             let scala_modifier = self.lang.tag == "SCALA" && matches!(word.as_str(), "case" | "implicit");
+            // Swift writes `mutating func` and `nonmutating func`: the word binds nothing and sits
+            // in front of `func`. Left unskipped, `function_head` never reached the keyword, and a
+            // generic header (`mutating func f<T>(…)`) fell through to the expression reader, which
+            // filed its `@escaping` parameter type as a call.
+            let swift_modifier = self.lang.tag == "SWIFT" && matches!(word.as_str(), "mutating" | "nonmutating");
             // `pub const fn` and `pub const unsafe extern "C" fn`: in Rust
             // `const` qualifies a function item just like `async` and `unsafe`.
             let rust_modifier = self.lang.tag == "RS" && word == "const";
-            if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier && !rust_modifier && !scala_modifier {
+            if !MODIFIERS.contains(&word.as_str()) && !kotlin_modifier && !rust_modifier && !scala_modifier && !swift_modifier {
                 break;
             }
             index += 1;
