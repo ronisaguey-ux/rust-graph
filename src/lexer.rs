@@ -644,6 +644,19 @@ impl<'a> Lexer<'a> {
             self.skip_directive();
             return self.token(Kind::Directive, start, line, col);
         }
+        // Swift `#if`, `#elseif`, `#else`, `#endif` are compiler-control keywords,
+        // not names: read as an identifier, `#endif` became a bare `n:endif` that
+        // the CST never writes. Only the keyword is consumed; the condition after
+        // `#if` is still read as code.
+        if byte == b'#' && first_on_line && self.lang.tag == "SWIFT" {
+            for word in [&b"elseif"[..], &b"endif"[..], &b"else"[..], &b"if"[..]] {
+                let end = 1 + word.len();
+                if self.src.get(start + 1..start + end) == Some(word) && !self.is_ident(self.peek(end)) {
+                    self.pos += end;
+                    return self.token(Kind::Directive, start, line, col);
+                }
+            }
+        }
         if self.lang.sigils && matches!(byte, b'$' | b'@') {
             let next = self.peek(1);
             if is_ident_start(next) || (byte == b'$' && next.is_ascii_digit()) {
