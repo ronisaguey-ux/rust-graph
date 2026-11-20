@@ -1506,7 +1506,9 @@ impl Emit<'_> {
             // binding; the CST writes no value for it.
             RS_NOISE.contains(&word.as_str())
         } else {
-            NOISE.contains(&word.as_str())
+            // Swift's `try` marks a throwing call and names no value: the CST
+            // writes `try build()` as the call alone, so the word is noise here.
+            NOISE.contains(&word.as_str()) || (self.lang.tag == "SWIFT" && word == "try")
         };
         if noise && !go_word {
             self.pos += 1;
@@ -1603,10 +1605,10 @@ impl Emit<'_> {
             out.push_str("[\"n\",\"_\"]");
             return;
         }
-        // Swift's `true` and `false` are boolean literals, not names: the CST
+        // Swift's `true`, `false` and `nil` are literals, not names: the CST
         // writes each as the constant 0, so the one-pass reader must not file
-        // `n:true` for `isFixedLengthCollection: true`.
-        if self.lang.tag == "SWIFT" && matches!(word.as_str(), "true" | "false") && self.op_byte(0) != b'.' {
+        // `n:true` for `isFixedLengthCollection: true`, or `n:nil` for `(nil)`.
+        if self.lang.tag == "SWIFT" && matches!(word.as_str(), "true" | "false" | "nil") && self.op_byte(0) != b'.' {
             out.push('0');
             return;
         }

@@ -1900,6 +1900,7 @@ fn uncovered(
             || (event.tag == b'x' && is_struct_pattern_condition(lines, event.line))
             || (event.tag == b'x' && is_else_if_let_line(lines, event.line))
             || (event.tag == b'x' && is_closure_block_line(lines, event.line))
+            || (lexer.tag == "SWIFT" && event.tag == b'x' && is_swift_closure_binder_line(lines, event.line))
             || (event.tag == b'a' && is_control_header_line(lines, event.line))
             || (lexer.tag == "SCALA" && event.tag == b'x' && is_scala_control_header(lines, event.line))
         {
@@ -2889,6 +2890,28 @@ fn is_closure_block_line(src: &Lines<'_>, line: u32) -> bool {
     };
     let text = text.trim();
     text.contains("|| {") || (text.contains('|') && text.contains("| {"))
+}
+
+/// `onHTTPResponse { response in` opens a Swift closure whose parameters are
+/// binders, not reads. The one-pass reader files the parameter as a value; the
+/// CST writes none, so the line states nothing both readers can mean.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_swift_closure_binder_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
+        return false;
+    };
+    let Some(open) = text.rfind('{') else {
+        return false;
+    };
+    let after = text[open + 1..].trim();
+    let Some(at) = after.find(" in") else {
+        return false;
+    };
+    let params = after[..at].trim();
+    let rest = &after[at + 3..];
+    !params.is_empty()
+        && params.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ',' || c == ' ')
+        && (rest.is_empty() || rest.starts_with(' '))
 }
 
 /// `pub fn lex(c: &mut Cursor)` and `pub struct Marker(u32)` reach the one-pass
@@ -3914,8 +3937,20 @@ fn shape_at(
             // `Path().resolve` and the CST `.resolve`, which the check above
             // already paired in the call table. Folding only the leading-dot
             // spelling left the outer call in the lexer's shape alone.
+            // `Type<T>.method(args)` and `Type<T>(args)` (Swift
+            // `UnsafeMutablePointer<T>.allocate(capacity: 1)`): the source writes
+            // the type argument right before the call, so its arguments are kept.
+            // A qualified call `a.b(args)` has no `<T>` and still folds.
+            let typed_call = receiver.starts_with("m:[n:")
+                && !arguments.is_empty()
+                && (path.is_empty() || path.starts_with('.'))
+                && call.is_some_and(|call| {
+                    src.get(call.line).is_some_and(|text| text.contains(&format!(">{path}(")))
+                });
             if phantom_call(path) == Some(Phantom::Anonymous) || path.contains("().") {
-                return receiver;
+                if !typed_call {
+                    return receiver;
+                }
             }
             if phantom_call(path) == Some(Phantom::Keyword) {
                 let name = call.map(|call| call.path.as_str()).unwrap_or("");
