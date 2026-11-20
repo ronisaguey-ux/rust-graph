@@ -672,6 +672,16 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `func f(x: C)` newline `where Address == C.GPRValue`: a generic
+            // constraint on the header is part of the declaration. Ended here,
+            // the `where` line became an `m:[n:where,...]` event the CST never
+            // writes (5 rows in the swift corpus).
+            if self.lang.tag == "SWIFT"
+                && self.function_head(&self.stmt, false).is_some()
+                && self.next_starts_with_word(last.end as usize, b"where")
+            {
+                return;
+            }
             // `interface A extends B` newline `{` or `interface A<T>` newline
             // `extends B`: the header of a type declaration spans the line
             // break; ending here leaves `{` in `<module>` and turns its type
