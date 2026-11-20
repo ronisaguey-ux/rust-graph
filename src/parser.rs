@@ -2386,6 +2386,17 @@ impl<'a> Parser<'a> {
             self.brackets.clear();
             return;
         }
+        // `case file(URL, shouldRemove: Bool)` in a Swift enum body declares a case: its labels
+        // name associated values and are not arguments, and the CST writes no value for it.
+        if self.lang.tag == "SWIFT"
+            && self.word_at(&self.stmt, 0).as_deref() == Some("case")
+            && !self.stmt.iter().any(|token| self.is_op(token, b"="))
+            && !self.stmt.last().is_some_and(|token| self.is_op(token, b":"))
+        {
+            self.brackets.clear();
+            self.stmt.clear();
+            return;
+        }
         // `@dec` and `@Component({...})` written on their own line decorate the
         // declaration that follows: a decorator is not a statement, so it writes
         // no event. A decorator sharing its line with a declaration is not
