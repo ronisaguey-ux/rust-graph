@@ -3676,6 +3676,21 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.merge_form(&items),
                 }
             }
+            // `case P => body`: the arm's value is its body. The pattern is a
+            // match, not a value, and reading the whole clause formed only the
+            // pattern, so `case None => DefaultPositive` lost its name.
+            "case_clause" if self.language.name == "scala" => {
+                let children = self.children(id);
+                let body: Vec<u32> = match children.iter().position(|&child| self.text_string(child) == "=>") {
+                    Some(at) => children[at + 1..].iter().copied().filter(|&child| !self.is_layout(child)).collect(),
+                    None => Vec::new(),
+                };
+                match body.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(body[0]),
+                    _ => self.merge_form(&body),
+                }
+            }
             "match_block" if self.language.name == "scala" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 match items.len() {
@@ -4438,7 +4453,11 @@ fn dotted_piece(text: &str) -> bool {
             // `f()()`: a callee that is not a plain name is an expression, and
             // the calls inside it are facts. A name has none, so it is skipped.
             let value = self.form(callee);
-            if self.path_of(callee).is_empty() {
+            // `foo(K).map(f)`: a Scala field callee whose base is a call has
+            // a path that starts with `.` (no name before it), so the base's
+            // value is the receiver and its arguments must be kept too.
+            let path = self.path_of(callee);
+            if path.is_empty() || path.starts_with('.') {
                 receiver_call = Some(value);
             }
         }
