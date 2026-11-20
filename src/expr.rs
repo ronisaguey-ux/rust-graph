@@ -1514,6 +1514,13 @@ impl Emit<'_> {
             self.pos += 1;
             return;
         }
+        // Swift's `guard` is a keyword that opens a condition, never a name: the
+        // CST writes the condition's values and nothing for the word itself, so
+        // `guard a <= b else` must not file `n:guard` with them.
+        if self.lang.tag == "SWIFT" && word == "guard" {
+            self.pos += 1;
+            return;
+        }
         // `private nonisolated(unsafe) var value`: `nonisolated` is a Swift
         // declaration modifier and `(unsafe)` its argument, so neither is a
         // call. The CST still writes a call here, a separate grammar gap.

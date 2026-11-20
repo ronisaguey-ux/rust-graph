@@ -2023,6 +2023,9 @@ impl<'a> Walker<'a> {
             // condition's binding, so the line had a return and no assignment,
             // and the call in the initialiser was lost with it.
             "guard_statement" => {
+                // `guard cond else { … }` tests its condition like an `if`: the
+                // condition's call or comparison is an event before the block.
+                self.condition_before(id);
                 if let Some((targets, value)) = self.swift_guard_binding(id) {
                     self.assignment_event(targets, value, self.line(id), false);
                 }
