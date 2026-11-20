@@ -501,6 +501,15 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `func f(a: A)` newline `-> Slice<T> {`: a Swift statement cannot
+            // begin with `->`, so the line break is inside the declaration. Ended
+            // here, the return type became an `x` event of its own on the second
+            // line, which the CST never writes (12 rows in the swift corpus).
+            if self.lang.tag == "SWIFT"
+                && self.next_line_start(last.end as usize).is_some_and(|at| self.src.get(at..at + 2) == Some(b"->"))
+            {
+                return;
+            }
             // `getRandomValues<` newline `T extends` newline `| Int8Array,`
             // newline `>(buffer: T): T;` is one member signature: the
             // type-parameter list spans the breaks and ends at its own `>`.
