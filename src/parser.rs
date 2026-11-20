@@ -415,6 +415,40 @@ impl<'a> Parser<'a> {
         self.src.get(at) == Some(&b'{')
     }
 
+    /// Whether the next line begins with an identifier or keyword: a declaration
+    /// or a label, never the continuation of an expression.
+    fn next_starts_with_name(&self, end: usize) -> bool {
+        let Some(at) = self.next_line_start(end) else { return false };
+        self.src.get(at).is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+    }
+
+    /// Whether the open statement is one call to a capitalised macro name,
+    /// `NAME(...)`, and nothing follows the call's closing `)`.
+    fn macro_call_statement(&self) -> bool {
+        let [head, open, ..] = self.stmt.as_slice() else { return false };
+        let name = self.raw(head);
+        if head.kind != Kind::Ident
+            || !self.is_op(open, b"(")
+            || !name.iter().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_')
+        {
+            return false;
+        }
+        let mut depth = 0;
+        for (at, token) in self.stmt.iter().enumerate().skip(1) {
+            match self.raw(token) {
+                b"(" => depth += 1,
+                b")" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at + 1 == self.stmt.len();
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Whether the next line begins with `word` as a standalone identifier.
     fn next_starts_with_word(&self, end: usize, word: &[u8]) -> bool {
         let Some(at) = self.next_line_start(end) else { return false };
@@ -454,6 +488,18 @@ impl<'a> Parser<'a> {
         }
         if self.lang.tag == "OBJC" && self.is_op(&self.stmt[0], b"@") {
             self.stmt.clear();
+            return;
+        }
+        // `VALIDATE_THREAD_LOCAL_TYPE(T)` on its own line, then `T value;`: a
+        // C macro call whose expansion ends in `;` needs no `;` of its own.
+        // Kept open, the next line's declaration was folded into the call's
+        // value and written on the call's line, one line early.
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && self.macro_call_statement()
+            && self.stmt.last().is_some_and(|last| self.next_starts_with_name(last.end as usize))
+        {
+            self.declaring = false;
+            self.end_statement();
             return;
         }
         if self.lang.semicolons || self.lang.period_only {
@@ -2372,6 +2418,19 @@ impl<'a> Parser<'a> {
                 self.word_at(&self.stmt, 0).as_deref(),
                 Some("_Static_assert" | "static_assert")
             )
+        {
+            self.brackets.clear();
+            self.stmt.clear();
+            return;
+        }
+        // Outside a function body C has no call statement, so a macro call such
+        // as `VALIDATE_THREAD_LOCAL_TYPE(T);` in a class body (or after a template
+        // header the lexer does not open a class for) is a declaration-level
+        // macro. Its expansion is static_asserts, as above, and the CST writes no
+        // event for it; the lexer wrote a call on its line.
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && !self.frames.iter().any(|frame| frame.kind == FrameKind::Function)
+            && self.macro_call_statement()
         {
             self.brackets.clear();
             self.stmt.clear();
@@ -4847,6 +4906,15 @@ impl<'a> Parser<'a> {
                 return false;
             }
             let word = self.text(token);
+            // `nonisolated(unsafe)` is one modifier: its parenthesised word is
+            // its argument, not a value the line assigns.
+            if word == "nonisolated"
+                && stmt.get(index + 1).is_some_and(|open| self.is_op(open, b"("))
+                && stmt.get(index + 3).is_some_and(|close| self.is_op(close, b")"))
+            {
+                index += 4;
+                continue;
+            }
             if matches!(
                 word.as_str(),
                 "private" | "fileprivate" | "internal" | "public" | "open" | "static" | "class" | "final"
@@ -4854,6 +4922,13 @@ impl<'a> Parser<'a> {
                     | "nonmutating" | "mutating" | "nonisolated" | "isolated" | "indirect" | "optional"
             ) {
                 index += 1;
+                // `unowned(unsafe) var t`: the parenthesised argument is part of the modifier, not a call.
+                if stmt.get(index).is_some_and(|token| self.is_op(token, b"(")) {
+                    let Some(close) = stmt[index..].iter().position(|token| self.is_op(token, b")")) else {
+                        return false;
+                    };
+                    index += close + 1;
+                }
                 continue;
             }
             // `deinit { ... }` is a declaration keyword with no name or value,
