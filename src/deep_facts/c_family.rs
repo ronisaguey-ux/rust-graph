@@ -1118,7 +1118,7 @@ impl<'a> Walker<'a> {
         // went missing (2 files of the C corpus).
         if !matches!(
             self.kind(id),
-            "cast_expression" | "user_cast_expression" | "compound_literal_expression"
+            "cast_expression" | "user_cast_expression" | "compound_literal_expression" | "named_cast"
         ) {
             return None;
         }
@@ -1126,7 +1126,7 @@ impl<'a> Walker<'a> {
         let ty = children
             .iter()
             .copied()
-            .find(|&child| matches!(self.kind(child), "cast_type" | "user_cast_head"))?;
+            .find(|&child| matches!(self.kind(child), "cast_type" | "user_cast_head" | "named_cast_head"))?;
         let operand = children
             .iter()
             .copied()

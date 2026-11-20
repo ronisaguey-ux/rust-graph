@@ -3554,7 +3554,7 @@ fn dotted_piece(text: &str) -> bool {
             }
             "attribute" | "member_expression" | "member_access_expression" | "member_access" | "subscript" | "subscript_expression" | "field_expression" | "meta_property"
             // `Ordering::Acquire` in an argument list is a path, not a constant.
-            | "scoped_identifier" | "scoped_type_identifier"
+            | "scoped_identifier" | "scoped_type_identifier" | "qualified_expression"
             // Kotlin's `user.title` in a `"${user.title}"` hole.
             | "navigation_expression" => {
                 let path = self.form_path(id);
@@ -3684,6 +3684,8 @@ fn dotted_piece(text: &str) -> bool {
             // operands, and read through the unmapped fallback it kept only the
             // left leaf and dropped any calls on the right.
             | "range_expression"
+            // Swift's `0...index` holds two operands the same way.
+            | "range"
             // `a if c else b` holds three values and every one is read; the
             // condition is where `x if p(v) else y` calls `p`. `(n := f())` is
             // the same: the value is on the right, the name on the left.
@@ -5033,6 +5035,26 @@ fn dotted_piece(text: &str) -> bool {
             let out = format!("[\"m\",[{base},{inner}]]");
             return (out, Some((index as u32, receiver)));
         }
+        // `Buf<Element>.create(n: 1)`: the lexer reads a member call on a
+        // specialized type as the type's names followed by an anonymous call.
+        if self.language.name == "swift"
+            && self.kind(callee) == "navigation_expression"
+            && self.children(callee).first().is_some_and(|&base| self.kind(base) == "generic_specialization")
+        {
+            let base = self.children(callee)[0];
+            let mut parts = Vec::new();
+            for child in self.children(base) {
+                if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | ",") {
+                    continue;
+                }
+                let value = self.form(child);
+                if value != "0" {
+                    parts.push(value);
+                }
+            }
+            parts.push(format!("[\"c\",{index},0,{arg_list}]"));
+            return (format!("[\"m\",[{}]]", parts.join(",")), Some((index as u32, "0".to_string())));
+        }
         let out = format!("[\"c\",{index},{receiver},{arg_list}]");
         let _ = is_new;
         let link = (index as u32, receiver);
@@ -5104,6 +5126,19 @@ fn dotted_piece(text: &str) -> bool {
                 };
                 (path, receiver)
             }
+            // The lexer records the scope of `a::b::f()` as the receiver.
+            "qualified_identifier" | "qualified_expression" if self.language.name == "cpp" => {
+                let path = self.path_of(callee);
+                match path.rsplit_once('.') {
+                    Some((owner, _)) => {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, owner);
+                        out.push(']');
+                        (path, out)
+                    }
+                    None => (path, "0".to_string()),
+                }
+            }
             "call" | "call_expression" | "new_expression" => {
                 // `f()(...)`: the callee is an inner call, and the name is the
                 // inner call's own callee. It has to be looked for *inside*
@@ -5156,8 +5191,12 @@ fn dotted_piece(text: &str) -> bool {
     /// A dotted path, recording the calls on the way: `urlparse(x).netloc` has
     /// a call under the attribute, and that call is a fact.
     pub(crate) fn form_path(&mut self, id: u32) -> String {
-        let path = self.path_of(id);
         let kind = self.kind(id);
+        // `A::B` as a value: the scope path is the name, `path_of` read only `A`.
+        let path = match kind {
+            "qualified_expression" if self.is_c() => self.c_path(id).unwrap_or_default(),
+            _ => self.path_of(id),
+        };
         let children = self.children(id);
         if !path.is_empty() && !path.starts_with('.') {
             if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression") {
@@ -5353,6 +5392,12 @@ fn dotted_piece(text: &str) -> bool {
             // `.macOS("10.10")` — an implicit member: the name is the member,
             // with no receiver. Read as a leaf the call lost its name entirely.
             "implicit_member_expression" => self.leaf_name(id).unwrap_or_default(),
+            // `std::chrono::steady_clock::now()`: a C++ qualified name is its
+            // scopes joined by dots, as the lexer records it. Read through the
+            // default arm the call had no name at all.
+            "qualified_identifier" | "qualified_expression" if self.language.name == "cpp" => {
+                self.text_string(id).split_whitespace().collect::<String>().replace("::", ".").trim_start_matches('.').to_string()
+            }
             "meta_property" => self.text_string(id).chars().filter(|ch| !ch.is_whitespace()).collect(),
             // `MainKtsScript::class.java`: a class literal as a navigation
             // receiver names `<base>.class`, not empty.
