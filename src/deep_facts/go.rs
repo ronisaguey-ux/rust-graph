@@ -2214,6 +2214,31 @@ impl<'a> Walker<'a> {
         (!targets.is_empty()).then_some((targets, value))
     }
 
+    /// `guard let code = a ?? b else {`: the lexer reads the binding and both
+    /// operands as one name list on the guard line; the CST wrote nothing.
+    pub(crate) fn swift_guard_coalesce(&mut self, id: u32) -> bool {
+        let Some(binding) = self.child_of_kind(id, "binding_condition") else { return false };
+        let Some(condition) = self.child_of_kind(binding, "condition_binding") else { return false };
+        let parts = self.children(condition);
+        let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") else { return false };
+        let Some(&value) = parts.get(at + 1) else { return false };
+        if self.kind(value) != "nil_coalescing" {
+            return false;
+        }
+        let targets = self.pattern_names(parts[0]);
+        if targets.len() != 1 {
+            return false;
+        }
+        let bound = self.form(value);
+        let Some(inner) = bound.strip_prefix("[\"m\",[").and_then(|rest| rest.strip_suffix("]]")) else { return false };
+        let mut name = "[\"n\",".to_string();
+        push_string(&mut name, &targets[0]);
+        name.push(']');
+        let line = self.line(binding);
+        self.event(&format!("[\"x\",{line},[\"m\",[{name},{inner}]]]"));
+        true
+    }
+
     /// `if let x = value, cond(x) {`: the binding and the call that follows it
     /// in the same condition list. `condition_before` reads only the first
     /// condition, and a binding forms as nothing, so the call was lost.
@@ -4629,7 +4654,9 @@ fn dotted_piece(text: &str) -> bool {
             // Rust's and JavaScript's lexers have no keyword table for these:
             // `true` is a name, and an object literal `{ value: true }` records
             // one where the CST was writing a constant.
-            "true" | "false" if self.is_rust() || self.is_js() => {
+            // C++ is the same: `constexpr bool X = false;` inside a namespace
+            // reaches this walk, and the lexer reads `false` as a name.
+            "true" | "false" if self.is_rust() || self.is_js() || self.is_c() => {
                 let text = self.text_string(id);
                 let mut out = "[\"n\",".to_string();
                 push_string(&mut out, &text);
@@ -4663,6 +4690,30 @@ fn dotted_piece(text: &str) -> bool {
             // parameter list, while the same statement in a non-generic method
             // was right.
             "true" | "false" | "null" if self.language.name == "csharp" => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
+            // C++ spells `true`/`false` as keywords; the one-pass reader writes each
+            // as a name, so `constexpr bool X = true;` in a namespace is `n:true`.
+            "true" | "false" if self.language.name == "cpp" => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
+            // C++ spells `true`/`false` as keywords; the one-pass reader writes each
+            // as a name, so `constexpr bool X = true;` in a namespace is `n:true`.
+            "true" | "false" if self.language.name == "cpp" => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
+            // C++ spells `true`/`false` as keywords; the one-pass reader writes each
+            // as a name, so `constexpr bool X = true;` in a namespace is `n:true`.
+            "true" | "false" if self.language.name == "cpp" => {
                 let mut out = "[\"n\",".to_string();
                 push_string(&mut out, &self.text_string(id));
                 out.push(']');

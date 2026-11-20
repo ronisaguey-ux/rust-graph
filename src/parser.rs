@@ -235,7 +235,7 @@ impl<'a> Parser<'a> {
     /// the name; a less-than is written with space on both sides, and `<=` is
     /// arithmetic on any reading.
     fn open_type_arguments(&self) -> bool {
-        if !matches!(self.lang.tag, "TS" | "TSX") {
+        if !matches!(self.lang.tag, "TS" | "TSX" | "SWIFT") {
             return false;
         }
         let mut depth = 0i32;
@@ -4601,6 +4601,11 @@ impl<'a> Parser<'a> {
                 self.event(&format!("[\"x\",{},{value}]", first.line));
                 return;
             }
+            // `nonmutating set {` is an accessor modifier and keyword: the CST folds the line
+            // into the body's names, so the two words are no value of their own.
+            if self.word_at(stmt, 0).as_deref() == Some("nonmutating") && self.word_at(stmt, 1).as_deref() == Some("set") {
+                return;
+            }
         }
         // `#![allow(unused)]` and a `#[derive(Debug)]` written on its own line
         // are layout: the CST writes nothing for them. Read as a value, the inner
@@ -5913,7 +5918,7 @@ impl<'a> Parser<'a> {
         // `implicit val s: Foo[Int, Bar] = ..`: the Scala annotation is a type,
         // and the comma inside its type arguments split the binder from its
         // type, so the statement named the type instead of `s`.
-        if matches!(self.lang.tag, "RS" | "TS" | "TSX" | "SCALA") {
+        if matches!(self.lang.tag, "RS" | "TS" | "TSX" | "SCALA" | "SWIFT") {
             let mut depth = 0i32;
             for (index, token) in targets.iter().enumerate() {
                 if token.kind != Kind::Op {
