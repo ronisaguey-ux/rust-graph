@@ -1589,6 +1589,13 @@ impl Emit<'_> {
             out.push_str("[\"n\",\"_\"]");
             return;
         }
+        // Swift's `true` and `false` are boolean literals, not names: the CST
+        // writes each as the constant 0, so the one-pass reader must not file
+        // `n:true` for `isFixedLengthCollection: true`.
+        if self.lang.tag == "SWIFT" && matches!(word.as_str(), "true" | "false") && self.op_byte(0) != b'.' {
+            out.push('0');
+            return;
+        }
         // `++i` and `i++`: an increment is not a read of the variable, and the
         // CST writes the whole update expression as a constant. Reading the
         // name here made the file lose a value the source never produced.
