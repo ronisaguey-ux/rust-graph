@@ -505,8 +505,16 @@ impl<'a> Parser<'a> {
             // begin with `->`, so the line break is inside the declaration. Ended
             // here, the return type became an `x` event of its own on the second
             // line, which the CST never writes (12 rows in the swift corpus).
+            // `func f<C>(a: C)` newline `where C: Collection {`: a generic
+            // constraint clause is part of the same declaration, and no statement
+            // begins with the keyword `where`. Ended at the break, the constraint
+            // became an `x` event on its own line the CST never writes.
             if self.lang.tag == "SWIFT"
-                && self.next_line_start(last.end as usize).is_some_and(|at| self.src.get(at..at + 2) == Some(b"->"))
+                && self.next_line_start(last.end as usize).is_some_and(|at| {
+                    self.src.get(at..at + 2) == Some(b"->")
+                        || (self.src.get(at..at + 5) == Some(b"where")
+                            && self.src.get(at + 5).is_none_or(|c| !c.is_ascii_alphanumeric() && *c != b'_'))
+                })
             {
                 return;
             }
