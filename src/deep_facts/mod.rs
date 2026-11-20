@@ -2012,7 +2012,9 @@ impl<'a> Walker<'a> {
                     self.event(&text);
                 }
             }
-            "if_statement" => {
+            // `guard cond else { … }` is an `if` whose body runs when the
+            // condition fails: the same condition event and block as `if`.
+            "if_statement" | "guard_statement" => {
                 self.condition_before(id);
                 self.event("[\"b\"]");
             }
@@ -2229,6 +2231,7 @@ impl<'a> Walker<'a> {
         if matches!(
             kind,
             "if_statement"
+                | "guard_statement"
                 | "for_statement"
                 | "for_in_statement"
                 | "while_statement"
