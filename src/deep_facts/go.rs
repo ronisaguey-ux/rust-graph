@@ -2246,6 +2246,38 @@ impl<'a> Walker<'a> {
         true
     }
 
+    /// `if cond, var x = value {`: the plain condition and the binding that
+    /// follows it. `condition_before` reads only the first condition, so the
+    /// call in the binding's initialiser was lost.
+    pub(crate) fn swift_call_then_binding(&mut self, id: u32) -> bool {
+        let items: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .take_while(|&child| !matches!(self.kind(child), "block" | "else_clause"))
+            .filter(|&child| !self.is_layout(child) && self.kind(child) != ",")
+            .collect();
+        let [test, binding] = items[..] else { return false };
+        if self.kind(binding) != "binding_condition" || self.kind(test) == "binding_condition" {
+            return false;
+        }
+        let Some(condition) = self.child_of_kind(binding, "condition_binding") else { return false };
+        let parts = self.children(condition);
+        let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") else { return false };
+        let Some(&value) = parts.get(at + 1) else { return false };
+        let targets = self.pattern_names(parts[0]);
+        if targets.len() != 1 {
+            return false;
+        }
+        let bound = self.form(value);
+        let mut name = "[\"n\",".to_string();
+        push_string(&mut name, &targets[0]);
+        name.push(']');
+        let first = self.form(test);
+        let line = self.line(test);
+        self.event(&format!("[\"x\",{line},[\"t\",[{first},[\"m\",[{name},{bound}]]]]]"));
+        true
+    }
+
     /// `for a, b in xs` / `for (const a of xs)` -> targets and iterable.
     pub(crate) fn loop_binding(&mut self, id: u32) -> Option<(Vec<String>, u32)> {
         let children = self.children(id);

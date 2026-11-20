@@ -2015,7 +2015,7 @@ impl<'a> Walker<'a> {
             // `guard cond else { … }` is an `if` whose body runs when the
             // condition fails: the same condition event and block as `if`.
             "if_statement" | "guard_statement" => {
-                if !(self.language.name == "swift" && self.swift_binding_then_call(id)) {
+                if !(self.language.name == "swift" && (self.swift_binding_then_call(id) || self.swift_call_then_binding(id))) {
                     self.condition_before(id);
                 }
                 self.event("[\"b\"]");
