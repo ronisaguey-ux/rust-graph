@@ -3724,8 +3724,9 @@ fn dotted_piece(text: &str) -> bool {
             // `into: &thread`: Swift's `&` on an argument marks it inout, and
             // the value is the operand itself. The one-pass lexer reads the
             // bare name, so wrapping it as a merge left every inout argument
-            // a loss on the CST path only.
-            "prefix_expression" if self.language.name == "swift" && self.text_string(id).starts_with('&') => match self.expression_child(id) {
+            // a loss on the CST path only. `!` is the same: `!$Embedded` and
+            // `!foo` read the operand, and the default arm read nothing.
+            "prefix_expression" if self.language.name == "swift" && matches!(self.text_string(id).chars().next(), Some('&' | '!')) => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
             },

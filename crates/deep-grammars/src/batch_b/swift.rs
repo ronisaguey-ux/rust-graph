@@ -120,6 +120,11 @@ rust_graph_deep::grammar! { SWIFT {
         KW_CONTINUE = "continue",
         KW_DEFAULT = "default",
         KW_DEFER = "defer",
+        /// Build-configuration lines: `#if os(Linux) && $Embedded`.
+        KW_HASH_IF = "#if",
+        KW_HASH_ELSEIF = "#elseif",
+        KW_HASH_ELSE = "#else",
+        KW_HASH_ENDIF = "#endif",
         KW_DEINIT = "deinit",
         KW_DO = "do",
         KW_ELSE = "else",
@@ -335,7 +340,10 @@ rust_graph_deep::grammar! { SWIFT {
     // ---- statements ----
 
     block: "{" _statement* "}",
-    expression_statement: _expression,
+    /// A build-configuration line is an expression statement too: its condition
+    /// is the value, and `$Embedded` and `os(...)` inside it read as they do
+    /// anywhere else.
+    expression_statement: _expression | ("#if" | "#elseif") _expression | "#else" | "#endif",
 
     if_statement: "if" _condition_list block [else_clause],
     else_clause: "else" (if_statement | block),
@@ -531,11 +539,7 @@ pub fn lex(c: &mut Cursor) -> Kind {
             c.eat_while(is_word_byte);
             IDENT
         }
-        b'#' if is_word_start(c.peek_at(1)) => {
-            c.bump();
-            c.eat_while(is_word_byte);
-            IDENT
-        }
+        b'#' if is_word_start(c.peek_at(1)) => directive(c),
         b'0'..=b'9' => number(c),
         b'.' if c.peek_at(1).is_ascii_digit() && !c.starts_with(b"..") => number(c),
         b'@' => {
@@ -561,6 +565,21 @@ fn word(c: &mut Cursor) -> Kind {
     let start = c.rest();
     let length = c.eat_while(is_word_byte);
     keyword(&start[..length])
+}
+
+/// `#if` and its partners open a build-configuration line whose condition is
+/// an ordinary expression. Any other `#word` is an identifier.
+fn directive(c: &mut Cursor) -> Kind {
+    let start = c.rest();
+    c.bump();
+    let length = c.eat_while(is_word_byte);
+    match &start[..length + 1] {
+        b"#if" => KW_HASH_IF,
+        b"#elseif" => KW_HASH_ELSEIF,
+        b"#else" => KW_HASH_ELSE,
+        b"#endif" => KW_HASH_ENDIF,
+        _ => IDENT,
+    }
 }
 
 fn keyword(text: &[u8]) -> Kind {
