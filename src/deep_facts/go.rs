@@ -132,6 +132,9 @@ impl<'a> Walker<'a> {
             return false;
         };
         let Some(&value) = children.get(at + 1) else { return false };
+        if self.language.name == "csharp" && children.iter().filter(|&&c| self.kind(c) == "=").count() > 1 {
+            return false;
+        }
         if !matches!(
             self.kind(value),
             "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression"
@@ -139,14 +142,42 @@ impl<'a> Walker<'a> {
         ) {
             return false;
         }
+        if self.language.name == "csharp"
+            && self.kind(value) == "object_creation"
+            && !self.children(value).iter().any(|&c| matches!(self.kind(c), "arguments" | "argument_list"))
+        {
+            return false;
+        }
         let Some(target) = children[..at]
             .iter()
             .rev()
-            .find(|&&child| self.kind(child) == "identifier")
+            .find(|&&child| {
+                self.kind(child) == "identifier"
+                    || (self.language.name == "csharp"
+                        && (self.kinds.soft.contains(&self.kind(child))
+                            || matches!(
+                                self.kind(child),
+                                "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "var"
+                            )))
+            })
             .map(|&child| self.text_string(child))
         else {
             return false;
         };
+        if self.language.name == "csharp" {
+            for (idx, &child) in children.iter().enumerate() {
+                if idx > at && self.kind(child) == "=" {
+                    if let Some(&rhs) = children.get(idx + 1) {
+                        let _ = self.form(rhs);
+                        if idx > 0 {
+                            if let Some(t) = self.leaf_name(children[idx - 1]) {
+                                self.cs_bind_constructed(t, rhs);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let line = self.line(id);
         // `const string S = nameof(M);`: the lexer's value is the call itself,
         // with the name it names as its argument.
@@ -214,7 +245,43 @@ impl<'a> Walker<'a> {
     /// C# slice, the largest cluster left once the calls themselves were
     /// read). The name is the whole dotted path, as the lexer's chain is.
     pub(crate) fn cs_declared_vars(&mut self, id: u32) {
-        let children: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+        let all = self.children(id);
+        let mut found_eq = false;
+        for (idx, &child) in all.iter().enumerate() {
+            if self.kind(child) == "=" {
+                found_eq = true;
+                let Some(&rhs) = all[idx + 1..].iter().find(|&&c| !self.is_layout(c) && self.kind(c) != "ref") else {
+                    continue;
+                };
+                if let Some(target) = all[..idx]
+                    .iter()
+                    .copied()
+                    .rev()
+                    .find(|&c| {
+                        self.kind(c) == "identifier"
+                            || self.kinds.soft.contains(&self.kind(c))
+                            || matches!(
+                                self.kind(c),
+                                "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "member_access" | "field_access"
+                            )
+                    })
+                    .map(|c| {
+                        if matches!(self.kind(c), "member_access" | "field_access") {
+                            self.path_of(c)
+                        } else {
+                            self.text_string(c)
+                        }
+                    })
+                    .filter(|path| !path.is_empty())
+                {
+                    self.cs_bind_constructed(target, rhs);
+                }
+            }
+        }
+        if found_eq {
+            return;
+        }
+        let children: Vec<u32> = all.into_iter().filter(|&child| !self.is_layout(child)).collect();
         // The grammar keeps no `=` in a declaration: `var webHost =
         // CreateHostBuilder(..)?.Build()` is `local_variable_declaration var
         // identifier invocation_expression`, so the initializer is the last
@@ -240,9 +307,15 @@ impl<'a> Walker<'a> {
                 // kind instead of `identifier`.
                 self.kind(child) == "identifier"
                     || self.kinds.soft.contains(&self.kind(child))
-                    || matches!(self.kind(child), "file" | "set" | "remove" | "get" | "init" | "member_access" | "field_access")
+                    || matches!(self.kind(child), "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "member_access" | "field_access")
             })
-            .map(|child| self.path_of(child))
+            .map(|child| {
+                if matches!(self.kind(child), "member_access" | "field_access") {
+                    self.path_of(child)
+                } else {
+                    self.text_string(child)
+                }
+            })
             .filter(|path| !path.is_empty())
         else {
             return;
@@ -639,11 +712,16 @@ impl<'a> Walker<'a> {
                 return String::new();
             }
             let text = self.text(id);
+            let text = if self.language.name == "csharp" && text.starts_with(b"@") && text.len() > 1 && text[1] != b'"' {
+                &text[1..]
+            } else {
+                text
+            };
             let first = text[0];
             if first.is_ascii_digit() || first == b'"' || first == b'\'' || first == b'`' {
                 return "0".to_string();
             }
-            if first.is_ascii_alphabetic() || first == b'_' {
+            if first.is_ascii_alphabetic() || first == b'_' || (self.language.name == "csharp" && first >= 0x80) {
                 // `this` is the flow form's `self`, exactly as `form`'s leaf arm
                 // and `path_of` spell it: the lexer names the receiver `self` in
                 // every language, and read verbatim the java record wrote
@@ -720,8 +798,46 @@ impl<'a> Walker<'a> {
                 _ => format!("[\"m\",[{}]]", parts.join(",")),
             };
         }
-        if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression") {
+        if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression" | "object_creation" | "invocation_expression") {
             let callee = self.decl_callee(id);
+            if self.language.name == "csharp" && kind == "object_creation" && matches!(self.kind(callee), "array_type" | "generic_type") {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.kind(child) == "new" {
+                        continue;
+                    }
+                    let v = self.decl_value(child);
+                    if !v.is_empty() && v != "0" {
+                        parts.push(v);
+                    }
+                }
+                return match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                };
+            }
+            if self.language.name == "csharp"
+                && kind == "object_creation"
+                && !self.children(id).iter().any(|&c| matches!(self.kind(c), "arguments" | "argument_list"))
+                && self.children(id).iter().any(|&c| matches!(self.kind(c), "object_initializer" | "array_initializer" | "collection_initializer"))
+            {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.kind(child) == "new" {
+                        continue;
+                    }
+                    let v = self.decl_value(child);
+                    if !v.is_empty() && v != "0" {
+                        parts.push(v);
+                    }
+                }
+                return match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                };
+            }
             // `NewBuilder(foo).WithCount(count(baz)).Build()`, `makeFn(prep(a))(b)`,
             // `getItems(makeKey(x))[pickIdx(x)].Render()`: when the receiver chain
             // carries calls of its own, form that receiver expression directly so
@@ -993,11 +1109,34 @@ impl<'a> Walker<'a> {
                     }
                 }
                 let path = self.path_of(child);
-                if !path.is_empty() {
+                if !path.is_empty() && !path.starts_with('.') {
+                    if matches!(self.kind(child), "member_access" | "conditional_member_access" | "element_access") {
+                        if let Some(&object) = self.children(child).first() {
+                            self.form(object);
+                        }
+                    }
                     let mut out = "[\"n\",".to_string();
                     push_string(&mut out, &path);
                     out.push(']');
                     callee_form = Some(out);
+                } else {
+                    let mut out = self.form(child);
+                    if path.starts_with('.') {
+                        let name = path.trim_start_matches('.');
+                        if !name.is_empty() {
+                            let mut n = "[\"n\",".to_string();
+                            push_string(&mut n, name);
+                            n.push(']');
+                            out = if out == "0" || out.is_empty() {
+                                n
+                            } else {
+                                format!("[\"m\",[{out},{n}]]")
+                            };
+                        }
+                    }
+                    if !out.is_empty() && out != "0" {
+                        callee_form = Some(out);
+                    }
                 }
                 continue;
             }
@@ -1011,6 +1150,11 @@ impl<'a> Walker<'a> {
                     let form = self.form(arg);
                     if !form.is_empty() && form != "0" {
                         type_args.push(form);
+                    } else if let Some(word) = self.leaf_name(arg) {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, &word);
+                        out.push(']');
+                        type_args.push(out);
                     }
                 }
                 continue;
@@ -1072,9 +1216,8 @@ impl<'a> Walker<'a> {
                 }
                 push_flat(&mut elem, targ);
                 if i == last_idx {
-                    if let Some(a) = args_form.take() {
-                        elem.push(a);
-                    }
+                    let a = args_form.take().unwrap_or_else(|| "0".to_string());
+                    elem.push(a);
                     elem.extend(std::mem::take(&mut trailing));
                 }
                 tuple.push(merge_vec(elem));
@@ -1088,9 +1231,8 @@ impl<'a> Walker<'a> {
         for targ in type_args {
             push_flat(&mut parts, targ);
         }
-        if let Some(a) = args_form {
-            parts.push(a);
-        }
+        let a = args_form.unwrap_or_else(|| "0".to_string());
+        parts.push(a);
         parts.extend(trailing);
         merge_vec(parts)
     }
@@ -3650,8 +3792,30 @@ fn dotted_piece(text: &str) -> bool {
             // `typeof(T)`: the one-pass reader keeps the type name inside the
             // parentheses, whereas the fallback descended into
             // `parenthesized_type` and returned `0` for a bare type identifier.
-            "typeof_expression" | "sizeof_expression" if self.language.name == "csharp" => {
+            "typeof_expression" | "sizeof_expression" | "default_expression" if self.language.name == "csharp" => {
+                if kind == "default_expression" && self.expression_child(id).is_none() {
+                    return "[\"n\",\"default\"]".to_string();
+                }
                 return self.expression_child(id).map_or_else(|| "0".to_string(), |child| self.form(child));
+            }
+            "null_forgiving" | "checked_expression" | "checked_arguments" if self.language.name == "csharp" => {
+                return self.expression_child(id).map_or_else(|| "0".to_string(), |child| self.form(child));
+            }
+            "out_declaration" if self.language.name == "csharp" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if let Some(word) = self.leaf_name(child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &word);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                }
+                return match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                };
             }
             // `x is null`, `x is not null`, `x is string s`: C#'s `is_pattern`
             // names its subject and the pattern's type, constant, or designator
@@ -3777,7 +3941,13 @@ fn dotted_piece(text: &str) -> bool {
             "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" | "_" | "type" | "from"
             | "of" | "satisfies" => {
                 let text = self.text_string(id);
-                let text = if text == "this" { "self".to_string() } else { text };
+                let text = if self.language.name == "csharp" && text.starts_with('@') && text.len() > 1 {
+                    text[1..].to_string()
+                } else if text == "this" {
+                    "self".to_string()
+                } else {
+                    text
+                };
                 if text.is_empty() {
                     "0".to_string()
                 } else {
@@ -3952,7 +4122,8 @@ fn dotted_piece(text: &str) -> bool {
             | "navigation_expression"
             // Swift's `second?.count` is an `optional_chaining_expression`; `path_of`
             // already reads it, so `form` must not fall through to `0`.
-            | "optional_chaining_expression" => {
+            | "optional_chaining_expression"
+            | "conditional_member_access" => {
                 let path = self.form_path(id);
                 if path.is_empty() || path.starts_with('.') {
                     // `f(x)[0].y`: the base is a call, so there is no path, and
@@ -4655,6 +4826,66 @@ fn dotted_piece(text: &str) -> bool {
                     format!("[\"t\",[{}]]", forms.join(","))
                 }
             }
+            "array_initializer" | "collection_initializer" | "object_initializer"
+            | "anonymous_object" | "anonymous_body" | "with_expression"
+                if self.language.name == "csharp" =>
+            {
+                let mut groups: Vec<Vec<u32>> = Vec::new();
+                let mut cur: Vec<u32> = Vec::new();
+                for child in self.children(id) {
+                    if matches!(self.kind(child), "{" | "}" | "new" | "with") {
+                        continue;
+                    }
+                    if self.kind(child) == "," {
+                        if !cur.is_empty() {
+                            groups.push(std::mem::take(&mut cur));
+                        }
+                        continue;
+                    }
+                    if self.is_layout(child) || self.kind(child) == "=" {
+                        continue;
+                    }
+                    cur.push(child);
+                }
+                if !cur.is_empty() {
+                    groups.push(cur);
+                }
+                let mut parts = Vec::with_capacity(groups.len());
+                for g in groups {
+                    match g.len() {
+                        0 => {}
+                        1 => parts.push(self.form(g[0])),
+                        _ => parts.push(self.merge_form(&g)),
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => format!("[\"m\",[{}]]", parts[0]),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            "implicit_array_creation" | "array_specifier" | "array_size_specifier" | "stackalloc_expression"
+            | "implicit_creation"
+                if self.language.name == "csharp" =>
+            {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if matches!(self.kind(child), "new" | "stackalloc" | "[" | "]" | ",") {
+                        continue;
+                    }
+                    if !self.is_layout(child) || self.leaf_name(child).is_some() {
+                        let v = self.form(child);
+                        if v != "0" {
+                            parts.push(v);
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             "collection_literal" | "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern" | "array_pattern" => {
                 // Swift wraps a literal's elements in one `collection_body`
                 // node, so `[1, 2, 3]` had one child and formed as `[0]`. The
@@ -4851,6 +5082,24 @@ fn dotted_piece(text: &str) -> bool {
             "assignment" | "assignment_expression" | "augmented_assignment_expression" => {
                 let children = self.children(id);
                 let value = children.last().filter(|&&last| last != children[0]).map(|&last| self.form(last)).unwrap_or_else(|| "0".to_string());
+                if self.language.name == "csharp" {
+                    let binder = self.form(children[0]);
+                    if let Some(first) = children.first().copied() {
+                        if let Some(&last) = children.last().filter(|&&l| l != first) {
+                            let t_name = match self.kind(first) {
+                                "identifier" => Some(self.text_string(first)),
+                                "member_access" | "field_access" => Some(self.path_of(first)),
+                                _ => self.leaf_name(first),
+                            };
+                            if let Some(t_name) = t_name.filter(|s| !s.is_empty()) {
+                                self.cs_bind_constructed(t_name, last);
+                            }
+                        }
+                    }
+                    if binder != "0" {
+                        return format!("[\"m\",[{binder},{value}]]");
+                    }
+                }
                 // `cache['SHA1'] = cache['sha1'] = _sha1.sha1` nests: the right
                 // side is another assignment, and the one-pass lexer reads the
                 // line left to right, so its value names the inner binder too.
@@ -5086,6 +5335,13 @@ fn dotted_piece(text: &str) -> bool {
                     let value = self.form(child);
                     if value != "0" {
                         parts.push(value);
+                    } else if self.language.name == "csharp" {
+                        if let Some(word) = self.leaf_name(child) {
+                            let mut out = "[\"n\",".to_string();
+                            push_string(&mut out, &word);
+                            out.push(']');
+                            parts.push(out);
+                        }
                     }
                 }
                 match parts.len() {
@@ -5099,12 +5355,37 @@ fn dotted_piece(text: &str) -> bool {
             "array_type" | "slice_type" | "reference_type" | "pointer_type" => {
                 let mut parts = Vec::new();
                 for child in self.children(id) {
-                    if self.is_layout(child) || matches!(self.kind(child), "[" | "]" | "&" | "*" | ";" ) {
+                    if matches!(self.kind(child), "[" | "]" | "&" | "*" | ";")
+                        || (self.is_layout(child) && !(self.language.name == "csharp" && self.leaf_name(child).is_some()))
+                    {
                         continue;
                     }
                     let value = self.form(child);
                     if value != "0" {
                         parts.push(value);
+                    } else if self.language.name == "csharp" {
+                        if let Some(word) = self.leaf_name(child) {
+                            let mut out = "[\"n\",".to_string();
+                            push_string(&mut out, &word);
+                            out.push(']');
+                            parts.push(out);
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            "dimensions" if self.language.name == "csharp" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if !self.is_layout(child) && !matches!(self.kind(child), "[" | "]" | ",") {
+                        let v = self.form(child);
+                        if v != "0" {
+                            parts.push(v);
+                        }
                     }
                 }
                 match parts.len() {
@@ -5614,7 +5895,7 @@ fn dotted_piece(text: &str) -> bool {
         let callee = children
             .iter()
             .copied()
-            .find(|&child| !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")"))
+            .find(|&child| !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")" | "?."))
             .unwrap_or(id);
         // `type("H", (), {...})()`: the callee is a value produced by another
         // call. That inner call is the fact and its arguments are where the
@@ -5626,8 +5907,12 @@ fn dotted_piece(text: &str) -> bool {
         // node. Unwrapping to the inner form dropped every argument, so each
         // construction read as `c(0;[])` against the lexer's `c(0;[n:arg])`.
         // Read it as a plain call named after the type instead.
-        let nested_callee = matches!(self.kind(callee), "call" | "call_expression")
-            || (self.kind(callee) == "new_expression" && self.language.name != "scala");
+        let nested_callee = matches!(
+            self.kind(callee),
+            "call" | "call_expression" | "invocation_expression" | "object_creation"
+                | "object_creation_expression" | "generic_invocation" | "implicit_creation"
+                | "conditional_invocation"
+        ) || (self.kind(callee) == "new_expression" && self.language.name != "scala");
         if callee != id && nested_callee {
             let inner = self.form(callee);
             if let Some(list) = children.iter().copied().find(|&child| matches!(self.kind(child), "argument_list" | "arguments")) {
@@ -5645,7 +5930,7 @@ fn dotted_piece(text: &str) -> bool {
         // Scala's `select` is `object.name`: `s"...$x".format(y)` has the
         // interpolated string as its receiver, and that receiver is a value.
         let scala_select = self.language.name == "scala" && self.kind(callee) == "select";
-        if scala_select || matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access" | "navigation_expression") {
+        if scala_select || matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access" | "conditional_member_access" | "navigation_expression") {
             if let Some(&object) = self.children(callee).first() {
                 if self.named_call(object) {
                     // `new URL(x).toString()`, `A().b()`, `A().b().c()`: a
@@ -5670,7 +5955,7 @@ fn dotted_piece(text: &str) -> bool {
                     }
                 }
             }
-        } else if !matches!(self.kind(callee), "identifier" | "property_identifier" | "type_identifier") {
+        } else if callee != id && !matches!(self.kind(callee), "identifier" | "property_identifier" | "type_identifier") {
             // `(_SockFilter * len(filters))(*filters)`, `handlers[k](x)` and
             // `f()()`: a callee that is not a plain name is an expression, and
             // the calls inside it are facts. A name has none, so it is skipped.
