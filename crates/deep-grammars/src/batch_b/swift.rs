@@ -179,6 +179,9 @@ rust_graph_deep::grammar! { SWIFT {
         KW_UNOWNED = "unowned",
         KW_REQUIRED = "required",
         KW_CONVENIENCE = "convenience",
+        /// `@convention(c)`: a type attribute that names its convention in
+        /// parentheses, so it needs a token of its own in a type position.
+        KW_CONVENTION = "convention",
         KW_DYNAMIC = "dynamic",
         KW_INDIRECT = "indirect",
 
@@ -448,7 +451,7 @@ rust_graph_deep::grammar! { SWIFT {
     _string_body: (STRING_TEXT | interpolation)*,
     interpolation: INTERP_OPEN _expression INTERP_CLOSE,
 
-    _name: IDENT,
+    _name: IDENT | KW_CONVENTION,
     _property: IDENT | "self" | "init" | "default" | "class",
     parenthesized_expression: "(" (_paren_item %? ",") ")",
     _paren_item: readonly_item | _expression@assign,
@@ -497,8 +500,15 @@ rust_graph_deep::grammar! { SWIFT {
 
     _type: [_type_attribute] _type_shape ["async"] ["throws"] ["->" _type],
     /// A type attribute carries no arguments: `@escaping (Data) -> Void`'s
-    /// parentheses are the function type, not an argument list.
-    _type_attribute: "@" _name,
+    /// parentheses are the function type, not an argument list. `@convention`
+    /// is the one that does name its convention in parentheses — left unread,
+    /// `@convention(c) () -> ()` made the group `(c)` the function type's
+    /// parameter list, so the binding's value came out as a tuple the source
+    /// never wrote.
+    _type_attribute: "@" (&("convention") "convention" convention_arguments | _name),
+    /// The convention a `@convention` type attribute names: `c` or `block`.
+    convention_arguments: "(" _name ")",
+
     _type_shape: [_type_modifier] _type_atom _type_suffix*,
     _type_modifier: "some" | "any" | "inout",
     _type_atom: _name | collection_type | tuple_type,
@@ -661,6 +671,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"unowned" => KW_UNOWNED,
         b"required" => KW_REQUIRED,
         b"convenience" => KW_CONVENIENCE,
+        b"convention" => KW_CONVENTION,
         b"dynamic" => KW_DYNAMIC,
         b"indirect" => KW_INDIRECT,
         _ => IDENT,
