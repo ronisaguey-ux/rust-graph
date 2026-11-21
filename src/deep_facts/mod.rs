@@ -1197,6 +1197,76 @@ impl<'a> Walker<'a> {
         calls.len() - 1
     }
 
+    /// `new T { Name = value, ... }`: the one-pass reader writes one `a` event for
+    /// the initialiser, on its first member's line, targeting that member. The
+    /// other members are folded into its value as names, so a later member is
+    /// not written on a line of its own. The CST read the initialiser for calls
+    /// alone and dropped that line, which left every `new T { ... }` (Avalonia's
+    /// `FilePickerFileTypes`, 20+ rows in one corpus) without the event.
+    pub(crate) fn cs_initializer_first_member(&mut self, id: u32) {
+        let children = self.children(id);
+        let mut members: Vec<(u32, u32)> = Vec::new();
+        let mut at = 0;
+        while at < children.len() {
+            if self.kind(children[at]) == "identifier" {
+                if let Some(&value) = children[at + 1..].iter().find(|&&child| self.kind(child) != "=") {
+                    members.push((children[at], value));
+                    at = children.iter().position(|&child| child == value).unwrap_or(at) + 1;
+                    continue;
+                }
+            }
+            at += 1;
+        }
+        let Some(&(name_node, value_node)) = members.first() else {
+            return;
+        };
+        let name = self.text_string(name_node);
+        let line = self.line(name_node);
+        let value = if members.len() == 1 {
+            self.cs_member_value(value_node)
+        } else {
+            // The later members, as the lexer folds them: a number is only its
+            // member's name, anything else is the name merged with its value, so
+            // every name and keyword literal the lexer read is an atom here too.
+            let mut parts = vec![self.cs_member_value(value_node)];
+            for &(later_name, later_value) in &members[1..] {
+                let later = self.text_string(later_name);
+                if self.kind(later_value).ends_with("integer_literal") {
+                    parts.push(format!("[\"n\",\"{later}\"]"));
+                } else {
+                    parts.push(format!("[\"m\",[[\"n\",\"{later}\"],{}]]", self.cs_member_value(later_value)));
+                }
+            }
+            format!("[\"t\",[{}]]", parts.join(","))
+        };
+        self.lexer_event(b'a', line, &[name], &value, false);
+        // The one-pass reader binds every member to the class it constructs, as
+        // it does a declaration (`var Background = SolidColorBrush`), so each
+        // member gets the same binding.
+        for (name_node, value_node) in members {
+            let name = self.text_string(name_node);
+            self.cs_bind_constructed(name, value_node);
+        }
+    }
+
+    /// The value of one initialiser member: a keyword literal is a name to the
+    /// one-pass reader, as in a declaration's initialiser, and anything else is
+    /// its own form (a constant when the form is empty). The calls the form
+    /// reads are already facts of the object-initialiser walk, so they are
+    /// taken back out of the call table: the form is only the value's shape.
+    fn cs_member_value(&mut self, value_node: u32) -> String {
+        match self.kind(value_node) {
+            kind @ ("true" | "false" | "null") => format!("[\"n\",\"{kind}\"]"),
+            _ => {
+                let symbol = self.frame().symbol;
+                let calls = self.facts.symbols[symbol].calls.len();
+                let form = self.form(value_node);
+                self.facts.symbols[symbol].calls.truncate(calls);
+                if form.is_empty() { "0".to_string() } else { form }
+            }
+        }
+    }
+
     // -- enter / leave ------------------------------------------------------
 
     pub(crate) fn enter(&mut self, id: u32) {
@@ -1885,6 +1955,7 @@ impl<'a> Walker<'a> {
             // the initialiser was read for its assignments alone, so every nested
             // creation stayed in the tree and out of the call table.
             "object_initializer" if self.language.name == "csharp" => {
+                self.cs_initializer_first_member(id);
                 let mut calls = Vec::new();
                 self.lambda_calls(id, &mut calls);
                 for call in calls {
