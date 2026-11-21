@@ -333,8 +333,18 @@ rust_graph_deep::grammar! { SWIFT {
     labeled_enum_case_value: _name ":" _type,
     associated_type_declaration: "associatedtype" _name [":" _type] [where_clause],
 
-    function_declaration: [declaration_modifiers] "func" (_name | "set") [generic_parameters] parameter_clause ["async"] ["throws" | "rethrows"] ["->" _type] [where_clause] [(block | ";")],
-    initializer_declaration: [declaration_modifiers] "init" ["?" | "!"] parameter_clause ["async"] ["throws"] [where_clause] (block | ";"),
+    function_declaration: [declaration_modifiers] "func" (_name | "set") [generic_parameters] parameter_clause ["async"] [throws_clause] ["->" _type] [where_clause] [(block | ";")],
+    initializer_declaration: [declaration_modifiers] "init" ["?" | "!"] parameter_clause ["async"] [throws_clause] [where_clause] (block | ";"),
+    /// Swift 6's typed throws, `throws(SomeError)`: the parenthesised type is
+    /// the one error the body may throw, part of the effect list. The clause
+    /// used to end at the word, so the `(SomeError)` and the `{` that follows
+    /// fell outside the declaration and the whole body was read as one
+    /// expression value on the signature's line — `Mangling.swift`'s
+    /// `demangle` lost every event it wrote for that reason.
+    throws_clause: ("throws" | "rethrows") [typed_throws],
+    /// The clause's own parenthesised type. The DSL lets a delimiter open and
+    /// close a rule only, so the group cannot be written inside the optional.
+    typed_throws: "(" _type ")",
     deinitializer_declaration: "deinit" block,
     subscript_declaration: [declaration_modifiers] "subscript" parameter_clause "->" _type (block | ";"),
     parameter_clause: "(" (parameter %? ",") ")",
@@ -409,6 +419,12 @@ rust_graph_deep::grammar! { SWIFT {
 
     // ---- expressions ----
 
+    // Swift reads `x?` at the end of a line and `.member` on the next as
+    // optional chaining, so the two are separate tokens there and not the one
+    // `?.` the row below takes. Left to the ternary row, the `?` swallowed the
+    // rest of the statement: every value after
+    // `UnsafeMutableRawPointer(buffer.baseAddress)?` in `ArrayBuffer.swift` was
+    // lost with it.
     _expression: precedence _primary {
         assign: right "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | GT_JOINED ">=" => assignment,
         cond: postfix "?" _expression ":" _expression@assign => ternary,
@@ -431,6 +447,7 @@ rust_graph_deep::grammar! { SWIFT {
         unary: prefix "-" | "+" | "!" | "~" | "&" => prefix_expression,
         postfix "!" => force_unwrap,
         postfix "?." _property => optional_chaining_expression,
+        postfix &("?" "." _property) "?" "." _property => optional_chaining_expression,
         postfix "." _property => navigation_expression,
         postfix arguments => call_expression,
         postfix subscript => subscript_expression,
@@ -508,7 +525,7 @@ rust_graph_deep::grammar! { SWIFT {
 
     // ---- types ----
 
-    _type: [_type_attribute] _type_shape ["async"] ["throws"] ["->" _type],
+    _type: [_type_attribute] _type_shape ["async"] [throws_clause] ["->" _type],
     /// A type attribute carries no arguments: `@escaping (Data) -> Void`'s
     /// parentheses are the function type, not an argument list. `@convention`
     /// is the one that does name its convention in parentheses — left unread,
