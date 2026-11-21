@@ -1766,20 +1766,57 @@ impl<'a> Walker<'a> {
                         children[..at]
                             .iter()
                             .rev()
-                            .find(|&&child| self.kind(child) == "identifier")
+                            .find(|&&child| {
+                                self.kind(child) == "identifier"
+                                    || (self.language.name == "csharp"
+                                        && (self.kinds.soft.contains(&self.kind(child))
+                                            || matches!(
+                                                self.kind(child),
+                                                "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "var"
+                                            )))
+                            })
                             .map(|&child| self.text_string(child))
                     });
                     match (assigned, target) {
                         (Some(at), Some(name)) => {
-                            let child = children.get(at + 1).copied();
+                            let child = children[at + 1..]
+                                .iter()
+                                .copied()
+                                .find(|&c| !self.is_layout(c) && self.kind(c) != "ref");
                             let kind = child.map(|node| self.kind(node)).unwrap_or("");
-                            let form = match kind {
+                            let first_form = match kind {
                                 "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
                                 "" => "0".to_string(),
                                 _ => child
                                     .map(|node| self.form(node))
                                     .filter(|form| !form.is_empty() && form != "0")
                                     .unwrap_or_else(|| "0".to_string()),
+                            };
+                            let mut multi = vec![first_form];
+                            for (idx, &c) in children.iter().enumerate() {
+                                if idx > at && self.kind(c) == "=" {
+                                    if let Some(&rhs) = children[idx + 1..]
+                                        .iter()
+                                        .find(|&&n| !self.is_layout(n) && self.kind(n) != "ref")
+                                    {
+                                        let rhs_form = self.form(rhs);
+                                        if let Some(t_name) = children[..idx].iter().rev().find_map(|&n| self.leaf_name(n)) {
+                                            let mut tf = String::from("[\"n\",");
+                                            push_string(&mut tf, &t_name);
+                                            tf.push(']');
+                                            if rhs_form == "0" || rhs_form.is_empty() {
+                                                multi.push(tf);
+                                            } else {
+                                                multi.push(format!("[\"m\",[{tf},{rhs_form}]]"));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let form = if multi.len() == 1 {
+                                multi.remove(0)
+                            } else {
+                                format!("[\"t\",[{}]]", multi.join(","))
                             };
                             let line = self.line(id);
                             self.lexer_event(b'a', line, &[name], &form, false);
@@ -2212,13 +2249,25 @@ impl<'a> Walker<'a> {
             // a creation inside an object initialiser is a call of its own, and
             // the initialiser was read for its assignments alone, so every nested
             // creation stayed in the tree and out of the call table.
-            "object_initializer" if self.language.name == "csharp" => {
-                self.cs_initializer_first_member(id);
+            "object_initializer" | "array_initializer" | "anonymous_body"
+            | "using_statement" | "foreach_statement" | "lock_statement"
+            | "fixed_statement" | "yield_statement"
+                if self.language.name == "csharp" =>
+            {
+                if matches!(kind, "object_initializer" | "array_initializer" | "anonymous_body") {
+                    self.cs_initializer_vars(id);
+                }
+                if kind == "object_initializer" {
+                    self.cs_initializer_first_member(id);
+                }
                 let mut calls = Vec::new();
                 self.lambda_calls(id, &mut calls);
                 for call in calls {
                     self.form(call);
                 }
+            }
+            "ERROR" if self.language.name == "csharp" => {
+                self.cs_recovered_calls(id);
             }
             "expression_statement" => self.expression_statement(id),
             // `val x = f()`: a Scala val/var is not a definition node the walk
@@ -2769,6 +2818,17 @@ impl<'a> Walker<'a> {
                 // `except OSError as error:` binds a name, and the lexer
                 // reads the clause as an assignment of the type to it.
                 if kind == "catch_clause" {
+                    if self.language.name == "csharp" {
+                        let mut calls = Vec::new();
+                        for child in self.children(id) {
+                            if self.kind(child) != "block" {
+                                self.lambda_calls(child, &mut calls);
+                            }
+                        }
+                        for call in calls {
+                            self.form(call);
+                        }
+                    }
                     // `catch (e)`: the lexer reads the caught binding as the
                     // clause's value. The binding sits inside a
                     // `catch_parameter`, so the name is one level down.
@@ -3673,7 +3733,18 @@ impl<'a> Walker<'a> {
 
     /// The value of one enum member as a flow form: a literal is `0`, and a
     /// reference is its name - the same shapes the lexer writes.
-    pub(crate) fn enum_member_value(&self, id: u32) -> String {
+    pub(crate) fn enum_member_value(&mut self, id: u32) -> String {
+        if self.language.name == "csharp" {
+            let children = self.children(id);
+            if let Some(at) = children.iter().position(|&c| self.kind(c) == "=") {
+                if let Some(&val) = children[at + 1..].iter().find(|&&c| !self.is_layout(c)) {
+                    let f = self.form(val);
+                    if !f.is_empty() && f != "0" {
+                        return f;
+                    }
+                }
+            }
+        }
         for child in self.children(id) {
             let kind = self.kind(child);
             if matches!(kind, "identifier") {
