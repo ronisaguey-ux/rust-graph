@@ -2305,10 +2305,11 @@ impl Emit<'_> {
                 self.pos += 1;
                 continue;
             }
-            // `remainingPath!.count`: Swift's postfix force-unwrap is the same
-            // kind of marker, and the CST names the chain `remainingPath.count`.
-            // Ending the value at `!` split it into two merged names.
-            if self.lang.tag == "SWIFT" && self.is_op(0, b"!") && self.is_op(1, b".") {
+            // `remainingPath!.count` (Swift) and `row.N_N_Bool!.Value` (C#): the
+            // postfix force-unwrap / null-forgiving `!` is the same kind of
+            // marker before `.`, and ending the value at `!` split the chain
+            // into two merged names (`m:[n:row.N_N_Bool,n:Value]`).
+            if matches!(self.lang.tag, "SWIFT" | "CS") && self.is_op(0, b"!") && self.is_op(1, b".") {
                 self.pos += 1;
                 continue;
             }
