@@ -2253,6 +2253,25 @@ impl<'a> Walker<'a> {
                             }
                         }
                     }
+                    // `guard let hProcess else {` (Swift's shorthand optional
+                    // binding): no `=` and no initialiser, so the arm above
+                    // found no value and the line kept nothing. The condition
+                    // still reads the binding it shadows, and the one-pass
+                    // reader files that name on the guard line. `if let x {` is
+                    // silent there, so only a guard writes.
+                    if self.kind(id) == "guard_statement" {
+                        if let Some(&first) = parts.first() {
+                            let targets = self.pattern_names(first);
+                            if targets.len() == 1 {
+                                let mut name = "[\"n\",".to_string();
+                                push_string(&mut name, &targets[0]);
+                                name.push(']');
+                                let line = self.line(binding);
+                                self.event(&format!("[\"x\",{line},{name}]"));
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         }

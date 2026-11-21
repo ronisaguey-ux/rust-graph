@@ -1708,6 +1708,18 @@ impl Emit<'_> {
             self.pos += 1;
             return;
         }
+        // Swift's `any`/`some` qualify the type that follows (`(any P).self`):
+        // the modifier names no value, and the CST writes only the type name, so
+        // reading both words made the value two names the source never had.
+        // Only an identifier on the same line is a type being qualified —
+        // `any.map { … }` and `let any = 1` keep the word as a name.
+        if self.lang.tag == "SWIFT"
+            && matches!(word.as_str(), "any" | "some")
+            && self.tok(1).is_some_and(|token| token.kind == Kind::Ident && token.line == self.toks[self.pos].line)
+        {
+            self.pos += 1;
+            return;
+        }
         // Swift's `throws` / `throws(Err)` is an effect specifier, never a
         // value or a call: `{ () throws(Err) in ... }` and `do throws(Err) {`
         // annotate the closure or block's error type, not a callee named
