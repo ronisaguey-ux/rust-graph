@@ -95,6 +95,14 @@ closed the remaining `const fn` and `extern "C" fn` cases so `c_style_head` neve
 reads a Rust attribute's `(` as a function name. The guard's skip of unpaired
 lexer symbols (`src/pipeline.rs`) remains open.
 
+**Update (2026-11-21):** a second lane retried the lexer half and confirmed it is
+done — every Rust repro (`#[rstest] #[case(1)] fn t()`, `#[cfg(test)] mod tests`,
+`#[derive(Debug)] pub enum E`) is already clean on `main`. Repeating the strip
+for C#/Swift/Scala made every one of them worse (csharp 2402/3692 -> 2478/4027,
+swift 116/208 -> 116/210, scala 86/117 -> 87/119), because C# attributes sit on
+members, not items, so stripping them renames members rather than items. Do not
+retry the lexer; the only open work here is the guard.
+
 ## 3. Rust: a call whose name the CST cannot place — 13 of 105
 
 Two shapes, all "the CST wrote no call where the lexer read one":
