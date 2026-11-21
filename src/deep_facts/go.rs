@@ -2177,6 +2177,32 @@ impl<'a> Walker<'a> {
     // -- control flow -------------------------------------------------------
 
     pub(crate) fn condition_before(&mut self, id: u32) {
+        // `if let credentials = store.credentials(for: space) {` with the body on the following
+        // lines: the condition is a `binding_condition`, and `form` on that kind writes the
+        // constant 0, so the whole binding was silently dropped. The lexer writes the pair, so it
+        // had no partner and the file fell back. Written inline the loss hid behind the body's own
+        // event on the same line, which is why it needed a two-line difference to show.
+        if self.language.name == "swift" {
+            if let Some(condition) = self.child_of_kind(id, "binding_condition") {
+                if let Some(binding) = self.child_of_kind(condition, "condition_binding") {
+                    let parts = self.children(binding);
+                    if let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") {
+                        if let (Some(&first), Some(&value)) = (parts.first(), parts.get(at + 1)) {
+                            let targets = self.pattern_names(first);
+                            if targets.len() == 1 && self.kind(value) != "type_annotation" {
+                                let bound = self.form(value);
+                                let mut name = "[\"n\",".to_string();
+                                push_string(&mut name, &targets[0]);
+                                name.push(']');
+                                let line = self.line(binding);
+                                self.event(&format!("[\"x\",{line},[\"m\",[{name},{bound}]]]"));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // `if x:` / `while x:` / `async with x:`: the first child that is not a
         // keyword or punctuation is the test.
         for child in self.children(id) {
