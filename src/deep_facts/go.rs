@@ -3897,6 +3897,19 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.tuple_form(&items),
                 }
             }
+            // `nameof(x)`: the lexer reads `nameof(...)` as a call to `nameof`
+            // with the inner expression as its argument, whereas the unmapped
+            // fallback descended into `nameof_arguments` and returned `0` for
+            // a leaf identifier.
+            "nameof_expression" => {
+                let line = self.line(id);
+                let index = self.push_call("nameof".to_string(), line);
+                let args = self
+                    .child_of_kind(id, "nameof_arguments")
+                    .and_then(|list| self.expression_child(list))
+                    .map_or_else(|| "[]".to_string(), |expr| format!("[{}]", self.form(expr)));
+                format!("[\"c\",{index},0,{args}]")
+            }
             "argument_list" | "arguments" | "parenthesized_expression" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 self.delim_depth += 1;
@@ -5817,13 +5830,6 @@ fn dotted_piece(text: &str) -> bool {
                 out.push(',');
             }
             first = false;
-            // `ArgumentNotNull(value, nameof(value))`: `nameof(…)` is a call to
-            // the lexer wherever it is written, and only an initialiser was
-            // read for it - every guard clause in the C# corpus lost it.
-            if kind == "nameof_expression" {
-                let line = self.line(child);
-                self.push_call("nameof".to_string(), line);
-            }
             // Go and Java do not use `form`: an argument that is itself a call
             // (`path.Join(os.Getenv(..))`) would come back as `0`.
             let value = if ellipsis || nothing {

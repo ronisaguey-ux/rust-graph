@@ -225,6 +225,10 @@ const CS_DEFS: &[Def] = &[
 ];
 const CS_CALLS: &[&str] = &["invocation_expression", "object_creation_expression", "object_creation"];
 const CS_IMPORTS: &[&str] = &["using_directive"];
+/// C#'s contextual keywords: `value` is the implicit parameter of a property
+/// or event accessor and an ordinary name everywhere else, so treating it as
+/// layout dropped `value` from every `set` guard and assignment.
+const CS_SOFT: &[&str] = &["value"];
 
 const KT_DEFS: &[Def] = &[
     Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
@@ -408,7 +412,7 @@ fn kinds(lang: Lang) -> Kinds {
         // `form`, so the generic arms below are not reached.
         Lang::Go => Kinds { definitions: GO_DEFS, calls: &[], imports: GO_IMPORTS, soft: &[], family: Family::Go },
         Lang::Java => Kinds { definitions: JAVA_DEFS, calls: &[], imports: JAVA_IMPORTS, soft: &[], family: Family::Java },
-        Lang::CSharp => Kinds { definitions: CS_DEFS, calls: CS_CALLS, imports: CS_IMPORTS, soft: &[], family: Family::Plain },
+        Lang::CSharp => Kinds { definitions: CS_DEFS, calls: CS_CALLS, imports: CS_IMPORTS, soft: CS_SOFT, family: Family::Plain },
         Lang::Kotlin => {
             Kinds { definitions: KT_DEFS, calls: KT_CALLS, imports: KT_IMPORTS, soft: KT_SOFT, family: Family::Plain }
         }
