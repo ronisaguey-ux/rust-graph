@@ -3654,21 +3654,28 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 None => "0".to_string(),
             },
-            // `MemoryLayout<Int>.size`: a member of a specialized type. Its base
-            // is a generic specialization that has no path, so the default arm
-            // below formed only the type arguments and dropped the member. The
-            // lexer reads the type's names and the member, so both are kept.
+            // `MemoryLayout<Int>.size` and `Outer<Int>.Inner.self`: a member
+            // (or chained member) of a specialized type. Its base is a generic
+            // specialization that has no path, so the default arm below formed
+            // only the type arguments or dropped them along with the member.
+            // The lexer reads the type's names and every member, so all are kept.
             "navigation_expression"
-                if self.language.name == "swift"
-                    && self.children(id).first().is_some_and(|&base| self.kind(base) == "generic_specialization") =>
+                if self.language.name == "swift" && self.swift_has_generic_base(id) =>
             {
                 let base = self.children(id)[0];
                 let mut parts = Vec::new();
-                for child in self.children(base) {
-                    if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | ",") {
-                        continue;
+                if self.kind(base) == "generic_specialization" {
+                    for child in self.children(base) {
+                        if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | ",") {
+                            continue;
+                        }
+                        let value = self.form(child);
+                        if value != "0" {
+                            parts.push(value);
+                        }
                     }
-                    let value = self.form(child);
+                } else {
+                    let value = self.form(base);
                     if value != "0" {
                         parts.push(value);
                     }
@@ -4611,16 +4618,44 @@ fn dotted_piece(text: &str) -> bool {
                     // A leaf identifier is a value: requiring the part to have
                     // children of its own skipped `{a}` entirely and left the
                     // field as the constant 0.
-                    let value = self.children(child).into_iter().find(|&part| {
-                        !self.is_layout(part)
-                            && !matches!(
-                                self.kind(part),
-                                "{" | "}" | ":" | "!" | "template_open" | "template_close"
-                            )
-                            && self.kind(part) != field
-                    });
-                    if let Some(value) = value {
-                        parts.push(self.form(value));
+                    if self.language.name == "swift" {
+                        // A Swift interpolation can split a nested generic
+                        // type like `Outer.Inner<Int>.self` into the base
+                        // navigation expression plus recovered `<Int>.self`
+                        // siblings, so read every non-layout part in the hole.
+                        let mut hole_parts = Vec::new();
+                        for part in self.children(child) {
+                            if !self.is_layout(part)
+                                && !matches!(
+                                    self.kind(part),
+                                    "{" | "}" | ":" | "!" | "template_open" | "template_close"
+                                )
+                                && self.kind(part) != field
+                            {
+                                hole_parts.push(self.form(part));
+                            }
+                        }
+                        if hole_parts.len() == 1 {
+                            parts.push(hole_parts.remove(0));
+                        } else {
+                            for formed in hole_parts {
+                                if formed != "0" {
+                                    parts.push(formed);
+                                }
+                            }
+                        }
+                    } else {
+                        let value = self.children(child).into_iter().find(|&part| {
+                            !self.is_layout(part)
+                                && !matches!(
+                                    self.kind(part),
+                                    "{" | "}" | ":" | "!" | "template_open" | "template_close"
+                                )
+                                && self.kind(part) != field
+                        });
+                        if let Some(value) = value {
+                            parts.push(self.form(value));
+                        }
                     }
                     for sub in self.children(child) {
                         if self.kind(sub) == field {
@@ -4988,6 +5023,20 @@ fn dotted_piece(text: &str) -> bool {
         }
         out.push_str("]]");
         out
+    }
+
+    /// Whether a Swift `navigation_expression` is rooted at a `generic_specialization`.
+    fn swift_has_generic_base(&self, mut id: u32) -> bool {
+        while self.kind(id) == "navigation_expression" {
+            let Some(&base) = self.children(id).first() else {
+                return false;
+            };
+            if self.kind(base) == "generic_specialization" {
+                return true;
+            }
+            id = base;
+        }
+        false
     }
 
     /// The tuple form of a Swift closure head of two or more plain names.

@@ -1215,6 +1215,15 @@ fn operator(c: &mut Cursor) -> Kind {
         (b'*', b'=', _) => (STAR_EQ, 2),
         (b'/', b'=', _) => (SLASH_EQ, 2),
         (b'%', b'=', _) => (PERCENT_EQ, 2),
+        // `a &+ b`, `a &- b`, `a &* b`: Swift's overflow operators are one
+        // operator token, not `&` followed by a unary sign. Split, the right
+        // operand opened with `+`/`-` parsed as a prefix expression the CST
+        // writes as the constant 0, so `hash = hash &+ word` lost `word`
+        // (RuntimeModule/PDB/Hashes.swift 56). Swift joins adjacent operator
+        // characters, so `&+` is never bitwise-and of `+b`.
+        (b'&', b'+', _) => (PLUS, 2),
+        (b'&', b'-', _) => (MINUS, 2),
+        (b'&', b'*', _) => (STAR, 2),
         (b'&', b'=', _) => (AMP_EQ, 2),
         (b'|', b'=', _) => (PIPE_EQ, 2),
         (b'^', b'=', _) => (CARET_EQ, 2),
