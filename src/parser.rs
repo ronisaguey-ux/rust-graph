@@ -3813,7 +3813,19 @@ impl<'a> Parser<'a> {
                     && found.is_none()
                     && !toks.get(index + 1).is_some_and(|t| self.is_op(t, b":")) =>
                 {
-                    return None
+                    // `private readonly Action? _dispose = null;`: a `?` after a
+                    // type is the nullable marker in C#, TS, Kotlin and Swift,
+                    // not the start of a ternary. Bailing on it made the whole
+                    // declaration read as one expression, so the field lost its
+                    // assignment event and the merged value took its place -
+                    // the largest single shape in the C# corpus. A ternary is
+                    // only real when a `:` at this same depth follows it.
+                    let ternary = toks[index + 1..]
+                        .iter()
+                        .any(|token| token.kind == Kind::Op && self.raw(token) == b":");
+                    if ternary {
+                        return None;
+                    }
                 }
                 b"," if depth == 0
                     && angle == 0
