@@ -3959,7 +3959,7 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
-            "qualified_type" if self.is_kotlin() => {
+            "qualified_type" if self.is_kotlin() || self.language.name == "csharp" => {
                 let path = self.path_of(id);
                 if path.is_empty() {
                     "0".to_string()
@@ -5117,6 +5117,10 @@ fn dotted_piece(text: &str) -> bool {
                 out.push(']');
                 out
             }
+            // C#'s `string` is a predefined type keyword (a leaf whose text is
+            // `string`), not a string literal (`STRING`), so the one-pass
+            // reader writes `n:string`.
+            "string" if self.language.name == "csharp" => "[\"n\",\"string\"]".to_string(),
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment"
             | "arrow_function" | "function_expression" | "generator_function" => "0".to_string(),
