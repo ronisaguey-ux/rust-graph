@@ -5691,7 +5691,13 @@ fn dotted_piece(text: &str) -> bool {
             // is `c(0;0;[0])` there and `c(0;0;[])` here. Every EllipsisType and
             // every stub default of `...` fell back on the difference.
             let ellipsis = matches!(kind, "ellipsis" | "Ellipsis" | "...");
-            if self.is_layout(child) && !ellipsis {
+            // Swift's `nil` is a keyword leaf, so it reads as layout, but the
+            // one-pass lexer reads it as one argument of value 0:
+            // `setvbuf(stdout, nil, _IOLBF, 0)` is `c(0;0;[n:stdout,0,n:_IOLBF,0])`
+            // there and lost the `nil` argument here, so every call passing
+            // `nil` positionally disagreed.
+            let nothing = self.language.name == "swift" && kind == "nil";
+            if self.is_layout(child) && !ellipsis && !nothing {
                 continue;
             }
             if !first {
@@ -5707,7 +5713,7 @@ fn dotted_piece(text: &str) -> bool {
             }
             // Go and Java do not use `form`: an argument that is itself a call
             // (`path.Join(os.Getenv(..))`) would come back as `0`.
-            let value = if ellipsis {
+            let value = if ellipsis || nothing {
                 "0".to_string()
             } else if kind == "labeled_argument" || (kind == "named_argument" && (self.is_kotlin() || self.language.name == "scala")) {
                 // `Package(name: "x", platforms: [.macOS("10")])`: a Swift
