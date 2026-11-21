@@ -30,8 +30,9 @@
 //! TypeScript's template literals). Raw string literals are single tokens.
 //! LINQ query syntax (`from x in xs where ... select`) is not modelled; the
 //! method form (`xs.Where(...)`) is. Switch *expressions* are not modelled
-//! (only switch statements); pattern combinators (`and`, `or`, `not`,
-//! property patterns) are reduced to an `is` type/constant test. Preprocessor
+//! (only switch statements); pattern combinators are modelled for `is` and
+//! `case` (`and`, `or`, `not` between patterns), but property patterns are
+//! reduced to an `is` type/constant test. Preprocessor
 //! directives are comments. XML documentation comments are ordinary comments. Local
 //! functions are not modelled (a local declaration shape is tried first and
 //! reports the error inside the block).
@@ -173,6 +174,10 @@ rust_graph_deep::grammar! { CSHARP {
         KW_VAR = "var",
         /// A pattern negator: `x is not null`. A name everywhere else.
         KW_NOT = "not",
+        /// Pattern combinators: `x is A or B`, `x is string and not null`. A
+        /// name everywhere else, but never a designator (see `_pattern_designator`).
+        KW_AND = "and",
+        KW_OR = "or",
         KW_NOTNULL = "notnull",
         KW_UNMANAGED = "unmanaged",
 
@@ -485,14 +490,18 @@ rust_graph_deep::grammar! { CSHARP {
     switch_statement: "switch" parenthesized_expression switch_body,
     switch_body: "{" switch_section* "}",
     switch_section: (switch_label ":" | "default" ":") _statement*,
-    switch_label: "case" _pattern ["when" _expression],
+    switch_label: "case" _pattern_chain ["when" _expression],
     // A pattern is what `is` and `case` take: `int n`, `string`, `not null`,
     // `3`, `{ Length: 0 }`. A designator names the value the test binds.
     _pattern: pattern_object | _type [_pattern_designator] | _literal,
     pattern_object: "{" [pattern_members] "}",
     pattern_members: _pattern_member ("," _pattern_member)*,
     _pattern_member: _name ":" _pattern,
-    _pattern_designator: "var" _name | _name,
+    // A designator is a plain name: `o is string s` binds `s`, but in
+    // `o is A or B` the `or` is a combinator, never a binder named `or`.
+    _pattern_designator: "var" _name | _plain_name,
+    // `A or B`, `A and not B`: combinators read left to right, each side a pattern.
+    _pattern_chain: _pattern ((KW_AND | KW_OR) [KW_NOT] _pattern)*,
     try_statement: "try" block catch_clause* [finally_clause],
     catch_clause: "catch" [catch_declaration] ["when" parenthesized_expression] block,
     // `catch (ArgumentException) { }` and `catch (FormatException) when (p)`: the
@@ -538,7 +547,7 @@ rust_graph_deep::grammar! { CSHARP {
         // constant, or a property pattern), not an expression. Read as a
         // binary operand, the designator after the type was one MISSING per
         // line and the whole file fell back (C# corpus: 15 files).
-        type_test: postfix "is" [KW_NOT] _pattern => is_pattern,
+        type_test: postfix "is" [KW_NOT] _pattern_chain => is_pattern,
         shift: left "<<" | GT_JOINED ">" | GT_JOINED GT_JOINED ">" => binary_expression,
         add: left "+" | "-" => binary_expression,
         mul: left "*" | "/" | "%" => binary_expression,
@@ -657,6 +666,8 @@ rust_graph_deep::grammar! { CSHARP {
     // `type_parameters`.
     _member_segment: &(_name type_arguments) _name type_arguments | _name,
     _name:
+        _plain_name | KW_AND | KW_OR,
+    _plain_name:
         IDENT | "async" | "record" | "partial" | "where" | "get" | "set" | "init" | "add"
         | "remove" | "value" | "when" | "required" | "global" | "dynamic" | "scoped"
         | "yield" | "alias" | "not",
@@ -969,6 +980,8 @@ fn keyword(text: &[u8]) -> Kind {
         b"with" => KW_WITH,
         b"var" => KW_VAR,
         b"not" => KW_NOT,
+        b"and" => KW_AND,
+        b"or" => KW_OR,
         b"notnull" => KW_NOTNULL,
         b"unmanaged" => KW_UNMANAGED,
         _ => IDENT,
@@ -1111,6 +1124,17 @@ mod tests {
         assert!(fixtures::clean(&CSHARP, "class C { object IEnumerator.Current { get { throw null; } } }"));
         assert!(fixtures::clean(&CSHARP, "class C { void IDisposable.Dispose() { } }"));
         assert!(fixtures::clean(&CSHARP, "class C { [Obsolete(\"x\")] int P { get => 1; } }"));
+    }
+
+    #[test]
+    fn csharp_pattern_combinators_are_not_recovery_errors() {
+        // `or` after a type was read as a designator name, leaving the right side
+        // of the combinator unparsed and the enclosing statement lost.
+        assert!(fixtures::clean(&CSHARP, "class C { bool F(E f) { return f is E.B or E.C; } }"));
+        assert!(fixtures::clean(&CSHARP, "class C { bool F(object o) { return o is string and not null; } }"));
+        assert!(fixtures::clean(&CSHARP, "class C { int F(int x) { switch (x) { case 1 or 2: return 1; } return 0; } }"));
+        // `or` and `and` stay ordinary names outside a pattern.
+        assert!(fixtures::clean(&CSHARP, "class C { int or; int F() { var and = 1; return and; } }"));
     }
 
     #[test]
