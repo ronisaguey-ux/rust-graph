@@ -3595,6 +3595,23 @@ fn dotted_piece(text: &str) -> bool {
             "typeof_expression" | "sizeof_expression" if self.language.name == "csharp" => {
                 return self.expression_child(id).map_or_else(|| "0".to_string(), |child| self.form(child));
             }
+            // `x is null`, `x is not null`, `x is string s`: C#'s `is_pattern`
+            // names its subject and the pattern's type, constant, or designator
+            // leaves, as the one-pass reader does. Read through the default
+            // arm it kept only the first child and returned `0` whenever the
+            // subject was a bare identifier leaf.
+            "is_pattern" if self.language.name == "csharp" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.binary_operand(child) && !matches!(self.kind(child), "is" | "not"))
+                    .collect();
+                match items.len() {
+                    0 => return "0".to_string(),
+                    1 => return self.form(items[0]),
+                    _ => return self.merge_form(&items),
+                }
+            }
 
             // `T(text = writer.toString())`: a named argument is its value. Read
             // as its first child, the parameter name `text` swallowed the call
