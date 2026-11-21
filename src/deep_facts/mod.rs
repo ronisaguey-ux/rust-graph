@@ -1096,7 +1096,7 @@ impl<'a> Walker<'a> {
             // header, and nothing read the node, so every C# field an API
             // declares left an event the tree never wrote. Go has the same arm
             // in its own statement model.
-            "field_declaration" | "event_field_declaration" => {
+            "field_declaration" | "event_field_declaration" | "event_declaration" => {
                 // A field initialised with a call is an assignment to the
                 // lexer; anything else is the header event.
                 if !self.cs_field_assignment(id) {
