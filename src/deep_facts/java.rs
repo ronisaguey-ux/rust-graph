@@ -32,7 +32,7 @@ impl<'a> Walker<'a> {
                 self.kind(child),
                 "class_body" | "enum_body" | "interface_body" | "annotation_type_body" | "record_body" | "constructor_body" | "type_body"
                     // A C# property's body is statements of its own.
-                    | "property_body"
+                    | "property_body" | "property_tail"
             ) {
                 continue;
             }
