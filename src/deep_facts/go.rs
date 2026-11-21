@@ -133,7 +133,7 @@ impl<'a> Walker<'a> {
         if !matches!(
             self.kind(value),
             "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression"
-                | "nameof_expression"
+                | "generic_invocation" | "nameof_expression"
         ) {
             return false;
         }
@@ -1885,7 +1885,8 @@ impl<'a> Walker<'a> {
         // as an expression to record those calls in source order.
         let _ = self.form(first);
         let targets = self.assignment_targets(first);
-        let weak = augmented || matches!(self.kind(first), "subscript" | "subscript_expression" | "index_expression");
+        // C# spells a subscripted target `element_access`.
+        let weak = augmented || matches!(self.kind(first), "subscript" | "subscript_expression" | "index_expression" | "element_access");
         // `a = b = value` arrives flat: two `=` and the middle binder is an
         // ordinary child. The one-pass lexer reads the line left to right, so its
         // value names that binder as well; reading only the last child dropped
@@ -1964,7 +1965,7 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn assignment_targets(&self, id: u32) -> Vec<String> {
         match self.kind(id) {
-            "subscript" | "subscript_expression" | "index_expression" => {
+            "subscript" | "subscript_expression" | "index_expression" | "element_access" => {
                 let base = self.children(id).first().copied().unwrap_or(id);
                 self.assignment_targets(base)
             }
@@ -3857,7 +3858,7 @@ fn dotted_piece(text: &str) -> bool {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
-            "attribute" | "member_expression" | "member_access_expression" | "member_access" | "subscript" | "subscript_expression" | "field_expression" | "meta_property"
+            "attribute" | "member_expression" | "member_access_expression" | "member_access" | "subscript" | "subscript_expression" | "element_access" | "field_expression" | "meta_property"
             // `Ordering::Acquire` in an argument list is a path, not a constant.
             | "scoped_identifier" | "scoped_type_identifier" | "qualified_expression"
             // Kotlin's `user.title` in a `"${user.title}"` hole.
@@ -5822,7 +5823,7 @@ fn dotted_piece(text: &str) -> bool {
         };
         let children = self.children(id);
         if !path.is_empty() && !path.starts_with('.') {
-            if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression" | "field_expression") {
+            if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression" | "element_access" | "field_expression") {
                 if let Some(&object) = children.first() {
                     // A receiver can be any expression; nothing is recorded for a
                     // plain name, so this costs a walk and never a wrong fact.
@@ -5831,7 +5832,7 @@ fn dotted_piece(text: &str) -> bool {
             }
         }
         // `name[len(prefix):]`: the index is an expression of its own.
-        if matches!(kind, "subscript" | "subscript_expression") {
+        if matches!(kind, "subscript" | "subscript_expression" | "element_access") {
             for &child in children.iter().skip(1) {
                 if !self.is_layout(child) {
                     self.form(child);
@@ -6035,9 +6036,10 @@ fn dotted_piece(text: &str) -> bool {
             }
             // A subscript is transparent in a path: `elements[i].innerHTML`
             // names `elements.innerHTML`, and `x[0].y` names `x.y`. Rust spells
-            // it `index_expression`, and reading it as a leaf dropped the
-            // receiver of every indexed assignment target.
-            "subscript" | "subscript_expression" | "index_expression" => {
+            // it `index_expression` and C# spells it `element_access`, and
+            // reading it as a leaf dropped the receiver of every indexed
+            // assignment target and subscripted value.
+            "subscript" | "subscript_expression" | "index_expression" | "element_access" => {
                 let base = self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default();
                 base
             }
