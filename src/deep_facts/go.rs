@@ -2668,7 +2668,8 @@ impl<'a> Walker<'a> {
     /// The lexer reads the same line and files the last segment as the alias
     /// when no `as`-style name is spelled, so the alias is written here the same
     /// way: the records have to mean the same thing for the guard to keep the
-    /// tree.
+    /// tree. Generic type arguments on an aliased type (`Dictionary<K, V>`) and
+    /// `global::` qualifiers are normalized to match the dotted module path.
     pub(crate) fn cs_using(&mut self, id: u32) {
         let line = self.line(id);
         let raw = self.text_string(id);
@@ -2677,9 +2678,10 @@ impl<'a> Walker<'a> {
         let text = text.strip_prefix("using ").unwrap_or(text).trim();
         let text = text.strip_prefix("static ").unwrap_or(text).trim();
         let (alias, module) = match text.split_once('=') {
-            Some((alias, module)) => (alias.trim().to_string(), module.trim().to_string()),
-            None => (String::new(), text.to_string()),
+            Some((alias, module)) => (alias.trim().to_string(), module.trim()),
+            None => (String::new(), text),
         };
+        let module = module.split('<').next().unwrap_or(module).trim().replace("::", ".");
         if module.is_empty() {
             return;
         }
