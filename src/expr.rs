@@ -824,6 +824,16 @@ impl Emit<'_> {
                                 out.push('0');
                             }
                         }
+                        // `= [:]` is Swift's empty dictionary literal: the `:`
+                        // is a key separator with nothing on either side, so
+                        // the literal carries no element. Read as a list, the
+                        // bare separator consumed a token and wrote the
+                        // constant every empty element writes, so the value
+                        // became a one-element tuple the CST never has
+                        // (PDBCache.swift:34).
+                        b'[' if self.lang.tag == "SWIFT" && self.is_op(1, b":") && self.is_op(2, b"]") => {
+                            self.pos += 3;
+                        }
                         b'[' => {
                             let mut key = String::new();
                             self.display(&mut key, b']', "t");
@@ -842,6 +852,13 @@ impl Emit<'_> {
                                 out.push_str(&key);
                             }
                         }
+                        // Swift has no object literal: a `{ … }` in a value
+                        // position is a closure, and its body is statements of
+                        // its own, never the expressions of one value. Read as a
+                        // merge, every call in the body became a call the
+                        // enclosing call carries as an argument, which the CST
+                        // never writes (PDBCache.swift:65).
+                        b'{' if self.lang.tag == "SWIFT" => self.skip_block(),
                         b'{' => self.display(out, b'}', "m"),
                         // `a ? b : c ? b : a`: the whole conditional is one
                         // merge to the CST, and a conditional inside a branch

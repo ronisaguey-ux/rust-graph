@@ -1265,6 +1265,15 @@ impl<'a> Parser<'a> {
         {
             return true;
         }
+        // `private static var key: pthread_key_t = {` (Swift): a brace straight
+        // after the `=` of a binding opens the body of a closure literal. Swift
+        // has no object literal, so the body holds statements, and reading it as
+        // one value merged them into an expression on the declaration's line
+        // that the CST never writes, with every call in the body claimed as part
+        // of the initialiser (PDBCache.swift:63).
+        if self.lang.tag == "SWIFT" && self.is_op(&last, b"=") {
+            return true;
+        }
         if self.lang.tag == "TCL" && last.kind == Kind::Ident && self.has_def_word(&self.stmt) {
             return false;
         }
