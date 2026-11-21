@@ -67,19 +67,33 @@ files under a different symbol, and `001165_lib.rs:176` is a `let` inside a
 `#[pyfunction]` whose CST body carries no event at all. Those are counted here
 because the guard reports them with the same sentence.
 
-## 2. Rust: the symbol clause is only an attribute name now — 5 of 105
+## 2. The lexer names an attributed item after its attribute (latent, ~58 files)
 
-`000976_log_export.rs:233` `symbol instrument kind 1`, and `symbol case` on
-`001119_oculus_sot.rs:93`, `001263_hma.rs:384`, `001273_oculus_sot.rs:93`,
-`001417_hma.rs:384` (two files, each held twice by the corpus).
+    /tmp/rt7:  #[rstest] #[case(1)] fn t() { … }   ->  lexer symbol `m.case`
+    /tmp/rt8:  #[cfg(test)] mod tests { … }        ->  no owner; flows are `feed`, not `tests.feed`
 
-Both are §4: `#[instrument(...)]` and `#[case(1)]` open a symbol named after the
-attribute, because `c_style_head` reads the attribute's `(` as a parameter list.
-The clause is counted here only because the symbol check fires before the event
-check. The value-mismatch shapes that used to hold it — a match arm's folded
-block, a turbofish inside a struct literal, an `if let` struct pattern, the
-literal receiver — were closed by `f1a9112`, `65436fb` and `d446c97`, and the
-clause went 36 → 5 on the same corpora.
+`c_style_head` reads the attribute's `(` as the parameter list, so `#[derive(..)]
+pub enum E {` opens a symbol `derive`, `#[case(1)]` names the function `case` and
+owns its body, and `#[cfg(test)] mod tests {` opens `cfg` instead of the module.
+
+Stripping the attribute fixes it — `/tmp/rt6` (001201_vr.rs) goes from 4 losses
+to 0 and the `tests.` owner appears — **but the corpus count rises**: rust 141 →
+199 (attribute stripped in `open_block` and `c_style_head`) and 141 → 207
+(`c_style_head` alone). The reason is in the guard, not the lexer: it pairs a
+lexer symbol with a CST symbol by name and `continue`s when nothing pairs, so
+every event filed under a bogus `derive` / `case` / `cfg` symbol was never
+compared at all. Correct naming exposes ~58 real losses that the metric never
+saw.
+
+The next fix is therefore the guard — compare an unpaired lexer symbol's events
+against the file's rows instead of skipping the symbol — and only then the
+lexer. Both edits were reverted with `git checkout -- src/parser.rs`.
+
+**Update (2026-11-18):** `skip_modifiers` and `function_head` (`261a215`, `320ab65`)
+now skip leading `#[...]` attributes for plain `fn` and `mod`, and `h-argon`
+closed the remaining `const fn` and `extern "C" fn` cases so `c_style_head` never
+reads a Rust attribute's `(` as a function name. The guard's skip of unpaired
+lexer symbols (`src/pipeline.rs`) remains open.
 
 ## 3. Rust: a call whose name the CST cannot place — 13 of 105
 
@@ -111,33 +125,19 @@ unless the receiver is literally `"0"` — js 128 → **260**, rust 112 → 140.
 repair has to be CST-side (write the member name the lexer writes), which moves
 every literal-receiver call in four corpora and needs its own measurement.
 
-## 4. The lexer names an attributed item after its attribute (latent, ~58 files)
+## 4. Rust: the symbol clause is only an attribute name now — 5 of 105
 
-    /tmp/rt7:  #[rstest] #[case(1)] fn t() { … }   ->  lexer symbol `m.case`
-    /tmp/rt8:  #[cfg(test)] mod tests { … }        ->  no owner; flows are `feed`, not `tests.feed`
+`000976_log_export.rs:233` `symbol instrument kind 1`, and `symbol case` on
+`001119_oculus_sot.rs:93`, `001263_hma.rs:384`, `001273_oculus_sot.rs:93`,
+`001417_hma.rs:384` (two files, each held twice by the corpus).
 
-`c_style_head` reads the attribute's `(` as the parameter list, so `#[derive(..)]
-pub enum E {` opens a symbol `derive`, `#[case(1)]` names the function `case` and
-owns its body, and `#[cfg(test)] mod tests {` opens `cfg` instead of the module.
-
-Stripping the attribute fixes it — `/tmp/rt6` (001201_vr.rs) goes from 4 losses
-to 0 and the `tests.` owner appears — **but the corpus count rises**: rust 141 →
-199 (attribute stripped in `open_block` and `c_style_head`) and 141 → 207
-(`c_style_head` alone). The reason is in the guard, not the lexer: it pairs a
-lexer symbol with a CST symbol by name and `continue`s when nothing pairs, so
-every event filed under a bogus `derive` / `case` / `cfg` symbol was never
-compared at all. Correct naming exposes ~58 real losses that the metric never
-saw.
-
-The next fix is therefore the guard — compare an unpaired lexer symbol's events
-against the file's rows instead of skipping the symbol — and only then the
-lexer. Both edits were reverted with `git checkout -- src/parser.rs`.
-
-**Update (2026-11-18):** `skip_modifiers` and `function_head` (`261a215`, `320ab65`)
-now skip leading `#[...]` attributes for plain `fn` and `mod`, and `h-argon`
-closed the remaining `const fn` and `extern "C" fn` cases so `c_style_head` never
-reads a Rust attribute's `(` as a function name. The guard's skip of unpaired
-lexer symbols (`src/pipeline.rs`) remains open.
+Both are §4: `#[instrument(...)]` and `#[case(1)]` open a symbol named after the
+attribute, because `c_style_head` reads the attribute's `(` as a parameter list.
+The clause is counted here only because the symbol check fires before the event
+check. The value-mismatch shapes that used to hold it — a match arm's folded
+block, a turbofish inside a struct literal, an `if let` struct pattern, the
+literal receiver — were closed by `f1a9112`, `65436fb` and `d446c97`, and the
+clause went 36 → 5 on the same corpora.
 
 ## 5. TypeScript: a `.d.ts` declaration is not a runtime call — 4 rows
 
