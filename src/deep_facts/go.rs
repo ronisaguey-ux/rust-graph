@@ -233,7 +233,12 @@ impl<'a> Walker<'a> {
             .copied()
             .rev()
             .find(|&child| {
-                self.kind(child) == "identifier" || matches!(self.kind(child), "member_access" | "field_access")
+                // C# contextual keywords (`value`, `file`, `set`, `remove`) are
+                // valid local variable names; the grammar keeps their keyword
+                // kind instead of `identifier`.
+                self.kind(child) == "identifier"
+                    || self.kinds.soft.contains(&self.kind(child))
+                    || matches!(self.kind(child), "file" | "set" | "remove" | "get" | "init" | "member_access" | "field_access")
             })
             .map(|child| self.path_of(child))
             .filter(|path| !path.is_empty())
@@ -2132,7 +2137,11 @@ impl<'a> Walker<'a> {
         self.event(&text);
         if let Some(class) = self.constructed(value) {
             for target in &targets {
-                self.facts.vars.push((target.clone(), class.clone()));
+                // A C# declarator names one identifier; a dotted target is a
+                // member being assigned, not a variable being declared.
+                if !(self.language.name == "csharp" && target.contains('.')) {
+                    self.facts.vars.push((target.clone(), class.clone()));
+                }
             }
         } else {
             // `s, t = Counter(a), Counter(b)`: one value per target, so the
@@ -2162,10 +2171,14 @@ impl<'a> Walker<'a> {
         // whose base is the call. The lexer reads the first token, so the
         // chain is unwrapped to the call that starts it.
         let call = self.value_root_call(value)?;
-        if self.kind(call) == "new_expression" {
-            let path = self.children(call).into_iter().find_map(|child| {
-                matches!(self.kind(child), "identifier" | "member_expression" | "attribute").then(|| self.path_of(child))
-            })?;
+        if matches!(self.kind(call), "new_expression" | "object_creation" | "object_creation_expression") {
+            let path = if self.kind(call) == "new_expression" {
+                self.children(call).into_iter().find_map(|child| {
+                    matches!(self.kind(child), "identifier" | "member_expression" | "attribute").then(|| self.path_of(child))
+                })?
+            } else {
+                self.decl_path(self.decl_callee(call))
+            };
             let last = path.rsplit('.').next().unwrap_or(&path);
             return last.starts_with(|ch: char| ch.is_uppercase()).then_some(last.to_string());
         }
@@ -2178,8 +2191,12 @@ impl<'a> Walker<'a> {
     /// `a.b()`, `(a)` -> the call in the parentheses.
     pub(crate) fn value_root_call(&self, id: u32) -> Option<u32> {
         match self.kind(id) {
-            "call" | "call_expression" | "new_expression" => Some(id),
-            "attribute" | "member_expression" | "subscript" | "subscript_expression" | "parenthesized_expression" => {
+            // C# spells calls as `invocation_expression` / `generic_invocation`
+            // and `new T()` as `object_creation` / `object_creation_expression`.
+            "call" | "call_expression" | "new_expression" | "invocation_expression" | "object_creation"
+            | "object_creation_expression" | "generic_invocation" => Some(id),
+            "attribute" | "member_expression" | "member_access" | "field_access" | "subscript"
+            | "subscript_expression" | "parenthesized_expression" => {
                 self.children(id).first().and_then(|&object| self.value_root_call(object))
             }
             // `candidate = Path(x).parent / candidate`: a binary value starts
@@ -2214,13 +2231,16 @@ impl<'a> Walker<'a> {
     /// `f`, `a.b()` -> `a.b`.
     pub(crate) fn root_callee(&self, id: u32) -> Option<String> {
         match self.kind(id) {
-            "call" | "call_expression" | "new_expression" => {
+            "call" | "call_expression" | "new_expression" | "invocation_expression" | "generic_invocation" => {
                 let callee = self.children(id).into_iter().find(|&child| {
-                    !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")")
+                    !matches!(
+                        self.kind(child),
+                        "new" | "argument_list" | "arguments" | "type_arguments" | "type_parameter_list" | "(" | ")"
+                    )
                 })?;
                 (callee != id).then(|| self.root_callee(callee)).flatten()
             }
-            "attribute" | "member_expression" | "navigation_expression" => {
+            "attribute" | "member_expression" | "navigation_expression" | "member_access" | "field_access" => {
                 let object = self.children(id).first().copied()?;
                 let path = self.path_of(id);
                 // `Config.Array(...).pipe` starts with a call: unwrap to that
@@ -2228,7 +2248,13 @@ impl<'a> Walker<'a> {
                 // Otherwise the whole path is the answer: `Context.Reference`
                 // constructs Reference, not Context, and returning the object
                 // root reported every namespaced constructor as a lost var.
-                if path.contains("()") || matches!(self.kind(object), "call" | "call_expression" | "new_expression") {
+                if path.contains("()")
+                    || matches!(
+                        self.kind(object),
+                        "call" | "call_expression" | "new_expression" | "invocation_expression"
+                            | "object_creation" | "object_creation_expression"
+                    )
+                {
                     return self.root_callee(object);
                 }
                 (!path.is_empty()).then_some(path)
