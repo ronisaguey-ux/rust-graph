@@ -4823,31 +4823,6 @@ fn dotted_piece(text: &str) -> bool {
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment"
             | "arrow_function" | "function_expression" | "generator_function" => "0".to_string(),
-            // The one-pass lexer writes the whole call as `m:[callee, m:[body]]`,
-            // the body being each statement's value (`Result { try build() }` is
-            // `m:[n:Result,m:[m:[n:try,c(1;[])]]]`). The callee alone dropped the
-            // closure from the binding's value, so the CST lost the line the
-            // lexer reads. The body's calls are already recorded by its own walk.
-            "trailing_closure" if self.language.name == "swift" => {
-                let Some(callee) = self.expression_child(id) else { return "0".to_string() };
-                let callee = self.form(callee);
-                let closure = self.children(id).into_iter().find(|&child| self.kind(child) == "closure");
-                let statements: Vec<u32> = closure.map_or_else(Vec::new, |closure| {
-                    self.children(closure)
-                        .into_iter()
-                        .filter(|&child| !self.is_layout(child) && self.kind(child) != "closure_signature")
-                        .collect()
-                });
-                let mut body = Vec::new();
-                for statement in statements {
-                    body.push(self.form(statement));
-                }
-                if body.is_empty() {
-                    callee
-                } else {
-                    format!("[\"m\",[{},[\"m\",[{}]]]]", callee, body.join(","))
-                }
-            }
             // `WindowGroup { ... }`: Swift's trailing closure call has the
             // callee as its first expression child; when the callee is a bare
             // identifier leaf (`WindowGroup`), the generic fallback skips it
@@ -5019,7 +4994,9 @@ fn dotted_piece(text: &str) -> bool {
             .into_iter()
             .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")" | "," | "in"))
             .collect();
-        if items.len() < 2 || !items.iter().all(|&child| self.kind(child) == "identifier") {
+        // A Swift closure parameter can be `_`, which `form` and the lexer read
+        // as `["n","_"]`.
+        if items.len() < 2 || !items.iter().all(|&child| matches!(self.kind(child), "identifier" | "_")) {
             return None;
         }
         let mut names = Vec::new();
@@ -5059,7 +5036,7 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 continue;
             }
-            if self.kind(child) == "identifier" {
+            if matches!(self.kind(child), "identifier" | "_") {
                 let text = self.text_string(child);
                 let mut form = String::from("[\"n\",");
                 push_string(&mut form, &text);
