@@ -3886,11 +3886,14 @@ fn dotted_piece(text: &str) -> bool {
             }
             "argument_list" | "arguments" | "parenthesized_expression" => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
-                match items.len() {
+                self.delim_depth += 1;
+                let out = match items.len() {
                     0 => "0".to_string(),
                     1 => self.form(items[0]),
                     _ => self.tuple_form(&items),
-                }
+                };
+                self.delim_depth -= 1;
+                out
             }
             "binary_operator" | "comparison_operator" | "boolean_operator" | "binary_expression" | "ternary_expression"
             // `f() ?: g()`: the elvis holds two values the way a binary
@@ -3927,10 +3930,12 @@ fn dotted_piece(text: &str) -> bool {
                     .into_iter()
                     .filter(|&child| self.binary_operand(child))
                     .collect();
-                if kind == "binary" {
+                if kind == "binary" && self.delim_depth == 0 {
                     // An operand is its own event only when the operator that
-                    // joins it sits on its own line (`+ x` leading a line); an
-                    // operator that trails the first line (`a &&` then `b`)
+                    // joins it sits on its own line (`+ x` leading a line) at
+                    // statement level; inside delimiters (`(...)`, `[...]`) the
+                    // lexer keeps the whole binary expression in one event, and
+                    // an operator that trails the first line (`a &&` then `b`)
                     // keeps the operand in the expression that starts there.
                     let all = self.children(id);
                     let first = items.first().map(|&child| self.line(child));
@@ -4408,11 +4413,14 @@ fn dotted_piece(text: &str) -> bool {
                     })
                     .filter(|&child| !self.is_layout(child))
                     .collect();
-                if items.is_empty() {
+                self.delim_depth += 1;
+                let out = if items.is_empty() {
                     "0".to_string()
                 } else {
                     self.tuple_form(&items)
-                }
+                };
+                self.delim_depth -= 1;
+                out
             }
             "list_comprehension" | "set_comprehension" | "generator_expression" | "dictionary_comprehension" => {
                 // `[f(x) for x in xs if p(x)]`: the element and every clause's
@@ -4424,11 +4432,14 @@ fn dotted_piece(text: &str) -> bool {
                     }
                     items.push(child);
                 }
-                if items.is_empty() {
+                self.delim_depth += 1;
+                let out = if items.is_empty() {
                     "0".to_string()
                 } else {
                     self.tuple_form(&items)
-                }
+                };
+                self.delim_depth -= 1;
+                out
             }
             "for_in_clause" => {
                 // `for x in xs`: both the target and the iterable are written
@@ -4787,11 +4798,14 @@ fn dotted_piece(text: &str) -> bool {
                     .into_iter()
                     .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")" | ","))
                     .collect();
-                if items.is_empty() {
+                self.delim_depth += 1;
+                let out = if items.is_empty() {
                     "0".to_string()
                 } else {
                     self.tuple_form(&items)
-                }
+                };
+                self.delim_depth -= 1;
+                out
             }
             // `UnsafeCell<State>`, `Vec<Entry>`: a generic type holds the base
             // and the type arguments, and both are names the lexer reads.
@@ -5701,6 +5715,7 @@ fn dotted_piece(text: &str) -> bool {
     }
 
     pub(crate) fn arguments(&mut self, list: u32) -> String {
+        self.delim_depth += 1;
         let mut out = "[".to_string();
         let mut first = true;
         for child in self.children(list) {
@@ -5783,6 +5798,7 @@ fn dotted_piece(text: &str) -> bool {
             out.push_str(&value);
         }
         out.push(']');
+        self.delim_depth -= 1;
         out
     }
 

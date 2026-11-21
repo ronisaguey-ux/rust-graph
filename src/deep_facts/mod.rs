@@ -500,6 +500,10 @@ struct Walker<'a> {
     /// (P5-11).
     call_texts: std::collections::HashMap<u32, String>,
     in_kotlin_expr_body: bool,
+    /// Depth inside `(...)` or `[...]` while forming expressions; the lexer
+    /// does not split a multiline binary expression at a newline inside
+    /// delimiters.
+    delim_depth: usize,
 }
 
 /// The deep language for a lexer tag (`langs::Language::tag`), or `None` when
@@ -576,6 +580,7 @@ impl<'a> Walker<'a> {
             statement_lines: std::collections::HashMap::new(),
             call_texts: std::collections::HashMap::new(),
             in_kotlin_expr_body: false,
+            delim_depth: 0,
         }
     }
 
