@@ -1111,11 +1111,163 @@ impl Emit<'_> {
 
     fn display(&mut self, out: &mut String, close: u8, form: &str) {
         let line = self.toks[self.pos].line;
+        // `[k: v]` is a Swift dictionary literal, which is a list of pairs and
+        // not a list of values: read flat, the colon writes no item of its own,
+        // so `= [:]` became one constant (`t:[0]`) against the CST's empty
+        // value and `= ["x": 1]` a bare constant against `t:[m:[0,0]]`. Every
+        // typed dictionary default in the swift corpus lost its initialiser
+        // that way (ElfImageCache, PDBCache, PeImageCache, MinimalCollections,
+        // TypeIndexed, DetailViewController, EmptyCollectionSingleton).
+        if form == "t" && self.lang.tag == "SWIFT" && self.bracket_is_dictionary() {
+            let mut items = String::new();
+            let count = self.dictionary(&mut items);
+            let value = if count == 0 { String::new() } else { format!("[\"{form}\",[{items}]]") };
+            self.chain(out, value, String::new(), line);
+            return;
+        }
         self.pos += 1;
         let mut items = String::new();
         let count = self.list(&mut items, close, false);
         let value = if count == 0 { String::new() } else { format!("[\"{form}\",[{items}]]") };
         self.chain(out, value, String::new(), line);
+    }
+
+    /// Whether the `[` at the cursor opens a Swift dictionary literal: a `:`
+    /// between the brackets that is not inside a nested group and does not
+    /// belong to a conditional. `[Int]` and `[1, 2]` are arrays, `[:]` and
+    /// `["k": v]` are dictionaries, and `[c ? a : b]` is an array of one
+    /// conditional.
+    fn bracket_is_dictionary(&self) -> bool {
+        let mut depth = 0usize;
+        let mut conditional = false;
+        let mut at = self.pos;
+        while let Some(token) = self.toks.get(at) {
+            if token.kind == Kind::Op {
+                match self.op_byte_at(at) {
+                    b'[' | b'(' | b'{' => depth += 1,
+                    b']' | b')' | b'}' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            return false;
+                        }
+                    }
+                    b'?' if depth == 1 => conditional = true,
+                    b':' if depth == 1 => {
+                        if !conditional {
+                            return true;
+                        }
+                        conditional = false;
+                    }
+                    _ => {}
+                }
+            }
+            at += 1;
+        }
+        false
+    }
+
+    /// The pairs of a Swift dictionary literal, from the `[` at the cursor to
+    /// its `]`: `["k": v]` is `t:[m:[k,v]]`, `[:]` holds nothing at all (the
+    /// empty value, as `[]` is), and a segment with no colon is one plain item.
+    fn dictionary(&mut self, out: &mut String) -> usize {
+        let all = self.toks;
+        let start = self.pos;
+        let mut end = start + 1;
+        let mut depth = 0usize;
+        while let Some(token) = all.get(end) {
+            if token.kind == Kind::Op {
+                match self.op_byte_at(end) {
+                    b'[' | b'(' | b'{' => depth += 1,
+                    b']' | b')' | b'}' => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            end += 1;
+        }
+        let mut count = 0usize;
+        let mut from = start + 1;
+        let mut colon = None;
+        let mut at = from;
+        let mut depth = 0usize;
+        while at < end {
+            if all[at].kind == Kind::Op {
+                match self.op_byte_at(at) {
+                    b'[' | b'(' | b'{' => depth += 1,
+                    b']' | b')' | b'}' => depth = depth.saturating_sub(1),
+                    b',' if depth == 0 => {
+                        if self.pair(out, from, at, colon, &mut count) {
+                            colon = None;
+                        }
+                        from = at + 1;
+                    }
+                    b':' if depth == 0 => colon = Some(at),
+                    _ => {}
+                }
+            }
+            at += 1;
+        }
+        self.pair(out, from, end, colon, &mut count);
+        self.pos = (end + 1).min(all.len());
+        count
+    }
+
+    /// One segment of a dictionary literal: `key: value` becomes one pair, a
+    /// segment with no colon is the item itself, and a segment with no tokens
+    /// is not an item. Returns whether the segment was written.
+    fn pair(&mut self, out: &mut String, from: usize, to: usize, colon: Option<usize>, count: &mut usize) -> bool {
+        if from >= to {
+            return false;
+        }
+        let key = match colon {
+            // `[:]`: a bare separator with nothing on either side is the empty
+            // dictionary, which holds no pair at all — the empty value, as `[]`.
+            Some(at) if from >= at && at + 1 >= to => return false,
+            Some(at) => self.range_value(from, at),
+            None => self.range_value(from, to),
+        };
+        let text = match colon {
+            Some(at) => {
+                let value = self.range_value(at + 1, to);
+                let mut text = String::from("[\"m\",[");
+                text.push_str(if key.is_empty() { "0" } else { &key });
+                text.push(',');
+                text.push_str(if value.is_empty() { "0" } else { &value });
+                text.push_str("]]");
+                text
+            }
+            None => key,
+        };
+        if text.is_empty() {
+            return false;
+        }
+        if *count > 0 {
+            out.push(',');
+        }
+        out.push_str(&text);
+        *count += 1;
+        true
+    }
+
+    /// The value of one token range, read as a list item reads it: the pairs of
+    /// a dictionary literal are their keys and values as the reader would spell
+    /// them anywhere else.
+    fn range_value(&mut self, from: usize, to: usize) -> String {
+        let all = self.toks;
+        let src = self.src;
+        let lang = self.lang;
+        let receiver = self.receiver;
+        if from >= to {
+            return String::new();
+        }
+        let mut nested = Emit { src, lang, toks: &all[from..to], pos: 0, calls: self.calls, receiver };
+        let mut value = String::new();
+        nested.mix(&mut value, 0);
+        value
     }
 
     fn string_value(&mut self) -> (u32, String) {

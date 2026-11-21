@@ -502,7 +502,9 @@ rust_graph_deep::grammar! { SWIFT {
     _type_shape: [_type_modifier] _type_atom _type_suffix*,
     _type_modifier: "some" | "any" | "inout",
     _type_atom: _name | collection_type | tuple_type,
-    _type_suffix: "?" | "!" | "." _name | type_arguments,
+    /// `??` is lexed as `NULLISH` for nil-coalescing, so a double-optional type
+    /// like `Index??` needs `"??"` as a type suffix alongside `"?"`.
+    _type_suffix: "?" | "??" | "!" | "." _name | type_arguments,
     /// `[Int]` or `[String: Int]`: one rule, like the literal.
     collection_type: "[" _type [":" _type] "]",
     tuple_type: "(" (_type %? ",") ")",
@@ -1022,6 +1024,7 @@ mod tests {
     const PROBES: &[(&str, &str)] = &[
         ("argument_labels", "func move(from start: Point, to end: Point) {}"),
         ("optionals", "func find(_ id: Int?) -> String! { return nil }"),
+        ("double_optional", "func find(_ id: Int??) -> String?? { return nil }"),
         ("trailing_closure", "let done = items.filter { item in item.ready }.map { $0 }"),
         ("guard", "func f(_ x: Int?) -> Int {\n    guard let value = x else { return 0 }\n    return value\n}"),
         ("generic_constraint", "func largest<T: Comparable>(_ values: [T]) -> T? where T: Hashable { return nil }"),
