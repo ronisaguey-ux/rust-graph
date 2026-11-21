@@ -4153,7 +4153,11 @@ fn dotted_piece(text: &str) -> bool {
             // bare name, so wrapping it as a merge left every inout argument
             // a loss on the CST path only. `!` is the same: `!$Embedded` and
             // `!foo` read the operand, and the default arm read nothing.
-            "prefix_expression" if self.language.name == "swift" && matches!(self.text_string(id).chars().next(), Some('&' | '!')) => match self.expression_child(id) {
+            // Swift's other prefix operators are one more instance of the same
+            // rule: `-x`, `+x` and `~endOfTextOffset` all evaluate their
+            // operand, so the value is the operand and not the empty "0" the
+            // default arm wrote for the operator token it stopped on.
+            "prefix_expression" if self.language.name == "swift" && matches!(self.text_string(id).chars().next(), Some('&' | '!' | '~' | '-' | '+')) => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
             },
