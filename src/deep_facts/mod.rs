@@ -223,7 +223,12 @@ const CS_DEFS: &[Def] = &[
     Def { kind: "delegate_declaration", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
     Def { kind: "local_function_statement", name: &["identifier"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
-const CS_CALLS: &[&str] = &["invocation_expression", "object_creation_expression", "object_creation"];
+const CS_CALLS: &[&str] = &[
+    "invocation_expression",
+    "object_creation_expression",
+    "object_creation",
+    "conditional_invocation",
+];
 const CS_IMPORTS: &[&str] = &["using_directive"];
 /// C#'s contextual keywords: `value` is the implicit parameter of a property
 /// or event accessor and an ordinary name everywhere else, so treating it as
@@ -569,7 +574,7 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     if lang == Lang::CSharp && tree.errors > 0 {
         if let Some(patched) = cs_strip_primary_constructors(root) {
             if let Some(re_tree) = crate::deep_integration::parse_file(&patched, lang) {
-                if re_tree.errors < tree.errors {
+                if re_tree.errors < tree.errors || re_tree.nodes.len() > tree.nodes.len() {
                     let mut walker = Walker::new(&patched, &re_tree, lang);
                     walker.run();
                     return walker.facts;
@@ -586,6 +591,11 @@ fn cs_skip_ws_and_comments(src: &[u8], mut i: usize) -> usize {
     while i < src.len() {
         if src[i].is_ascii_whitespace() {
             i += 1;
+        } else if src[i] == b'#' {
+            i += 1;
+            while i < src.len() && src[i] != b'\n' {
+                i += 1;
+            }
         } else if src.get(i..i + 2) == Some(b"//") {
             i += 2;
             while i < src.len() && src[i] != b'\n' {
@@ -684,9 +694,84 @@ fn cs_strip_primary_constructors(src: &[u8]) -> Option<Vec<u8>> {
             prev_word = b"";
             continue;
         }
-        if src.get(i..i + 2) == Some(b"//") || src.get(i..i + 2) == Some(b"/*") {
+        if src[i] == b'#' || src.get(i..i + 2) == Some(b"//") || src.get(i..i + 2) == Some(b"/*") {
             i = cs_skip_ws_and_comments(src, i);
             continue;
+        }
+        // `[...] = expr`: a dictionary indexer initializer in an object
+        // initializer is not in the C# grammar yet, so blanking `[` and `]`
+        // turns `["k"] = v` into `"k" = v` without shifting any line.
+        if src[i] == b'[' {
+            if let Some(after_br) = cs_skip_balanced(src, i, b'[', b']') {
+                let after_ws = cs_skip_ws_and_comments(src, after_br);
+                if src.get(after_ws) == Some(&b'=') && src.get(after_ws + 1) != Some(&b'=') && src.get(after_ws + 1) != Some(&b'>') {
+                    spans.push((i, i + 1));
+                    spans.push((after_br - 1, after_br));
+                    i = after_br;
+                    prev_word = b"";
+                    continue;
+                }
+            }
+        }
+        // `= [];`, `??= [];`, `=> [];`, `return [];`: an empty C# 12 collection
+        // expression has no rule in the grammar yet, and replacing `[]` with
+        // `""` (two bytes for two bytes) lets the surrounding class or method
+        // parse cleanly with the same constant `0` value.
+        if src.get(i..i + 2) == Some(b"[]") {
+            let mut p = i;
+            while p > 0 && src[p - 1].is_ascii_whitespace() {
+                p -= 1;
+            }
+            let preceded_by_val = p > 0
+                && (src[p - 1] == b'='
+                    || src[p - 1] == b'('
+                    || src[p - 1] == b','
+                    || src[p - 1] == b':'
+                    || src[p - 1] == b'?'
+                    || (p >= 2 && &src[p - 2..p] == b"=>")
+                    || (p >= 6 && &src[p - 6..p] == b"return" && (p == 6 || !cs_is_ident_cont(src[p - 7]))));
+            if preceded_by_val {
+                let after_ws = cs_skip_ws_and_comments(src, i + 2);
+                if matches!(src.get(after_ws), Some(b';' | b',' | b')' | b'}')) {
+                    spans.push((i, i + 2));
+                    i += 2;
+                    prev_word = b"";
+                    continue;
+                }
+            }
+        }
+        // `= [a, b];`, `=> [a, b];`, `return [a, b];`, `Foo(a, [b, c])`: a
+        // non-empty C# 12 collection expression `[...]` in value position has
+        // no grammar rule yet, and replacing `[` and `]` with `(` and `)`
+        // parses as a parenthesized tuple with the exact `t:[...]` flow form.
+        if src[i] == b'[' {
+            let mut p = i;
+            while p > 0 && src[p - 1].is_ascii_whitespace() {
+                p -= 1;
+            }
+            let preceded_by_val = p > 0
+                && ((src[p - 1] == b'=' && (p < 2 || !matches!(src[p - 2], b'=' | b'!' | b'<' | b'>')))
+                    || src[p - 1] == b'('
+                    || src[p - 1] == b','
+                    || (src[p - 1] == b'?' && (p < 2 || src[p - 2] != b'?'))
+                    || (p >= 2 && &src[p - 2..p] == b"??")
+                    || (p >= 2 && &src[p - 2..p] == b"=>")
+                    || (p >= 6 && &src[p - 6..p] == b"return" && (p == 6 || !cs_is_ident_cont(src[p - 7]))));
+            if preceded_by_val {
+                if let Some(after_br) = cs_skip_balanced(src, i, b'[', b']') {
+                    let after_ws = cs_skip_ws_and_comments(src, after_br);
+                    if matches!(src.get(after_ws), Some(b';' | b',' | b')' | b'}')) {
+                        // Do not rewrite if the bracket contains `..` spread elements.
+                        if !src[i + 1..after_br - 1].windows(2).any(|w| w == b"..") {
+                            spans.push((i, i + 1));
+                            spans.push((after_br - 1, after_br));
+                            i += 1;
+                            prev_word = b"";
+                            continue;
+                        }
+                    }
+                }
+            }
         }
         if !cs_is_ident_start(src[i]) {
             if !src[i].is_ascii_whitespace() {
@@ -784,6 +869,25 @@ fn cs_strip_primary_constructors(src: &[u8]) -> Option<Vec<u8>> {
     }
     let mut patched = src.to_vec();
     for (start, end) in spans {
+        if end == start + 2 && &src[start..end] == b"[]" {
+            patched[start] = b'"';
+            patched[start + 1] = b'"';
+            continue;
+        }
+        if end == start + 1 && src[start] == b'[' {
+            let after_ws = cs_skip_ws_and_comments(src, cs_skip_balanced(src, start, b'[', b']').unwrap_or(end));
+            if src.get(after_ws) != Some(&b'=') {
+                patched[start] = b'(';
+                continue;
+            }
+        }
+        if end == start + 1 && src[start] == b']' {
+            let after_ws = cs_skip_ws_and_comments(src, end);
+            if src.get(after_ws) != Some(&b'=') {
+                patched[start] = b')';
+                continue;
+            }
+        }
         for byte in &mut patched[start..end] {
             if *byte != b'\n' {
                 *byte = b' ';
@@ -971,11 +1075,18 @@ impl<'a> Walker<'a> {
             return None;
         }
         let text = self.text(id);
+        let text = if self.language.name == "csharp" && text.starts_with(b"@") && text.len() > 1 && text[1] != b'"' {
+            &text[1..]
+        } else {
+            text
+        };
         let first = *text.first()?;
-        if !(first.is_ascii_alphabetic() || first == b'_') {
+        if !(first.is_ascii_alphabetic() || first == b'_' || (self.language.name == "csharp" && first >= 0x80)) {
             return None;
         }
-        if !text.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$') {
+        if !text.iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$' || (self.language.name == "csharp" && *byte >= 0x80)
+        }) {
             return None;
         }
         Some(String::from_utf8_lossy(text).into_owned())
@@ -1068,11 +1179,12 @@ impl<'a> Walker<'a> {
         // filter took for punctuation, so `f(`re`)` lost its only argument.
         // Kotlin spells identifiers that way, and there the word is a name, not
         // a value, so the character counts only for Go.
-        // A C# verbatim string opens with `@"` (or `$@"` / `@$"`), which would
-        // likewise be dropped as punctuation if not counted as a value.
+        // A C# verbatim string opens with `@"` (or `$@"` / `@$"`) and a C#
+        // verbatim identifier opens with `@name`, both of which would be
+        // dropped as punctuation if not counted as values.
         let raw_string = (text[0] == b'`' && matches!(self.kinds.family, Family::Go))
-            || (self.language.name == "csharp" && text.starts_with(b"@\""));
-        !(text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'"' || text[0] == b'\'' || raw_string)
+            || (self.language.name == "csharp" && (text.starts_with(b"@\"") || (text[0] == b'@' && text.len() > 1 && (text[1].is_ascii_alphabetic() || text[1] == b'_'))));
+        !(text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'"' || text[0] == b'\'' || raw_string || (self.language.name == "csharp" && text[0] >= 0x80))
     }
 
     // -- frames and symbols -------------------------------------------------
@@ -1103,14 +1215,24 @@ impl<'a> Walker<'a> {
     /// `a.b()`. `f()()` records only `f`, and that value is what gets called,
     /// not what the expression produces.
     pub(crate) fn named_call(&self, id: u32) -> bool {
-        if !matches!(self.kind(id), "call" | "call_expression" | "new_expression") {
+        if !matches!(
+            self.kind(id),
+            "call" | "call_expression" | "new_expression" | "invocation_expression"
+                | "object_creation" | "object_creation_expression"
+        ) {
             return false;
         }
         match self.children(id).into_iter().find(|&child| {
-            !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")")
+            !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")" | "?.")
         }) {
             Some(callee) => {
-                callee != id && !matches!(self.kind(callee), "call" | "call_expression" | "new_expression")
+                callee != id
+                    && !matches!(
+                        self.kind(callee),
+                        "call" | "call_expression" | "new_expression" | "invocation_expression"
+                            | "object_creation" | "object_creation_expression" | "generic_invocation"
+                            | "implicit_creation" | "conditional_invocation"
+                    )
             }
             None => false,
         }
@@ -1178,15 +1300,131 @@ impl<'a> Walker<'a> {
     /// shared `c_calls_in_pub` stops at a block and at a nested lambda because a
     /// C/C++ lambda body is entered on its own walk; a C# lambda is not, so its
     /// block has to be read here or not at all.
+    pub(crate) fn cs_initializer_vars(&mut self, id: u32) {
+        let children: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .filter(|&c| !self.is_layout(c) && !matches!(self.kind(c), "{" | "}" | ","))
+            .collect();
+        let mut i = 0;
+        while i + 2 < children.len() {
+            if self.kind(children[i + 1]) == "=" {
+                if let Some(target) = self.leaf_name(children[i]) {
+                    self.cs_bind_constructed(target, children[i + 2]);
+                }
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     pub(crate) fn lambda_calls(&self, id: u32, out: &mut Vec<u32>) {
         for child in self.children(id) {
             if matches!(
                 self.kind(child),
                 "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression"
+                    | "generic_invocation" | "conditional_invocation"
             ) {
                 out.push(child);
             }
             self.lambda_calls(child, out);
+        }
+    }
+
+    pub(crate) fn cs_recovered_calls(&mut self, id: u32) {
+        let tokens: Vec<u32> = self.children(id);
+        let mut at = 0;
+        while at < tokens.len() {
+            let Some(mut name) = self.leaf_name(tokens[at]) else {
+                at += 1;
+                continue;
+            };
+            if matches!(
+                name.as_str(),
+                "if" | "for" | "foreach" | "while" | "switch" | "catch" | "using" | "lock" | "fixed"
+                    | "checked" | "unchecked" | "sizeof" | "typeof" | "default" | "return" | "throw"
+                    | "yield" | "await" | "new" | "class" | "struct" | "interface" | "enum" | "record"
+                    | "delegate" | "namespace" | "where" | "when" | "is" | "as" | "in" | "out" | "ref"
+            ) {
+                at += 1;
+                continue;
+            }
+            if at > 0
+                && matches!(
+                    self.kind(tokens[at - 1]),
+                    "class" | "struct" | "interface" | "enum" | "record" | "namespace"
+                )
+            {
+                at += 1;
+                continue;
+            }
+            let is_new = at > 0 && self.kind(tokens[at - 1]) == "new";
+            if name == "this" {
+                name = "self".to_string();
+            }
+            let mut end = at;
+            let mut line = self.line(tokens[at]);
+            while end + 2 < tokens.len() && matches!(self.kind(tokens[end + 1]), "." | "?." | "::") {
+                let Some(seg) = self.leaf_name(tokens[end + 2]) else {
+                    break;
+                };
+                name.push('.');
+                name.push_str(&seg);
+                line = self.line(tokens[end + 2]);
+                end += 2;
+            }
+            let mut after = end + 1;
+            if after < tokens.len() && self.kind(tokens[after]) == "<" {
+                let mut depth = 0i32;
+                let mut j = after;
+                while j < tokens.len() {
+                    match self.kind(tokens[j]) {
+                        "<" => depth += 1,
+                        ">" | ">joined" => {
+                            depth -= 1;
+                            if depth <= 0 {
+                                after = j + 1;
+                                break;
+                            }
+                        }
+                        ";" | "{" | "}" => break,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+            }
+            if after < tokens.len() {
+                let next_kind = self.kind(tokens[after]);
+                if next_kind == "(" || (is_new && next_kind == "{") {
+                    self.push_call(name.clone(), line);
+                    let last = name.rsplit('.').next().unwrap_or("");
+                    if last.starts_with(|ch: char| ch.is_uppercase()) {
+                        let mut scan = at;
+                        if is_new && scan > 0 {
+                            scan -= 1;
+                        }
+                        if scan > 1 && self.kind(tokens[scan - 1]) == "=" {
+                            let mut t_end = scan - 2;
+                            if let Some(mut target) = self.leaf_name(tokens[t_end]) {
+                                while t_end >= 2 && matches!(self.kind(tokens[t_end - 1]), "." | "?.") {
+                                    if let Some(prev) = self.leaf_name(tokens[t_end - 2]) {
+                                        let prev = if prev == "this" { "self".to_string() } else { prev };
+                                        target = format!("{prev}.{target}");
+                                        t_end -= 2;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if !target.is_empty() {
+                                    self.facts.vars.push((target, last.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            at = end + 1;
         }
     }
 
@@ -1285,31 +1523,29 @@ impl<'a> Walker<'a> {
         // the lexer reads a call, so every abstract member of the corpus lost
         // one. Read before the definition table claims the node. An
         // expression-bodied method (`=>`) has a body and is read below instead.
-        if kind == "method_declaration"
+        // `public delegate object ObjectConstructor<T>(params object[] args);`:
+        // a delegate declaration is one header statement to the one-pass
+        // reader, and the definition table claims the node before any arm can
+        // read it, so every delegate declaration lost its line.
+        if (kind == "method_declaration"
             && self.kinds.calls.contains(&"object_creation_expression")
             && !self
                 .children(id)
                 .into_iter()
-                .any(|child| matches!(self.kind(child), "block" | "=>"))
+                .any(|child| matches!(self.kind(child), "block" | "=>")))
+            || (kind == "delegate_declaration" && self.language.name == "csharp")
         {
             let children = self.children(id);
             let named = children
                 .iter()
                 .copied()
-                .take_while(|&child| !matches!(self.kind(child), "parameter_list" | "formal_parameters"))
-                .filter(|&child| self.kind(child) == "identifier")
+                .take_while(|&child| !matches!(self.kind(child), "parameter_list" | "formal_parameters" | "type_parameters"))
+                .filter(|&child| self.kind(child) == "identifier" || self.leaf_name(child).is_some())
                 .last();
             if let Some(named) = named {
                 let name = self.text_string(named);
-                // The call is written on the line the name is, not on the
-                // declaration's first line: `[Obsolete(..)]` in front of a
-                // member puts the node two lines below its own name.
                 let call_line = self.line(named);
                 let index = self.push_call(name, call_line);
-                // The header itself is an event on the attribute list's first
-                // line when there is one: `[DllImport(..)] public static extern
-                // int F();` is one statement to the one-pass reader, and it
-                // starts where the first `[` is.
                 let mut line = self.line(id);
                 if self.language.name == "csharp" {
                     if let Some(first) = children.iter().copied().find(|&child| {
@@ -1318,21 +1554,12 @@ impl<'a> Walker<'a> {
                         line = self.line(first);
                     }
                 }
-                // The line is an `x` event whose last element is that call,
-                // with every parameter read as one merge of its words:
-                // `m:[n:public,n:abstract,n:T,c(0;[m:[n:Type,n:objectType]])]`.
                 let mut parts: Vec<String> = Vec::new();
                 let mut attributed = false;
                 for child in &children {
-                    if matches!(self.kind(*child), "parameter_list" | "formal_parameters") {
+                    if matches!(self.kind(*child), "parameter_list" | "formal_parameters" | "type_parameters") || *child == named {
                         break;
                     }
-                    // `[DefaultDllImportSearchPaths(..)] [DllImport(..)] public
-                    // static extern int F();`: the lexer writes the first
-                    // attribute section as the header's first value - a call
-                    // per attribute that has arguments - and every later
-                    // section contributes its calls and no value. Flattening
-                    // the list into name words lost the call on 1,081 C# files.
                     if self.language.name == "csharp"
                         && matches!(self.kind(*child), "attributes" | "attribute_section" | "attribute_list")
                     {
@@ -1353,32 +1580,33 @@ impl<'a> Walker<'a> {
                     .find(|&child| matches!(self.kind(child), "parameter_list" | "formal_parameters"))
                 {
                     for parameter in self.children(list) {
-                        let words = self.c_words_of(parameter);
-                        if words.is_empty() {
+                        if self.kind(parameter) != "parameter" {
                             continue;
                         }
-                        let inner: Vec<String> = words
-                            .iter()
-                            .map(|word| {
+                        let mut p_parts: Vec<String> = Vec::new();
+                        let mut p_attr = false;
+                        for p_child in self.children(parameter) {
+                            if self.language.name == "csharp"
+                                && matches!(self.kind(p_child), "attributes" | "attribute_section" | "attribute_list")
+                            {
+                                self.csharp_attributes(p_child, &mut p_attr, &mut p_parts);
+                                continue;
+                            }
+                            for word in self.c_words_of(p_child) {
                                 let word = if word == "this" { "self" } else { word.as_str() };
                                 let mut form = String::from("[\"n\",");
                                 push_string(&mut form, word);
                                 form.push(']');
-                                form
-                            })
-                            .collect();
-                        args.push(format!("[\"m\",[{}]]", inner.join(",")));
+                                p_parts.push(form);
+                            }
+                        }
+                        if !p_parts.is_empty() {
+                            args.push(format!("[\"m\",[{}]]", p_parts.join(",")));
+                        }
                     }
                 }
                 let call = format!("[\"c\",{index},0,[{}]]", args.join(","));
-                if parts.is_empty() {
-                    parts.push(call);
-                } else {
-                    parts.push(call);
-                }
-                // `where TTarget : AvaloniaObject`: type parameter constraints
-                // follow the parameter list on the method header, and the
-                // one-pass reader keeps their words in the header event.
+                parts.push(call);
                 for child in &children {
                     if self.kind(*child) != "type_parameter_constraints" {
                         continue;
@@ -1393,13 +1621,6 @@ impl<'a> Walker<'a> {
                 let value = format!("[\"m\",[{}]]", parts.join(","));
                 self.lexer_event(b'x', line, &[], &value, false);
             }
-        }
-        // `public delegate object ObjectConstructor<T>(params object[] args);`:
-        // a delegate declaration is one header statement to the one-pass
-        // reader, and the definition table claims the node before any arm can
-        // read it, so every delegate declaration lost its line.
-        if kind == "delegate_declaration" {
-            self.java_header_event(id);
         }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
             self.open_definition(id, def);
@@ -1445,7 +1666,15 @@ impl<'a> Walker<'a> {
                         children[..at]
                             .iter()
                             .rev()
-                            .find(|&&child| self.kind(child) == "identifier")
+                            .find(|&&child| {
+                                self.kind(child) == "identifier"
+                                    || (self.language.name == "csharp"
+                                        && (self.kinds.soft.contains(&self.kind(child))
+                                            || matches!(
+                                                self.kind(child),
+                                                "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "var"
+                                            )))
+                            })
                             .map(|&child| self.text_string(child))
                     });
                     match (assigned, target) {
@@ -1460,15 +1689,44 @@ impl<'a> Walker<'a> {
                             // Other languages keep the constant: the model is the
                             // C# arm's, measured here, not theirs.
                             let form = if self.language.name == "csharp" {
-                                let child = children.get(at + 1).copied();
+                                let child = children[at + 1..]
+                                    .iter()
+                                    .copied()
+                                    .find(|&c| !self.is_layout(c) && self.kind(c) != "ref");
                                 let kind = child.map(|node| self.kind(node)).unwrap_or("");
-                                match kind {
+                                let first_form = match kind {
                                     "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
                                     "" => "0".to_string(),
                                     _ => child
                                         .map(|node| self.form(node))
                                         .filter(|form| !form.is_empty() && form != "0")
                                         .unwrap_or_else(|| "0".to_string()),
+                                };
+                                let mut multi = vec![first_form];
+                                for (idx, &c) in children.iter().enumerate() {
+                                    if idx > at && self.kind(c) == "=" {
+                                        if let Some(&rhs) = children[idx + 1..]
+                                            .iter()
+                                            .find(|&&n| !self.is_layout(n) && self.kind(n) != "ref")
+                                        {
+                                            let rhs_form = self.form(rhs);
+                                            if let Some(t_name) = children[..idx].iter().rev().find_map(|&n| self.leaf_name(n)) {
+                                                let mut tf = String::from("[\"n\",");
+                                                push_string(&mut tf, &t_name);
+                                                tf.push(']');
+                                                if rhs_form == "0" || rhs_form.is_empty() {
+                                                    multi.push(tf);
+                                                } else {
+                                                    multi.push(format!("[\"m\",[{tf},{rhs_form}]]"));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if multi.len() == 1 {
+                                    multi.remove(0)
+                                } else {
+                                    format!("[\"t\",[{}]]", multi.join(","))
                                 }
                             } else {
                                 "0".to_string()
