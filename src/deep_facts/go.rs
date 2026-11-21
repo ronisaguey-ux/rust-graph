@@ -4100,6 +4100,26 @@ fn dotted_piece(text: &str) -> bool {
                     None => "0".to_string(),
                 }
             }
+            // `var y = $0.sorted()` / `var output = ""`: a Swift property
+            // declaration inside a closure still evaluates its initializer, and
+            // the lexer reads both the bound name and the initializer.
+            "property_declaration" if self.language.name == "swift" => {
+                let children = self.children(id);
+                let mut parts = Vec::new();
+                if let Some(pattern) = children.iter().copied().find(|&c| self.kind(c) == "pattern") {
+                    self.swift_collect_idents(pattern, &mut parts);
+                }
+                if let Some(at) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(value) = children[at + 1..].iter().copied().find(|&c| !self.is_layout(c)) {
+                        parts.push(self.form(value));
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             "not_null_expression" if self.is_kotlin() => match self.expression_child(id) {
                 Some(child) => self.form(child),
                 None => "0".to_string(),
@@ -4903,10 +4923,11 @@ fn dotted_piece(text: &str) -> bool {
                     if value != "0" {
                         parts.push(value);
                     } else {
-                        // Statements that `form` does not map (e.g. `let`,
-                        // `for`, `switch`, `return`) still contribute their
-                        // identifier leaves, matching the lexer's flat read.
-                        self.swift_collect_idents(statement, &mut parts);
+                        // Statements that `form` does not map (e.g. `for`,
+                        // `switch`, `return`) still contribute their calls,
+                        // literals and identifier leaves, matching the lexer's
+                        // flat read.
+                        self.swift_collect_forms(statement, &mut parts);
                     }
                 }
                 match parts.len() {
@@ -5091,6 +5112,74 @@ fn dotted_piece(text: &str) -> bool {
                 continue;
             }
             if matches!(self.kind(child), "identifier" | "_") {
+                let text = self.text_string(child);
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, &text);
+                form.push(']');
+                out.push(form);
+                continue;
+            }
+            let mut kids = self.children(child);
+            kids.reverse();
+            stack.extend(kids);
+        }
+    }
+
+    /// Formed expressions, literals and identifier leaves inside an unmapped
+    /// Swift statement (e.g. `for`, `if`, `switch`, `return`) inside a closure.
+    fn swift_collect_forms(&mut self, node: u32, out: &mut Vec<String>) {
+        let mut stack: Vec<u32> = self.children(node);
+        stack.reverse();
+        while let Some(child) = stack.pop() {
+            if self.is_layout(child) {
+                continue;
+            }
+            let kind = self.kind(child);
+            if matches!(
+                kind,
+                "call_expression"
+                    | "property_declaration"
+                    | "closure"
+                    | "trailing_closure"
+                    | "navigation_expression"
+                    | "subscript_expression"
+                    | "integer_literal"
+                    | "hex_literal"
+                    | "oct_literal"
+                    | "bin_literal"
+                    | "real_literal"
+                    | "boolean_literal"
+                    | "nil"
+            ) {
+                out.push(self.form(child));
+                continue;
+            }
+            if matches!(kind, "line_string_literal" | "multi_line_string_literal" | "raw_string_literal")
+                && !self
+                    .children(child)
+                    .into_iter()
+                    .any(|grand| self.kind(grand) == "interpolated_expression")
+            {
+                out.push("0".to_string());
+                continue;
+            }
+            if kind == "labeled_argument" {
+                let parts = self.children(child);
+                let name = parts.first().map(|&node| self.path_of(node)).unwrap_or_default();
+                if !name.is_empty() {
+                    let mut keyed = String::from("[\"k\",");
+                    push_string(&mut keyed, &name);
+                    keyed.push_str(",0]");
+                    out.push(keyed);
+                }
+                if parts.len() > 1 {
+                    if let Some(&inner) = parts.last() {
+                        stack.push(inner);
+                    }
+                }
+                continue;
+            }
+            if matches!(kind, "identifier" | "_") {
                 let text = self.text_string(child);
                 let mut form = String::from("[\"n\",");
                 push_string(&mut form, &text);

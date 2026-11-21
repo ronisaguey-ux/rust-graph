@@ -693,6 +693,26 @@ impl<'a> Parser<'a> {
             {
                 return;
             }
+            // `static let f:` newline `@convention(c) (Int) -> Foo =` newline
+            // `symbol(handle, "f")`: a binding's type annotation may follow its
+            // colon on the next line, and no Swift statement ends at a `:` apart
+            // from a `case`/`default` label, which a binding is not. Ended
+            // here, the annotation line became a statement of its own, so its
+            // target was the return type (`a ["\".Foo\""]`) and the
+            // initialiser's call was filed under that name instead of the
+            // binding — 12 rows in the swift corpus, every `@convention(c)`
+            // function pointer whose type spans lines.
+            if self.lang.tag == "SWIFT"
+                && self.is_op(last, b":")
+                && self.stmt.iter().any(|token| {
+                    token.kind == Kind::Ident && matches!(self.raw(token), b"let" | b"var")
+                })
+                && !self.stmt.iter().any(|token| {
+                    token.kind == Kind::Ident && matches!(self.raw(token), b"case" | b"default")
+                })
+            {
+                return;
+            }
             // `func f(x: [Int])` newline `-> Slice<T> {`: a Swift return type
             // on its own line is still the function's header. Ended here, the
             // arrow line became a module-level value (`x`) the CST never writes.
