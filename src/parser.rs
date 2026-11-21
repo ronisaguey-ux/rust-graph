@@ -90,6 +90,9 @@ struct Frame {
     /// The body of a type declaration: `interface { ... }`, `enum { ... }`.
     /// Its statements are type members and write no fact.
     type_only: bool,
+    /// The body of a C# object or collection initialiser: `new Dto { A = 1 }`.
+    /// Its `Name = value` statements set members, not variables.
+    initialiser: bool,
 }
 
 #[derive(Default)]
@@ -320,6 +323,7 @@ impl<'a> Parser<'a> {
             saved: None,
             defines: None,
         type_only: false,
+        initialiser: false,
         });
         loop {
             let token = self.next_token();
@@ -1030,10 +1034,14 @@ impl<'a> Parser<'a> {
                 }
             }
             let macro_body = self.macro_rules_head();
+            let initialiser = self.lang.tag == "CS" && self.opens_cs_initialiser();
             let before = self.frames.len();
             self.open_block();
             if (type_body || macro_body) && self.frames.len() > before {
                 self.frames[before].type_only = true;
+            }
+            if initialiser && self.frames.len() > before {
+                self.frames[before].initialiser = true;
             }
             if conditional {
                 self.conditional_type_open = true;
@@ -1042,6 +1050,26 @@ impl<'a> Parser<'a> {
             self.brackets.push(b'{');
             self.stmt.push(token);
         }
+    }
+
+    /// `return new Dto {` and `Address = new Address() {`: a `new` at the top
+    /// level of the header, so the brace that follows is an object or collection
+    /// initialiser. A `new` inside the parentheses of a call or a constructor's
+    /// base list is an argument, and its brace is a body.
+    fn opens_cs_initialiser(&self) -> bool {
+        let mut depth = 0i32;
+        for token in &self.stmt {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" => depth += 1,
+                    b")" | b"]" => depth -= 1,
+                    _ => {}
+                }
+            } else if depth == 0 && token.kind == Kind::Ident && self.raw(token) == b"new" {
+                return true;
+            }
+        }
+        false
     }
 
     fn on_close_brace(&mut self, token: Token) {
@@ -1918,7 +1946,7 @@ impl<'a> Parser<'a> {
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
-            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false, initialiser: false });
         } else if self.lang.tag == "SWIFT" && self.swift_subscript_head(&stmt) {
             // `subscript(_ name: String) -> String? { get … set … }` declares a
             // computed subscript, not a function. The CST names no `subscript`
@@ -1929,7 +1957,7 @@ impl<'a> Parser<'a> {
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
-            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false, initialiser: false });
         } else if self.head_word(&stmt).is_some_and(|word| word == "extern")
             && (self.lang.tag == "RS"
                 || (matches!(self.lang.tag, "C" | "CPP" | "OBJC")
@@ -1944,7 +1972,7 @@ impl<'a> Parser<'a> {
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
-            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false, initialiser: false });
         } else if self.lang.tag == "RS"
             && stmt.len() > 2
             && stmt.last().is_some_and(|token| self.raw(token) == b"else")
@@ -1957,7 +1985,7 @@ impl<'a> Parser<'a> {
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
-            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false, initialiser: false });
         } else if let Some((name, bases)) = self.class_head(&stmt).or_else(|| {
             matches!(self.lang.tag, "JS" | "JSX" | "TS" | "TSX")
                 .then(|| {
@@ -1994,7 +2022,7 @@ impl<'a> Parser<'a> {
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
-            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false, initialiser: false });
             if typedef_block {
                 self.typedef_block = Some(self.frames.len());
             }
@@ -2040,7 +2068,7 @@ impl<'a> Parser<'a> {
                 let symbol = self.top().symbol;
                 let class = self.top().class.clone();
                 let receiver = self.top().receiver.clone();
-                self.frames.push(Frame { kind: FrameKind::Control, symbol, class, receiver, col, saved: None, defines: None, type_only: false });
+                self.frames.push(Frame { kind: FrameKind::Control, symbol, class, receiver, col, saved: None, defines: None, type_only: false, initialiser: false });
                 return;
             }
         }
@@ -2050,7 +2078,7 @@ impl<'a> Parser<'a> {
         let symbol = self.top().symbol;
         let class = self.top().class.clone();
         let receiver = self.top().receiver.clone();
-        self.frames.push(Frame { kind: FrameKind::Control, symbol, class, receiver, col, saved: None, defines: None, type_only: false });
+        self.frames.push(Frame { kind: FrameKind::Control, symbol, class, receiver, col, saved: None, defines: None, type_only: false, initialiser: false });
     }
 
     /// `["f"]`: this arm has no condition, so the arms together cover every case.
@@ -2285,6 +2313,7 @@ impl<'a> Parser<'a> {
             saved: saved.map(|(stmt, brackets)| SavedStmt::Expr(stmt, brackets)),
             defines: Some(index),
             type_only: false,
+            initialiser: false,
         });
     }
 
@@ -2300,6 +2329,7 @@ impl<'a> Parser<'a> {
             saved: saved.map(|(stmt, brackets)| SavedStmt::Expr(stmt, brackets)),
             defines: Some(index),
         type_only: false,
+        initialiser: false,
         });
     }
 
@@ -3048,7 +3078,7 @@ impl<'a> Parser<'a> {
             let symbol = self.top().symbol;
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
-            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col, saved: None, defines: None, type_only: false });
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col, saved: None, defines: None, type_only: false, initialiser: false });
             return;
         }
         self.simple_statement(stmt);
@@ -3095,6 +3125,7 @@ impl<'a> Parser<'a> {
                             saved: None,
                             defines: None,
                         type_only: false,
+                        initialiser: false,
                         });
                     }
                 }
@@ -5483,6 +5514,10 @@ impl<'a> Parser<'a> {
         }
         let capital = class.starts_with(|ch: char| ch.is_uppercase());
         let name = if owner.is_empty() { class } else { self.name_chain(value, at).0 };
+        // C# methods are PascalCase too, so `var file = GetSubString(s)` is a
+        // call whose result is a string, not a `GetSubString`. Only `new` makes
+        // a C# value of a named class; the CST binds nothing else.
+        let capital = capital && self.lang.tag != "CS";
         if called && (explicit || capital) && name.starts_with(|ch: char| ch.is_uppercase()) {
             let target = self.target_path(targets);
             if let Some(target) = target {
@@ -5491,7 +5526,11 @@ impl<'a> Parser<'a> {
                 // `sock.LingerState = new LingerOption(…)` bound `sock.LingerState`
                 // to `LingerOption` and the CST, which never declares that name,
                 // lost a variable for every such line.
-                if !(self.lang.tag == "CS" && target.contains('.')) {
+                // An object initialiser's member is a property being set, not a
+                // variable being declared: `return new Dto { Address = new
+                // Address() }` binds no `Address`, and the CST writes none.
+                let initialiser = self.lang.tag == "CS" && self.frames.last().is_some_and(|frame| frame.initialiser);
+                if !(self.lang.tag == "CS" && (target.contains('.') || initialiser)) {
                     self.facts.vars.push((target, name));
                 }
             }
@@ -5830,9 +5869,13 @@ impl<'a> Parser<'a> {
     }
 
     fn is_join(&self, token: &Token) -> bool {
+        // C# `label?.Content = v` is the null-conditional member, the same path
+        // as `label.Content`: the CST writes the dotted target and binds nothing.
+        // The walk stopped at `?.`, so the target was the bare `Content`.
         token.kind == Kind::Op
             && (matches!(self.raw(token), b"." | b"::")
-                || (self.raw(token) == b"->" && self.lang.tag != "KT"))
+                || (self.raw(token) == b"->" && self.lang.tag != "KT")
+                || (self.raw(token) == b"?." && self.lang.tag == "CS"))
     }
 
     /// True when a parenthesised group's top-level tokens form a path/call chain
