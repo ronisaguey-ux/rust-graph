@@ -561,9 +561,236 @@ pub fn lang_for_forced(tag: &str) -> Option<Lang> {
 
 /// Read a file's facts off its CST.
 pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
+    // C# 12 primary constructors on `class` and `struct` (`class C(int x) { ... }`)
+    // are not in the C# grammar yet, so tree-sitter terminates the class at
+    // its name and dumps `(x) { ... }` into an `ERROR` region. Blanking the
+    // parameter list (and any `: Base(x)` argument list) with spaces preserves
+    // every line number and lets the CST read the class body normally.
+    if lang == Lang::CSharp && tree.errors > 0 {
+        if let Some(patched) = cs_strip_primary_constructors(root) {
+            if let Some(re_tree) = crate::deep_integration::parse_file(&patched, lang) {
+                if re_tree.errors < tree.errors {
+                    let mut walker = Walker::new(&patched, &re_tree, lang);
+                    walker.run();
+                    return walker.facts;
+                }
+            }
+        }
+    }
     let mut walker = Walker::new(root, tree, lang);
     walker.run();
     walker.facts
+}
+
+fn cs_skip_ws_and_comments(src: &[u8], mut i: usize) -> usize {
+    while i < src.len() {
+        if src[i].is_ascii_whitespace() {
+            i += 1;
+        } else if src.get(i..i + 2) == Some(b"//") {
+            i += 2;
+            while i < src.len() && src[i] != b'\n' {
+                i += 1;
+            }
+        } else if src.get(i..i + 2) == Some(b"/*") {
+            i += 2;
+            while i + 1 < src.len() && src.get(i..i + 2) != Some(b"*/") {
+                i += 1;
+            }
+            i = (i + 2).min(src.len());
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+fn cs_skip_string_or_char(src: &[u8], i: usize) -> Option<usize> {
+    if src.get(i..i + 2) == Some(b"@\"") {
+        let mut j = i + 2;
+        while j < src.len() {
+            if src[j] == b'"' {
+                if src.get(j + 1) == Some(&b'"') {
+                    j += 2;
+                } else {
+                    return Some(j + 1);
+                }
+            } else {
+                j += 1;
+            }
+        }
+        return Some(src.len());
+    }
+    let quote = src[i];
+    if quote == b'"' || quote == b'\'' {
+        let mut j = i + 1;
+        while j < src.len() {
+            if src[j] == b'\\' {
+                j += 2;
+            } else if src[j] == quote {
+                return Some(j + 1);
+            } else {
+                j += 1;
+            }
+        }
+        return Some(src.len());
+    }
+    None
+}
+
+fn cs_skip_balanced(src: &[u8], i: usize, open: u8, close: u8) -> Option<usize> {
+    if src.get(i) != Some(&open) {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut j = i + 1;
+    while j < src.len() {
+        if let Some(next) = cs_skip_string_or_char(src, j) {
+            j = next;
+            continue;
+        }
+        if src.get(j..j + 2) == Some(b"//") || src.get(j..j + 2) == Some(b"/*") {
+            j = cs_skip_ws_and_comments(src, j);
+            continue;
+        }
+        if src[j] == open {
+            depth += 1;
+        } else if src[j] == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(j + 1);
+            }
+        }
+        j += 1;
+    }
+    None
+}
+
+fn cs_is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_' || b == b'@'
+}
+
+fn cs_is_ident_cont(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn cs_strip_primary_constructors(src: &[u8]) -> Option<Vec<u8>> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    let mut prev_word: &[u8] = b"";
+
+    while i < src.len() {
+        if let Some(next) = cs_skip_string_or_char(src, i) {
+            i = next;
+            prev_word = b"";
+            continue;
+        }
+        if src.get(i..i + 2) == Some(b"//") || src.get(i..i + 2) == Some(b"/*") {
+            i = cs_skip_ws_and_comments(src, i);
+            continue;
+        }
+        if !cs_is_ident_start(src[i]) {
+            if !src[i].is_ascii_whitespace() {
+                prev_word = b"";
+            }
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        while i < src.len() && cs_is_ident_cont(src[i]) {
+            i += 1;
+        }
+        let word = &src[start..i];
+        if (word == b"class" || word == b"struct") && prev_word != b"record" {
+            let mut j = cs_skip_ws_and_comments(src, i);
+            if j < src.len() && cs_is_ident_start(src[j]) {
+                j += 1;
+                while j < src.len() && cs_is_ident_cont(src[j]) {
+                    j += 1;
+                }
+                j = cs_skip_ws_and_comments(src, j);
+                if src.get(j) == Some(&b'<') {
+                    if let Some(after_gen) = cs_skip_balanced(src, j, b'<', b'>') {
+                        j = cs_skip_ws_and_comments(src, after_gen);
+                    }
+                }
+                if src.get(j) == Some(&b'(') {
+                    if let Some(after_params) = cs_skip_balanced(src, j, b'(', b')') {
+                        let mut local_spans = vec![(j, after_params)];
+                        let mut k = cs_skip_ws_and_comments(src, after_params);
+                        // Optional base list `: Base(args), IFoo` before `where` or `{`.
+                        if src.get(k) == Some(&b':') {
+                            k += 1;
+                            while k < src.len() {
+                                k = cs_skip_ws_and_comments(src, k);
+                                if k >= src.len() || src[k] == b'{' || src[k] == b';' {
+                                    break;
+                                }
+                                if src.get(k) == Some(&b'<') {
+                                    if let Some(after_gen) = cs_skip_balanced(src, k, b'<', b'>') {
+                                        k = after_gen;
+                                        continue;
+                                    }
+                                }
+                                if src.get(k) == Some(&b'(') {
+                                    if let Some(after_args) = cs_skip_balanced(src, k, b'(', b')') {
+                                        local_spans.push((k, after_args));
+                                        k = after_args;
+                                        continue;
+                                    }
+                                }
+                                if cs_is_ident_start(src[k]) {
+                                    let w_start = k;
+                                    k += 1;
+                                    while k < src.len() && cs_is_ident_cont(src[k]) {
+                                        k += 1;
+                                    }
+                                    if &src[w_start..k] == b"where" {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                k += 1;
+                            }
+                        }
+                        // Advance past optional `where` constraints to confirm `{` body.
+                        while k < src.len() {
+                            if let Some(next) = cs_skip_string_or_char(src, k) {
+                                k = next;
+                                continue;
+                            }
+                            if src.get(k..k + 2) == Some(b"//") || src.get(k..k + 2) == Some(b"/*") {
+                                k = cs_skip_ws_and_comments(src, k);
+                                continue;
+                            }
+                            if src[k] == b'{' {
+                                spans.extend(local_spans);
+                                break;
+                            }
+                            if src[k] == b';' || src[k] == b'}' {
+                                break;
+                            }
+                            k += 1;
+                        }
+                    }
+                }
+            }
+        }
+        prev_word = word;
+    }
+
+    if spans.is_empty() {
+        return None;
+    }
+    let mut patched = src.to_vec();
+    for (start, end) in spans {
+        for byte in &mut patched[start..end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    Some(patched)
 }
 
 impl<'a> Walker<'a> {
