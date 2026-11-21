@@ -186,6 +186,15 @@ rust_graph_deep::grammar! { SWIFT {
         KW_INDIRECT = "indirect",
 
         SEMI = ";",
+        /// A line break that ends a statement, written where the next line
+        /// opens with `(` or `[`. Swift's own parser refuses both as a call or
+        /// subscript suffix when a line break comes first
+        /// (`TokenSpec(.leftParen, allowAtStartOfLine: false)`), so
+        /// `allocate(capacity: 5)` then `(buf + 0).initialize(…)` is two
+        /// statements. Glued instead, the second line's call became an
+        /// argument list of the first and its own statement never reached the
+        /// record (2 rows in swift/test/stdlib/Builtins.swift).
+        LINE_END = "line_end",
         COMMA = ",",
         DOT = ".",
         BACKSLASH = "\\",
@@ -270,6 +279,7 @@ rust_graph_deep::grammar! { SWIFT {
         | break_statement
         | continue_statement
         | ";"
+        | LINE_END
         | expression_statement,
 
     // ---- declarations ----
@@ -531,8 +541,22 @@ pub fn lex(c: &mut Cursor) -> Kind {
     }
     match c.peek() {
         b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
-            c.eat_while(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c));
-            WHITESPACE
+            let mut line_break = false;
+            c.eat_while(|byte| {
+                line_break |= byte == b'\n' || byte == b'\r';
+                matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+            });
+            // Swift ends a statement at a line break, and its parser says so
+            // for the two suffixes that would otherwise continue the line
+            // above: a `(` or `[` at the start of a line is never a call or a
+            // subscript, whatever precedes it. Every other token that can
+            // continue an expression (`.`, an operator, `{`) keeps the line
+            // break as whitespace, which is why only these two end one.
+            if line_break && ends_statement(c.previous()) && matches!(c.peek(), b'(' | b'[') {
+                LINE_END
+            } else {
+                WHITESPACE
+            }
         }
         0xef if c.starts_with(b"\xef\xbb\xbf") => {
             c.bump_n(3);
@@ -571,6 +595,19 @@ pub fn lex(c: &mut Cursor) -> Kind {
         byte if is_word_start(byte) => word(c),
         _ => operator(c),
     }
+}
+
+/// Whether a token can be the last thing on a statement's line, so that a `(`
+/// or `[` on the next one starts a new statement rather than continuing it.
+/// Every expression a statement can end with is here; a keyword that opens a
+/// construct (`if`, `let`, `in`) is not, because the line after one of those
+/// does continue it.
+fn ends_statement(kind: Kind) -> bool {
+    matches!(
+        kind,
+        IDENT | NUMBER | FLOAT | STRING | STRING_END | STRING_BAD | BAD_LITERAL
+            | RPAREN | RBRACKET | RBRACE | KW_TRUE | KW_FALSE | KW_NIL | KW_SELF | KW_SUPER | BANG | QUESTION
+    )
 }
 
 #[inline]
@@ -1055,6 +1092,9 @@ mod tests {
         ("array_trailing_comma", "let values = [1, 2,];"),
         ("array_closure_last", "let values = [1, { text in text.count },];"),
         ("array_closure_no_comma", "let values = [1, { text in text.count }];"),
+        // A `(` that opens a line is never a call suffix, so this is two
+        // statements: one `property_declaration` and one `call_expression`.
+        ("paren_statement", "func f() {\n    let buf = allocate(capacity: 5)\n    (buf + 0).initialize(to: 1)\n}"),
     ];
 
     fn parse(src: &[u8]) -> (bool, usize, String) {
