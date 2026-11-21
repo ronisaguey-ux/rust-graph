@@ -964,7 +964,10 @@ impl<'a> Walker<'a> {
     /// same statement to the one-pass reader.
     pub(crate) fn cs_generic_invocation(&mut self, id: u32) -> String {
         let children = self.children(id);
-        let mut parts: Vec<String> = Vec::new();
+        let mut callee_form: Option<String> = None;
+        let mut type_args: Vec<String> = Vec::new();
+        let mut args_form: Option<String> = None;
+        let mut trailing: Vec<String> = Vec::new();
         for (index, &child) in children.iter().enumerate() {
             let kind = self.kind(child);
             if index == 0 {
@@ -973,27 +976,26 @@ impl<'a> Walker<'a> {
                     let mut out = "[\"n\",".to_string();
                     push_string(&mut out, &path);
                     out.push(']');
-                    parts.push(out);
+                    callee_form = Some(out);
                 }
                 continue;
             }
             if kind == "type_arguments" {
                 for arg in self.children(child) {
-                    if self.is_layout(arg) {
+                    if matches!(self.kind(arg), "<" | ">" | ">>" | ",")
+                        || (self.is_layout(arg) && self.leaf_name(arg).is_none())
+                    {
                         continue;
                     }
-                    let path = self.path_of(arg);
-                    if path.is_empty() {
-                        continue;
+                    let form = self.form(arg);
+                    if !form.is_empty() && form != "0" {
+                        type_args.push(form);
                     }
-                    let mut out = "[\"n\",".to_string();
-                    push_string(&mut out, &path);
-                    out.push(']');
-                    parts.push(out);
                 }
                 continue;
             }
             if matches!(kind, "arguments" | "argument_list") {
+                self.delim_depth += 1;
                 let mut items: Vec<String> = Vec::new();
                 for arg in self.children(child) {
                     if self.is_layout(arg) {
@@ -1001,12 +1003,12 @@ impl<'a> Walker<'a> {
                     }
                     items.push(self.form(arg));
                 }
-                let value = match items.len() {
-                    0 => continue,
-                    1 => items.pop().unwrap_or_else(|| "0".to_string()),
-                    _ => format!("[\"t\",[{}]]", items.join(",")),
-                };
-                parts.push(value);
+                self.delim_depth -= 1;
+                match items.len() {
+                    0 => {}
+                    1 => args_form = Some(items.pop().unwrap_or_else(|| "0".to_string())),
+                    _ => args_form = Some(format!("[\"t\",[{}]]", items.join(","))),
+                }
                 continue;
             }
             if self.is_layout(child) {
@@ -1014,14 +1016,62 @@ impl<'a> Walker<'a> {
             }
             let value = self.form(child);
             if !value.is_empty() && value != "0" {
-                parts.push(value);
+                trailing.push(value);
             }
         }
-        match parts.len() {
-            0 => "0".to_string(),
-            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
-            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        // Merge helper that flattens a nested `["m",[...]]` (e.g. from a generic
+        // type argument like `IEnumerable<Color>`) so it matches the one-pass
+        // reader's flat merge.
+        let push_flat = |out: &mut Vec<String>, form: String| {
+            if let Some(inner) = form.strip_prefix("[\"m\",[").and_then(|s| s.strip_suffix("]]")) {
+                out.push(inner.to_string());
+            } else {
+                out.push(form);
+            }
+        };
+        let merge_vec = |items: Vec<String>| -> String {
+            match items.len() {
+                0 => "0".to_string(),
+                1 => items.into_iter().next().unwrap_or_else(|| "0".to_string()),
+                _ => format!("[\"m\",[{}]]", items.join(",")),
+            }
+        };
+        // With two or more type arguments (`Foo<A, B>(x)`), the one-pass reader
+        // splits on `,` outside parentheses into a tuple: `m:[Foo, A]` then
+        // `m:[B, x]`.
+        if type_args.len() >= 2 {
+            let mut tuple = Vec::with_capacity(type_args.len());
+            let last_idx = type_args.len() - 1;
+            for (i, targ) in type_args.into_iter().enumerate() {
+                let mut elem = Vec::new();
+                if i == 0 {
+                    if let Some(c) = callee_form.take() {
+                        push_flat(&mut elem, c);
+                    }
+                }
+                push_flat(&mut elem, targ);
+                if i == last_idx {
+                    if let Some(a) = args_form.take() {
+                        elem.push(a);
+                    }
+                    elem.extend(std::mem::take(&mut trailing));
+                }
+                tuple.push(merge_vec(elem));
+            }
+            return format!("[\"t\",[{}]]", tuple.join(","));
         }
+        let mut parts = Vec::new();
+        if let Some(c) = callee_form {
+            push_flat(&mut parts, c);
+        }
+        for targ in type_args {
+            push_flat(&mut parts, targ);
+        }
+        if let Some(a) = args_form {
+            parts.push(a);
+        }
+        parts.extend(trailing);
+        merge_vec(parts)
     }
 
     /// One call, at the line its callee is written on, named the way the source
@@ -3279,10 +3329,12 @@ fn dotted_piece(text: &str) -> bool {
         // `(socklen_t)ss_size`: a cast is the type's words and the operand's
         // value to the one-pass reader, and the shared fallbacks below read
         // the node as its first child, which is the type alone.
-        if self.is_c() {
+        if self.is_c() || self.language.name == "csharp" {
             if let Some(out) = self.c_cast_form(id) {
                 return out;
             }
+        }
+        if self.is_c() {
             if let Some(out) = self.c_designated_form(id) {
                 return out;
             }
@@ -3504,6 +3556,32 @@ fn dotted_piece(text: &str) -> bool {
             // it. The tree kept the lambda node and nothing read its body, so
             // every lambda argument lost what it contains.
             "lambda_expression" if self.language.name == "csharp" => return self.cs_lambda_value(id),
+            // `nameof(Color)`: the one-pass reader records a call to `nameof`
+            // with the named expression as its argument, rather than `0`.
+            "nameof_expression" if self.language.name == "csharp" => {
+                let line = self.line(id);
+                let index = self.push_call("nameof".to_string(), line);
+                let inner = self
+                    .child_of_kind(id, "nameof_arguments")
+                    .map(|args| self.arguments(args))
+                    .unwrap_or_else(|| "[]".to_string());
+                return format!("[\"c\",{index},0,{inner}]");
+            }
+            // `defaultBindingMode: BindingMode.TwoWay`: a C# named argument
+            // merges the parameter name and the argument value, as the one-pass
+            // reader does.
+            "named_argument" if self.language.name == "csharp" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => return "0".to_string(),
+                    1 => return self.form(items[0]),
+                    _ => return self.merge_form(&items),
+                }
+            }
+            // `IColorPalette?`: a C# nullable type wraps its inner type.
+            "nullable_type" if self.language.name == "csharp" => {
+                return self.expression_child(id).map_or_else(|| "0".to_string(), |child| self.form(child));
+            }
 
             // `T(text = writer.toString())`: a named argument is its value. Read
             // as its first child, the parameter name `text` swallowed the call
