@@ -4788,57 +4788,43 @@ fn dotted_piece(text: &str) -> bool {
             "trailing_closure" => self
                 .expression_child(id)
                 .map_or_else(|| "0".to_string(), |child| self.form(child)),
-            // `.init({ _ in stringCtx })`: a Swift closure is its parameters and
-            // the names its body reads, which is how the lexer writes it. Read
-            // as the default arm the whole closure was the constant 0, so every
-            // name a closure body read dropped out of the call that took it.
-            // The body is walked as statements of its own, so its names are
-            // read here without forming it again (a second form would record
-            // its calls twice).
+            // `.init({ _ in stringCtx })` / `{ request.response(a: b) }`: a Swift
+            // closure is its parameters and the formed values of its body
+            // statements, which is how the lexer writes it. Flattening the body
+            // to identifier leaves dropped every call inside `{ ... }` from
+            // the enclosing assignment or call argument. The body is formed
+            // only to read its value: its calls are dropped again, because the
+            // statement walk records them.
             "closure" if self.language.name == "swift" => {
-                // `{ (position, _, _) in serialize(v, at: &position) }`: with a
-                // tuple head the lexer writes the head as a tuple and the body
-                // statements as their own values, not as a flat run of names.
-                // The body is formed only to read its value: its calls are
-                // dropped again, because the statement walk records them.
+                let mut parts: Vec<String> = Vec::new();
                 if let Some(head) = self.swift_closure_head(id) {
-                    let symbol = self.frame().symbol;
-                    let before = self.facts.symbols[symbol].calls.len();
-                    let statements: Vec<u32> = self
-                        .children(id)
-                        .into_iter()
-                        .filter(|&child| !self.is_layout(child) && self.kind(child) != "closure_signature")
-                        .collect();
-                    let mut parts = vec![head];
-                    for statement in statements {
-                        parts.push(self.form(statement));
-                    }
-                    self.facts.symbols[symbol].calls.truncate(before);
-                    return format!("[\"m\",[{}]]", parts.join(","));
+                    parts.push(head);
+                } else if let Some(sig) = self.child_of_kind(id, "closure_signature") {
+                    self.swift_collect_idents(sig, &mut parts);
                 }
-                let mut names: Vec<String> = Vec::new();
-                let mut stack: Vec<u32> = self.children(id);
-                stack.reverse();
-                while let Some(child) = stack.pop() {
-                    if self.is_layout(child) {
-                        continue;
+                let symbol = self.frame().symbol;
+                let before = self.facts.symbols[symbol].calls.len();
+                let statements: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != "closure_signature")
+                    .collect();
+                for statement in statements {
+                    let value = self.form(statement);
+                    if value != "0" {
+                        parts.push(value);
+                    } else {
+                        // Statements that `form` does not map (e.g. `let`,
+                        // `for`, `switch`, `return`) still contribute their
+                        // identifier leaves, matching the lexer's flat read.
+                        self.swift_collect_idents(statement, &mut parts);
                     }
-                    if self.kind(child) == "identifier" {
-                        let text = self.text_string(child);
-                        let mut form = String::from("[\"n\",");
-                        push_string(&mut form, &text);
-                        form.push(']');
-                        names.push(form);
-                        continue;
-                    }
-                    let mut kids = self.children(child);
-                    kids.reverse();
-                    stack.extend(kids);
                 }
-                match names.len() {
+                self.facts.symbols[symbol].calls.truncate(before);
+                match parts.len() {
                     0 => "0".to_string(),
-                    1 => names.remove(0),
-                    _ => format!("[\"m\",[{}]]", names.join(",")),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
             // `class Action extends _AttributeHolder(Function) {}`: the body is
@@ -4856,10 +4842,15 @@ fn dotted_piece(text: &str) -> bool {
             // implicit concatenation of a literal with an f-string is not a
             // rule, and skipping the region dropped the call inside it.
             "ERROR" => {
+                // Recovery may leave bare tokens (identifiers and literals, e.g.
+                // inside a Swift collection literal whose typed closure
+                // parameter failed to parse) alongside structured subtrees;
+                // keep every non-layout child so neither names nor constants
+                // are dropped.
                 let items: Vec<u32> = self
                     .children(id)
                     .into_iter()
-                    .filter(|&child| !self.is_layout(child) && self.node(child).first_child != NONE)
+                    .filter(|&child| !self.is_layout(child))
                     .collect();
                 // The tokens inside a region the grammar could not name are
                 // still there, and a call is visible in them: a name followed by
@@ -4867,11 +4858,15 @@ fn dotted_piece(text: &str) -> bool {
                 // reading what recovery left — and it is the only way a call
                 // inside `("prefix " f"{call(x)}")` survives, since implicit
                 // concatenation of a literal with an f-string is not a rule yet.
-                self.recovered_calls(id);
-                match items.len() {
+                let calls = self.recovered_calls(id);
+                let mut parts: Vec<String> = items.into_iter().map(|item| self.form(item)).collect();
+                for call in calls {
+                    parts.push(format!("[\"c\",{call},0,[0]]"));
+                }
+                match parts.len() {
                     0 => "0".to_string(),
-                    1 => self.form(items[0]),
-                    _ => self.merge_form(&items),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
             // A keyword reused as an identifier (`match`, `type`, `case`)
@@ -4900,7 +4895,8 @@ fn dotted_piece(text: &str) -> bool {
     /// `a.b(`. Nothing is invented — the name and the argument list are both in
     /// the source, and the region is only reached where the grammar failed to
     /// build a node for them.
-    pub(crate) fn recovered_calls(&mut self, id: u32) {
+    pub(crate) fn recovered_calls(&mut self, id: u32) -> Vec<usize> {
+        let mut calls = Vec::new();
         let tokens: Vec<u32> = self.children(id);
         let mut at = 0;
         while at < tokens.len() {
@@ -4922,10 +4918,11 @@ fn dotted_piece(text: &str) -> bool {
             }
             if end + 1 < tokens.len() && self.kind(tokens[end + 1]) == "(" {
                 let line = self.line(tokens[at]);
-                self.push_call(name, line);
+                calls.push(self.push_call(name, line));
             }
             at = end + 1;
         }
+        calls
     }
 
     pub(crate) fn tuple_form(&mut self, items: &[u32]) -> String {
@@ -4960,6 +4957,28 @@ fn dotted_piece(text: &str) -> bool {
             names.push(form);
         }
         Some(format!("[\"t\",[{}]]", names.join(",")))
+    }
+
+    /// Identifier leaves inside a Swift closure signature or unmapped statement.
+    fn swift_collect_idents(&self, node: u32, out: &mut Vec<String>) {
+        let mut stack: Vec<u32> = self.children(node);
+        stack.reverse();
+        while let Some(child) = stack.pop() {
+            if self.is_layout(child) {
+                continue;
+            }
+            if self.kind(child) == "identifier" {
+                let text = self.text_string(child);
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, &text);
+                form.push(']');
+                out.push(form);
+                continue;
+            }
+            let mut kids = self.children(child);
+            kids.reverse();
+            stack.extend(kids);
+        }
     }
 
     /// A Swift literal's elements in order, with the `,` and `:` separators

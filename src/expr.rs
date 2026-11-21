@@ -1539,6 +1539,19 @@ impl Emit<'_> {
             self.pos += 1;
             return;
         }
+        // Swift's `throws` / `throws(Err)` is an effect specifier, never a
+        // value or a call: `{ () throws(Err) in ... }` and `do throws(Err) {`
+        // annotate the closure or block's error type, not a callee named
+        // `throws`.
+        if self.lang.tag == "SWIFT" && word == "throws" {
+            self.pos += 1;
+            if self.op_byte(0) == b'(' {
+                if let Some(after) = self.skip_balanced(self.pos, b"(", b")") {
+                    self.pos = after;
+                }
+            }
+            return;
+        }
         // `private nonisolated(unsafe) var value`: `nonisolated` is a Swift
         // declaration modifier and `(unsafe)` its argument, so neither is a
         // call. The CST still writes a call here, a separate grammar gap.
