@@ -6050,18 +6050,80 @@ fn dotted_piece(text: &str) -> bool {
                     continue;
                 }
                 let value = self.form(child);
-                if value != "0" {
+                if !value.is_empty() && value != "0" {
                     parts.push(value);
+                } else if self.language.name == "csharp" {
+                    if let Some(word) = self.leaf_name(child) {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, &word);
+                        out.push(']');
+                        parts.push(out);
+                    }
                 }
             }
             parts.push(format!("[\"c\",{index},0,{arg_list}]"));
             return (format!("[\"m\",[{}]]", parts.join(",")), Some((index as u32, "0".to_string())));
         }
-        let mut out = format!("[\"c\",{index},{receiver},{arg_list}]");
+        let mut out = if self.language.name == "csharp"
+            && self.kind(id) == "object_creation"
+            && matches!(self.kind(callee), "array_type" | "generic_type")
+            && args.is_none()
+        {
+            let mut parts = Vec::new();
+            let base = self.form(callee);
+            if base != "0" {
+                parts.push(base);
+            }
+            for child in children.iter().copied() {
+                if matches!(self.kind(child), "object_initializer" | "array_initializer" | "collection_initializer") {
+                    let init_form = self.form(child);
+                    if init_form != "0" {
+                        parts.push(init_form);
+                    }
+                }
+            }
+            match parts.len() {
+                0 => "0".to_string(),
+                1 => parts.remove(0),
+                _ => format!("[\"m\",[{}]]", parts.join(",")),
+            }
+        } else {
+            let mut c_out = format!("[\"c\",{index},{receiver},{arg_list}]");
+            if self.language.name == "csharp" && self.kind(id) == "object_creation" {
+                let mut init_parts = Vec::new();
+                for child in children.iter().copied() {
+                    if matches!(self.kind(child), "object_initializer" | "array_initializer" | "collection_initializer") {
+                        let init_form = self.form(child);
+                        if init_form != "0" {
+                            init_parts.push(init_form);
+                        }
+                    }
+                }
+                if !init_parts.is_empty() {
+                    if args.is_none() && self.kind(callee) != "generic_type" {
+                        let mut parts = Vec::new();
+                        let callee_path = self.path_of(callee);
+                        if !callee_path.is_empty() {
+                            let mut name = String::from("[\"n\",");
+                            push_string(&mut name, &callee_path);
+                            name.push(']');
+                            parts.push(name);
+                        }
+                        parts.extend(init_parts);
+                        c_out = format!("[\"m\",[{}]]", parts.join(","));
+                    } else {
+                        let mut parts = vec![c_out];
+                        parts.extend(init_parts);
+                        c_out = format!("[\"m\",[{}]]", parts.join(","));
+                    }
+                }
+            }
+            c_out
+        };
         // `new ClassHandlerObserver<TTarget>(action)`: a generic constructor
         // names both its class and its type arguments in the one-pass reader's
         // value, while the constructor call itself keeps only the runtime args.
-        if self.language.name == "csharp" && self.kind(id) == "object_creation" && self.kind(callee) == "generic_type" {
+        if self.language.name == "csharp" && self.kind(id) == "object_creation" && self.kind(callee) == "generic_type" && args.is_some() {
             if let Some(type_args) = self.child_of_kind(callee, "type_arguments") {
                 let targs = self.form(type_args);
                 if targs != "0" {
@@ -6230,7 +6292,7 @@ fn dotted_piece(text: &str) -> bool {
         };
         let children = self.children(id);
         if !path.is_empty() && !path.starts_with('.') {
-            if matches!(kind, "attribute" | "member_expression" | "subscript" | "subscript_expression" | "element_access" | "field_expression") {
+            if matches!(kind, "attribute" | "member_expression" | "member_access" | "conditional_member_access" | "subscript" | "subscript_expression" | "element_access" | "field_expression") {
                 if let Some(&object) = children.first() {
                     // A receiver can be any expression; nothing is recorded for a
                     // plain name, so this costs a walk and never a wrong fact.
@@ -6263,7 +6325,7 @@ fn dotted_piece(text: &str) -> bool {
             // .DisposeAsync();` - was dated to the receiver's first line, and the
             // one-pass reader dates a call to its name (84 files).
             "attribute" | "member_expression" | "navigation_expression" | "member_access"
-            | "selector_expression" | "field_access" | "optional_chaining_expression" => {
+            | "conditional_member_access" | "selector_expression" | "field_access" | "optional_chaining_expression" => {
                 let children = self.children(callee);
                 if let Some(&name) = children.iter().rev().find(|&&child| {
                     self.node(child).first_child == NONE && !self.is_layout(child)
@@ -6390,6 +6452,8 @@ fn dotted_piece(text: &str) -> bool {
                 let text = self.text_string(id);
                 if text == "this" {
                     "self".to_string()
+                } else if self.language.name == "csharp" && text.starts_with('@') && text.len() > 1 {
+                    text[1..].to_string()
                 } else {
                     text.trim_start_matches('#').to_string()
                 }
@@ -6480,7 +6544,9 @@ fn dotted_piece(text: &str) -> bool {
             // its name, so the member access formed as `0`.
             "force_unwrap" => self.expression_child(id).map(|child| self.path_of(child)).unwrap_or_default(),
             // A call has no name of its own: `f().x` names `.x`.
-            "call" | "call_expression" | "new_expression" | "invocation_expression" => String::new(),
+            "call" | "call_expression" | "new_expression" | "invocation_expression"
+            | "object_creation" | "object_creation_expression" | "generic_invocation"
+            | "implicit_creation" | "conditional_invocation" => String::new(),
             // `match.group`, `type.name`: a keyword reused as an identifier.
             _ => self.leaf_name(id).map(|text| if text == "this" { "self".to_string() } else { text }).unwrap_or_default(),
         }
