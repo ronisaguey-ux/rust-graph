@@ -1033,6 +1033,10 @@ impl<'a> Walker<'a> {
                 // one argument from every call that takes a regex
                 // (`arg.replace(/x/, 's')`, 69 js first-loss rows).
                 | "regex"
+                // C# `$"{...}"` is a single token leaf with no children; read as
+                // layout it was skipped by `arguments` and `merge_form` before
+                // `form` could parse its interpolation holes.
+                | "interpolated_string_literal"
                 | "self"
                 | "this"
                 | "super"

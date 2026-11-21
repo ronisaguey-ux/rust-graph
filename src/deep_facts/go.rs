@@ -102,7 +102,7 @@ impl<'a> Walker<'a> {
                 if matches!(
                     kind,
                     "object_creation" | "object_creation_expression" | "invocation_expression" | "call_expression"
-                        | "nameof_expression"
+                        | "generic_invocation" | "nameof_expression"
                 ) {
                     let path = if kind == "nameof_expression" {
                         "nameof".to_string()
@@ -114,6 +114,8 @@ impl<'a> Walker<'a> {
                         let line = self.line(child);
                         self.push_call(path, line);
                     }
+                } else if kind == "interpolated_string_literal" && self.language.name == "csharp" {
+                    self.cs_interpolated_calls(child);
                 }
                 pending.push(child);
             }
@@ -1176,7 +1178,11 @@ impl<'a> Walker<'a> {
             // `JObject.Parse`: the C# member access carries two name leaves and
             // no dotted kind at all, so every call through a type lost its
             // receiver - 592 rows of one C# slice.
-            | "member_access" => {
+            | "member_access"
+            // `button.Tag?.ToString()`: a null-conditional member access names
+            // the same dotted path as a plain one when reached via a field or
+            // local initializer.
+            | "conditional_member_access" => {
                 let children = self.children(id);
                 // The last segment is read by its text: `Mockito.when` names a
                 // member called `when`, which this grammar gives a keyword kind.
@@ -4974,6 +4980,12 @@ fn dotted_piece(text: &str) -> bool {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
+            // C# `$"{...}"` is lexed as a single `interpolated_string_literal`
+            // token, so its holes are not CST children. Parse each hole's
+            // expression so calls and names inside interpolations are recorded.
+            "interpolated_string_literal" if self.language.name == "csharp" => {
+                self.cs_interpolated_form(id)
+            }
             // `a to listOf(1)`: Kotlin's infix call is a value with two operands
             // and a name between them. Read through the default arm only the
             // first operand was formed, so a call written on the right of `to`,
@@ -6176,6 +6188,234 @@ fn dotted_piece(text: &str) -> bool {
             }
             "tuple_pattern" | "pattern_list" | "array_pattern" | "list_pattern" | "object_pattern" => None,
             _ => self.leaf_name(id).filter(|path| !path.is_empty()),
+        }
+    }
+
+    /// Extracts `(hole_bytes, line_offset)` pairs from a C#
+    /// `interpolated_string_literal` token (`$"..."`, `$@"..."`, `@$"..."`).
+    fn cs_interpolated_holes(text: &[u8]) -> Vec<(Vec<u8>, u32)> {
+        let Some(quote_pos) = text.iter().position(|&b| b == b'"') else {
+            return Vec::new();
+        };
+        let verbatim = text[..quote_pos].contains(&b'@');
+        let mut holes = Vec::new();
+        let mut i = quote_pos + 1;
+        let mut line_offset = 0u32;
+        while i < text.len() {
+            let b = text[i];
+            if verbatim && b == b'"' && text.get(i + 1) == Some(&b'"') {
+                i += 2;
+            } else if b == b'"' {
+                break;
+            } else if !verbatim && b == b'\\' {
+                if text.get(i + 1) == Some(&b'\n') {
+                    line_offset += 1;
+                }
+                i += 2;
+            } else if b == b'{' && text.get(i + 1) == Some(&b'{') {
+                i += 2;
+            } else if b == b'}' && text.get(i + 1) == Some(&b'}') {
+                i += 2;
+            } else if b == b'{' {
+                i += 1;
+                let hole_start = i;
+                let hole_line = line_offset;
+                let mut brace_depth = 1u32;
+                let mut paren_depth = 0u32;
+                let mut bracket_depth = 0u32;
+                let mut ternary_depth = 0u32;
+                let mut expr_end: Option<usize> = None;
+                while i < text.len() && brace_depth > 0 {
+                    let c = text[i];
+                    if c == b'\n' {
+                        line_offset += 1;
+                        i += 1;
+                    } else if c == b'"' {
+                        i += 1;
+                        while i < text.len() {
+                            if text[i] == b'\\' {
+                                if text.get(i + 1) == Some(&b'\n') {
+                                    line_offset += 1;
+                                }
+                                i += 2;
+                            } else if text[i] == b'"' {
+                                i += 1;
+                                break;
+                            } else {
+                                if text[i] == b'\n' {
+                                    line_offset += 1;
+                                }
+                                i += 1;
+                            }
+                        }
+                    } else if c == b'\'' {
+                        i += 1;
+                        while i < text.len() {
+                            if text[i] == b'\\' {
+                                i += 2;
+                            } else if text[i] == b'\'' {
+                                i += 1;
+                                break;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    } else if c == b'{' {
+                        brace_depth += 1;
+                        i += 1;
+                    } else if c == b'}' {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            let end = expr_end.unwrap_or(i);
+                            if end > hole_start {
+                                holes.push((text[hole_start..end].to_vec(), hole_line));
+                            }
+                            i += 1;
+                            break;
+                        }
+                        i += 1;
+                    } else if c == b'(' {
+                        paren_depth += 1;
+                        i += 1;
+                    } else if c == b')' {
+                        paren_depth = paren_depth.saturating_sub(1);
+                        i += 1;
+                    } else if c == b'[' {
+                        bracket_depth += 1;
+                        i += 1;
+                    } else if c == b']' {
+                        bracket_depth = bracket_depth.saturating_sub(1);
+                        i += 1;
+                    } else if brace_depth == 1 && paren_depth == 0 && bracket_depth == 0 {
+                        if c == b'?' {
+                            if !matches!(text.get(i + 1), Some(b'.' | b'?' | b'[')) {
+                                ternary_depth += 1;
+                            }
+                            i += 1;
+                        } else if c == b':' {
+                            if ternary_depth > 0 {
+                                ternary_depth -= 1;
+                            } else if expr_end.is_none() && text.get(i + 1) != Some(&b':') {
+                                expr_end = Some(i);
+                            }
+                            i += 1;
+                        } else if c == b',' && ternary_depth == 0 && expr_end.is_none() {
+                            expr_end = Some(i);
+                            i += 1;
+                        } else {
+                            i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            } else {
+                if b == b'\n' {
+                    line_offset += 1;
+                }
+                i += 1;
+            }
+        }
+        holes
+    }
+
+    fn shift_call_indices(form: &str, base: usize) -> String {
+        if base == 0 || !form.contains("[\"c\",") {
+            return form.to_string();
+        }
+        let bytes = form.as_bytes();
+        let mut out = String::with_capacity(form.len() + 8);
+        let mut i = 0usize;
+        let mut in_str = false;
+        while i < bytes.len() {
+            if in_str {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    out.push(bytes[i] as char);
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                } else {
+                    if bytes[i] == b'"' {
+                        in_str = false;
+                    }
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
+            } else if bytes[i] == b'"' {
+                in_str = true;
+                out.push('"');
+                i += 1;
+            } else if bytes[i..].starts_with(b"[\"c\",") {
+                out.push_str("[\"c\",");
+                i += 5;
+                let num_start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i > num_start {
+                    if let Ok(idx) = form[num_start..i].parse::<usize>() {
+                        out.push_str(&(idx + base).to_string());
+                    } else {
+                        out.push_str(&form[num_start..i]);
+                    }
+                }
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn parse_cs_hole(&mut self, hole: &[u8], base_line: u32) -> Option<String> {
+        let mut buf = Vec::with_capacity(hole.len() + 30);
+        buf.extend_from_slice(b"class _ { void _() {\n");
+        buf.extend_from_slice(hole);
+        buf.extend_from_slice(b";\n} }");
+        let sub_tree = crate::deep_integration::parse_file(&buf, crate::deep_integration::Lang::CSharp)?;
+        let mut sub = Walker::new(&buf, &sub_tree, crate::deep_integration::Lang::CSharp);
+        sub.run();
+        let sym = sub.facts.symbols.into_iter().find(|s| s.kind == KIND_FUNCTION)?;
+        let symbol_idx = self.frame().symbol;
+        let base_idx = self.facts.symbols[symbol_idx].calls.len();
+        for call in sym.calls {
+            let line = base_line + call.line.saturating_sub(2);
+            self.push_call(call.path, line);
+        }
+        let events = sym.events.trim();
+        if events.starts_with("[\"x\",") && events.ends_with(']') {
+            if let Some(c1) = events.find(',') {
+                if let Some(rel_c2) = events[c1 + 1..].find(',') {
+                    let val = &events[c1 + 1 + rel_c2 + 1..events.len() - 1];
+                    return Some(Self::shift_call_indices(val, base_idx));
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn cs_interpolated_calls(&mut self, id: u32) {
+        let base_line = self.line(id);
+        let text = self.text(id).to_vec();
+        for (hole, offset) in Self::cs_interpolated_holes(&text) {
+            let _ = self.parse_cs_hole(&hole, base_line + offset);
+        }
+    }
+
+    pub(crate) fn cs_interpolated_form(&mut self, id: u32) -> String {
+        let base_line = self.line(id);
+        let text = self.text(id).to_vec();
+        let mut parts = Vec::new();
+        for (hole, offset) in Self::cs_interpolated_holes(&text) {
+            if let Some(form) = self.parse_cs_hole(&hole, base_line + offset) {
+                if form != "0" {
+                    parts.push(form);
+                }
+            }
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.remove(0),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
         }
     }
 }
