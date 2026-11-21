@@ -3515,11 +3515,22 @@ impl<'a> Parser<'a> {
         // and nothing else.
         if self.lang.tag == "CS" && word == "using" {
             let mut last_ident = false;
+            let mut seen_eq = false;
             for token in rest {
                 if self.is_op(token, b";") {
                     break;
                 }
                 if self.is_op(token, b"(") {
+                    return false;
+                }
+                // `using ComPtr<IDXGIAdapter> adapter = default;` is a using
+                // *declaration*: a generic type before any `=` can only be that,
+                // because a directive names a type with generics only on the
+                // right of its alias (`using V = Action<int>;`). Read as a
+                // directive it filed the module `ComPtr`, two rows in Avalonia.
+                if self.is_op(token, b"=") {
+                    seen_eq = true;
+                } else if self.is_op(token, b"<") && !seen_eq {
                     return false;
                 }
                 if token.kind == Kind::Ident && self.raw(token) == b"static" {

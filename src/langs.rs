@@ -316,6 +316,12 @@ pub const LANGUAGES: &[Language] = &[
         member_calls: true,
         tag: "CS",
         extensions: &["cs"],
+        // `var s = """ … """;` is a C# 11 raw string, and it spans lines. Without
+        // triple quotes it lexed as `""` then an open `"`, so every line of the
+        // literal was read as code: `using System.Collections;` inside a test's
+        // source text became an import the CST, which sees a string, never wrote.
+        // Twenty xunit generator tests lost one row each this way.
+        triple_quotes: true,
         global_names: true,
         classes: &["class", "struct", "interface", "namespace"],
         imports: Imports::Path,
