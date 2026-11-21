@@ -4529,19 +4529,56 @@ impl<'a> Parser<'a> {
         // `int __attribute__((__visibility__("default"))) foo(int x) {` and
         // `__declspec(dllexport) int bar(int y) {`: the attribute's group is
         // not the function's parameter list, so skip it to find the real name.
+        // In C#, a generic method writes `<T, U>` between its name and `(`:
+        // `public void Include<T>() where T : Base {`. Without stepping back
+        // over `<...>`, `toks[open - 1]` is `>`, so `c_style_head` returned
+        // None and `open_block` emitted the whole method header as an `x`
+        // event in the module symbol (and dumped the method body there too).
+        let name_before = |open: usize| -> Option<usize> {
+            if open == 0 {
+                return None;
+            }
+            let mut at = open - 1;
+            if self.lang.tag == "CS" && (self.is_op(&toks[at], b">") || self.is_op(&toks[at], b">>")) {
+                let mut depth = 0i32;
+                loop {
+                    if self.is_op(&toks[at], b">") {
+                        depth += 1;
+                    } else if self.is_op(&toks[at], b">>") {
+                        depth += 2;
+                    } else if self.is_op(&toks[at], b"<") {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else if toks[at].kind == Kind::Op
+                        && matches!(self.raw(&toks[at]), b";" | b"=" | b"==" | b"!=" | b"&&" | b"||")
+                    {
+                        return None;
+                    }
+                    if at == 0 {
+                        return None;
+                    }
+                    at -= 1;
+                }
+                if at == 0 {
+                    return None;
+                }
+                at -= 1;
+            }
+            Some(at)
+        };
         let open = *groups.iter().find(|&&open| {
-            open > 0
-                && (self
-                    .word_at(toks, open - 1)
-                    .is_some_and(|name| {
-                        !self.is_control(name.as_str())
-                            && !NOT_A_NAME.contains(&name.as_str())
-                            && !(matches!(self.lang.tag, "C" | "CPP" | "OBJC")
-                                && matches!(name.as_str(), "__attribute__" | "__attribute" | "__declspec"))
-                    })
-                    || (js_class && self.is_op(&toks[open - 1], b"]")))
+            name_before(open).is_some_and(|at| {
+                self.word_at(toks, at).is_some_and(|name| {
+                    !self.is_control(name.as_str())
+                        && !NOT_A_NAME.contains(&name.as_str())
+                        && !(matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+                            && matches!(name.as_str(), "__attribute__" | "__attribute" | "__declspec"))
+                }) || (js_class && self.is_op(&toks[at], b"]"))
+            })
         })?;
-        let name_at = open - 1;
+        let name_at = name_before(open)?;
         let computed = js_class && self.is_op(&toks[name_at], b"]");
         let name = if computed {
             String::new()
@@ -4552,7 +4589,18 @@ impl<'a> Parser<'a> {
             }
             name
         };
-        if self.head_word(toks).is_some_and(|word| self.is_control(word.as_str())) {
+        if self.head_word(toks).is_some_and(|word| {
+            self.is_control(word.as_str())
+                || (self.lang.tag == "CS" && matches!(word.as_str(), "return" | "throw" | "yield" | "await"))
+        }) {
+            return None;
+        }
+        // `new List<int>() { 1, 2, 3 }`: object/collection initialiser, not a
+        // generic method named `List`.
+        if self.lang.tag == "CS"
+            && name_at > 0
+            && self.word_at(toks, name_at - 1).as_deref() == Some("new")
+        {
             return None;
         }
         // `go func() { … }()` and `defer f.Close()`: the Go statement keyword

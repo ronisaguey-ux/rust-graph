@@ -1383,39 +1383,46 @@ impl<'a> Walker<'a> {
             "expression_bodied_member" if self.language.name == "csharp" => {
                 self.cs_arrow_body(id, self.line(id));
             }
-            // `using SafeFileHandle handle = Interop.Kernel32.CreateFile(name);`:
-            // a using declaration is one declarator, and no arm read the node, so
-            // the call it opens with stayed in the tree.
-            "using_declaration" if self.language.name == "csharp" => {
-                let children = self.children(id);
-                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
-                    if let Some(&value) = children.get(at + 1) {
-                        self.form(value);
+            // `var o = JObject.Parse(text);` and `int depth = 0;` and `using var x = ...;`:
+            // C# local and using declarations are assignment statements to the
+            // lexer. `cs_field_assignment` handles direct calls/creations; any
+            // other initialised declaration (literals, names, member reads,
+            // expressions) still writes an `a` event, matching `field_declaration`.
+            "local_variable_declaration" | "using_declaration"
+                if self.kinds.calls.contains(&"object_creation_expression") =>
+            {
+                if !self.cs_field_assignment(id) {
+                    let children = self.children(id);
+                    let assigned = children.iter().position(|&child| self.kind(child) == "=");
+                    let target = assigned.and_then(|at| {
+                        children[..at]
+                            .iter()
+                            .rev()
+                            .find(|&&child| self.kind(child) == "identifier")
+                            .map(|&child| self.text_string(child))
+                    });
+                    match (assigned, target) {
+                        (Some(at), Some(name)) => {
+                            let child = children.get(at + 1).copied();
+                            let kind = child.map(|node| self.kind(node)).unwrap_or("");
+                            let form = match kind {
+                                "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
+                                "" => "0".to_string(),
+                                _ => child
+                                    .map(|node| self.form(node))
+                                    .filter(|form| !form.is_empty() && form != "0")
+                                    .unwrap_or_else(|| "0".to_string()),
+                            };
+                            let line = self.line(id);
+                            self.lexer_event(b'a', line, &[name], &form, false);
+                        }
+                        _ => self.field_initializer_calls(id),
                     }
                 }
                 self.cs_declared_vars(id);
-            }
-            // `var o = JObject.Parse(text);`: a C# local initialised with a call
-            // recorded nothing at all - deep 0 against lexer 2 on a two-line
-            // method. Only C# spells its call kinds this way, so the arm is
-            // gated on them rather than on the family.
-            "local_variable_declaration" if self.kinds.calls.contains(&"object_creation_expression") => {
-                if !self.cs_field_assignment(id) {
-                    self.field_initializer_calls(id);
+                if kind == "local_variable_declaration" {
+                    self.cs_lambda_symbol(id);
                 }
-                self.cs_declared_vars(id);
-                self.cs_lambda_symbol(id);
-            }
-            // `using var tempListener = new MeterListener();`: a using
-            // declaration is a local declaration to the lexer - it binds the
-            // name to the creation and files the line as a statement - and no
-            // arm read the node, so every using declaration lost its `var`
-            // (C# corpus: 14 files).
-            "using_declaration" => {
-                if !self.cs_field_assignment(id) {
-                    self.field_initializer_calls(id);
-                }
-                self.cs_declared_vars(id);
             }
             // `size_t n = strlen(s);`: a declaration with an initializer is one
             // statement to the lexer, and the call in it is a fact. C, C++ and
