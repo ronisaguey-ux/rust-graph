@@ -2211,6 +2211,14 @@ impl<'a> Parser<'a> {
 
     /// `for a, b in c`, `for (const a of b)`, `with c as a`.
     fn loop_binding(&mut self, stmt: &[Token]) {
+        // Swift's `catch let error as DecodingError` casts the thrown value to
+        // a type and binds it; it is a pattern like `if let`, not `x as T` with
+        // the type as the target. Read as a binding across `as` it invented an
+        // assignment to the error type (`a:[DecodingError], error`), which the
+        // CST rightly writes nothing for.
+        if self.lang.tag == "SWIFT" && self.word_at(stmt, 0).as_deref() == Some("catch") {
+            return;
+        }
         let Some(at) = self.binding_index(stmt) else { return };
         let is_with = self.raw(&stmt[at]) == b"as";
         let head = self.binding_head(stmt);

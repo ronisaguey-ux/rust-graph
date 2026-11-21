@@ -4059,6 +4059,25 @@ fn dotted_piece(text: &str) -> bool {
                     _ => self.merge_form(&items),
                 }
             }
+            // `if #available(macOS 10.13, *) { values[#line] = f(.pi / 2) }`
+            // inside a closure: the condition is a value and so is every
+            // statement in the branch. The default arm read the condition
+            // through `expression_child` and dropped the branch, so the
+            // assignment written in an `if` lost its call - a `lazy var x: [Int
+            // : T] = { … }()` that gates a value on `#available` was the
+            // largest remaining swift file.
+            "if_statement" if self.language.name == "swift" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "if" | "else"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
             // `val M = if (h <= 0) 0L else acc.cumulative(h-1)`: Scala's `if`
             // is a value too, and the default arm read only its condition, so
             // both branches (and the calls in them) left the CST's value.
@@ -4107,6 +4126,49 @@ fn dotted_piece(text: &str) -> bool {
                     0 => "0".to_string(),
                     1 => self.form(items[0]),
                     _ => self.merge_form(&items),
+                }
+            }
+            // `var v = [1 : Foo(a: 1)]` inside a Swift closure: the statement
+            // binds a name and evaluates its initializer, and the lexer writes
+            // both as one merge. The default arm read no initializer at all, so
+            // the closure arm fell back to the statement's identifier leaves and
+            // every value in a `{ … }()` body was lost - the largest remaining
+            // swift file is six of them in a row (`lazy var x: [Int : T] = { var
+            // values = [ … ]; return values }()`).
+            "property_declaration" if self.language.name == "swift" => {
+                let children = self.children(id);
+                let value = children
+                    .iter()
+                    .position(|&child| self.kind(child) == "=")
+                    .and_then(|at| children.get(at + 1).copied());
+                let Some(value) = value else { return "0".to_string() };
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(name) = children.iter().copied().find(|&child| self.kind(child) == "identifier") {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &self.text_string(name));
+                    out.push(']');
+                    parts.push(out);
+                }
+                // `var values: [Int : URL] = [...]`: the lexer reads the
+                // declared type into the statement's value, so the names it
+                // spells are part of the read and leaving them out lost
+                // `Int`/`URL` off the one statement that declares both.
+                if let Some(colon) = children.iter().position(|&child| self.kind(child) == ":") {
+                    let end = children.iter().position(|&child| self.kind(child) == "=").unwrap_or(children.len());
+                    for &child in children.iter().take(end).skip(colon + 1) {
+                        if !self.is_layout(child) {
+                            self.swift_collect_idents(child, &mut parts);
+                        }
+                    }
+                }
+                let inner = self.form(value);
+                if inner != "0" {
+                    parts.push(inner);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
             // `val x = f()`: a property declaration inside an expression-valued
