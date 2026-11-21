@@ -3579,8 +3579,20 @@ fn dotted_piece(text: &str) -> bool {
                     _ => return self.merge_form(&items),
                 }
             }
-            // `IColorPalette?`: a C# nullable type wraps its inner type.
-            "nullable_type" if self.language.name == "csharp" => {
+            // `IColorPalette?`, `object?`: a C# nullable or parenthesized type
+            // wraps its inner type, including predefined keyword types like
+            // `object` or `int`.
+            "nullable_type" | "parenthesized_type" if self.language.name == "csharp" => {
+                let inner = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&child| !self.is_layout(child) || self.leaf_name(child).is_some());
+                return inner.map_or_else(|| "0".to_string(), |child| self.form(child));
+            }
+            // `typeof(T)`: the one-pass reader keeps the type name inside the
+            // parentheses, whereas the fallback descended into
+            // `parenthesized_type` and returned `0` for a bare type identifier.
+            "typeof_expression" | "sizeof_expression" if self.language.name == "csharp" => {
                 return self.expression_child(id).map_or_else(|| "0".to_string(), |child| self.form(child));
             }
 
@@ -4642,7 +4654,9 @@ fn dotted_piece(text: &str) -> bool {
                     None => "0".to_string(),
                 }
             }
-            "dictionary" | "object" => {
+            // An `object` literal has `{ ... }` children; a bare `object` leaf
+            // (e.g. C#'s predefined `object` type) falls through to `leaf_name`.
+            "dictionary" | "object" if self.node(id).first_child != NONE => {
                 let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
                 if items.is_empty() {
                     "0".to_string()
@@ -4983,7 +4997,9 @@ fn dotted_piece(text: &str) -> bool {
             "generic_type" | "generic_specialization" | "type_arguments" | "type_parameter_list" => {
                 let mut parts = Vec::new();
                 for child in self.children(id) {
-                    if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | "," | "::") {
+                    if matches!(self.kind(child), "<" | ">" | ">>" | "," | "::")
+                        || (self.is_layout(child) && !(self.language.name == "csharp" && self.leaf_name(child).is_some()))
+                    {
                         continue;
                     }
                     let value = self.form(child);
@@ -5671,7 +5687,28 @@ fn dotted_piece(text: &str) -> bool {
             parts.push(format!("[\"c\",{index},0,{arg_list}]"));
             return (format!("[\"m\",[{}]]", parts.join(",")), Some((index as u32, "0".to_string())));
         }
-        let out = format!("[\"c\",{index},{receiver},{arg_list}]");
+        let mut out = format!("[\"c\",{index},{receiver},{arg_list}]");
+        // `new ClassHandlerObserver<TTarget>(action)`: a generic constructor
+        // names both its class and its type arguments in the one-pass reader's
+        // value, while the constructor call itself keeps only the runtime args.
+        if self.language.name == "csharp" && self.kind(id) == "object_creation" && self.kind(callee) == "generic_type" {
+            if let Some(type_args) = self.child_of_kind(callee, "type_arguments") {
+                let targs = self.form(type_args);
+                if targs != "0" {
+                    let mut parts = Vec::new();
+                    let callee_path = self.path_of(callee);
+                    if !callee_path.is_empty() {
+                        let mut name = String::from("[\"n\",");
+                        push_string(&mut name, &callee_path);
+                        name.push(']');
+                        parts.push(name);
+                    }
+                    parts.push(targs);
+                    parts.push(out);
+                    out = format!("[\"m\",[{}]]", parts.join(","));
+                }
+            }
+        }
         let _ = is_new;
         let link = (index as u32, receiver);
         (out, Some(link))

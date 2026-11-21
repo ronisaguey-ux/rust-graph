@@ -1253,6 +1253,7 @@ impl<'a> Walker<'a> {
                         let inner: Vec<String> = words
                             .iter()
                             .map(|word| {
+                                let word = if word == "this" { "self" } else { word.as_str() };
                                 let mut form = String::from("[\"n\",");
                                 push_string(&mut form, word);
                                 form.push(']');
@@ -1267,6 +1268,20 @@ impl<'a> Walker<'a> {
                     parts.push(call);
                 } else {
                     parts.push(call);
+                }
+                // `where TTarget : AvaloniaObject`: type parameter constraints
+                // follow the parameter list on the method header, and the
+                // one-pass reader keeps their words in the header event.
+                for child in &children {
+                    if self.kind(*child) != "type_parameter_constraints" {
+                        continue;
+                    }
+                    for word in self.c_words_of(*child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &word);
+                        form.push(']');
+                        parts.push(form);
+                    }
                 }
                 let value = format!("[\"m\",[{}]]", parts.join(","));
                 self.lexer_event(b'x', line, &[], &value, false);
