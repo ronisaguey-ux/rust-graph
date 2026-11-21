@@ -2176,7 +2176,55 @@ impl<'a> Walker<'a> {
 
     // -- control flow -------------------------------------------------------
 
+    fn swift_condition_item(&mut self, item: u32) -> String {
+        if self.kind(item) == "binding_condition" {
+            if let Some(binding) = self.child_of_kind(item, "condition_binding") {
+                let parts = self.children(binding);
+                if let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") {
+                    if let (Some(&first), Some(&value)) = (parts.first(), parts.get(at + 1)) {
+                        let targets = self.pattern_names(first);
+                        if targets.len() == 1 && self.kind(value) != "type_annotation" {
+                            let bound = self.form(value);
+                            let mut name = "[\"n\",".to_string();
+                            push_string(&mut name, &targets[0]);
+                            name.push(']');
+                            return format!("[\"m\",[{name},{bound}]]");
+                        }
+                    }
+                }
+            }
+            return "0".to_string();
+        }
+        self.form(item)
+    }
+
     pub(crate) fn condition_before(&mut self, id: u32) {
+        // `if a, b, c {`: Swift condition lists have multiple comma-separated
+        // clauses before `block`, and the lexer records all of them as a tuple.
+        // Reading only the first child dropped every clause after the first.
+        if self.language.name == "swift" {
+            let items: Vec<u32> = self
+                .children(id)
+                .into_iter()
+                .take_while(|&child| !matches!(self.kind(child), "block" | "else_clause"))
+                .filter(|&child| !self.is_layout(child) && self.kind(child) != ",")
+                .collect();
+            if items.len() > 1 {
+                let parts: Vec<String> = items.iter().map(|&item| self.swift_condition_item(item)).collect();
+                if parts.iter().any(|part| part != "0") {
+                    let mut expr = items[0];
+                    while self.kind(expr) == "parenthesized_expression" {
+                        match self.expression_child(expr) {
+                            Some(inner) => expr = inner,
+                            None => break,
+                        }
+                    }
+                    let line = self.line(expr);
+                    self.event(&format!("[\"x\",{line},[\"t\",[{}]]]", parts.join(",")));
+                }
+                return;
+            }
+        }
         // `if let credentials = store.credentials(for: space) {` with the body on the following
         // lines: the condition is a `binding_condition`, and `form` on that kind writes the
         // constant 0, so the whole binding was silently dropped. The lexer writes the pair, so it
@@ -3691,7 +3739,10 @@ fn dotted_piece(text: &str) -> bool {
             // `Ordering::Acquire` in an argument list is a path, not a constant.
             | "scoped_identifier" | "scoped_type_identifier" | "qualified_expression"
             // Kotlin's `user.title` in a `"${user.title}"` hole.
-            | "navigation_expression" => {
+            | "navigation_expression"
+            // Swift's `second?.count` is an `optional_chaining_expression`; `path_of`
+            // already reads it, so `form` must not fall through to `0`.
+            | "optional_chaining_expression" => {
                 let path = self.form_path(id);
                 if path.is_empty() || path.starts_with('.') {
                     // `f(x)[0].y`: the base is a call, so there is no path, and
@@ -4816,9 +4867,10 @@ fn dotted_piece(text: &str) -> bool {
             // closure is its parameters and the formed values of its body
             // statements, which is how the lexer writes it. Flattening the body
             // to identifier leaves dropped every call inside `{ ... }` from
-            // the enclosing assignment or call argument. The body is formed
-            // only to read its value: its calls are dropped again, because the
-            // statement walk records them.
+            // the enclosing assignment or call argument. Keep the calls pushed
+            // while forming the body: truncating `calls` afterwards leaves
+            // `["c", id, ...]` in the closure's value pointing at freed indices
+            // that an enclosing `{ ... }()` or later call reuses.
             "closure" if self.language.name == "swift" => {
                 let mut parts: Vec<String> = Vec::new();
                 if let Some(head) = self.swift_closure_head(id) {
@@ -4826,8 +4878,6 @@ fn dotted_piece(text: &str) -> bool {
                 } else if let Some(sig) = self.child_of_kind(id, "closure_signature") {
                     self.swift_collect_idents(sig, &mut parts);
                 }
-                let symbol = self.frame().symbol;
-                let before = self.facts.symbols[symbol].calls.len();
                 let statements: Vec<u32> = self
                     .children(id)
                     .into_iter()
@@ -4844,7 +4894,6 @@ fn dotted_piece(text: &str) -> bool {
                         self.swift_collect_idents(statement, &mut parts);
                     }
                 }
-                self.facts.symbols[symbol].calls.truncate(before);
                 match parts.len() {
                     0 => "0".to_string(),
                     1 => parts.remove(0),
@@ -4989,6 +5038,25 @@ fn dotted_piece(text: &str) -> bool {
         stack.reverse();
         while let Some(child) = stack.pop() {
             if self.is_layout(child) {
+                continue;
+            }
+            if self.kind(child) == "labeled_argument" {
+                // Keep keyword argument labels (`split(separator: "/")`) as
+                // `["k", name, 0]` rather than plain `["n", name]`, matching
+                // the lexer's keyword-argument form.
+                let parts = self.children(child);
+                let name = parts.first().map(|&node| self.path_of(node)).unwrap_or_default();
+                if !name.is_empty() {
+                    let mut keyed = String::from("[\"k\",");
+                    push_string(&mut keyed, &name);
+                    keyed.push_str(",0]");
+                    out.push(keyed);
+                }
+                if parts.len() > 1 {
+                    if let Some(&inner) = parts.last() {
+                        stack.push(inner);
+                    }
+                }
                 continue;
             }
             if self.kind(child) == "identifier" {

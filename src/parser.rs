@@ -4599,12 +4599,16 @@ impl<'a> Parser<'a> {
     fn statement(&mut self, stmt: &[Token]) {
         let Some(first) = stmt.first() else { return };
         // `public typealias LoggingCollection<Base: Collection> = LoggingSequence<Base>`
-        // declares a type; the CST writes no value for it and the guard already
-        // ignores its line. Read as an assignment, the RHS merged with every line
-        // of the `extension` block that follows, so each subscript in it became
-        // a `subscript` call on the module. Swallow the declaration.
+        // and `associatedtype EncodedScalar: BidirectionalCollection where ...`
+        // declare types; the CST writes no value for them. Read as an
+        // expression or assignment, `typealias` merged with the `extension`
+        // block that follows and `associatedtype` emitted `x` events the CST
+        // never wrote. Swallow both declarations.
         if self.lang.tag == "SWIFT"
-            && self.word_at(stmt, self.skip_modifiers(stmt)).as_deref() == Some("typealias")
+            && matches!(
+                self.word_at(stmt, self.skip_modifiers(stmt)).as_deref(),
+                Some("typealias" | "associatedtype")
+            )
         {
             return;
         }
