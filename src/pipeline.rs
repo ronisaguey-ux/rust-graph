@@ -368,6 +368,13 @@ fn parse_pass(
         if File::open(&full).and_then(|mut file| file.read_to_end(&mut content)).is_err() {
             continue;
         }
+        // A UTF-8 BOM is not source text. The one-pass lexer skipped it and the
+        // CST reader read it as an error node, so every BOM'd file lost its
+        // first line to the tree alone - `namespace X;` in most C# files. Strip
+        // it once, here, before either reader sees the bytes.
+        if content.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            content.drain(..3);
+        }
         let sha = sha256::digest(&content);
         let reused = old.as_mut().and_then(|pack| {
             let (old_sha, offset, length) = *pack.rows.get(path)?;
