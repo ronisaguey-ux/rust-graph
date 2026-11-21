@@ -946,27 +946,17 @@ impl<'a> Walker<'a> {
         if self.is_c() && self.enter_c(id) {
             return;
         }
-        // `public override Task AcceptConnectionAsync(..) => throw new
-        // NotImplementedException();`: a method with an expression body is read
-        // here as a bodyless declaration - its header event and a call named
-        // after the method - and the value after `=>` was never read, so the
-        // creation the lexer records on that line was lost. NotImplemented and
-        // its sibling exceptions cost 220 files.
-        if kind == "method_declaration" && self.kinds.calls.contains(&"object_creation_expression") {
-            let children = self.children(id);
-            if let Some(at) = children.iter().position(|&child| self.kind(child) == "=>") {
-                if let Some(&value) = children.get(at + 1) {
-                    self.form(value);
-                }
-            }
-        }
         // `public abstract T Create(Type objectType);` in an interface or an
         // abstract class has no body: the grammar calls it a declaration and
         // the lexer reads a call, so every abstract member of the corpus lost
-        // one. Read before the definition table claims the node.
+        // one. Read before the definition table claims the node. An
+        // expression-bodied method (`=>`) has a body and is read below instead.
         if kind == "method_declaration"
             && self.kinds.calls.contains(&"object_creation_expression")
-            && !self.has_kind(id, &["block"])
+            && !self
+                .children(id)
+                .into_iter()
+                .any(|child| matches!(self.kind(child), "block" | "=>"))
         {
             let children = self.children(id);
             let named = children
@@ -1055,19 +1045,6 @@ impl<'a> Walker<'a> {
                 self.lexer_event(b'x', line, &[], &value, false);
             }
         }
-        // `public int Count => _sb.Length;`, `public string Name => _sb.ToString();`:
-        // an expression-bodied member is one statement to the lexer, and no arm
-        // read its body, so every call in one was missing from the CST record
-        // (C# corpus: 59 files). The body is the member's last expression child;
-        // `form` records its calls without writing an event the line already has.
-        if self.facts.tag == "CS"
-            && (kind == "expression_bodied_member" || (kind == "method_declaration" && !self.has_kind(id, &["block"])))
-        {
-            if let Some(body) = self.cs_expression_body(id) {
-                self.form(body);
-            }
-        }
-
         // `public delegate object ObjectConstructor<T>(params object[] args);`:
         // a delegate declaration is one header statement to the one-pass
         // reader, and the definition table claims the node before any arm can
@@ -1077,6 +1054,9 @@ impl<'a> Walker<'a> {
         }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
             self.open_definition(id, def);
+            if self.language.name == "csharp" && !def.container {
+                self.cs_arrow_body(id, self.line(id));
+            }
             return;
         }
         if self.has_kind(id, self.kinds.imports) {
@@ -1156,16 +1136,10 @@ impl<'a> Walker<'a> {
                 self.cs_declared_vars(id);
             }
             // `uint A(int hc) => hc.ToHashCode();`: an expression-bodied member
-            // writes its body after the arrow, and no arm read the expression, so
-            // the call it holds stayed in the tree — the same shape of gap
-            // Kotlin's `function_body` arm closes.
-            "expression_bodied_member" | "method_declaration" if self.language.name == "csharp" => {
-                let children = self.children(id);
-                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=>") {
-                    if let Some(&value) = children.get(at + 1) {
-                        self.form(value);
-                    }
-                }
+            // writes its body after the arrow, and the one-pass reader drops
+            // the member header before `=>` and records only that body.
+            "expression_bodied_member" if self.language.name == "csharp" => {
+                self.cs_arrow_body(id, self.line(id));
             }
             // `using SafeFileHandle handle = Interop.Kernel32.CreateFile(name);`:
             // a using declaration is one declarator, and no arm read the node, so
@@ -1218,29 +1192,18 @@ impl<'a> Walker<'a> {
             // arm writes. Dispatched by the grammar's own call kinds.
             // `public IJEnumerable<int> this[object key] { get; }`: an indexer
             // is a header statement to the lexer, with `this` spelled `self`.
-            "indexer_declaration" => self.java_header_event(id),
-            // `public static bool operator !=(V a, V b)`: a statement header to
-            // the one-pass reader, with no node kind of its own in the walk, so
-            // every operator declaration lost its line.
-            "operator_declaration" => self.java_header_event(id),
-            // `public static explicit operator BlobHandle(EntityHandle handle)`:
-            // a conversion operator is the same header statement to the lexer.
-            "conversion_operator_declaration" => self.java_header_event(id),
-            // `public int Foo => Bar();`: an expression-bodied member is the
-            // header's shape plus its value, and nothing read the value, so
-            // every call written in one was lost - the runtime's ref assemblies
-            // and the test data files are almost nothing else.
-            "expression_bodied_member" => {
-                let children = self.children(id);
-                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=>") {
-                    if let Some(&value) = children.get(at + 1) {
-                        self.form(value);
-                    }
+            // `public static bool operator !=(V a, V b)` and conversion
+            // operators are the same header statement, unless expression-bodied.
+            "indexer_declaration" | "operator_declaration" | "conversion_operator_declaration" => {
+                if !(self.language.name == "csharp" && self.cs_arrow_body(id, self.line(id))) {
+                    self.java_header_event(id);
                 }
             }
             "property_declaration" => {
                 if self.kinds.calls.contains(&"object_creation_expression") {
-                    self.java_header_event(id);
+                    if !(self.language.name == "csharp" && self.cs_arrow_body(id, self.line(id))) {
+                        self.java_header_event(id);
+                    }
                 } else {
                     self.kt_property(id);
                 }
@@ -1472,6 +1435,9 @@ impl<'a> Walker<'a> {
             // `get;` / `set;`: the notifier token is the value — a keyword leaf
             // carries no expression child, so the arm writes the name itself.
             "accessor_declaration" => {
+                if self.language.name == "csharp" && self.cs_arrow_body(id, self.line(id)) {
+                    return;
+                }
                 let name = self
                     .children(id)
                     .into_iter()
@@ -2708,6 +2674,35 @@ impl<'a> Walker<'a> {
         if restored {
             self.stack.pop();
         }
+    }
+
+    /// Emit the statement event for a C# expression-bodied member (`=> expr;`).
+    /// The one-pass reader drops everything before `=>` and records only the
+    /// body expression on the member's starting line, rather than the header.
+    pub(crate) fn cs_arrow_body(&mut self, id: u32, line: u32) -> bool {
+        let children = self.children(id);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "=>") else {
+            return false;
+        };
+        let Some(&value) = children[at + 1..]
+            .iter()
+            .find(|&&child| !self.is_layout(child) && self.kind(child) != ";")
+        else {
+            return true;
+        };
+        match self.kind(value) {
+            "assignment_expression" => self.assignment(value, false),
+            "augmented_assignment_expression" | "compound_assignment_expr" => {
+                self.assignment(value, true);
+            }
+            _ => {
+                let form = self.form(value);
+                if form != "0" {
+                    self.event(&format!("[\"x\",{line},{form}]"));
+                }
+            }
+        }
+        true
     }
 
     /// The expression a member writes after `=>`: the last child that is not
