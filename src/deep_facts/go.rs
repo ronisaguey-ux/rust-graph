@@ -3320,6 +3320,30 @@ fn dotted_piece(text: &str) -> bool {
                     out
                 }
             }
+            // `\Sortable1.name`, `\.optionalObject`: Swift's key-path literal
+            // names the root type and property chain (or the property alone
+            // when rooted on an inferred type). The lexer skips `\` and `.`
+            // and reads the dotted name, while the default arm wrote `0`.
+            "key_path_expression" if self.language.name == "swift" => {
+                let mut text = String::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) || matches!(self.kind(child), "\\" | ".") {
+                        continue;
+                    }
+                    if !text.is_empty() {
+                        text.push('.');
+                    }
+                    text.push_str(&self.text_string(child));
+                }
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &text);
+                    out.push(']');
+                    out
+                }
+            }
             // `object : Base()`: an anonymous object is the name `object`
             // merged with its supertype constructor's call, which is how the
             // lexer writes it. Nothing read the node, so the value was the

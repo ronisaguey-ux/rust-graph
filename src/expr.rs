@@ -1688,6 +1688,16 @@ impl Emit<'_> {
         }
         let head = if word == "this" || word == "self" || (!self.receiver.is_empty() && word == self.receiver) {
             "self".to_string()
+        } else if self.lang.tag == "SWIFT"
+            && self.op_byte(0) != b'('
+            && self.pos >= 2
+            && self.raw_is(&self.toks[self.pos - 2], b"#")
+            && self.toks[self.pos - 2].end == self.toks[self.pos - 1].start
+        {
+            // Swift's `#function`, `#file`, `#line`, `#column`, `#dsohandle` are
+            // `#`-prefixed special literals: the CST names them with their `#`,
+            // while the lexer split `#` off as an operator and read `function`.
+            format!("#{word}")
         } else {
             word
         };
