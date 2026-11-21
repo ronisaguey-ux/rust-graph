@@ -837,7 +837,10 @@ impl<'a> Walker<'a> {
         // filter took for punctuation, so `f(`re`)` lost its only argument.
         // Kotlin spells identifiers that way, and there the word is a name, not
         // a value, so the character counts only for Go.
-        let raw_string = text[0] == b'`' && matches!(self.kinds.family, Family::Go);
+        // A C# verbatim string opens with `@"` (or `$@"` / `@$"`), which would
+        // likewise be dropped as punctuation if not counted as a value.
+        let raw_string = (text[0] == b'`' && matches!(self.kinds.family, Family::Go))
+            || (self.language.name == "csharp" && text.starts_with(b"@\""));
         !(text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'"' || text[0] == b'\'' || raw_string)
     }
 

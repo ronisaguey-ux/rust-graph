@@ -329,6 +329,34 @@ impl<'a> Lexer<'a> {
         true
     }
 
+    fn scan_verbatim(&mut self, interp: Interp) -> Vec<(u32, u32)> {
+        let mut parts = Vec::new();
+        while self.pos < self.src.len() {
+            match self.src[self.pos] {
+                b'"' => {
+                    if self.peek(1) == b'"' {
+                        self.pos += 2;
+                    } else {
+                        self.pos += 1;
+                        return parts;
+                    }
+                }
+                b'\n' => self.newline(),
+                b'{' if interp == Interp::PyFormat => {
+                    if self.peek(1) == b'{' {
+                        self.pos += 2;
+                    } else {
+                        self.pos += 1;
+                        let (start, end) = self.balanced(b'{', b'}');
+                        self.py_format_parts(start, end, &mut parts);
+                    }
+                }
+                _ => self.pos += 1,
+            }
+        }
+        parts
+    }
+
     fn scan_interpolated(&mut self, close: &[u8], interp: Interp, multi_line: bool) -> Vec<(u32, u32)> {
         let mut parts = Vec::new();
         while self.pos < self.src.len() {
@@ -790,6 +818,25 @@ impl<'a> Lexer<'a> {
             if self.peek(width) == b'\'' {
                 self.pos += width + 1;
                 return self.token(Kind::Str, start, line, col);
+            }
+        }
+        // A C# verbatim string (`@"..."`, `$@"..."`, `@$"..."`) spans lines,
+        // treats `\` as literal, and escapes a quote by doubling it (`""`).
+        if self.lang.tag == "CS" {
+            let prefix = match (byte, self.peek(1), self.peek(2)) {
+                (b'@', b'"', _) => 1,
+                (b'$', b'@', b'"') | (b'@', b'$', b'"') => 2,
+                _ => 0,
+            };
+            if prefix > 0 {
+                self.pos += prefix + 1;
+                let interp = if prefix == 2 { Interp::PyFormat } else { Interp::None };
+                let parts = self.scan_verbatim(interp);
+                let mut token = self.token(Kind::Str, start, line, col);
+                if !parts.is_empty() {
+                    token.interp = Some(Box::new(parts));
+                }
+                return token;
             }
         }
         if matches!(byte, b'$' | b'@') && self.lang.quotes.contains(&self.peek(1)) {
