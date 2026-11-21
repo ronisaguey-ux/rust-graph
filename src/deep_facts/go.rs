@@ -2232,9 +2232,9 @@ impl<'a> Walker<'a> {
         }
         // `if let credentials = store.credentials(for: space) {` with the body on the following
         // lines: the condition is a `binding_condition`, and `form` on that kind writes the
-        // constant 0, so the whole binding was silently dropped. The lexer writes the pair, so it
-        // had no partner and the file fell back. Written inline the loss hid behind the body's own
-        // event on the same line, which is why it needed a two-line difference to show.
+        // constant 0, so the whole binding was silently dropped. Written inline the loss hid
+        // behind the body's own event on the same line, which is why it needed a two-line
+        // difference to show.
         if self.language.name == "swift" {
             if let Some(condition) = self.child_of_kind(id, "binding_condition") {
                 if let Some(binding) = self.child_of_kind(condition, "condition_binding") {
@@ -2243,12 +2243,15 @@ impl<'a> Walker<'a> {
                         if let (Some(&first), Some(&value)) = (parts.first(), parts.get(at + 1)) {
                             let targets = self.pattern_names(first);
                             if targets.len() == 1 && self.kind(value) != "type_annotation" {
-                                let bound = self.form(value);
-                                let mut name = "[\"n\",".to_string();
-                                push_string(&mut name, &targets[0]);
-                                name.push(']');
+                                // A conditional binding is the assignment a
+                                // plain `let` writes, and the lexer reads it as
+                                // one (`a result = value`); `guard let … else`
+                                // already writes the same event here. Written as
+                                // a pair of its own the binding matched nothing
+                                // the lexer wrote, so its line was reported as a
+                                // loss (Diffing.swift:418).
                                 let line = self.line(binding);
-                                self.event(&format!("[\"x\",{line},[\"m\",[{name},{bound}]]]"));
+                                self.assignment_event(targets, value, line, false);
                                 return;
                             }
                         }
