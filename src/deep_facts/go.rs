@@ -5467,6 +5467,14 @@ fn dotted_piece(text: &str) -> bool {
     pub(super) fn member_name(&self, id: u32) -> String {
         for &child in self.children(id).iter().rev() {
             if self.node(child).first_child != NONE {
+                // Swift's `.some(...)` parses `some` as an `ERROR` node inside
+                // `implicit_member_expression` because `some` is also a keyword.
+                if self.kind(child) == "ERROR" {
+                    let name = self.member_name(child);
+                    if !name.is_empty() {
+                        return name;
+                    }
+                }
                 continue;
             }
             let text = self.text(child);
