@@ -1673,6 +1673,25 @@ impl Emit<'_> {
                 return;
             }
         }
+        // `x = .some(1)`, `{ .some($0) }`: Swift enum shorthand (an implicit
+        // member expression) reads `.some` as a member on the inferred type,
+        // not as a callee named `some`. The CST files these as anonymous calls
+        // (a call with arguments but no name); naming them `some` invented a
+        // call the tree has no name for (3 rows of the swift corpus). Emit the
+        // anonymous call the tree writes. The leading dot was dropped as layout
+        // before this word was read, so detect it from the source bytes.
+        if self.lang.tag == "SWIFT"
+            && self.op_byte(0) == b'('
+            && self.pos >= 2
+            && self.raw_is(&self.toks[self.pos - 2], b".")
+        {
+            self.pos += 1;
+            let mut args = String::new();
+            self.list(&mut args, b')', true);
+            let id = self.new_call(String::new(), line);
+            out.push_str(&format!("[\"c\",{id},0,[{args}]]"));
+            return;
+        }
         let head = if word == "this" || word == "self" || (!self.receiver.is_empty() && word == self.receiver) {
             "self".to_string()
         } else {
