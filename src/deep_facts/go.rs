@@ -2140,6 +2140,11 @@ impl<'a> Walker<'a> {
             "as_expression" | "satisfies_expression" | "non_null_expression" => {
                 self.expression_child(id).and_then(|expr| self.value_root_call(expr))
             }
+            // Swift spells the same shape `cast`/`force_unwrap`. Guarded on the
+            // language so no other grammar's node of that name is misread.
+            "cast" | "force_unwrap" if self.language.name == "swift" => {
+                self.expression_child(id).and_then(|expr| self.value_root_call(expr))
+            }
             _ => None,
         }
     }
