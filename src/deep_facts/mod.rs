@@ -1125,11 +1125,44 @@ impl<'a> Walker<'a> {
         let Some(at) = children.iter().position(|&child| self.kind(child) == "lambda_expression") else {
             return;
         };
+        // `cfg.ShouldMapProperty = p => true;` has a `member_access` on the
+        // left of `=`, not a bare `identifier`, so read the rightmost name.
         let Some(target) = children[..at]
             .iter()
             .rev()
-            .find(|&&child| self.kind(child) == "identifier")
-            .map(|&child| self.text_string(child))
+            .find(|&&child| matches!(self.kind(child), "identifier" | "member_access" | "field_access"))
+            .and_then(|&child| self.last_name(child))
+        else {
+            return;
+        };
+        if target.is_empty() {
+            return;
+        }
+        let line = self.line(id);
+        let owner = self.frame().class.clone();
+        self.add_symbol(target, owner, KIND_FUNCTION, line, Vec::new());
+    }
+
+    /// `handler = (a, b) => f(a, b);` and `cfg.P = x => x;`: in the C#
+    /// grammar `=>` has lower precedence than `=`, so a statement-level lambda
+    /// assignment parses as `lambda_expression(assignment_expression(lhs, =, params), =>, body)`.
+    /// Declare the target as `KIND_FUNCTION` to match the one-pass lexer.
+    pub(crate) fn cs_lambda_assignment_symbol(&mut self, id: u32) {
+        let Some(lhs) = self.children(id).into_iter().find(|&c| !self.is_layout(c)) else {
+            return;
+        };
+        if self.kind(lhs) != "assignment_expression" {
+            return;
+        }
+        let children = self.children(lhs);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "=") else {
+            return;
+        };
+        let Some(target) = children[..at]
+            .iter()
+            .rev()
+            .find(|&&child| matches!(self.kind(child), "identifier" | "member_access" | "field_access"))
+            .and_then(|&child| self.last_name(child))
         else {
             return;
         };
@@ -1380,6 +1413,9 @@ impl<'a> Walker<'a> {
                     }
                 }
                 self.cs_declared_vars(id);
+                if self.language.name == "csharp" {
+                    self.cs_lambda_symbol(id);
+                }
             }
             // `uint A(int hc) => hc.ToHashCode();`: an expression-bodied member
             // writes its body after the arrow, and the one-pass reader drops
@@ -1837,6 +1873,7 @@ impl<'a> Walker<'a> {
             // the same shape of gap — so they are read here, and only the call
             // table is written: a lambda has no value of its own to compare.
             "lambda_expression" if self.language.name == "csharp" => {
+                self.cs_lambda_assignment_symbol(id);
                 let mut calls = Vec::new();
                 self.lambda_calls(id, &mut calls);
                 for call in calls {

@@ -1493,6 +1493,9 @@ impl<'a> Walker<'a> {
                 return;
             }
         }
+        if self.language.name == "csharp" && self.kind(child) == "lambda_expression" {
+            self.cs_lambda_assignment_symbol(child);
+        }
         match self.kind(child) {
             "assignment" | "assignment_expression" => self.assignment(child, false),
             // Rust's `=` is the same statement: the lexer records the target,
@@ -1887,6 +1890,13 @@ impl<'a> Walker<'a> {
             return;
         }
         let line = self.line(id);
+        // `expression_statement` dispatches `assignment_expression` here
+        // directly, bypassing the walk arm in `mod.rs`, so a statement-level
+        // lambda assignment (`_handler = x => ...;` or `cfg.P = x => ...;`)
+        // must also declare its function symbol here.
+        if !augmented && self.language.name == "csharp" {
+            self.cs_lambda_symbol(id);
+        }
         if std::env::var("RG_ASSIGN_DEBUG").is_ok() {
             let dump: Vec<String> = children.iter().map(|&c| format!("{}:{:?}", self.kind(c), self.text_string(c).chars().take(8).collect::<String>())).collect();
             eprintln!("assign: {:?}", dump);
