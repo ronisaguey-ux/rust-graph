@@ -2135,6 +2135,16 @@ impl<'a> Walker<'a> {
             // with its left operand, which is what the lexer's first token is.
             "binary_operator" | "binary_expression" | "boolean_operator" | "conditional_expression"
             | "ternary_expression" => self.children(id).first().and_then(|&left| self.value_root_call(left)),
+            // Swift spells the same node `binary` (and `a ?? b` as
+            // `nil_coalescing`). Without them the CST reader gave up on a whole
+            // file whose only unusual node was one of these: Double.swift had no
+            // CST record at all, and the audit could only report a single generic
+            // loss for it. Reading them costs per-line rows on the files that now
+            // parse, and that is the honest trade - a parsed file with named
+            // disagreements beats an unparsed one.
+            "binary" | "nil_coalescing" if self.language.name == "swift" => {
+                self.children(id).first().and_then(|&left| self.value_root_call(left))
+            }
             // `new Foo() as any`, `new Foo() satisfies T`, `new Foo()!`: a type
             // assertion or non-null postfix does not change the constructed class.
             "as_expression" | "satisfies_expression" | "non_null_expression" => {
