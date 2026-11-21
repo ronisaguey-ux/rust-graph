@@ -4288,6 +4288,12 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
             "int", "char", "void", "unsigned", "signed", "long", "short", "float", "double", "const", "struct",
             "union", "enum", "static", "extern", "inline", "register", "volatile", "typedef", "auto", "sizeof",
         ],
+        // `subscript(...)` is a declaration head in Swift, never a call:
+        // subscript access is written `value[index]`. When a generic typealias
+        // or extension header makes the one-pass reader merge the declaration
+        // into a surrounding statement, the word still arrives as a callee.
+        // The CST names no such call, so it is not a lost fact.
+        "SWIFT" => &["if", "for", "while", "return", "switch", "guard", "subscript"],
         _ => &["if", "for", "while", "return", "switch", "function", "func", "fn", "def"],
     };
     keywords.contains(&name)

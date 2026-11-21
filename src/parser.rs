@@ -1097,6 +1097,25 @@ impl<'a> Parser<'a> {
 
     /// Whether a `{` here starts statements rather than a value.
     fn is_block(&mut self) -> bool {
+        // `public subscript(_ name: String) -> String? { get … set … }`: the
+        // header's optional return type ends in `?`, and the generic op test
+        // below would call the brace an object literal, merging the whole
+        // declaration into one value on the header line. A Swift subscript
+        // declaration always opens a body of accessors.
+        if self.lang.tag == "SWIFT" && self.swift_subscript_head(&self.stmt) {
+            return true;
+        }
+        // `if let value = newValue {` in Swift: a conditional binding opens a
+        // block. With the `=` in the header the generic assignment test below
+        // called it a value instead, and the whole if/else became one assignment
+        // to the binder — a target the CST never writes. The CST records the
+        // branch markers and the calls in its arms, which need the block open.
+        if self.lang.tag == "SWIFT"
+            && matches!(self.word_at(&self.stmt, 0).as_deref(), Some("if") | Some("while"))
+            && self.stmt.iter().any(|token| token.kind == Kind::Ident && self.raw(token) == b"let")
+        {
+            return true;
+        }
         // `if let Some(x) = e {`: the statement holds a `=` and the old test
         // read that as an assignment rather than a block opener, so the whole
         // body became one merged value.
@@ -1871,6 +1890,17 @@ impl<'a> Parser<'a> {
             let class = self.top().class.clone();
             let receiver = self.top().receiver.clone();
             self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
+        } else if self.lang.tag == "SWIFT" && self.swift_subscript_head(&stmt) {
+            // `subscript(_ name: String) -> String? { get … set … }` declares a
+            // computed subscript, not a function. The CST names no `subscript`
+            // symbol and files the accessor bodies under the enclosing symbol.
+            // Left to the block-level function reader, the header became a
+            // `subscript` function symbol the CST never has; read it as layout
+            // and let the bodies open as statements of the current symbol.
+            let symbol = self.top().symbol;
+            let class = self.top().class.clone();
+            let receiver = self.top().receiver.clone();
+            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col: start_col, saved: None, defines: None, type_only: false });
         } else if self.head_word(&stmt).is_some_and(|word| word == "extern")
             && (self.lang.tag == "RS"
                 || (matches!(self.lang.tag, "C" | "CPP" | "OBJC")
@@ -2100,6 +2130,16 @@ impl<'a> Parser<'a> {
     }
 
     fn control_condition_before(&mut self, stmt: &[Token]) {
+        // Swift `if let value = newValue` / `while let x = e` bind a name from an
+        // optional; the binder is a pattern, not an assignment target, and the
+        // condition states no value the CST records (the body's calls carry the
+        // facts). Reading the binding as an expression invented an `x` event.
+        if self.lang.tag == "SWIFT"
+            && matches!(self.word_at(stmt, 0).as_deref(), Some("if") | Some("while"))
+            && stmt.iter().any(|token| token.kind == Kind::Ident && self.raw(token) == b"let")
+        {
+            return;
+        }
         // `catch (IOException ioe)` declares the handler's variable and assigns
         // nothing: the CST writes no value for the header, and read as one the
         // parameter became an `x` event with an empty target list — 1,246
@@ -4558,6 +4598,16 @@ impl<'a> Parser<'a> {
 
     fn statement(&mut self, stmt: &[Token]) {
         let Some(first) = stmt.first() else { return };
+        // `public typealias LoggingCollection<Base: Collection> = LoggingSequence<Base>`
+        // declares a type; the CST writes no value for it and the guard already
+        // ignores its line. Read as an assignment, the RHS merged with every line
+        // of the `extension` block that follows, so each subscript in it became
+        // a `subscript` call on the module. Swallow the declaration.
+        if self.lang.tag == "SWIFT"
+            && self.word_at(stmt, self.skip_modifiers(stmt)).as_deref() == Some("typealias")
+        {
+            return;
+        }
         // `pub extern crate grep_cli as cli;` is a crate alias, not an exported name: the lexer
         // wrote an `x` event the CST never had, and ripgrep's facade lost every alias line
         // (2 rows in crates/grep/src/lib.rs, and the same shape across cargo workspaces).
@@ -4604,6 +4654,23 @@ impl<'a> Parser<'a> {
             // `nonmutating set {` is an accessor modifier and keyword: the CST folds the line
             // into the body's names, so the two words are no value of their own.
             if self.word_at(stmt, 0).as_deref() == Some("nonmutating") && self.word_at(stmt, 1).as_deref() == Some("set") {
+                return;
+            }
+            // A subscript declaration is not a call: `subscript(_ name: String)
+            // -> String? { get … set … }` is read by the one-pass lexer as a
+            // call named `subscript`, and the whole declaration (header plus
+            // accessor bodies) as one merged value on the header line. The CST
+            // writes no event for the head and files the accessor bodies under
+            // the enclosing symbol, so say nothing here and let the body open
+            // as a block of statements.
+            if self.swift_subscript_head(stmt) {
+                return;
+            }
+            // A bare `set {` accessor head: `set` is a keyword, not a value.
+            // The CST names no `set` (unlike `get`, which it folds into the
+            // getter's value), so reading the head as an expression invented an
+            // `n:set` event. The accessor body is read as its own statements.
+            if stmt.len() == 1 && self.word_at(stmt, 0).as_deref() == Some("set") {
                 return;
             }
         }
@@ -4920,6 +4987,20 @@ impl<'a> Parser<'a> {
     /// value, so reading it as an expression invented `m:[n:window,n:UIWindow]`.
     /// A statement that carries a declaration keyword is the declaration itself
     /// (`@objc func f()`) and keeps its event.
+    /// A Swift subscript declaration head: `public subscript(_ name: String) ->
+    /// String?` (after modifiers, the word `subscript` and its parameter list).
+    /// `subscript` is not a language def, so `function_head` never sees it and
+    /// the one-pass reader took the header for a call; the CST makes it a
+    /// declaration and writes nothing for the head.
+    fn swift_subscript_head(&self, stmt: &[Token]) -> bool {
+        if self.lang.tag != "SWIFT" {
+            return false;
+        }
+        let index = self.skip_modifiers(stmt);
+        self.word_at(stmt, index).as_deref() == Some("subscript")
+            && stmt.get(index + 1).is_some_and(|token| self.is_op(token, b"("))
+    }
+
     /// `get async throws` / `set throws` / `willSet async`: an accessor keyword with its effect
     /// specifiers. The CST writes one value containing both, so the reader must too.
     fn swift_accessor_head(&self, stmt: &[Token]) -> Option<String> {
