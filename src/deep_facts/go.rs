@@ -978,6 +978,20 @@ impl<'a> Walker<'a> {
         for (index, &child) in children.iter().enumerate() {
             let kind = self.kind(child);
             if index == 0 {
+                // `new Action(() => Map(x)).Go<Ex>(y)`: the callee is a member
+                // access whose receiver is itself a call. The name alone dropped
+                // that receiver, so `Action` lost its row. Form the receiver first,
+                // so its call is recorded before the outer call's arguments, as
+                // the source reads.
+                if self.language.name == "csharp" && self.kind(child) == "member_access" {
+                    let object = self.children(child).into_iter().find(|&part| !self.is_layout(part) && self.kind(part) != ".");
+                    if let Some(object) = object.filter(|&object| self.value_root_call(object).is_some()) {
+                        let value = self.form(object);
+                        if !value.is_empty() && value != "0" {
+                            trailing.push(value);
+                        }
+                    }
+                }
                 let path = self.path_of(child);
                 if !path.is_empty() {
                     let mut out = "[\"n\",".to_string();
