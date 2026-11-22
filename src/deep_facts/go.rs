@@ -949,6 +949,19 @@ impl<'a> Walker<'a> {
                 .map(|list| self.arguments(list))
                 .unwrap_or_else(|| "[]".to_string());
             let call = format!("[\"c\",{index},{receiver},{args}]");
+            // `gitRepo{}.gitWithinDir(x)`: a method called on a composite literal.
+            // The receiver is not a call, so `decl_receiver_expr` leaves it out
+            // and the record had no `gitRepo` at all. The lexer reads the literal
+            // as its own name beside the call (`m:[n:gitRepo, c(...)]`), so the
+            // literal is written the same way here.
+            if self.language.name == "go" && kind == "call_expression" && self.kind(callee) == "selector_expression" {
+                if let Some(object) = self.children(callee).into_iter().find(|&child| !self.is_layout(child)) {
+                    if self.kind(object) == "composite_literal" {
+                        let literal = self.decl_value(object);
+                        return format!("[\"m\",[{literal},{call}]]");
+                    }
+                }
+            }
             // `new X() { … }`: the anonymous class body is part of the creation,
             // and the lexer merges it with the call (`m:[c(X), body]`, `0` for an
             // empty body). Dropping it lost every java `new` with a body that sat
