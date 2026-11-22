@@ -4252,7 +4252,19 @@ fn dotted_piece(text: &str) -> bool {
                 self.delim_depth += 1;
                 let out = match items.len() {
                     0 => "0".to_string(),
-                    1 => self.form(items[0]),
+                    1 => {
+                        let inner = self.form(items[0]);
+                        let node = &self.nodes[id as usize];
+                        if kind == "parenthesized_expression"
+                            && self.language.name == "csharp"
+                            && self.orig_src.get(node.start as usize) == Some(&b'[')
+                            && self.orig_src.get(node.end.saturating_sub(1) as usize) == Some(&b']')
+                        {
+                            format!("[\"t\",[{inner}]]")
+                        } else {
+                            inner
+                        }
+                    }
                     _ => self.tuple_form(&items),
                 };
                 self.delim_depth -= 1;
