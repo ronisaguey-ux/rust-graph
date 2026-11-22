@@ -573,6 +573,20 @@ impl Emit<'_> {
                 }
                 continue;
             }
+            // `key -> key.length()`, `() -> { use(); }`: a Java lambda's value
+            // is its parameter list and its body, as the CST writes it
+            // (`m:[params, body]`, `0` for an empty parameter list).
+            if self.lang.tag == "JAVA" && self.is_op(0, b"->") {
+                self.pos += 1;
+                let params = out.split_off(start);
+                let params = if params.is_empty() { "0".to_string() } else { params };
+                let mut body = String::new();
+                self.mix(&mut body, close);
+                let body = if body.is_empty() { "0".to_string() } else { body };
+                out.push_str(&format!("[\"m\",[{params},{body}]]"));
+                count = 1;
+                continue;
+            }
             if self.is_arrow(0) || (self.lang.tag == "KT" && self.is_op(0, b"->")) {
                 // In Rust `=>` opens a match arm: the pattern is not part of the
                 // value, so it is dropped and the arm's expression stands (the
@@ -644,72 +658,110 @@ impl Emit<'_> {
             let body = out.len();
             match kind {
                 Kind::Ident => {
-                    // Swift `@Sendable (…) -> Void` and `@escaping (…) -> Void`: the word behind the
-                    // `@` is an attribute on a closure type, never a call. Read as a call it invented
-                    // `call Sendable` / `call escaping` on every closure-typed parameter and alias.
-                    if self.lang.tag == "SWIFT" {
-                        let start = self.toks[self.pos].start as usize;
-                        let after_at = start > 0 && self.src[start - 1] == b'@';
-                        if after_at {
-                            self.pos += 1;
-                            if self.op_byte(0) == b'(' {
-                                let mut skipped = String::new();
-                                self.list(&mut skipped, close, false);
+                    // `configure<SpotlessExtension> { … }`: a Kotlin generic call
+                    // whose only argument is a trailing lambda. The statement was
+                    // split at the block, so `<…>` was dropped as layout and the
+                    // type name became a second item (`m:[n:configure,n:SpotlessExtension]`)
+                    // where the CST names the callee alone.
+                    let mut kt_generic: Option<String> = None;
+                    // `object : Serializable, FormatterFunc { … }`: a Kotlin
+                    // object expression is one value that names its supertypes.
+                    // Read member by member the commas split it into arguments
+                    // the CST never has, and the body hung off the last one.
+                    let mut kt_object: Option<String> = None;
+                    if self.lang.tag == "KT" && self.word(0).as_deref() == Some("object") && self.op_byte(1) == b':' {
+                        kt_object = self.kt_object_value();
+                    }
+                    if self.lang.tag == "KT" && self.op_byte(1) == b'<' {
+                        if let Some(after) = self.skip_ts_type_args(self.pos + 1) {
+                            // Only the trailing-lambda form (`…> {`), which the
+                            // statement split at the brace, or a type list that
+                            // ends the slice. `…> (` is a call and `ident`
+                            // already reads it as one.
+                            let trailing_lambda = self
+                                .toks
+                                .get(after)
+                                .map_or(true, |t| t.kind == Kind::Op && self.raw_is(t, b"{"));
+                            if trailing_lambda {
+                                kt_generic = self.word(0);
+                                self.pos = after;
                             }
-                            if count > 0 {
-                                out.truncate(at);
+                        }
+                    }
+                    if let Some(value) = kt_object {
+                        out.push_str(&value);
+                    } else if let Some(word) = kt_generic {
+                        out.push_str("[\"n\",");
+                        push_string(out, &word);
+                        out.push(']');
+                    } else {
+                        // Swift `@Sendable (…) -> Void` and `@escaping (…) -> Void`: the word behind the
+                        // `@` is an attribute on a closure type, never a call. Read as a call it invented
+                        // `call Sendable` / `call escaping` on every closure-typed parameter and alias.
+                        if self.lang.tag == "SWIFT" {
+                            let start = self.toks[self.pos].start as usize;
+                            let after_at = start > 0 && self.src[start - 1] == b'@';
+                            if after_at {
+                                self.pos += 1;
+                                if self.op_byte(0) == b'(' {
+                                    let mut skipped = String::new();
+                                    self.list(&mut skipped, close, false);
+                                }
+                                if count > 0 {
+                                    out.truncate(at);
+                                }
+                                break;
                             }
+                        }
+                        // `x as T` and `x satisfies T`: everything after the keyword
+                        // is a type, erased at runtime, so the value ends there.
+                        // Left as a name it became a merge item beside the value and
+                        // the CST never wrote it.
+                        if matches!(self.lang.tag, "TS" | "TSX")
+                            && count > 0
+                            && matches!(self.word(0).as_deref(), Some("as") | Some("satisfies"))
+                        {
+                            // The separator for this item is already written; drop it
+                            // with the item, or the value ends in a stray comma and
+                            // the event JSON stops parsing.
+                            out.truncate(at);
                             break;
                         }
-                    }
-                    // `x as T` and `x satisfies T`: everything after the keyword
-                    // is a type, erased at runtime, so the value ends there.
-                    // Left as a name it became a merge item beside the value and
-                    // the CST never wrote it.
-                    if matches!(self.lang.tag, "TS" | "TSX")
-                        && count > 0
-                        && matches!(self.word(0).as_deref(), Some("as") | Some("satisfies"))
-                    {
-                        // The separator for this item is already written; drop it
-                        // with the item, or the value ends in a stray comma and
-                        // the event JSON stops parsing.
-                        out.truncate(at);
-                        break;
-                    }
-                    // `{ set(v) { … } }`: a method definition is one value to
-                    // the CST, and the lexer read its body as part of the
-                    // object. The key is dropped with it, exactly as the CST
-                    // drops it, so the merge lists the same items.
-                    let js_family = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
-                    if js_family && close == b'}' && self.op_byte(1) == b':' {
-                        // `{ delete: 1 }` and `{ q: 1 }`: a key whose value is
-                        // a constant is one pair to the CST. The keyword key is
-                        // dropped by ident() as noise, and a number writes no
-                        // item of its own, so the pair vanished.
-                        let word = self.word(0).unwrap_or_default();
-                        let constant = self.toks.get(self.pos + 2).is_some_and(|token| token.kind == Kind::Num);
-                        if constant {
-                            self.pos += 3;
-                            out.push_str("[\"m\",[[\"n\",");
-                            push_string(out, &word);
-                            out.push_str("],0]]");
-                        } else if NOISE.contains(&word.as_str()) && !self.lang.defs.contains(&word.as_str()) {
-                            self.pos += 1;
-                            out.push_str("[\"n\",");
-                            push_string(out, &word);
-                            out.push(']');
+                        // `{ set(v) { … } }`: a method definition is one value to
+                        // the CST, and the lexer read its body as part of the
+                        // object. The key is dropped with it, exactly as the CST
+                        // drops it, so the merge lists the same items.
+                        let js_family = matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX");
+                        if js_family && close == b'}' && self.op_byte(1) == b':' {
+                            // `{ delete: 1 }` and `{ q: 1 }`: a key whose value is
+                            // a constant is one pair to the CST. The keyword key is
+                            // dropped by ident() as noise, and a number writes no
+                            // item of its own, so the pair vanished.
+                            let word = self.word(0).unwrap_or_default();
+                            let constant = self.toks.get(self.pos + 2).is_some_and(|token| token.kind == Kind::Num);
+                            if constant {
+                                self.pos += 3;
+                                out.push_str("[\"m\",[[\"n\",");
+                                push_string(out, &word);
+                                out.push_str("],0]]");
+                            } else if NOISE.contains(&word.as_str()) && !self.lang.defs.contains(&word.as_str()) {
+                                self.pos += 1;
+                                out.push_str("[\"n\",");
+                                push_string(out, &word);
+                                out.push(']');
+                            } else {
+                                self.ident(out, close);
+                            }
+                        } else if close == b'}' {
+                            if let Some(end) = self.method_end(self.pos) {
+                                self.pos = end;
+                                out.push('0');
+                            } else {
+                                self.ident(out, close);
+                            }
                         } else {
                             self.ident(out, close);
                         }
-                    } else if close == b'}' {
-                        if let Some(end) = self.method_end(self.pos) {
-                            self.pos = end;
-                            out.push('0');
-                        } else {
-                            self.ident(out, close);
-                        }
-                    } else {
-                        self.ident(out, close);
                     }
                 }
                 Kind::Str => {
@@ -2136,9 +2188,54 @@ impl Emit<'_> {
         }
     }
 
+    /// `object : Serializable, FormatterFunc { … }`: a Kotlin object expression
+    /// is one value that names its supertypes. The body is not part of the
+    /// value, and the commas between the supertypes do not split it.
+    fn kt_object_value(&mut self) -> Option<String> {
+        let mut parts = String::new();
+        parts.push_str("[\"n\",");
+        push_string(&mut parts, "object");
+        parts.push(']');
+        let mut at = self.pos + 2;
+        let mut types: Vec<String> = Vec::new();
+        loop {
+            let Some(token) = self.toks.get(at) else { break };
+            if token.kind == Kind::Op && self.raw_is(token, b",") {
+                at += 1;
+                continue;
+            }
+            if token.kind != Kind::Ident {
+                break;
+            }
+            types.push(lexeme(self.src, token, self.lang));
+            at += 1;
+            if self.toks.get(at).is_some_and(|t| t.kind == Kind::Op && self.raw_is(t, b"?")) {
+                at += 1;
+            }
+            if self.toks.get(at).is_some_and(|t| t.kind == Kind::Op && self.raw_is(t, b"<")) {
+                at = self.skip_balanced(at, b"<", b">")?;
+            }
+            if self.toks.get(at).is_some_and(|t| t.kind == Kind::Op && self.raw_is(t, b"(")) {
+                at = self.skip_balanced(at, b"(", b")")?;
+            }
+        }
+        if types.is_empty() {
+            return None;
+        }
+        for name in types {
+            parts.push_str(",[\"n\",");
+            push_string(&mut parts, &name);
+            parts.push(']');
+        }
+        self.pos = at;
+        if self.op_byte(0) == b'{' {
+            self.skip_block();
+        }
+        Some(format!("[\"m\",[{parts}]]"))
+    }
+
     /// Skip a Kotlin `<...>` type-argument or type-parameter list at `self.pos`.
-    fn skip_kt_angles(&mut self) {
-        if !self.is_op(0, b"<") && !self.is_op(0, b"<<") {
+    fn skip_kt_angles(&mut self) {        if !self.is_op(0, b"<") && !self.is_op(0, b"<<") {
             return;
         }
         let mut depth = 0i32;
@@ -2395,11 +2492,22 @@ impl Emit<'_> {
                     b">" | b">>" | b">>>" if paren == 0 && bracket == 0 && brace == 0 => {
                         angle = angle.checked_sub(raw.len())?;
                         if angle == 0 {
-                            return self
-                                .toks
-                                .get(index + 1)
-                                .is_some_and(|t| t.kind == Kind::Op && self.raw_is(t, b"("))
-                                .then_some(index + 1);
+                            // `configure<SpotlessExtension> { … }`: a Kotlin
+                            // generic call whose only argument is a trailing
+                            // lambda. Read as a comparison the `<…>` became a
+                            // member (`m:[n:configure,n:SpotlessExtension]`)
+                            // where the CST names the callee alone.
+                            let opens_call = match self.toks.get(index + 1) {
+                                Some(t) => {
+                                    t.kind == Kind::Op
+                                        && (self.raw_is(t, b"(") || (self.lang.tag == "KT" && self.raw_is(t, b"{")))
+                                }
+                                // `configure<SpotlessExtension>` ends the
+                                // statement's token slice: the trailing lambda
+                                // is the block the statement was split at.
+                                None => self.lang.tag == "KT",
+                            };
+                            return opens_call.then_some(index + 1);
                         }
                     }
                     b";" | b"&&" | b"||" | b"??" | b"==" | b"===" | b"!=" | b"!=="
@@ -2591,7 +2699,10 @@ impl Emit<'_> {
                 continue;
             }
             let separator = self.is_op(0, b".")
-                || (self.is_op(0, b"->") && self.lang.tag != "KT")
+                // Java's `->` opens a lambda body; read as a member separator
+                // it named `key.new` and `key.key` where the source has a
+                // parameter and a body.
+                || (self.is_op(0, b"->") && !matches!(self.lang.tag, "KT" | "JAVA"))
                 || self.is_op(0, b"::")
                 || self.is_op(0, b"?.")
                 || (self.is_op(0, b":") && self.op_byte(2) == b'(' && self.lang.tag == "LUA");
