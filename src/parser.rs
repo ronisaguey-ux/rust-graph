@@ -4788,8 +4788,8 @@ impl<'a> Parser<'a> {
                     depth += 1;
                 }
                 b")" => depth -= 1,
-                b"[" if js_class => depth += 1,
-                b"]" if js_class => depth -= 1,
+                b"[" if js_class || self.lang.tag == "CS" => depth += 1,
+                b"]" if js_class || self.lang.tag == "CS" => depth -= 1,
                 b":" if depth == 0 && !groups.is_empty() => break,
                 _ => {}
             }
