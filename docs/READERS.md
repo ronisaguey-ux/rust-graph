@@ -55,11 +55,10 @@ Covered (41):
 - c-style for with an inline body
 - computed method key in a class body
 
-Known gaps (4):
+Known gaps (3):
 
 - arrow returning a class expression
 - declare field without an initialiser
-- a JSX element's value
 - labelled statement
 
 ## TypeScript — `tests/ts_coverage.rs`
