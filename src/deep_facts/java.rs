@@ -202,6 +202,15 @@ impl<'a> Walker<'a> {
             "constant_declaration" => self.java_declaration(id),
             "expression_statement" => match self.expression_child(id) {
                 Some(child) if self.kind(child) == "assignment_expression" => self.java_assign(child),
+                // `this.validator = () -> adapter;`: `=` binds tighter than
+                // `->` in this grammar, so a statement-level lambda assignment
+                // is a lambda whose head is the assignment. Read as a lambda
+                // expression it wrote an `x` whose value merged the binder and
+                // the body; the one-pass reader writes the assignment, with
+                // the lambda (its parameter list and body) as the value.
+                Some(child) if self.kind(child) == "lambda_expression" && self.child_of_kind(child, "assignment_expression").is_some() => {
+                    self.java_lambda_assignment(child)
+                }
                 Some(child) => {
                     let value = self.decl_value(id);
                     let line = self.line(id);
@@ -229,16 +238,44 @@ impl<'a> Walker<'a> {
             "method_declaration" => {
                 if self.child_of_kind(id, "block").is_none() && self.child_of_kind(id, "constructor_body").is_none() {
                     let children = self.children(id);
-                    let name = children
+                    let name_node = children
                         .iter()
                         .copied()
                         .take_while(|&child| self.kind(child) != "formal_parameters")
                         .filter(|&child| matches!(self.kind(child), "identifier"))
-                        .last()
-                        .map(|node| self.text_string(node));
+                        .last();
+                    let name = name_node.map(|node| self.text_string(node));
                     if let Some(name) = name {
                         let line = self.line(id);
-                        self.push_call(name, line);
+                        let index = self.push_call(name, line);
+                        // A method with no body is a statement to the one-pass
+                        // reader: it writes one `x` over the whole header, the
+                        // call included, and the CST wrote the call alone, so
+                        // every abstract and interface method's line was an
+                        // event the record did not have
+                        // (`<V> @Nullable V get(Object key, Class<V>
+                        // requiredType);`, 8 rows of Store.java).
+                        let params = children
+                            .iter()
+                            .copied()
+                            .find(|&child| self.kind(child) == "formal_parameters");
+                        let args = params.map(|list| self.arguments(list)).unwrap_or_else(|| "[]".to_string());
+                        let mut parts: Vec<String> = Vec::new();
+                        for &child in &children {
+                            if Some(child) == name_node || Some(child) == params {
+                                continue;
+                            }
+                            let value = self.decl_value(child);
+                            if !value.is_empty() && value != "0" {
+                                parts.push(value);
+                            }
+                        }
+                        parts.push(format!("[\"c\",{index},0,{args}]"));
+                        let value = match parts.len() {
+                            1 => parts.pop().unwrap_or_default(),
+                            _ => format!("[\"m\",[{}]]", parts.join(",")),
+                        };
+                        self.lexer_event(b'x', line, &[], &value, false);
                     }
                 }
             }
@@ -304,10 +341,225 @@ impl<'a> Walker<'a> {
                 later = true;
             }
         }
-        let value = if later { self.decl_values(&values) } else { self.decl_values(&parts[equal + 1..]) };
+        // `Type type = new TypeToken<…>() {}.getType();`: the one-pass reader
+        // ends the declaration at the anonymous class's body and reads the
+        // chain after it as a statement of its own.
+        let split = match &parts[equal + 1..] {
+            [node] if !later => self.java_anonymous_split(*node),
+            _ => None,
+        };
+        let value = match &split {
+            Some((creation, _)) => creation.clone(),
+            None if later => self.decl_values(&values),
+            None => self.decl_values(&parts[equal + 1..]),
+        };
         let targets = self.java_targets(id);
         let line = self.line(id);
         self.lexer_event(b'a', line, &targets, &value, false);
+        if let Some((_, rest)) = split {
+            self.lexer_event(b'x', line, &[], &rest, false);
+        }
+    }
+
+    /// `new TypeToken<…>() {}.getType().hashCode()`: after an anonymous class
+    /// body the one-pass reader ends the expression at the creation and reads
+    /// the rest as a statement of its own, whose value is the chain with the
+    /// creation's call written as the constant 0. Returns the creation's value
+    /// and the rest's.
+    pub(crate) fn java_anonymous_split(&mut self, id: u32) -> Option<(String, String)> {
+        let mut at = id;
+        let mut creation = None;
+        for _ in 0..64 {
+            match self.kind(at) {
+                "method_invocation" | "object_creation_expression" => {
+                    if self.child_of_kind(at, "class_body").is_some() {
+                        creation = Some(at);
+                        break;
+                    }
+                    let base = self.children(at).into_iter().find(|&child| {
+                        !self.is_layout(child)
+                            && !matches!(self.kind(child), "arguments" | "argument_list" | "type_arguments" | "type_parameter_list")
+                    })?;
+                    if base == at {
+                        break;
+                    }
+                    at = base;
+                }
+                "field_access" => {
+                    let base = self.children(at).into_iter().find(|&child| !self.is_layout(child))?;
+                    if base == at {
+                        break;
+                    }
+                    at = base;
+                }
+                _ => break,
+            }
+        }
+        let creation = creation?;
+        if creation == id {
+            return None;
+        }
+        // One pass only: the creation's call is recorded by the chain's own
+        // value, and reading it a second time would give it a second index.
+        let callee = self.decl_callee(creation);
+        let created = self.decl_path(callee);
+        let line = self.line(creation);
+        let symbol = self.frame().symbol;
+        let before = self.facts.symbols[symbol].calls.len();
+        let full = self.decl_value(id);
+        let index = self.facts.symbols[symbol].calls[before..]
+            .iter()
+            .position(|call| call.path == created && call.line == line)
+            .map(|at| before + at)?;
+        let needle = format!("[\"c\",{index},");
+        let start = full.find(&needle)?;
+        let end = Self::json_array_end(&full, start)?;
+        let creation_form = full[start..end].to_string();
+        let rest = format!("{}{}{}", &full[..start], "0", &full[end..]);
+        Some((creation_form, rest))
+    }
+
+    /// An argument that is an anonymous class or a chain on one. Inside an
+    /// argument list the one-pass reader merges the creation with what follows
+    /// it (`m:[c(X), body]` for a body, `m:[c(X), rest]` for a chain), while a
+    /// declaration keeps the creation alone and the chain as a statement of its
+    /// own.
+    pub(crate) fn java_argument_value(&mut self, id: u32) -> String {
+        if let Some((creation, rest)) = self.java_anonymous_split(id) {
+            return format!("[\"m\",[{creation},{rest}]]");
+        }
+        if self.kind(id) == "object_creation_expression" {
+            if let Some(body) = self.child_of_kind(id, "class_body") {
+                let members = self.java_anon_body(body);
+                if !members.is_empty() && members != "0" {
+                    let call = self.decl_value(id);
+                    return format!("[\"m\",[{call},{members}]]");
+                }
+            }
+        }
+        self.decl_value(id)
+    }
+
+    /// The members of an anonymous class body as the one-pass reader writes
+    /// them: one merge of what the block's statements read as. A method there
+    /// is a call of its name (see [`Self::java_anon_method`]) and every other
+    /// member keeps the value the CST gives it.
+    pub(crate) fn java_anon_body(&mut self, body: u32) -> String {
+        let mut parts = Vec::new();
+        for member in self.children(body) {
+            if self.is_layout(member) {
+                continue;
+            }
+            if self.kind(member) == "method_declaration" {
+                let value = self.java_anon_method(member);
+                if !value.is_empty() && value != "0" {
+                    parts.push(value);
+                }
+                continue;
+            }
+            let value = self.decl_value(member);
+            if !value.is_empty() && value != "0" {
+                parts.push(value);
+            }
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
+    /// `@Override public void handle(String s) throws E { … }` in an anonymous
+    /// class body: the one-pass reader opens a plain block at the `{`, so the
+    /// declaration is a statement of that block and reads as a call of the
+    /// method's name with one merged argument per parameter. Read here as a
+    /// class member, that call was never written and the parameters sat as a
+    /// merge of their own, so every anonymous class method that takes an
+    /// argument was a call the CST's value did not carry — 165 rows of the java
+    /// corpus, its largest cluster. The names stay in the form the CST reads
+    /// them; the count of calls is what the guard compares.
+    pub(crate) fn java_anon_method(&mut self, id: u32) -> String {
+        let children = self.children(id);
+        let name = children
+            .iter()
+            .copied()
+            .take_while(|&child| self.kind(child) != "formal_parameters")
+            .filter(|&child| self.kind(child) == "identifier")
+            .last()
+            .map(|node| self.text_string(node));
+        let mut parts = Vec::new();
+        for child in children {
+            if self.is_layout(child) {
+                continue;
+            }
+            if self.kind(child) == "formal_parameters" {
+                let mut params = Vec::new();
+                for param in self.children(child) {
+                    if self.kind(param) != "formal_parameter" {
+                        continue;
+                    }
+                    let value = self.decl_value(param);
+                    if !value.is_empty() {
+                        params.push(value);
+                    }
+                }
+                // A method that takes nothing writes a call of no arguments,
+                // which neither record's shape counts (a call with no receiver
+                // and no argument names nothing). Keeping the constant the
+                // parameter list read as keeps the value's length, which the
+                // guard compares when it weighs a lost `0`.
+                let line = self.line(id);
+                match name.clone().filter(|_| !params.is_empty()) {
+                    Some(name) => {
+                        let index = self.push_call(name, line);
+                        parts.push(format!("[\"c\",{index},0,[{}]]", params.join(",")));
+                    }
+                    None => parts.push(if params.is_empty() { "0".to_string() } else { format!("[\"m\",[{}]]", params.join(",")) }),
+                }
+                continue;
+            }
+            let value = self.decl_value(child);
+            if !value.is_empty() && value != "0" {
+                parts.push(value);
+            }
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
+    /// The exclusive end of the JSON array that starts at `start`.
+    fn json_array_end(text: &str, start: usize) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut depth = 0i32;
+        let mut quote = false;
+        let mut escape = false;
+        for (at, &byte) in bytes.iter().enumerate().skip(start) {
+            if quote {
+                if escape {
+                    escape = false;
+                } else if byte == b'\\' {
+                    escape = true;
+                } else if byte == b'"' {
+                    quote = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' => quote = true,
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(at + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     pub(crate) fn java_targets(&self, id: u32) -> Vec<String> {
@@ -383,9 +635,55 @@ impl<'a> Walker<'a> {
                 self.facts.vars.push((target.clone(), class));
             }
         }
-        let value = self.decl_values(&children[at + 1..]);
+        let split = match &children[at + 1..] {
+            [node, ..] if children.len() == at + 2 => self.java_anonymous_split(*node),
+            _ => None,
+        };
+        let value = match &split {
+            Some((creation, _)) => creation.clone(),
+            None => self.decl_values(&children[at + 1..]),
+        };
         let line = self.line(id);
         self.lexer_event(b'a', line, &targets, &value, operator != "=");
+        if let Some((_, rest)) = split {
+            self.lexer_event(b'x', line, &[], &rest, false);
+        }
+    }
+
+    /// `target = params -> body`: one assignment whose value is the lambda.
+    pub(crate) fn java_lambda_assignment(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(assign) = children.iter().copied().find(|&child| self.kind(child) == "assignment_expression") else { return };
+        let assign_children = self.children(assign);
+        let Some(equal) = assign_children.iter().position(|&child| self.kind(child) == "=") else { return };
+        let Some(&lhs) = assign_children.first() else { return };
+        // `this.validator = …`: a field access is a target like any other path,
+        // and the one-pass reader spells it `self.validator`.
+        let targets: Vec<String> = self.decl_target(lhs).into_iter().collect();
+        if targets.is_empty() {
+            return;
+        }
+        let params = assign_children[equal + 1..]
+            .iter()
+            .copied()
+            .find(|&child| !self.is_layout(child))
+            .map(|child| {
+                let value = self.decl_value(child);
+                if value.is_empty() { "0".to_string() } else { value }
+            })
+            .unwrap_or_else(|| "0".to_string());
+        let body = children
+            .iter()
+            .position(|&child| self.kind(child) == "->")
+            .and_then(|at| children[at + 1..].iter().copied().find(|&child| !self.is_layout(child)))
+            .map(|child| {
+                let value = self.decl_value(child);
+                if value.is_empty() { "0".to_string() } else { value }
+            })
+            .unwrap_or_else(|| "0".to_string());
+        let value = format!("[\"m\",[{params},{body}]]");
+        let line = self.line(id);
+        self.lexer_event(b'a', line, &targets, &value, false);
     }
 
     pub(crate) fn java_return(&mut self, id: u32) {
@@ -460,6 +758,41 @@ impl<'a> Walker<'a> {
         self.event("[\"e\"]");
         for child in self.children(id) {
             self.java_statement(child);
+        }
+    }
+
+    /// `catch (InterruptedException e) { … }` read as a value (inside a
+    /// lambda's body, a field's initialiser): the one-pass reader has no
+    /// keyword table in value position, so the declaration is a call of the
+    /// keyword itself with the exception as its only argument, followed by the
+    /// block. The CST read the parameter list as a merge and wrote no call, so
+    /// every try/catch that a value carries was a call the record did not have
+    /// (30 rows of the java corpus, guava's SimpleTimeLimiter two of them).
+    pub(crate) fn java_catch_clause(&mut self, id: u32) -> String {
+        let mut parts = Vec::new();
+        for child in self.children(id) {
+            if self.is_layout(child) {
+                continue;
+            }
+            if self.kind(child) == "catch_formal_parameter" {
+                let value = self.decl_value(child);
+                if value.is_empty() || value == "0" {
+                    continue;
+                }
+                let line = self.line(id);
+                let index = self.push_call("catch".to_string(), line);
+                parts.push(format!("[\"c\",{index},0,[{value}]]"));
+                continue;
+            }
+            let value = self.decl_value(child);
+            if !value.is_empty() && value != "0" {
+                parts.push(value);
+            }
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
         }
     }
 
