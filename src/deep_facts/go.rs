@@ -2071,13 +2071,16 @@ impl<'a> Walker<'a> {
     }
 
     pub(crate) fn assignment(&mut self, id: u32, augmented: bool) {
+        self.assignment_at(id, augmented, self.line(id));
+    }
+
+    pub(crate) fn assignment_at(&mut self, id: u32, augmented: bool, line: u32) {
         let children = self.children(id);
         let Some(&first) = children.first() else { return };
         let Some(&last) = children.last() else { return };
         if first == last {
             return;
         }
-        let line = self.line(id);
         // `expression_statement` dispatches `assignment_expression` here
         // directly, bypassing the walk arm in `mod.rs`, so a statement-level
         // lambda assignment (`_handler = x => ...;` or `cfg.P = x => ...;`)
@@ -3905,6 +3908,13 @@ fn dotted_piece(text: &str) -> bool {
                         push_string(&mut form, &word);
                         form.push(']');
                         parts.push(form);
+                    } else if self.node(child).first_child != NONE {
+                        // A non-leaf type such as `nullable_type` (`SymbolResult?`)
+                        // has no leaf name, so form it to keep the type name.
+                        let form = self.form(child);
+                        if !form.is_empty() && form != "0" {
+                            parts.push(form);
+                        }
                     }
                 }
                 return match parts.len() {
@@ -5648,16 +5658,15 @@ fn dotted_piece(text: &str) -> bool {
                 let mut parts = Vec::new();
                 for child in self.children(id) {
                     if !self.is_layout(child) && !matches!(self.kind(child), "[" | "]" | ",") {
-                        let v = self.form(child);
-                        if v != "0" {
-                            parts.push(v);
-                        }
+                        parts.push(self.form(child));
                     }
                 }
-                match parts.len() {
-                    0 => "0".to_string(),
-                    1 => parts.remove(0),
-                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                if parts.is_empty() {
+                    "0".to_string()
+                } else {
+                    // Sized dimensions (`new object?[0]`) form as a bracketed list
+                    // (`["t",[0]]`) to match the one-pass reader.
+                    format!("[\"t\",[{}]]", parts.join(","))
                 }
             }
             // Rust's and JavaScript's lexers have no keyword table for these:
