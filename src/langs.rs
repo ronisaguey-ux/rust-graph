@@ -289,6 +289,14 @@ pub const LANGUAGES: &[Language] = &[
         imports: Imports::Path,
         import_words: &["import"],
         type_first: true,
+        // `String body = """…"""`: a Java 15 text block spans lines, and read as
+        // a single-line string it ended at the first `"` and handed the literal
+        // to the reader as code — every `Content-Disposition: form-data;
+        // name="x"` line inside one became an `a` event targeting `name` and the
+        // words of the body became names, which the CST (which sees one string)
+        // never writes. spring-framework's multipart matcher tests lost five
+        // rows each this way.
+        triple_quotes: true,
         ..BASE
     },
     Language {
