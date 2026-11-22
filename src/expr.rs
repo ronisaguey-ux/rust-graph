@@ -1761,6 +1761,42 @@ impl Emit<'_> {
         if self.lang.tag == "GO" && word == "func" && self.op_byte(0) == b'(' {
             return;
         }
+        // `private (A, B) _f;`, `private readonly (A, B) _f;`,
+        // `protected abstract (A, B) M();`, `delegate(object s, EventArgs a) {}`:
+        // C# visibility/member modifiers before a tuple type and `delegate`
+        // before an anonymous method's parameter list are keywords, never
+        // callees. Left to `chain()`, the lexer read the keyword as a call
+        // whose arguments were the tuple elements or parameter list.
+        if self.lang.tag == "CS"
+            && matches!(
+                word.as_str(),
+                "private"
+                    | "protected"
+                    | "public"
+                    | "internal"
+                    | "readonly"
+                    | "static"
+                    | "abstract"
+                    | "virtual"
+                    | "override"
+                    | "sealed"
+                    | "extern"
+                    | "partial"
+                    | "volatile"
+                    | "delegate"
+            )
+            && self.op_byte(0) == b'('
+        {
+            return;
+        }
+        // `public delegate int MyDelegate(int x);` and `static extern int kill(int pid);`:
+        // a C# delegate or extern declaration is not a call to `MyDelegate` or `kill`.
+        // Stop reading the declaration header so `chain()` does not emit the declared
+        // name as a call.
+        if self.lang.tag == "CS" && matches!(word.as_str(), "delegate" | "extern") {
+            self.pos = self.toks.len();
+            return;
+        }
         // `typealias H = suspend (Int) -> Unit`, `val w: suspend C.() -> Unit`:
         // a suspend function *type*. The group is its parameter list and the
         // type after `->` is its result, so the construct names no value at all;
