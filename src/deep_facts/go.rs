@@ -807,7 +807,12 @@ impl<'a> Walker<'a> {
             let mut parts = Vec::new();
             for child in self.children(id) {
                 let child_kind = self.kind(child);
-                if child_kind == "dimensions_expr" {
+                if child_kind == "new" {
+                    continue;
+                }
+                // `new int[] { foo() }`: an array initializer can contain calls
+                // and expressions that must be walked, just like `dimensions_expr`.
+                if matches!(child_kind, "dimensions_expr" | "array_initializer") {
                     let value = self.decl_value(child);
                     if !value.is_empty() && value != "0" {
                         parts.push(value);
@@ -815,13 +820,15 @@ impl<'a> Walker<'a> {
                     continue;
                 }
                 if let Some(name) = self.leaf_name(child) {
-                    if name == "new" {
-                        continue;
-                    }
                     let mut out = "[\"n\",".to_string();
                     push_string(&mut out, &name);
                     out.push(']');
                     parts.push(out);
+                } else {
+                    let value = self.decl_value(child);
+                    if !value.is_empty() && value != "0" {
+                        parts.push(value);
+                    }
                 }
             }
             return match parts.len() {
@@ -1291,6 +1298,13 @@ impl<'a> Walker<'a> {
             "selector_expression" | "member_expression" | "field_access" => {
                 let object = self.children(callee).into_iter().find(|&child| !self.is_layout(child))?;
                 (object != call && self.decl_has_call(object)).then_some(object)
+            }
+            // `Ordering.from(k).<K>onKeys()`: Java's `method_invocation` with
+            // `type_arguments` keeps the receiver as a direct child of `call`
+            // rather than wrapping it in `field_access`.
+            _ if self.kind(call) == "method_invocation" => {
+                let object = self.children(call).into_iter().find(|&child| !self.is_layout(child))?;
+                (object != callee && self.decl_has_call(object)).then_some(object)
             }
             _ => None,
         }
