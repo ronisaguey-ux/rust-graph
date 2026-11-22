@@ -233,7 +233,8 @@ const CS_IMPORTS: &[&str] = &["using_directive"];
 /// C#'s contextual keywords: `value` is the implicit parameter of a property
 /// or event accessor and an ordinary name everywhere else, so treating it as
 /// layout dropped `value` from every `set` guard and assignment.
-const CS_SOFT: &[&str] = &["value"];
+// `value` and `remove` are C# contextual keywords that also name parameters and locals.
+const CS_SOFT: &[&str] = &["value", "remove"];
 
 const KT_DEFS: &[Def] = &[
     Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
@@ -2340,11 +2341,8 @@ impl<'a> Walker<'a> {
                                                 let mut tf = String::from("[\"n\",");
                                                 push_string(&mut tf, &t_name);
                                                 tf.push(']');
-                                                if rhs_form == "0" || rhs_form.is_empty() {
-                                                    multi.push(tf);
-                                                } else {
-                                                    multi.push(format!("[\"m\",[{tf},{rhs_form}]]"));
-                                                }
+                                                let rhs_val = if rhs_form.is_empty() { "0" } else { rhs_form.as_str() };
+                                                multi.push(format!("[\"m\",[{tf},{rhs_val}]]"));
                                             }
                                         }
                                     }
@@ -2802,18 +2800,44 @@ impl<'a> Walker<'a> {
                         } else {
                             let mut parts = vec![first_value];
                             for member in rest {
-                                match (self.first_identifier(*member), self.enum_member_value(*member)) {
+                                let attr_forms: Vec<String> = if self.language.name == "csharp" {
+                                    let mut forms = Vec::new();
+                                    let mut attributed = false;
+                                    self.csharp_attributes(*member, &mut attributed, &mut forms);
+                                    forms
+                                } else {
+                                    Vec::new()
+                                };
+                                let member_name = if self.language.name == "csharp" {
+                                    self.children(*member)
+                                        .into_iter()
+                                        .find(|&c| self.kind(c) == "identifier")
+                                        .map(|c| self.text_string(c))
+                                        .or_else(|| self.first_identifier(*member))
+                                } else {
+                                    self.first_identifier(*member)
+                                };
+                                match (member_name, self.enum_member_value(*member)) {
                                     (Some(member_name), value) if value == "0" => {
                                         let mut form = String::from("[\"n\",");
                                         push_string(&mut form, &member_name);
                                         form.push(']');
-                                        parts.push(form);
+                                        if attr_forms.is_empty() {
+                                            parts.push(form);
+                                        } else {
+                                            let mut items = attr_forms;
+                                            items.push(form);
+                                            parts.push(format!("[\"m\",[{}]]", items.join(",")));
+                                        }
                                     }
                                     (Some(member_name), value) => {
                                         let mut key = String::from("[\"n\",");
                                         push_string(&mut key, &member_name);
                                         key.push(']');
-                                        parts.push(format!("[\"m\",[{key},{value}]]"));
+                                        let mut items = attr_forms;
+                                        items.push(key);
+                                        items.push(value);
+                                        parts.push(format!("[\"m\",[{}]]", items.join(",")));
                                     }
                                     _ => {}
                                 }
@@ -4053,9 +4077,9 @@ impl<'a> Walker<'a> {
             return true;
         };
         match self.kind(value) {
-            "assignment_expression" => self.assignment(value, false),
+            "assignment_expression" => self.assignment_at(value, false, line),
             "augmented_assignment_expression" | "compound_assignment_expr" => {
-                self.assignment(value, true);
+                self.assignment_at(value, true, line);
             }
             _ => {
                 let form = self.form(value);
@@ -4422,11 +4446,12 @@ impl<'a> Walker<'a> {
             if let Some(at) = children.iter().position(|&c| self.kind(c) == "=") {
                 if let Some(&val) = children[at + 1..].iter().find(|&&c| !self.is_layout(c)) {
                     let f = self.form(val);
-                    if !f.is_empty() && f != "0" {
-                        return f;
-                    }
+                    return if f.is_empty() { "0".to_string() } else { f };
                 }
             }
+            // Do not fall through to the member's own identifier when `=` has
+            // a constant RHS (`Binary = 0x00`) or no `=` at all.
+            return "0".to_string();
         }
         for child in self.children(id) {
             let kind = self.kind(child);
