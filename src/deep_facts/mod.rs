@@ -1489,6 +1489,216 @@ impl<'a> Walker<'a> {
         }
     }
 
+                "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "??="
+                    if p_depth == 0 && b_depth == 0 =>
+                {
+                    eq_at = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if let Some(at) = eq_at {
+            if at > 0 {
+                if let Some(target) = self.cs_recovered_target(&stmt[..at]) {
+                    let value = self.cs_recovered_form(&stmt[at + 1..]);
+                    let weak = self.kind(stmt[at]) != "=";
+                    self.lexer_event(b'a', line, &[target], &value, weak);
+                    return;
+                }
+            }
+        }
+        let value = self.cs_recovered_form(stmt);
+        if value != "0" && !value.is_empty() {
+            self.lexer_event(b'x', line, &[], &value, false);
+        }
+    }
+
+    fn cs_recovered_target(&self, lhs: &[u32]) -> Option<String> {
+        let mut is_dotted = !lhs.is_empty();
+        let mut segs: Vec<String> = Vec::new();
+        for (i, &n) in lhs.iter().enumerate() {
+            if i % 2 == 1 {
+                if !matches!(self.kind(n), "." | "?.") {
+                    is_dotted = false;
+                    break;
+                }
+            } else if let Some(name) = self.cs_leaf_ident(n) {
+                segs.push(if name == "this" { "self".to_string() } else { name });
+            } else {
+                is_dotted = false;
+                break;
+            }
+        }
+        if is_dotted && !segs.is_empty() && lhs.len() % 2 == 1 {
+            return Some(segs.join("."));
+        }
+        lhs.iter().rev().find_map(|&n| self.cs_leaf_ident(n))
+    }
+
+    fn cs_leaf_ident(&self, id: u32) -> Option<String> {
+        let kind = self.kind(id);
+        if kind == "identifier"
+            || self.kinds.soft.contains(&kind)
+            || matches!(kind, "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "var" | "this")
+        {
+            Some(self.text_string(id))
+        } else {
+            self.leaf_name(id)
+        }
+    }
+
+    fn cs_recovered_form(&mut self, nodes: &[u32]) -> String {
+        let symbol = self.frame().symbol;
+        let calls_len = self.facts.symbols[symbol].calls.len();
+        let mut parts: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < nodes.len() {
+            let n = nodes[i];
+            if self.node(n).first_child != NONE {
+                let f = self.form(n);
+                if !f.is_empty() && f != "0" {
+                    parts.push(f);
+                }
+                i += 1;
+                continue;
+            }
+            let kind = self.kind(n);
+            if matches!(kind, "true" | "false" | "null") {
+                parts.push(format!("[\"n\",\"{kind}\"]"));
+                i += 1;
+                continue;
+            }
+            if matches!(
+                kind,
+                "integer_literal" | "real_literal" | "string_literal" | "character_literal"
+                    | "verbatim_string_literal" | "raw_string_literal"
+            ) {
+                parts.push("0".to_string());
+                i += 1;
+                continue;
+            }
+            if let Some(first) = self.cs_leaf_ident(n) {
+                if matches!(
+                    first.as_str(),
+                    "var" | "await" | "out" | "ref" | "in" | "is" | "as" | "new" | "throw" | "yield"
+                ) {
+                    i += 1;
+                    continue;
+                }
+                let is_new = i > 0 && self.kind(nodes[i - 1]) == "new";
+                let mut segs = vec![if first == "this" { "self".to_string() } else { first }];
+                let mut end = i;
+                while end + 2 < nodes.len() && matches!(self.kind(nodes[end + 1]), "." | "?." | "::") {
+                    if let Some(seg) = self.cs_leaf_ident(nodes[end + 2]) {
+                        segs.push(seg);
+                        end += 2;
+                    } else {
+                        break;
+                    }
+                }
+                let mut after = end + 1;
+                if after < nodes.len() && self.kind(nodes[after]) == "<" {
+                    let mut depth = 0i32;
+                    let mut j = after;
+                    while j < nodes.len() {
+                        match self.kind(nodes[j]) {
+                            "<" => depth += 1,
+                            ">" | ">joined" => {
+                                depth -= 1;
+                                if depth <= 0 {
+                                    after = j + 1;
+                                    break;
+                                }
+                            }
+                            ";" | "{" | "}" | "(" => break,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                }
+                if after < nodes.len() && self.kind(nodes[after]) == "(" {
+                    let mut depth = 0i32;
+                    let mut close = None;
+                    for (j, &tok) in nodes.iter().enumerate().skip(after) {
+                        match self.kind(tok) {
+                            "(" => depth += 1,
+                            ")" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close = Some(j);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(close_idx) = close {
+                        let mut args: Vec<String> = Vec::new();
+                        let mut arg_start = after + 1;
+                        let mut p = 0i32;
+                        let mut b = 0i32;
+                        for j in (after + 1)..close_idx {
+                            match self.kind(nodes[j]) {
+                                "(" | "[" => p += 1,
+                                ")" | "]" => p = (p - 1).max(0),
+                                "{" => b += 1,
+                                "}" => b = (b - 1).max(0),
+                                "," if p == 0 && b == 0 => {
+                                    args.push(self.cs_recovered_form(&nodes[arg_start..j]));
+                                    arg_start = j + 1;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if arg_start < close_idx {
+                            args.push(self.cs_recovered_form(&nodes[arg_start..close_idx]));
+                        }
+                        let recv = if !is_new && segs.len() > 1 {
+                            let recv_name = segs[..segs.len() - 1].join(".");
+                            let mut r = String::from("[\"n\",");
+                            push_string(&mut r, &recv_name);
+                            r.push(']');
+                            r
+                        } else {
+                            "0".to_string()
+                        };
+                        let call_name = segs.join(".");
+                        let call_line = self.line(nodes[end]);
+                        let call_idx = self.facts.symbols[symbol]
+                            .calls
+                            .iter()
+                            .position(|c| c.line == call_line && c.path == call_name)
+                            .unwrap_or(0);
+                        parts.push(format!("[\"c\",{call_idx},{recv},[{}]]", args.join(",")));
+                        i = close_idx + 1;
+                        continue;
+                    }
+                }
+                let name = segs.join(".");
+                let mut f = String::from("[\"n\",");
+                push_string(&mut f, &name);
+                f.push(']');
+                parts.push(f);
+                i = end + 1;
+                continue;
+            }
+            i += 1;
+        }
+        self.facts.symbols[symbol].calls.truncate(calls_len);
+        // Drop bare `0` literals when combined with names/calls in an expression,
+        // matching how `form` omits constants inside merges, while keeping `0`
+        // when it is the sole value (e.g. a call argument or `return 0;`).
+        if parts.len() > 1 && parts.iter().any(|p| p != "0") {
+            parts.retain(|p| p != "0");
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap(),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
     pub(crate) fn push_call(&mut self, path: String, line: u32) -> usize {
         let symbol = self.frame().symbol;
         let calls = &mut self.facts.symbols[symbol].calls;
