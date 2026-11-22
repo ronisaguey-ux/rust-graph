@@ -236,12 +236,18 @@ const CS_IMPORTS: &[&str] = &["using_directive"];
 // `value` and `remove` are C# contextual keywords that also name parameters and locals.
 const CS_SOFT: &[&str] = &["value", "remove"];
 
-/// Java's module-directive words are restricted identifiers: `to` is a name
-/// everywhere but `exports a.b to c`, and a variable called `to` is ordinary
-/// code. Read as layout, every `to = high - 1`, every `swap(array, from, to)`
-/// and every `int low = from + 1, high = to` lost it — 44 rows of the java
-/// dump, 5 in guava's QuantilesAlgorithm alone.
-const JAVA_SOFT: &[&str] = &["to"];
+/// Java's contextual keywords: `module`, `open`, `requires`, `exports`,
+/// `opens`, `to`, `uses`, `provides`, `with` and `transitive` are keywords only
+/// inside a `module-info.java` directive, and `record`, `yield`, `sealed`,
+/// `permits` and `when` only where a declaration or a statement claims them.
+/// Everywhere else the grammar's `_name` rule accepts them and the lexer reads
+/// them as names; without this list a leaf whose kind is its own spelling was
+/// layout, so `swap(array, from, to)` lost its third argument and `to = x`
+/// lost its target (53 rows in the java dump).
+const JAVA_SOFT: &[&str] = &[
+    "exports", "module", "open", "opens", "permits", "provides", "record", "requires", "sealed", "to",
+    "transitive", "uses", "when", "with", "yield",
+];
 
 const KT_DEFS: &[Def] = &[
     Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
