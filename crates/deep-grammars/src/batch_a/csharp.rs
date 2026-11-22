@@ -327,7 +327,7 @@ rust_graph_deep::grammar! { CSHARP {
         | &([attributes] [modifiers] "struct") struct_declaration
         | &([attributes] [modifiers] "interface") interface_declaration
         | &([attributes] [modifiers] "enum") enum_declaration
-        | &([attributes] [modifiers] "record" _name) record_declaration
+        | &([attributes] [modifiers] "record" ["class" | "struct"] _name) record_declaration
         | &([attributes] [modifiers] ["implicit" | "explicit"] "operator" _type formal_parameters) conversion_operator_declaration
         | &([attributes] [modifiers] _type "operator") operator_declaration
         // `public static implicit operator T(Source s)`: a conversion writes no
@@ -450,7 +450,7 @@ rust_graph_deep::grammar! { CSHARP {
         | &([attributes] [modifiers] "class" _name) class_declaration
         | &([attributes] [modifiers] "struct" _name) struct_declaration
         | &([attributes] [modifiers] "interface" _name) interface_declaration
-        | &([attributes] [modifiers] "record" _name) record_declaration
+        | &([attributes] [modifiers] "record" ["class" | "struct"] _name) record_declaration
         | &(_name ":") labeled_statement
         | block
         | ";"
