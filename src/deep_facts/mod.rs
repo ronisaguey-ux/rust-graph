@@ -728,11 +728,12 @@ fn cs_strip_primary_constructors(src: &[u8]) -> Option<Vec<u8>> {
                     || src[p - 1] == b','
                     || src[p - 1] == b':'
                     || src[p - 1] == b'?'
+                    || src[p - 1] == b'['
                     || (p >= 2 && &src[p - 2..p] == b"=>")
                     || (p >= 6 && &src[p - 6..p] == b"return" && (p == 6 || !cs_is_ident_cont(src[p - 7]))));
             if preceded_by_val {
                 let after_ws = cs_skip_ws_and_comments(src, i + 2);
-                if matches!(src.get(after_ws), Some(b';' | b',' | b')' | b'}')) {
+                if matches!(src.get(after_ws), Some(b';' | b',' | b')' | b'}' | b']' | b'.')) {
                     spans.push((i, i + 2));
                     i += 2;
                     prev_word = b"";
@@ -744,6 +745,9 @@ fn cs_strip_primary_constructors(src: &[u8]) -> Option<Vec<u8>> {
         // non-empty C# 12 collection expression `[...]` in value position has
         // no grammar rule yet, and replacing `[` and `]` with `(` and `)`
         // parses as a parenthesized tuple with the exact `t:[...]` flow form.
+        // Named arguments (`messages: [a]`), nested collections (`[[a], b]`),
+        // and spread elements (`[..a, b]`) are included; top-level `..`
+        // spreads are blanked to spaces so `(  a, b)` parses without ERROR.
         if src[i] == b'[' {
             let mut p = i;
             while p > 0 && src[p - 1].is_ascii_whitespace() {
@@ -753,6 +757,8 @@ fn cs_strip_primary_constructors(src: &[u8]) -> Option<Vec<u8>> {
                 && ((src[p - 1] == b'=' && (p < 2 || !matches!(src[p - 2], b'=' | b'!' | b'<' | b'>')))
                     || src[p - 1] == b'('
                     || src[p - 1] == b','
+                    || src[p - 1] == b':'
+                    || src[p - 1] == b'['
                     || (src[p - 1] == b'?' && (p < 2 || src[p - 2] != b'?'))
                     || (p >= 2 && &src[p - 2..p] == b"??")
                     || (p >= 2 && &src[p - 2..p] == b"=>")
@@ -760,15 +766,47 @@ fn cs_strip_primary_constructors(src: &[u8]) -> Option<Vec<u8>> {
             if preceded_by_val {
                 if let Some(after_br) = cs_skip_balanced(src, i, b'[', b']') {
                     let after_ws = cs_skip_ws_and_comments(src, after_br);
-                    if matches!(src.get(after_ws), Some(b';' | b',' | b')' | b'}')) {
-                        // Do not rewrite if the bracket contains `..` spread elements.
-                        if !src[i + 1..after_br - 1].windows(2).any(|w| w == b"..") {
-                            spans.push((i, i + 1));
-                            spans.push((after_br - 1, after_br));
-                            i += 1;
-                            prev_word = b"";
-                            continue;
+                    if matches!(src.get(after_ws), Some(b';' | b',' | b')' | b'}' | b']' | b'.')) {
+                        spans.push((i, i + 1));
+                        spans.push((after_br - 1, after_br));
+                        // Blank top-level `..` spread operators inside `[...]`.
+                        let mut k = cs_skip_ws_and_comments(src, i + 1);
+                        let end_inner = after_br - 1;
+                        if k + 1 < end_inner && &src[k..k + 2] == b".." {
+                            spans.push((k, k + 2));
+                            k += 2;
                         }
+                        while k < end_inner {
+                            if let Some(next) = cs_skip_string_or_char(src, k) {
+                                k = next;
+                                continue;
+                            }
+                            if src.get(k..k + 2) == Some(b"//") || src.get(k..k + 2) == Some(b"/*") {
+                                k = cs_skip_ws_and_comments(src, k);
+                                continue;
+                            }
+                            if let Some(next) = match src[k] {
+                                b'(' => cs_skip_balanced(src, k, b'(', b')'),
+                                b'[' => cs_skip_balanced(src, k, b'[', b']'),
+                                b'{' => cs_skip_balanced(src, k, b'{', b'}'),
+                                _ => None,
+                            } {
+                                k = next;
+                                continue;
+                            }
+                            if src[k] == b',' {
+                                k = cs_skip_ws_and_comments(src, k + 1);
+                                if k + 1 < end_inner && &src[k..k + 2] == b".." {
+                                    spans.push((k, k + 2));
+                                    k += 2;
+                                }
+                                continue;
+                            }
+                            k += 1;
+                        }
+                        i += 1;
+                        prev_word = b"";
+                        continue;
                     }
                 }
             }
