@@ -1758,9 +1758,39 @@ impl<'a> Walker<'a> {
                 if !targets.is_empty() {
                     let value = self.cs_recovered_form(&stmt[at + 1..]);
                     let weak = self.kind(stmt[at]) != "="
-                        || stmt[..at].last().is_some_and(|&n| self.kind(n) == "]");
+                        || stmt[..at].last().is_some_and(|&n| {
+                            matches!(self.kind(n), "]" | "bracketed_argument_list" | "element_access")
+                        });
                     self.lexer_event(b'a', line, &targets, &value, weak);
                     return;
+                }
+            }
+        }
+        // A class/struct/interface/enum/record header stranded in an ERROR node
+        // still declares a type symbol for the one-pass reader.
+        if let Some(at) = stmt
+            .iter()
+            .position(|&n| matches!(self.kind(n), "class" | "struct" | "interface" | "enum" | "record"))
+        {
+            if stmt[..at].iter().all(|&n| {
+                matches!(
+                    self.kind(n),
+                    "public" | "private" | "protected" | "internal" | "static" | "sealed"
+                        | "abstract" | "partial" | "new" | "readonly" | "ref" | "file"
+                )
+            }) {
+                if let Some(&name_node) = stmt.get(at + 1) {
+                    if let Some(name) = self.cs_leaf_ident(name_node) {
+                        if !self
+                            .facts
+                            .symbols
+                            .iter()
+                            .any(|s| s.name == name && s.line == line && s.kind == KIND_CLASS)
+                        {
+                            let owner = self.frame().class.clone();
+                            self.add_symbol(name, owner, KIND_CLASS, line, Vec::new());
+                        }
+                    }
                 }
             }
         }
@@ -1773,7 +1803,14 @@ impl<'a> Walker<'a> {
     fn cs_recovered_targets(&self, mut lhs: &[u32]) -> Vec<String> {
         // `Inner[key] = value` / `this[index] = value`: strip trailing `[...]`
         // subscripts so the target is the receiver, not the index expression.
-        while lhs.last().is_some_and(|&n| self.kind(n) == "]") {
+        while let Some(&last) = lhs.last() {
+            if self.kind(last) == "bracketed_argument_list" {
+                lhs = &lhs[..lhs.len() - 1];
+                continue;
+            }
+            if self.kind(last) != "]" {
+                break;
+            }
             let mut depth = 0i32;
             let mut open = None;
             for (i, &n) in lhs.iter().enumerate().rev() {
@@ -1791,6 +1828,9 @@ impl<'a> Walker<'a> {
             }
             let Some(i) = open else { break };
             lhs = &lhs[..i];
+        }
+        if lhs.len() == 1 && self.kind(lhs[0]) == "element_access" {
+            return self.assignment_targets(lhs[0]);
         }
         // `var (a, b) = ...` / `(a, b) = ...`: extract every binder in the tuple.
         if lhs.last().is_some_and(|&n| self.kind(n) == ")") {
@@ -2393,7 +2433,10 @@ impl<'a> Walker<'a> {
                             let line = self.line(id);
                             self.lexer_event(b'a', line, &[name], &form, false);
                         }
-                        _ => self.field_initializer_calls(id),
+                        _ => {
+                            self.decl_statement(id);
+                            self.field_initializer_calls(id);
+                        }
                     }
                 }
                 self.cs_declared_vars(id);
