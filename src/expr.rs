@@ -2163,6 +2163,12 @@ impl Emit<'_> {
         if self.lang.tag == "GO" && word == "func" && self.op_byte(0) == b'(' {
             return;
         }
+        // `(map[string]string)(nil)`: `map[K]V` is a type, and a type is not a
+        // value. Its words read as names (`map`, `string`) on the conversion.
+        if self.lang.tag == "GO" && word == "map" && self.op_byte(0) == b'[' {
+            self.skip_type();
+            return;
+        }
         // `private (A, B) _f;`, `private readonly (A, B) _f;`,
         // `protected abstract (A, B) M();`, `delegate(object s, EventArgs a) {}`:
         // C# visibility/member modifiers before a tuple type and `delegate`

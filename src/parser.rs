@@ -1034,7 +1034,17 @@ impl<'a> Parser<'a> {
     }
 
     fn on_open_brace(&mut self, token: Token) {
-        let opens_block = self.uses_braces() && self.is_block();
+        // `r.(interface{ ForceFlush(ctx) error })`: the interface type of a
+        // type assertion. Its members are method specifications, not calls,
+        // so the body opens as a type body.
+        let n = self.stmt.len();
+        let go_type_literal = self.lang.tag == "GO"
+            && n >= 3
+            && self.is_op(&self.stmt[n - 3], b".")
+            && self.is_op(&self.stmt[n - 2], b"(")
+            && self.stmt[n - 1].kind == Kind::Ident
+            && self.raw(&self.stmt[n - 1]) == b"interface";
+        let opens_block = self.uses_braces() && (self.is_block() || go_type_literal);
         if opens_block {
             self.settle_branch(None);
             // `interface User extends Base {` opens a body of type members:
@@ -1050,6 +1060,7 @@ impl<'a> Parser<'a> {
                 || self.c_enum_body()
                 || self.java_annotation_type_body()
                 || self.go_type_body()
+                || go_type_literal
                 // `enum class Kind { A { … }, B { … } }`: an entry's body is a
                 // type body too, and the entry itself (`A {`) is a member, not
                 // a value. Read as a statement it wrote `x n:A`, which the CST
@@ -1637,7 +1648,14 @@ impl<'a> Parser<'a> {
         {
             return true;
         }
-        if last.kind == Kind::Ident && !BLOCK_WORDS.contains(&self.raw(&last)) && self.field_key_ahead() {
+        // Go's `else {` always opens a block: `x, e := h(1)` behind it reads as
+        // a field list `{x, ...` to the lookahead, which merged the else body
+        // into one value on the `else` line.
+        if last.kind == Kind::Ident
+            && !BLOCK_WORDS.contains(&self.raw(&last))
+            && !(self.lang.tag == "GO" && self.raw(&last) == b"else")
+            && self.field_key_ahead()
+        {
             return false;
         }
         // `return []T{ { A: 1, B: 2 } }`: the brace after the element type
@@ -5674,7 +5692,9 @@ impl<'a> Parser<'a> {
         // event for a `goto_statement`, so reading the label as an expression
         // invented one on every cleanup jump in the C corpus. A computed
         // `goto *ptr;` is the same statement with an expression for a target.
-        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+        // Go's `goto` is the same statement (the generated lexers jump to
+        // `yyruleN` this way).
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC" | "GO")
             && self.word_at(stmt, 0).as_deref() == Some("goto")
             && stmt.len() >= 2
         {
@@ -5778,7 +5798,10 @@ impl<'a> Parser<'a> {
                     let augmented = self.raw(&body[equal]) != b"="
                         && !matches!(self.raw(&body[equal]), b":=" | b"<-");
                     let value = self.c_initialiser(targets, &body[equal + 1..]);
-                    if !Self::stores_no_class(self.lang.tag, self.raw(&body[equal])) {
+                    // A compound assignment combines into a target that already
+                    // has its type, and a Go send hands a value to a channel:
+                    // neither stores the value's class on the target.
+                    if !augmented && !Self::stores_no_class(self.lang.tag, self.raw(&body[equal])) {
                         self.note_class(targets, value);
                     }
                     self.assignment(targets, value, line, augmented);
@@ -5822,7 +5845,9 @@ impl<'a> Parser<'a> {
             };
             let augmented = self.raw(&stmt[equal]) != b"=" && !matches!(self.raw(&stmt[equal]), b":=" | b"<-");
             let value = self.c_initialiser(targets, &stmt[equal + 1..]);
-            if !Self::stores_no_class(self.lang.tag, self.raw(&stmt[equal])) {
+            // `m.Role |= NodeRole(b) << shift` combines a value into a field
+            // that already has its type; the assignment does not bind a class.
+            if !augmented && !Self::stores_no_class(self.lang.tag, self.raw(&stmt[equal])) {
                 self.note_class(targets, value);
             }
             self.assignment(targets, value, line, augmented);
