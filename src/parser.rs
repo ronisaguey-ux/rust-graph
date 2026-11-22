@@ -5725,7 +5725,9 @@ impl<'a> Parser<'a> {
                     let augmented = self.raw(&body[equal]) != b"="
                         && !matches!(self.raw(&body[equal]), b":=" | b"<-");
                     let value = self.c_initialiser(targets, &body[equal + 1..]);
-                    self.note_class(targets, value);
+                    if !Self::stores_no_class(self.lang.tag, self.raw(&body[equal])) {
+                        self.note_class(targets, value);
+                    }
                     self.assignment(targets, value, line, augmented);
                 } else {
                     self.expression_event_at("x", body, line);
@@ -5767,7 +5769,9 @@ impl<'a> Parser<'a> {
             };
             let augmented = self.raw(&stmt[equal]) != b"=" && !matches!(self.raw(&stmt[equal]), b":=" | b"<-");
             let value = self.c_initialiser(targets, &stmt[equal + 1..]);
-            self.note_class(targets, value);
+            if !Self::stores_no_class(self.lang.tag, self.raw(&stmt[equal])) {
+                self.note_class(targets, value);
+            }
             self.assignment(targets, value, line, augmented);
         } else if !(self.lang.tag == "JAVA" && self.java_declares_only(stmt))
             && !(self.lang.tag == "SWIFT" && self.swift_declares_only(stmt))
@@ -6147,6 +6151,17 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `m.Status |= Status(b) << shift` (Go) updates a field whose type the
+    /// declaration already states: the value is combined into the target, not
+    /// stored as a new one, so the value's class is not the target's. Only the
+    /// logical assignments can replace the target with the value. `ch <-
+    /// MustNew(...)` (Go) is a channel send: it stores nothing in `ch`. R's
+    /// `<-` is a plain assignment, so only Go's send is excluded.
+    fn stores_no_class(lang: &str, op: &[u8]) -> bool {
+        matches!(op, b"+=" | b"-=" | b"*=" | b"/=" | b"%=" | b"|=" | b"&=" | b"^=" | b"<<=" | b">>=" | b".=")
+            || (lang == "GO" && op == b"<-")
+    }
+
     /// `repo = new Repo()` and `repo = Repo()` say what `repo.find` means.
     fn note_class(&mut self, targets: &[Token], value: &[Token]) {
         // `array_container_t *c_qua_array = CAST_array(c);` states the type in
@@ -6209,15 +6224,12 @@ impl<'a> Parser<'a> {
         // `Value::Object(m)?` unwraps it, so neither names the variant. C
         // reaches the rest of the value through `->` as well: `mt =
         // G(L)->mt[i]` holds a table slot, not a `G`, and reading it as one
-        // bound four lua files to a macro name.
+        // bound four lua files to a macro name. Any operator continues the
+        // value: `noActiveHelp := GetConfig(c) == disable` holds a bool, and
+        // the CST binds no class to it (go cobra, 1 row).
         if called {
             if let Some((_, close)) = self.group_at(value, next) {
-                if value.get(close + 1).is_some_and(|token| {
-                    self.is_op(token, b".")
-                        || self.is_op(token, b"?")
-                        || self.is_op(token, b"[")
-                        || self.is_op(token, b"->")
-                }) {
+                if value.get(close + 1).is_some_and(|token| token.kind == Kind::Op) {
                     return;
                 }
             }
