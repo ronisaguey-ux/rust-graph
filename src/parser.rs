@@ -4405,6 +4405,12 @@ impl<'a> Parser<'a> {
         if matches!(self.lang.tag, "TS" | "TSX") && self.type_declaration(toks) {
             return None;
         }
+        // `new Option<string>("-x") { DefaultValueFactory = (_) => "default" }`:
+        // an object initialiser member is a property being set, not a function
+        // declaration, and the CST writes no symbol for it.
+        if self.lang.tag == "CS" && self.frames.last().is_some_and(|frame| frame.initialiser) {
+            return None;
+        }
         let equal = self.top_level_assign(toks)?;
         // Scala's `val f = () => x` binds a value that holds a function; only
         // `def` declares one. The CST writes no symbol for a val, so a head here
