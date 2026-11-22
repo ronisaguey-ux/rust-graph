@@ -5079,6 +5079,44 @@ impl<'a> Parser<'a> {
         if self.lang.tag == "C" && self.parenthesised_declarator(stmt) {
             return;
         }
+        // `public static TValue GetValueOrDefault<TKey, TValue>(...) => expr;`:
+        // a C# expression-bodied member's signature precedes `=>`, and any comma
+        // inside type parameters or constraints splits `expr::list` before
+        // `=>` can truncate it, leaving header tokens in the event. Drop the
+        // signature up to the top-level `=>` and file the body on the member's
+        // starting line, matching `deep_facts::cs_arrow_body`.
+        if self.lang.tag == "CS" {
+            let mut depth = 0i32;
+            let mut arrow = None;
+            for (index, token) in stmt.iter().enumerate() {
+                if token.kind != Kind::Op {
+                    continue;
+                }
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" if depth > 0 => depth -= 1,
+                    b"=>" if depth == 0 => {
+                        arrow = Some(index);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(arrow) = arrow.filter(|&at| self.top_level_assign(&stmt[..at]).is_none()) {
+                let body = &stmt[arrow + 1..];
+                if let Some(equal) = self.top_level_assign(body) {
+                    let targets = &body[..equal];
+                    let augmented = self.raw(&body[equal]) != b"="
+                        && !matches!(self.raw(&body[equal]), b":=" | b"<-");
+                    let value = self.c_initialiser(targets, &body[equal + 1..]);
+                    self.note_class(targets, value);
+                    self.assignment(targets, value, line, augmented);
+                } else {
+                    self.expression_event_at("x", body, line);
+                }
+                return;
+            }
+        }
         if let Some(equal) = self.top_level_assign(stmt) {
             // In Kotlin, `->` separates a `when` arm or lambda parameter header
             // from its body: `pat -> lhs = rhs` assigns `lhs`, not `pat.lhs`.
