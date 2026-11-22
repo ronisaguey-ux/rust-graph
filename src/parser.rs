@@ -5835,9 +5835,10 @@ impl<'a> Parser<'a> {
                 // (`bytekeyBytes`, `longLONG_ARRAY_NOT_SUPPORTED`), the one
                 // java shape the CST never writes: 612 rows over 265 files.
                 // C# spells an array type the same way, and pasted it on
-                // (`byte[] bytes = Encoding.GetBytes(s)` bound `bytebytes`).
+                // (`byte[] bytes = Encoding.GetBytes(s)` bound `bytebytes`),
+                // including rectangular arrays like `double[,] _overhead`.
                 if matches!(self.lang.tag, "JAVA" | "CS")
-                    && toks.get(index + 1).is_some_and(|token| self.is_op(token, b"]"))
+                    && toks[index + 1..start - 1].iter().all(|token| self.is_op(token, b","))
                     && index > 0
                     && toks[index - 1].kind == Kind::Ident
                 {

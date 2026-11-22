@@ -1754,10 +1754,12 @@ impl<'a> Walker<'a> {
         }
         if let Some(at) = eq_at {
             if at > 0 {
-                if let Some(target) = self.cs_recovered_target(&stmt[..at]) {
+                let targets = self.cs_recovered_targets(&stmt[..at]);
+                if !targets.is_empty() {
                     let value = self.cs_recovered_form(&stmt[at + 1..]);
-                    let weak = self.kind(stmt[at]) != "=";
-                    self.lexer_event(b'a', line, &[target], &value, weak);
+                    let weak = self.kind(stmt[at]) != "="
+                        || stmt[..at].last().is_some_and(|&n| self.kind(n) == "]");
+                    self.lexer_event(b'a', line, &targets, &value, weak);
                     return;
                 }
             }
@@ -1768,7 +1770,71 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn cs_recovered_target(&self, lhs: &[u32]) -> Option<String> {
+    fn cs_recovered_targets(&self, mut lhs: &[u32]) -> Vec<String> {
+        // `Inner[key] = value` / `this[index] = value`: strip trailing `[...]`
+        // subscripts so the target is the receiver, not the index expression.
+        while lhs.last().is_some_and(|&n| self.kind(n) == "]") {
+            let mut depth = 0i32;
+            let mut open = None;
+            for (i, &n) in lhs.iter().enumerate().rev() {
+                match self.kind(n) {
+                    "]" => depth += 1,
+                    "[" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            open = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(i) = open else { break };
+            lhs = &lhs[..i];
+        }
+        // `var (a, b) = ...` / `(a, b) = ...`: extract every binder in the tuple.
+        if lhs.last().is_some_and(|&n| self.kind(n) == ")") {
+            let mut depth = 0i32;
+            let mut open = None;
+            for (i, &n) in lhs.iter().enumerate().rev() {
+                match self.kind(n) {
+                    ")" => depth += 1,
+                    "(" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            open = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(i) = open {
+                if i == 0 || (i == 1 && matches!(self.kind(lhs[0]), "var" | "ref")) {
+                    let inner = &lhs[i + 1..lhs.len() - 1];
+                    let mut out = Vec::new();
+                    let mut start = 0usize;
+                    let mut p = 0i32;
+                    for (j, &n) in inner.iter().enumerate() {
+                        match self.kind(n) {
+                            "(" | "[" | "<" => p += 1,
+                            ")" | "]" | ">" => p = (p - 1).max(0),
+                            "," if p == 0 => {
+                                out.extend(self.cs_recovered_targets(&inner[start..j]));
+                                start = j + 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if start < inner.len() {
+                        out.extend(self.cs_recovered_targets(&inner[start..]));
+                    }
+                    if !out.is_empty() {
+                        return out;
+                    }
+                }
+            }
+        }
         let mut is_dotted = !lhs.is_empty();
         let mut segs: Vec<String> = Vec::new();
         for (i, &n) in lhs.iter().enumerate() {
@@ -1785,9 +1851,14 @@ impl<'a> Walker<'a> {
             }
         }
         if is_dotted && !segs.is_empty() && lhs.len() % 2 == 1 {
-            return Some(segs.join("."));
+            return vec![segs.join(".")];
         }
-        lhs.iter().rev().find_map(|&n| self.cs_leaf_ident(n))
+        lhs.iter()
+            .rev()
+            .find_map(|&n| self.cs_leaf_ident(n))
+            .map(|name| if name == "this" { "self".to_string() } else { name })
+            .into_iter()
+            .collect()
     }
 
     fn cs_leaf_ident(&self, id: u32) -> Option<String> {
