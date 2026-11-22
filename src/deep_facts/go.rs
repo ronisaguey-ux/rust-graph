@@ -5021,7 +5021,21 @@ fn dotted_piece(text: &str) -> bool {
                 for g in groups {
                     match g.len() {
                         0 => {}
-                        1 => parts.push(self.form(g[0])),
+                        1 => {
+                            let v = self.form(g[0]);
+                            // `["k"] = v`: `cs_preprocess` blanks `[` and `]`
+                            // so a string-keyed dictionary initializer parses as
+                            // `"k" = v`. Keep the key `0` alongside `v` instead
+                            // of dropping the constant LHS.
+                            if kind == "object_initializer" && self.kind(g[0]) == "assignment_expression" {
+                                let ac = self.children(g[0]);
+                                if !ac.is_empty() && self.form(ac[0]) == "0" {
+                                    parts.push(format!("[\"m\",[0,{v}]]"));
+                                    continue;
+                                }
+                            }
+                            parts.push(v);
+                        }
                         _ => parts.push(self.merge_form(&g)),
                     }
                 }
@@ -5042,7 +5056,15 @@ fn dotted_piece(text: &str) -> bool {
                     }
                     if !self.is_layout(child) || self.leaf_name(child).is_some() {
                         let v = self.form(child);
-                        if v != "0" {
+                        // `new("All") { Patterns = ... }`: a non-empty argument
+                        // list (or bare argument/parenthesized child) evaluates
+                        // its argument constants even when its form is `0`,
+                        // whereas an empty `()` or `{}` has no arguments.
+                        let non_empty_arg = kind == "implicit_creation"
+                            && !matches!(self.kind(child), "object_initializer" | "collection_initializer" | "array_initializer")
+                            && (self.kind(child) != "argument_list"
+                                || self.children(child).into_iter().any(|c| !self.is_layout(c)));
+                        if v != "0" || non_empty_arg {
                             parts.push(v);
                         }
                     }

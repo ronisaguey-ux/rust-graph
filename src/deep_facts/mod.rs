@@ -2364,15 +2364,35 @@ impl<'a> Walker<'a> {
                 // line carried a header event and no value (C# corpus: 9 files).
                 if self.facts.tag == "CS" {
                     let tail = self.children(id).into_iter().find(|&child| self.kind(child) == "property_tail");
-                    let value = tail
+                    let rhs: Vec<u32> = tail
                         .map(|tail| self.children(tail))
                         .unwrap_or_default()
                         .into_iter()
-                        .rev()
-                        .find(|&child| !self.is_layout(child) && self.kind(child) != "=");
-                    if let Some(value) = value {
-                        let line = self.line(value);
-                        let form = self.form(value);
+                        .filter(|&child| !self.is_layout(child) && self.kind(child) != "=")
+                        .collect();
+                    // `= new("All") { Patterns = ... }`: when the constructor and
+                    // its object_initializer sit as siblings in `property_tail`,
+                    // taking only the last child drops the constructor's
+                    // arguments; merge them unless it is an empty `new()`.
+                    let rhs_slice = if rhs.len() > 1
+                        && self.kind(rhs[0]) == "implicit_creation"
+                        && self.children(rhs[0]).into_iter().all(|c| {
+                            self.is_layout(c)
+                                || self.kind(c) == "new"
+                                || (self.kind(c) == "argument_list"
+                                    && !self.children(c).into_iter().any(|a| !self.is_layout(a)))
+                        }) {
+                        &rhs[1..]
+                    } else {
+                        &rhs[..]
+                    };
+                    if let Some(&first) = rhs_slice.first() {
+                        let line = self.line(first);
+                        let form = if rhs_slice.len() == 1 {
+                            self.form(first)
+                        } else {
+                            self.merge_form(rhs_slice)
+                        };
                         if form != "0" {
                             self.event(&format!("[\"x\",{line},{form}]"));
                         }
