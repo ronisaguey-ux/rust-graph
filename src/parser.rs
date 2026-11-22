@@ -1533,6 +1533,22 @@ impl<'a> Parser<'a> {
         {
             return false;
         }
+        // Go: `func (d *decodeState) valueQuoted() interface {`. The braces of
+        // an `interface{…}` or `struct{…}` written in a signature close over
+        // the type, so the brace here is the type's, not the body's. Opened as
+        // the body, the function frame closed on the type's own `}` and the
+        // real body became statements of the module: the symbol vanished
+        // (`valueInterface`, `arrayInterface`, `objectInterface`,
+        // `literalInterface`) and its statements lost the receiver, so the
+        // lexer wrote `d.off` where the CST writes `self.off` (decode.go: 24
+        // rows). `type T struct {` is a type body, not this shape.
+        if self.lang.tag == "GO"
+            && last.kind == Kind::Ident
+            && matches!(self.raw(&last), b"interface" | b"struct")
+            && self.word_at(&self.stmt, 0).as_deref() != Some("type")
+        {
+            return false;
+        }
         if (!ts_return_type_brace && self.has_def_word(&self.stmt)) || self.assigned_class(&self.stmt).is_some() {
             return true;
         }
@@ -1549,6 +1565,14 @@ impl<'a> Parser<'a> {
         if matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt) {
             return true;
         }
+        // `return <>text {call(x)} text</>`: a `{…}` in a JSX element's children
+        // is an expression of the element, not a block of statements. Opened as
+        // a block, the call it holds was filed under the module and the element
+        // never reached the reader that writes it as the constant 0
+        // (SeriesName.tsx:118, Aggregation.tsx:131).
+        if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") && self.jsx_children_open() {
+            return false;
+        }
         // Go writes a control header without parentheses: `for i := 0; i < n; i++ {`,
         // `if err := f(); err != nil {`, `switch v := f(x); v {`. The `:=` made the
         // last test below read the brace as a composite literal, so the whole body
@@ -1559,6 +1583,21 @@ impl<'a> Parser<'a> {
         // `;`, and its body's first `n, err := …` read as a field list, which
         // merged the whole loop into one value (transport.go:1548,
         // syscall_linux.go:1434).
+        // `for _, tc := range []struct{ … }{ { … } } {`: the range expression
+        // may be a composite literal without parentheses (the parenthesising
+        // rule is for `if`/`switch` conditions), and the loop's body is the
+        // brace after that literal closes. Read as the body, the literal's
+        // brace became a block of its own: the element's `{` opened a plain
+        // frame and the fields after a func literal split into statements the
+        // CST writes only inside the element's value (consul_test: 2 rows,
+        // block_test: 6).
+        if self.lang.tag == "GO"
+            && self.word_at(&self.stmt, 0).as_deref() == Some("for")
+            && self.stmt.iter().any(|token| token.kind == Kind::Ident && self.raw(token) == b"range")
+            && self.brace_closes_before_a_brace()
+        {
+            return false;
+        }
         if self.lang.tag == "GO"
             && self
                 .word_at(&self.stmt, 0)
@@ -1585,6 +1624,15 @@ impl<'a> Parser<'a> {
             // `else {`, `case x {`: an arm word opens the branch it names.
             && !self.is_control(&self.text(&last))
             && !ARMS.contains(&self.text(&last).as_str())
+            // `lbls: func() Labels {`: a function literal written in a struct
+            // literal's field list. The body brace follows the return type (an
+            // identifier), and read as a composite literal the whole body
+            // merged into the field's value while the CST files the body's
+            // statements on their own lines (labels_test.go: 3 rows).
+            && !self
+                .stmt
+                .iter()
+                .any(|token| token.kind == Kind::Ident && self.raw(token) == b"func")
         {
             return false;
         }
@@ -1742,6 +1790,68 @@ impl<'a> Parser<'a> {
         // A body longer than the scan is a block: a field list that long is not
         // a shape this reader has to win.
         true
+    }
+
+    /// Whether the brace just read sits in the children of a JSX element: an
+    /// opening tag (`<name …>` or `<>`) already closed, and what follows it is
+    /// children. `<T>(x: T) => …` is a generic arrow — its `(` follows the tag
+    /// it would need — so it is not this shape.
+    fn jsx_children_open(&self) -> bool {
+        let mut depth = 0i32;
+        let mut open = None;
+        for (index, token) in self.stmt.iter().enumerate() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"(" | b"[" | b"{" => depth += 1,
+                b")" | b"]" | b"}" => depth -= 1,
+                b"<" if depth == 0 => {
+                    let tag = self.stmt.get(index + 1).is_some_and(|next| {
+                        next.kind == Kind::Ident || self.is_op(next, b">")
+                    });
+                    open = tag.then_some(index);
+                }
+                b">" if depth == 0 && open.is_some() => {
+                    return self
+                        .stmt
+                        .get(index + 1)
+                        .is_none_or(|next| !self.is_op(next, b"("));
+                }
+                _ => {}
+            }
+        }
+        // The tag has not closed yet: this brace is inside it, and the shapes
+        // above already read an attribute's `{` as a literal.
+        false
+    }
+
+    /// Whether the brace just read closes before another `{` at its own level:
+    /// a composite literal written where a block could also start, whose `}`
+    /// is followed by that block's brace (`range []T{ … } {`).
+    fn brace_closes_before_a_brace(&mut self) -> bool {
+        let mut depth = 1i32;
+        for at in 0..MAX_BRACE_SCAN {
+            let token = self.peek_token(at);
+            if token.kind == Kind::Eof {
+                return false;
+            }
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(&token) {
+                b"{" => depth += 1,
+                b"}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let next = self.peek_token(at + 1);
+                        return next.kind == Kind::Op && self.raw(&next) == b"{";
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn expr_class_at(&self, toks: &[Token]) -> Option<usize> {
@@ -2977,7 +3087,29 @@ impl<'a> Parser<'a> {
             if self.top().kind == FrameKind::Control {
                 self.event("[\"e\"]");
             }
-            if let Some(colon) = stmt.iter().position(|token| self.is_op(token, b":")) {
+            // The colon that opens the arm is the first one at the statement's
+            // own level: `case g(s[2:], flags):` carries the slice's `:` in
+            // `[2:]`, and reading that as the label's end filed the tail
+            // (`], flags)`) as a tuple the CST never writes (cobra: 2 rows).
+            let mut depth = 0i32;
+            let colon = stmt.iter().position(|token| {
+                if token.kind != Kind::Op {
+                    return false;
+                }
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => {
+                        depth += 1;
+                        false
+                    }
+                    b")" | b"]" | b"}" => {
+                        depth -= 1;
+                        false
+                    }
+                    b":" => depth == 0,
+                    _ => false,
+                }
+            });
+            if let Some(colon) = colon {
                 self.brace_statement(&stmt[colon + 1..]);
             }
             return;
@@ -4721,7 +4853,35 @@ impl<'a> Parser<'a> {
         let mut start = if go_typed_var {
             1
         } else {
-            equal.checked_sub(1).filter(|at| toks[*at].kind == Kind::Ident)?
+            match equal.checked_sub(1).filter(|at| toks[*at].kind == Kind::Ident) {
+                Some(at) => at,
+                // `const UPlotChart: FC<Props> = ({ data }) => {`: the token
+                // before the `=` is the annotation's own closing `>`, so the
+                // name is the one its colon follows. Read as no head, the arrow
+                // was not a function: the declaration wrote a stray value event
+                // at its own line that the CST never has, and the body's
+                // statements were filed under the module (7 tsx rows).
+                None if matches!(self.lang.tag, "TS" | "TSX")
+                    && toks[equal + 1..].iter().any(|token| token.kind == Kind::Op && self.raw(token) == b"=>") =>
+                {
+                    let mut depth = 0i32;
+                    let mut colon = None;
+                    for (index, token) in toks[..equal].iter().enumerate() {
+                        if token.kind != Kind::Op {
+                            continue;
+                        }
+                        match self.raw(token) {
+                            b"(" | b"[" | b"{" | b"<" => depth += 1,
+                            b")" | b"]" | b"}" | b">" => depth -= 1,
+                            b":" if depth == 0 => colon = Some(index),
+                            _ => {}
+                        }
+                    }
+                    let colon = colon?;
+                    toks[..colon].iter().rposition(|token| token.kind == Kind::Ident)?
+                }
+                None => return None,
+            }
         };
         if !go_typed_var {
             while start >= 2
