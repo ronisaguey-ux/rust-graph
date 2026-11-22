@@ -1448,6 +1448,25 @@ impl Emit<'_> {
         matches!(&self.src[token.start as usize..token.end as usize], b"++" | b"--")
     }
 
+    /// Whether the cursor sits on `typeof` followed by `(Name<,…>)`, an open
+    /// generic whose type arguments are all empty. Returns the index just past
+    /// the closing `)`, or `None` for anything else (`typeof(Foo<int>)` keeps
+    /// its arguments and goes through the ordinary reader).
+    fn cs_open_generic_typeof(&self) -> Option<usize> {
+        self.word(2)?;
+        if self.op_byte(3) != b'<' {
+            return None;
+        }
+        let mut at = 4;
+        while self.op_byte(at) == b',' {
+            at += 1;
+        }
+        if self.op_byte(at) != b'>' || self.op_byte(at + 1) != b')' {
+            return None;
+        }
+        Some(self.pos + at + 2)
+    }
+
     /// Skip one type expression written after `as` (or `satisfies`): it runs to
     /// the first token that cannot continue a type at depth zero.
     fn skip_type(&mut self) {
@@ -1769,6 +1788,20 @@ impl Emit<'_> {
             "defer" => !matches!(self.lang.tag, "GO" | "SWIFT"),
             _ => false,
         };
+        // `typeof(Foo<,>)` in C#: an open generic names its type and nothing
+        // else. Read as a parenthesized group, the commas inside `<,>` split the
+        // argument into `Foo<` and `>`, and the empty slots became constant 0s
+        // the CST never writes; the CST names the type alone (`n:Foo`), as it
+        // does for `typeof(Foo)`. Only a bare name with empty slots is taken.
+        if self.lang.tag == "CS" && word == "typeof" && self.op_byte(1) == b'(' {
+            if let Some(after) = self.cs_open_generic_typeof() {
+                let line = self.toks[self.pos].line;
+                let name = self.word(2).unwrap_or_default();
+                self.pos = after;
+                self.chain(out, String::new(), name, line);
+                return;
+            }
+        }
         // `new` is a keyword in the JavaScript family and an ordinary name in
         // Rust: reading it as noise left `new.is_none()` calling nothing, and
         // the record differed by a constant that was never there.
