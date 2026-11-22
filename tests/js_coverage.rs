@@ -216,6 +216,13 @@ const COVERAGE: &[(&str, &str)] = &[
         "computed method key in a class body",
         "class C {\n  [Symbol.iterator]() { return this; }\n}\n",
     ),
+    (
+        // The deep reader learned the JSX brace rule, so the element's children
+        // are an expression of the element and both readers agree: the row moved
+        // here from KNOWN_GAPS.
+        "a JSX element's value",
+        "const el = <div className={x}>{y}</div>;\n",
+    ),
 ];
 
 /// Constructs the reader does not cover yet, with the exact disagreement.
@@ -233,11 +240,6 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
         "declare field without an initialiser",
         "class D {\n  declare field: string;\n}\n",
         "the lexer reads `declare` as a name and writes `m:[n:declare,n:field,n:string]`; the CST writes nothing",
-    ),
-    (
-        "a JSX element's value",
-        "const el = <div className={x}>{y}</div>;\n",
-        "the lexer writes the element's tag and attributes as names; the CST writes the constant 0",
     ),
     (
         "labelled statement",
