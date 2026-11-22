@@ -222,17 +222,37 @@ impl<'a> Walker<'a> {
     }
 
     pub(crate) fn java_targets(&self, id: u32) -> Vec<String> {
+        // Commas inside generic type arguments (`Map<Class<?>, Class<?>> m = ...`)
+        // or annotations sit inside `<>` / `()` and are not declarator separators.
         let mut parts: Vec<Vec<String>> = vec![Vec::new()];
         let mut leaves = Vec::new();
         self.collect_leaves(id, &mut leaves);
+        let mut depth = 0i32;
         for leaf in leaves {
             let text = self.text_string(leaf);
-            if text == "=" {
-                break;
-            }
-            if text == "," {
-                parts.push(Vec::new());
-                continue;
+            match text.as_str() {
+                "(" | "[" | "{" | "<" => {
+                    depth += 1;
+                    continue;
+                }
+                ")" | "]" | "}" | ">" => {
+                    depth = (depth - 1).max(0);
+                    continue;
+                }
+                ">>" => {
+                    depth = (depth - 2).max(0);
+                    continue;
+                }
+                ">>>" => {
+                    depth = (depth - 3).max(0);
+                    continue;
+                }
+                "=" if depth == 0 => break,
+                "," if depth == 0 => {
+                    parts.push(Vec::new());
+                    continue;
+                }
+                _ => {}
             }
             let bytes = text.as_bytes();
             if bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
