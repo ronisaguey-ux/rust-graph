@@ -1202,6 +1202,12 @@ impl<'a> Walker<'a> {
                 | "number"
                 | "integer"
                 | "float"
+                // Java writes a float with no digit before the dot (`.005`), so
+                // the character test below read it as punctuation and every
+                // call that took one lost the argument: `assertEquals(1.0, x,
+                // .005, "msg")` formed as `c(0;[0,c(8),0,0])` there and
+                // `c(0;[0,c(8),0])` here.
+                | "floating_point_literal"
                 // A regex literal is a value, not punctuation: the lexer
                 // writes it as the constant 0, and dropping it as layout lost
                 // one argument from every call that takes a regex
@@ -4278,25 +4284,31 @@ impl<'a> Walker<'a> {
         if def.name_last {
             // Java writes the return type before the name: `Item find(int id)`.
             let children = self.children(id);
+            // Java's contextual keywords (`open`, `module`, `record`, `sealed`,
+            // `permits`, `to`, `exports`, `with`) are legal method names, but the
+            // grammar gives the word its own anonymous token rather than an
+            // identifier, so no identifier child exists for them. The name is
+            // then the leaf right before the parameter list — and it is the name
+            // even when the return type is an identifier, which is why
+            // `public TestCompiler with(…)` was named after its return type
+            // (`TestCompiler`) and the method itself left the record.
+            if self.kinds.family == Family::Java {
+                if let Some(params) = def.params {
+                    if let Some(at) = children.iter().position(|&child| self.kind(child) == params) {
+                        if let Some(&name) = at.checked_sub(1).and_then(|at| children.get(at)) {
+                            let text = self.text_string(name);
+                            if self.node(name).first_child == NONE
+                                && !text.is_empty()
+                                && text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                            {
+                                return Some(text);
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(node) = children.iter().copied().filter(|&child| def.name.contains(&self.kind(child))).next_back() {
                 return Some(self.text_string(node));
-            }
-            // Java's contextual keywords (`open`, `module`, `record`, `sealed`,
-            // `permits`, `to`, `exports`) are legal method names, but the grammar
-            // gives the word its own anonymous token rather than an identifier,
-            // so no identifier child exists. The name is the leaf right before
-            // the parameter list, as it is for the JavaScript keyword names above.
-            if self.kinds.family == Family::Java {
-                let params = def.params?;
-                let at = children.iter().position(|&child| self.kind(child) == params)?;
-                let name = *children.get(at.checked_sub(1)?)?;
-                let text = self.text_string(name);
-                if self.node(name).first_child == NONE
-                    && !text.is_empty()
-                    && text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-                {
-                    return Some(text);
-                }
             }
             return None;
         }
