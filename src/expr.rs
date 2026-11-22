@@ -2098,6 +2098,10 @@ impl Emit<'_> {
                 // ExpressionVariant, Constraint). The word can never name a value in C#.
                 || (self.lang.tag == "CS" && word == "operator")
                 || (self.lang.tag == "CS" && word == "default" && self.op_byte(1) == b'(')
+                // `make(chan (chan acceptResponse))`: `chan` is Go's channel
+                // type keyword, and a parenthesised element type after it is
+                // not a call to `chan`.
+                || (self.lang.tag == "GO" && word == "chan")
         };
         if noise && !go_word {
             self.pos += 1;

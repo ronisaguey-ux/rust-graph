@@ -2500,7 +2500,11 @@ impl<'a> Parser<'a> {
                     _ => {}
                 }
             }
-            if depth <= 1 && token.kind == Kind::Ident && index > head && matches!(self.raw(token), b"in" | b"of" | b"as") {
+            // Go's loop binds across `range`; `in` is an ordinary name there
+            // (`for _, c := range in.comments` read the receiver `in` as the
+            // keyword and bound `range` as the variable).
+            let binders: &[&[u8]] = if self.lang.tag == "GO" { &[b"range"] } else { &[b"in", b"of", b"as"] };
+            if depth <= 1 && token.kind == Kind::Ident && index > head && binders.contains(&self.raw(token)) {
                 return Some(index);
             }
         }
@@ -2628,11 +2632,21 @@ impl<'a> Parser<'a> {
         let is_with = self.raw(&stmt[at]) == b"as";
         let head = self.binding_head(stmt);
         let value_start = if is_with { self.with_item_start(&stmt[head + 1..at]) } else { 0 };
-        let (targets, value) = if is_with {
+        let (mut targets, value) = if is_with {
             (&stmt[at + 1..], &stmt[head + 1 + value_start..at])
         } else {
             (&stmt[head + 1..at], &stmt[at + 1..])
         };
+        // `for k, v := range xs` binds `k, v`: the `:=` (or `=`) before the
+        // keyword is the operator, not a name in the target list.
+        if self.lang.tag == "GO" && !is_with {
+            if targets.last().is_some_and(|token| self.is_op(token, b":=") || self.is_op(token, b"=")) {
+                targets = &targets[..targets.len() - 1];
+            }
+            if targets.is_empty() {
+                return;
+            }
+        }
         self.assignment(targets, value, stmt[0].line, false);
     }
 
