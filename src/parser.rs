@@ -1565,14 +1565,6 @@ impl<'a> Parser<'a> {
         if matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt) {
             return true;
         }
-        // `return <>text {call(x)} text</>`: a `{…}` in a JSX element's children
-        // is an expression of the element, not a block of statements. Opened as
-        // a block, the call it holds was filed under the module and the element
-        // never reached the reader that writes it as the constant 0
-        // (SeriesName.tsx:118, Aggregation.tsx:131).
-        if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") && self.jsx_children_open() {
-            return false;
-        }
         // Go writes a control header without parentheses: `for i := 0; i < n; i++ {`,
         // `if err := f(); err != nil {`, `switch v := f(x); v {`. The `:=` made the
         // last test below read the brace as a composite literal, so the whole body
