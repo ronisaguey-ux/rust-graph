@@ -412,11 +412,12 @@ impl Emit<'_> {
             let colon = self.op_byte(1) == b':'
                 && (NAMED_ARGS_WITH_COLON.contains(&self.lang.tag)
                     || (self.lang.tag == "CS" && self.csharp_attribute_args()));
-            // `isNaN(it = +it)` in JS/TS and `g(x = 1)` / `cfg!(all(feature = "deep"))`
-            // in Rust: `=` in an argument is an assignment expression or macro key-value
-            // token, not a keyword argument — the CST writes a merge, never `k(...)`.
+            // `isNaN(it = +it)` in JS/TS, `AddLayer(rv = new A(), z)` in C#, and
+            // `g(x = 1)` / `cfg!(all(feature = "deep"))` in Rust: `=` in an argument
+            // is an assignment expression or macro key-value token, not a keyword
+            // argument — the CST writes a merge, never `k(...)`.
             let assigned =
-                self.op_byte(1) == b'=' && !matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX" | "RS");
+                self.op_byte(1) == b'=' && !matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX" | "RS" | "CS");
             if assigned || colon {
                 self.pos += 2;
                 out.push_str("[\"k\",");
