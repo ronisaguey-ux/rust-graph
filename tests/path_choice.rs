@@ -39,9 +39,9 @@ const FIXTURE: &[(&str, &str)] = &[
     // It used to be a generic call (`g<number>(x)`); the lexer reads that as a
     // call now, so that shape is a tie and could not pin the strict win.
     ("deep_more.ts", "type A = { x: number };\nconst v: A = { x: 1 };\n"),
-    // Both paths read the call inside the element's child expression, so this
-    // file weighs the same on either side: it pins that the JSX child fact is
-    // no longer the lexer's alone.
+    // The element is markup: both readers write the constant 0 and skip its
+    // children, so the file weighs the same on either side and pins that the
+    // lexer does not claim a call the CST does not read.
     ("opaque.js", "function panel(x) {\n  return <button label={handle(x)}>press</button>;\n}\n"),
     // Nothing to differ on: both records weigh the same.
     ("tie.py", "def f(x):\n    return x\n"),
@@ -119,20 +119,26 @@ fn a_strict_win_goes_to_the_cst_and_says_which_count_won() {
 }
 
 #[test]
-fn a_jsx_child_call_is_a_fact_on_both_paths() {
+fn a_jsx_element_is_markup_on_both_paths() {
     let tree = Tree::new("loss");
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
-    // The fact reader descends into a JSX element's child expression, so the
-    // call the element holds is no longer the lexer's alone and the row is a
-    // tie. `tests/deep_pipeline.rs` still covers the fallback mechanism with a
-    // file that does lose a fact.
+    // The CST writes the element as the constant 0, and the lexer learned to
+    // skip it the same way, so the file is a tie: no call is claimed on either
+    // path. A call inside an element's child expression is not a fact by this
+    // project's own choice for JSX, so the row must not claim one.
     let row = source_row(&json, "opaque.js");
     assert!(row.contains("\"path_choice\":\"deep:tie\""), "{row}");
     assert!(row.contains("\"parsed_by\":\"deep\""), "{row}");
     assert!(!row.contains("deep_fallback"), "{row}");
-    assert!(json.contains(r#""calls":[["handle",2,null,null,0]]"#), "{json}");
     assert!(json.contains(r#""fallbacks":0"#), "{json}");
+
+    let out = tree.build(&["--compare", "--no-cache"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("opaque.js\tsymbols deep=2 lexer=2 (+0)\tcalls deep=0 lexer=0 (+0)\timports deep=0 lexer=0 (+0)\n"),
+        "{text}"
+    );
 }
 
 #[test]
