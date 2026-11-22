@@ -42,6 +42,19 @@ impl<'a> Walker<'a> {
             "if_statement" | "expression_switch_statement" | "type_switch_statement" | "switch_statement"
             | "select_statement" => self.go_header(id),
             "expression_case" | "default_case" | "type_case" | "communication_case" => self.go_case(id),
+            "func_literal" => {
+                if let Some(&index) = self.go_literal_frames.get(&id) {
+                    let class = self.facts.symbols[index].owner.clone();
+                    self.stack.push(Frame {
+                        node: id,
+                        symbol: index,
+                        class,
+                        receiver: String::new(),
+                        container: false,
+                        defines: Some(index),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -80,7 +93,7 @@ impl<'a> Walker<'a> {
             "return_statement" => self.go_return(id),
             "var_declaration" | "const_declaration" => self.go_var(id),
             "send_statement" => self.go_send(id),
-            "call_expression" | "defer_statement" | "go_statement" | "inc_statement" => {
+            "call_expression" | "defer_statement" | "go_statement" | "inc_statement" | "dec_statement" => {
                 self.decl_statement(id)
             }
             _ => return false,
@@ -497,19 +510,9 @@ impl<'a> Walker<'a> {
         // only the literal, so the name was the one fact every Go file with a
         // callback lost — 1,162 symbol losses, one per file.
         if let [target] = targets.as_slice() {
-            let literal = children[at + 1..]
-                .iter()
-                .copied()
-                .find(|&child| self.kind(child) == "func_literal");
-            if let Some(literal) = literal {
-                let params = self
-                    .child_of_kind(literal, "parameter_list")
-                    .map(|list| self.params(literal, list))
-                    .unwrap_or_default();
-                if !target.is_empty() && target != "self" {
-                    let line = self.line(id);
-                    self.add_symbol(target.clone(), String::new(), KIND_FUNCTION, line, params);
-                }
+            if let Some(literal) = self.go_find_func_literal(&children[at + 1..]) {
+                let line = self.line(id);
+                self.go_bind_func_literal(target, literal, line);
             }
         }
         let value = self.decl_values(&children[at + 1..]);
@@ -570,9 +573,51 @@ impl<'a> Walker<'a> {
             self.lexer_event(b'a', line, &target, &value, false);
             return;
         }
+        if declared.len() == 1 {
+            if let Some(literal) = self.go_find_func_literal(&parts[equal + 1..]) {
+                self.go_bind_func_literal(&declared[0], literal, line);
+            }
+        }
         for name in declared {
             self.lexer_event(b'a', line, std::slice::from_ref(&name), &value, false);
         }
+    }
+
+    fn go_find_func_literal(&self, nodes: &[u32]) -> Option<u32> {
+        for &node in nodes {
+            match self.kind(node) {
+                "func_literal" => return Some(node),
+                "call_expression" => {
+                    if let Some(callee) = self.children(node).into_iter().find(|&c| !self.is_layout(c)) {
+                        if self.kind(callee) == "func_literal" {
+                            return Some(callee);
+                        }
+                    }
+                }
+                "expression_list" => {
+                    let non_layout: Vec<u32> = self.children(node).into_iter().filter(|&c| !self.is_layout(c)).collect();
+                    if non_layout.len() == 1 {
+                        if let Some(found) = self.go_find_func_literal(&non_layout) {
+                            return Some(found);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn go_bind_func_literal(&mut self, target: &str, literal: u32, line: u32) {
+        if target.is_empty() || target == "self" {
+            return;
+        }
+        let params = self
+            .child_of_kind(literal, "parameter_list")
+            .map(|list| self.params(literal, list))
+            .unwrap_or_default();
+        let index = self.add_symbol(target.to_string(), String::new(), KIND_FUNCTION, line, params);
+        self.go_literal_frames.insert(literal, index);
     }
 
     /// `ch <- v`: the lexer reads the arrow as an assignment and names the
