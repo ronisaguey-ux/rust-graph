@@ -6472,6 +6472,9 @@ fn dotted_piece(text: &str) -> bool {
             // `s.go()` / `s->go()` in the C family: the grammar writes a field
             // access as `field_expression`, and read through the default arm
             // the call had no name at all.
+            // `new ExampleTest.ClassA(0)`: C# parses a qualified constructor
+            // type as `qualified_type`. Without splitting it here, `call_target`
+            // kept the dotted path and dropped the owner from the receiver slot.
             "attribute" | "member_expression" | "member_access_expression" | "member_access"
             | "conditional_member_access" | "navigation_expression" | "optional_chaining_expression"
             | "field_expression" | "select" | "qualified_type" => {

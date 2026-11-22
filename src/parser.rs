@@ -1062,14 +1062,30 @@ impl<'a> Parser<'a> {
     /// `new string? SkipReason { get; }`).
     fn cs_new_initialiser(&self) -> bool {
         let mut depth = 0i32;
+        let mut in_where = false;
+        let mut saw_where_colon = false;
         for (i, token) in self.stmt.iter().enumerate() {
             if token.kind == Kind::Op {
                 match self.raw(token) {
                     b"(" | b"[" => depth += 1,
                     b")" | b"]" => depth -= 1,
+                    b":" if depth == 0 && in_where => saw_where_colon = true,
+                    b"=" | b"=>" | b";" if depth == 0 => {
+                        in_where = false;
+                        saw_where_colon = false;
+                    }
                     _ => {}
                 }
+            } else if depth == 0 && token.kind == Kind::Ident && self.raw(token) == b"where" {
+                in_where = true;
+                saw_where_colon = false;
             } else if depth == 0 && token.kind == Kind::Ident && self.raw(token) == b"new" {
+                // `where T : I, new() {`: a `new()` type-parameter constraint
+                // sits at depth 0 right before the method/class body `{`, not
+                // an object initialiser.
+                if saw_where_colon {
+                    continue;
+                }
                 // Standalone `new ... {` at statement start: distinguish a `new`
                 // creation expression (`new {`, `new() {`, `new[] {`, `new T {`,
                 // `new T() {`) from a member-hiding `new` modifier (`new void Foo() {`,
@@ -5397,6 +5413,7 @@ impl<'a> Parser<'a> {
         } else if !(self.lang.tag == "JAVA" && self.java_declares_only(stmt))
             && !(self.lang.tag == "SWIFT" && self.swift_declares_only(stmt))
             && !(self.lang.tag == "KT" && self.kotlin_declares_only(stmt))
+            && !(self.lang.tag == "CS" && self.cs_declares_only(stmt))
         {
             let expr = if self.lang.tag == "KT"
                 && stmt.len() > 3
@@ -5661,6 +5678,42 @@ impl<'a> Parser<'a> {
             return false;
         }
         false
+    }
+
+    /// `T value;`: an uninitialised C# local variable declaration inside a
+    /// method or accessor body binds no value and writes no event in the CST.
+    /// Field declarations at class scope keep their event.
+    fn cs_declares_only(&self, stmt: &[Token]) -> bool {
+        if matches!(self.top().kind, FrameKind::Class | FrameKind::Module) || stmt.len() < 2 {
+            return false;
+        }
+        let Some(last) = stmt.last() else { return false };
+        if last.kind != Kind::Ident {
+            return false;
+        }
+        let last_word = self.text(last);
+        if matches!(
+            last_word.as_str(),
+            "break" | "continue" | "return" | "throw" | "yield" | "await" | "true" | "false" | "null"
+        ) {
+            return false;
+        }
+        let mut has_type_ident = false;
+        stmt[..stmt.len() - 1].iter().all(|token| match token.kind {
+            Kind::Ident => {
+                let word = self.text(token);
+                if matches!(
+                    word.as_str(),
+                    "return" | "throw" | "yield" | "await" | "case" | "goto" | "new" | "delete" | "typeof" | "sizeof"
+                ) {
+                    return false;
+                }
+                has_type_ident = true;
+                true
+            }
+            Kind::Op => matches!(self.raw(token), b"<" | b">" | b">>" | b"?" | b"[" | b"]" | b"," | b"."),
+            _ => false,
+        }) && has_type_ident
     }
 
     fn java_declares_only(&self, stmt: &[Token]) -> bool {
