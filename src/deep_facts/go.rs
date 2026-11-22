@@ -4061,6 +4061,34 @@ fn dotted_piece(text: &str) -> bool {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
+            // `JEnumerable<JToken>.Empty`, `Provider<T>.Instance`: a member of a
+            // generic type. `path_of` drops the type arguments or returns only
+            // `.Member`, so the generic member-access arm below either wrote
+            // `n:Type.Member` without the type arguments or fell back to the
+            // base and dropped `.Member`. The lexer reads the type, its type
+            // arguments, and the member, so all are kept.
+            "member_access" | "conditional_member_access" | "member_access_expression"
+                if self.language.name == "csharp" && self.cs_has_generic_base(id) =>
+            {
+                let base = self.children(id)[0];
+                let mut parts = Vec::new();
+                let value = self.form(base);
+                if value != "0" {
+                    parts.push(value);
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
             // `ducetExtract[scalars]!.collationElements`: a member read through a
             // force unwrap has no dotted path, so the path arm below formed only
             // the base and dropped the member. The lexer reads the base and the
@@ -4130,7 +4158,26 @@ fn dotted_piece(text: &str) -> bool {
                     // the value is the base's — a subscript of a value is that
                     // value. Writing 0 here lost the call's argument.
                     match self.children(id).first().copied() {
-                        Some(base) => self.form(base),
+                        Some(base) => {
+                            let base_form = self.form(base);
+                            let name = self.member_name(id);
+                            if self.language.name == "csharp"
+                                && !name.is_empty()
+                                && !self.named_call(base)
+                                && self.value_root_call(base).is_none()
+                            {
+                                let mut out = "[\"n\",".to_string();
+                                push_string(&mut out, &name);
+                                out.push(']');
+                                if base_form == "0" {
+                                    out
+                                } else {
+                                    format!("[\"m\",[{base_form},{out}]]")
+                                }
+                            } else {
+                                base_form
+                            }
+                        }
                         None => "0".to_string(),
                     }
                 } else {
@@ -5652,6 +5699,22 @@ fn dotted_piece(text: &str) -> bool {
                 return false;
             };
             if self.kind(base) == "generic_specialization" {
+                return true;
+            }
+            id = base;
+        }
+        false
+    }
+
+    /// Whether a C# `member_access` is rooted at a `generic_name` or `generic_type`.
+    fn cs_has_generic_base(&self, mut id: u32) -> bool {
+        while matches!(self.kind(id), "member_access" | "conditional_member_access" | "member_access_expression") {
+            let Some(&base) = self.children(id).first() else {
+                return false;
+            };
+            if matches!(self.kind(base), "generic_name" | "generic_type")
+                || (self.kind(base) == "ERROR" && self.text(base).trim_ascii_end().ends_with(b">"))
+            {
                 return true;
             }
             id = base;
