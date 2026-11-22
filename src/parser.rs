@@ -4320,6 +4320,22 @@ impl<'a> Parser<'a> {
         None
     }
 
+    /// A C# generic method head: `Name<…>(` with the `<` directly after a name
+    /// and the `(` directly after the closing `>`. Returns the `<` index and the
+    /// index just past the `>`.
+    fn cs_generic_head(&self, toks: &[Token]) -> Option<(usize, usize)> {
+        for open in 1..toks.len() {
+            if !self.is_op(&toks[open], b"<") || toks[open - 1].kind != Kind::Ident {
+                continue;
+            }
+            let close = self.skip_generics(toks, open);
+            if close > open && toks.get(close).is_some_and(|token| self.is_op(token, b"(")) {
+                return Some((open, close));
+            }
+        }
+        None
+    }
+
     fn skip_generics(&self, toks: &[Token], mut at: usize) -> usize {
         if toks.get(at).is_some_and(|token| self.is_op(token, b"<")) {
             let mut depth = 0i32;
@@ -4912,6 +4928,24 @@ impl<'a> Parser<'a> {
             && !stmt.iter().any(|token| self.is_op(token, b"="))
         {
             return;
+        }
+        // `void MapFrom<TMember>(Expression<Func<TSource, TMember>> s);` in an interface or a
+        // class body is a bodyless generic method. Read as an expression, `MapFrom < TMember >
+        // (…)` was a comparison chain: the lexer wrote the names `MapFrom` and `TMember` and no
+        // call, while the CST writes the declaration as a call to `MapFrom` with its parameters
+        // (one line per declaration, interface members included). Drop the type-parameter list
+        // and read the head as the plain `void MapFrom(…);`, which the lexer already reads as a
+        // call. Only a type body qualifies, and not an expression-bodied member (`=> M<T>(x);`),
+        // whose call the CST keeps with its type arguments.
+        if self.lang.tag == "CS"
+            && self.top().kind == FrameKind::Class
+            && !stmt.iter().any(|token| self.is_op(token, b"=") || self.is_op(token, b"=>") || self.is_op(token, b"{"))
+        {
+            if let Some((open, close)) = self.cs_generic_head(stmt) {
+                let trimmed: Vec<Token> = stmt[..open].iter().chain(stmt[close..].iter()).cloned().collect();
+                self.statement(&trimmed);
+                return;
+            }
         }
         // `get async throws {` is a computed property's accessor head, and the CST folds the
         // effect specifier into the same value: `m:[n:get,n:throws]`. Read as a plain expression
