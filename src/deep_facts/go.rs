@@ -2725,6 +2725,23 @@ impl<'a> Walker<'a> {
                 break;
             }
         }
+        // C# keeps the header inside `foreach_header`: `foreach (T x in ys)`.
+        // Only the last non-layout child before `in` is the binding; the type
+        // precedes it.
+        if split.is_none() {
+            if let Some(header) = children.iter().copied().find(|&child| self.kind(child) == "foreach_header") {
+                let inner = self.children(header);
+                let at = inner.iter().position(|&child| self.kind(child) == "in")?;
+                let targets = inner[..at]
+                    .iter()
+                    .rev()
+                    .find(|&&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")"))
+                    .map(|&child| self.pattern_names(child))
+                    .unwrap_or_default();
+                let value = *inner.get(at + 1)?;
+                return Some((targets, value));
+            }
+        }
         // JS keeps the header inside `for_header`: `for (let x of y)`.
         if split.is_none() {
             let header = children.iter().copied().find(|&child| self.kind(child) == "for_header")?;
@@ -4737,6 +4754,18 @@ fn dotted_piece(text: &str) -> bool {
             },
             "not_operator" | "unary_operator" | "unary_expression" | "await" | "await_expression" | "yield" | "yield_expression"
             | "typeof" | "void" | "non_null_expression" | "as_expression" | "satisfies_expression" | "type_assertion" | "delete_expression" => {
+                match self.expression_child(id) {
+                    Some(child) => {
+                        let inner = self.form(child);
+                        format!("[\"m\",[{inner}]]")
+                    }
+                    None => "0".to_string(),
+                }
+            }
+            // C# `index++` / `index--` inside a condition (`if (index++ != 0)`)
+            // is a `postfix_expression`; read its operand so the condition
+            // keeps the variable name.
+            "postfix_expression" if self.language.name == "csharp" => {
                 match self.expression_child(id) {
                     Some(child) => {
                         let inner = self.form(child);
