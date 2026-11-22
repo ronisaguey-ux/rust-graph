@@ -212,6 +212,22 @@ impl<'a> Walker<'a> {
                     self.java_lambda_assignment(child)
                 }
                 Some(child) => {
+                    // `new Thread() { … }.start();`: the one-pass reader ends the
+                    // expression at the anonymous class's body and reads the
+                    // chain after it as a statement of its own, on the line that
+                    // chain's last call is written on. Merged into one event at
+                    // the line of `new`, the statement sat on a line the lexer
+                    // never wrote and every such line was a loss (guava's
+                    // LocalCacheTest, 2 rows).
+                    if let Some((_creation, rest)) = self.java_anonymous_split(child) {
+                        let symbol = self.frame().symbol;
+                        let line = self.facts.symbols[symbol]
+                            .calls
+                            .last()
+                            .map_or_else(|| self.line(id), |call| call.line);
+                        self.lexer_event(b'x', line, &[], &rest, false);
+                        return;
+                    }
                     let value = self.decl_value(id);
                     let line = self.line(id);
                     self.lexer_event(b'x', line, &[], &value, false);
@@ -282,6 +298,15 @@ impl<'a> Walker<'a> {
             "try_statement" => {
                 self.java_statements(id);
             }
+            // `try (JsonParser p = R.createParser(in)) { … }`: the resource is a
+            // declaration the one-pass reader files as one statement over the
+            // header — the type, the name, then the initialiser's value, in
+            // source order — and no arm read it. The initialiser's call and
+            // every call inside it left the record, so each try-with-resources
+            // whose resource builds something was a call the CST did not have
+            // (`new ByteArrayInputStream(…)`, `new BufferedOutputStream(…)`:
+            // 4 rows of the java corpus).
+            "resource_specification" => self.java_resource_specification(id),
             _ => {}
         }
     }
@@ -357,6 +382,13 @@ impl<'a> Walker<'a> {
         let line = self.line(id);
         self.lexer_event(b'a', line, &targets, &value, false);
         if let Some((_, rest)) = split {
+            // The chain after the anonymous class's body is a statement of its
+            // own, written on the line its last call sits on.
+            let symbol = self.frame().symbol;
+            let line = self.facts.symbols[symbol]
+                .calls
+                .last()
+                .map_or(line, |call| call.line);
             self.lexer_event(b'x', line, &[], &rest, false);
         }
     }
@@ -427,15 +459,6 @@ impl<'a> Walker<'a> {
     pub(crate) fn java_argument_value(&mut self, id: u32) -> String {
         if let Some((creation, rest)) = self.java_anonymous_split(id) {
             return format!("[\"m\",[{creation},{rest}]]");
-        }
-        if self.kind(id) == "object_creation_expression" {
-            if let Some(body) = self.child_of_kind(id, "class_body") {
-                let members = self.java_anon_body(body);
-                if !members.is_empty() && members != "0" {
-                    let call = self.decl_value(id);
-                    return format!("[\"m\",[{call},{members}]]");
-                }
-            }
         }
         self.decl_value(id)
     }
@@ -684,6 +707,35 @@ impl<'a> Walker<'a> {
         let value = format!("[\"m\",[{params},{body}]]");
         let line = self.line(id);
         self.lexer_event(b'a', line, &targets, &value, false);
+    }
+
+    /// `try (A a = f(); B b = g())`: one part per declaration piece in source
+    /// order — the type, the name, the initialiser's value — exactly as the
+    /// one-pass reader merges the header, and one `x` event on the header's
+    /// line. A bare `try (a)` states the name alone.
+    pub(crate) fn java_resource_specification(&mut self, id: u32) {
+        let mut parts = Vec::new();
+        for resource in self.children(id) {
+            if self.is_layout(resource) {
+                continue;
+            }
+            for piece in self.children(resource) {
+                if self.is_layout(piece) {
+                    continue;
+                }
+                let value = self.decl_value(piece);
+                if !value.is_empty() {
+                    parts.push(value);
+                }
+            }
+        }
+        let value = match parts.len() {
+            0 => return,
+            1 => parts.pop().unwrap_or_default(),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        };
+        let line = self.line(id);
+        self.lexer_event(b'x', line, &[], &value, false);
     }
 
     pub(crate) fn java_return(&mut self, id: u32) {
