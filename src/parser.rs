@@ -1591,6 +1591,11 @@ impl<'a> Parser<'a> {
         if self.lang.tag == "CS" && self.cs_new_initialiser() {
             return false;
         }
+        // `new Boolean[] { Boolean.FALSE, Boolean.TRUE }`: in Java a `{` after
+        // `]` is an array initialiser, never a statement block.
+        if self.lang.tag == "JAVA" && self.is_op(&last, b"]") {
+            return false;
+        }
         !(self.top_level_assign(&self.stmt).is_some() && !self.is_op(&last, b")"))
     }
 
@@ -4037,6 +4042,11 @@ impl<'a> Parser<'a> {
                     && found.is_none()
                     && !toks.get(index + 1).is_some_and(|t| self.is_op(t, b":")) =>
                 {
+                    // `Class<?> x = ...;`: a `?` inside `<...>` in Java is a
+                    // wildcard type argument, never a ternary operator.
+                    if self.lang.tag == "JAVA" && angle > 0 {
+                        continue;
+                    }
                     // `private readonly Action? _dispose = null;`: a `?` after a
                     // type is the nullable marker in C#, not the start of a
                     // ternary. Bailing on it made the whole declaration read as
@@ -4046,7 +4056,7 @@ impl<'a> Parser<'a> {
                     // same depth follows it. Gated on C#: Kotlin's `?:` and the
                     // ternary bails elsewhere are load-bearing (the kotlin lambda
                     // arrow test caught exactly that when this ran everywhere).
-                    if matches!(self.lang.tag, "CS" | "SWIFT") {
+                    if matches!(self.lang.tag, "CS" | "SWIFT" | "JAVA") {
                         // The `:` must sit at the `?`'s own depth. A named
                         // argument's `:` inside a call (`Register<A, object?>(
                         // nameof(X), enableDataValidation: true)`) is not a
