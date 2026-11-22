@@ -4264,12 +4264,28 @@ impl<'a> Walker<'a> {
         }
         if def.name_last {
             // Java writes the return type before the name: `Item find(int id)`.
-            let node = self
-                .children(id)
-                .into_iter()
-                .filter(|&child| def.name.contains(&self.kind(child)))
-                .next_back()?;
-            return Some(self.text_string(node));
+            let children = self.children(id);
+            if let Some(node) = children.iter().copied().filter(|&child| def.name.contains(&self.kind(child))).next_back() {
+                return Some(self.text_string(node));
+            }
+            // Java's contextual keywords (`open`, `module`, `record`, `sealed`,
+            // `permits`, `to`, `exports`) are legal method names, but the grammar
+            // gives the word its own anonymous token rather than an identifier,
+            // so no identifier child exists. The name is the leaf right before
+            // the parameter list, as it is for the JavaScript keyword names above.
+            if self.kinds.family == Family::Java {
+                let params = def.params?;
+                let at = children.iter().position(|&child| self.kind(child) == params)?;
+                let name = *children.get(at.checked_sub(1)?)?;
+                let text = self.text_string(name);
+                if self.node(name).first_child == NONE
+                    && !text.is_empty()
+                    && text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                {
+                    return Some(text);
+                }
+            }
+            return None;
         }
         if let Some(node) = def.name.iter().find_map(|kind| self.child_of_kind(id, *kind)) {
             let text = self.text_string(node);
