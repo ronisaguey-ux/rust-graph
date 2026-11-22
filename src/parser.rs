@@ -1082,6 +1082,11 @@ impl<'a> Parser<'a> {
                     .get(i + 1)
                     .is_some_and(|t| t.kind == Kind::Op && matches!(self.raw(t), b"(" | b"["));
                 if next_is_delim {
+                    // `where T : ILogEventSink, new() {`: a generic constructor
+                    // constraint sits after `where ... :`, never an initialiser.
+                    if self.is_op(&self.stmt[i + 1], b"(") && self.cs_in_where_constraint(i) {
+                        continue;
+                    }
                     return true;
                 }
                 let prev_is_expr = self.stmt[i - 1].kind == Kind::Op
@@ -1093,6 +1098,26 @@ impl<'a> Parser<'a> {
                 if prev_is_expr {
                     return true;
                 }
+            }
+        }
+        false
+    }
+
+    /// Returns whether `new` at `at` sits inside a C# `where T : ..., new()`
+    /// generic constraint rather than an object or array initialiser.
+    fn cs_in_where_constraint(&self, at: usize) -> bool {
+        let mut depth = 0i32;
+        let mut saw_where = false;
+        for token in &self.stmt[..at] {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    b":" if depth == 0 && saw_where => return true,
+                    _ => {}
+                }
+            } else if depth == 0 && token.kind == Kind::Ident && self.raw(token) == b"where" {
+                saw_where = true;
             }
         }
         false
@@ -1521,7 +1546,7 @@ impl<'a> Parser<'a> {
             let raw = self.raw(&last);
             if raw != b")"
                 && raw != b">"
-                && !(matches!(self.lang.tag, "RS" | "TS" | "TSX") && raw == b">>")
+                && !(matches!(self.lang.tag, "RS" | "TS" | "TSX" | "CS") && raw == b">>")
                 && raw != b"]"
                 && raw != b"}"
             {
@@ -1862,6 +1887,18 @@ impl<'a> Parser<'a> {
             };
             if toks.get(next).is_some_and(|t| self.is_op(t, b"[")) {
                 if let Some((_, close)) = self.group_at(toks, next) {
+                    index = close + 1;
+                    continue;
+                }
+            }
+            break;
+        }
+        // `[RunWith(typeof(StubRunner))] class Foo`: C# attributes precede the
+        // declaration header; skipping them keeps `RunWith(...)` from looking
+        // like a function header in `c_style_head`.
+        while self.lang.tag == "CS" && toks.get(index).is_some_and(|t| self.is_op(t, b"[")) {
+            if let Some((_, close)) = self.group_at(toks, index) {
+                if close + 1 < toks.len() {
                     index = close + 1;
                     continue;
                 }
@@ -4066,7 +4103,8 @@ impl<'a> Parser<'a> {
     }
 
     fn class_head(&self, toks: &[Token]) -> Option<(String, Vec<String>)> {
-        let mut index = self.skip_modifiers(toks);
+        let start = self.skip_rs_attrs(toks);
+        let mut index = start + self.skip_modifiers(&toks[start..]);
         // `@InternalApi private[akka] class Foo(ns: Int) {`: Scala writes the
         // annotation in front of the head on the same line. It names nothing,
         // so skip it and any modifiers after it. Left in place, the `@` read as
@@ -4695,6 +4733,10 @@ impl<'a> Parser<'a> {
 
     /// `ret name(args) ... {` where no keyword says it is a function.
     fn c_style_head(&self, toks: &[Token]) -> Option<Head> {
+        // Skip leading modifiers (`private protected override (A, B) F()`):
+        // otherwise a modifier before a tuple return type looks like `name(`.
+        let mod_skip = self.skip_modifiers(toks);
+        let toks = &toks[mod_skip..];
         if self.top_level_assign(toks).is_some_and(|equal| !toks[..equal].iter().any(|t| self.is_op(t, b"("))) {
             return None;
         }
