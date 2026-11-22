@@ -1695,7 +1695,11 @@ impl Emit<'_> {
         } else {
             // Swift's `try` marks a throwing call and names no value: the CST
             // writes `try build()` as the call alone, so the word is noise here.
-            NOISE.contains(&word.as_str()) || (self.lang.tag == "SWIFT" && word == "try")
+            // C#'s `checked` / `unchecked` are operator keywords that wrap an
+            // expression in parentheses without being a call.
+            NOISE.contains(&word.as_str())
+                || (self.lang.tag == "SWIFT" && word == "try")
+                || (self.lang.tag == "CS" && matches!(word.as_str(), "checked" | "unchecked"))
         };
         if noise && !go_word {
             self.pos += 1;

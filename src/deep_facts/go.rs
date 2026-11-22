@@ -5474,10 +5474,11 @@ fn dotted_piece(text: &str) -> bool {
                 out.push(']');
                 out
             }
-            // C#'s `string` is a predefined type keyword (a leaf whose text is
-            // `string`), not a string literal (`STRING`), so the one-pass
-            // reader writes `n:string`.
-            "string" if self.language.name == "csharp" => "[\"n\",\"string\"]".to_string(),
+            // C#'s `string` and `float` are predefined type keywords (leaves
+            // whose text is `string` / `float`), not literals (`string_literal`
+            // / `real_literal`), so the one-pass reader writes `n:string` /
+            // `n:float`.
+            "string" | "float" if self.language.name == "csharp" => format!("[\"n\",\"{kind}\"]"),
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment"
             | "arrow_function" | "function_expression" | "generator_function" => "0".to_string(),
