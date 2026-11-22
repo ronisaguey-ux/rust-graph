@@ -5864,7 +5864,13 @@ impl<'a> Parser<'a> {
         }
         // The head before the name states a type, so every word in it is a
         // modifier, a primitive or a type name — never a value.
-        stmt[..open - 1].iter().all(|token| match token.kind {
+        // An annotation in that head (`public abstract @Nullable C next(C
+        // value);`) decorates the declaration and is not a value either: left in,
+        // the `@` failed this test and the interface member wrote an `x` event
+        // the CST never writes (guava's DiscreteDomain, 2 rows).
+        let head = &stmt[..open - 1];
+        let head = &head[self.skip_java_annotations(head)..];
+        head.iter().all(|token| match token.kind {
             Kind::Ident => {
                 let word = self.text(token);
                 java_modifier(&word)
@@ -5875,7 +5881,12 @@ impl<'a> Parser<'a> {
                     )
                     || word.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
             }
-            Kind::Op => matches!(self.raw(token), b"<" | b">" | b"[" | b"]" | b"," | b"?"),
+            // `Collection<Entry<K, V>> entries();`: the `>>` that closes two type
+            // arguments arrives as one shift operator, and it is the close of a
+            // generic argument list exactly as `>` is. Missing here it made every
+            // nested-generic member signature an expression the CST never writes
+            // (guava's Multimap, junit's ClasspathScanner: 4 rows).
+            Kind::Op => matches!(self.raw(token), b"<" | b">" | b">>" | b">>>" | b"[" | b"]" | b"," | b"?"),
             _ => false,
         })
     }
