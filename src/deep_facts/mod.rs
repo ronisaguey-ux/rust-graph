@@ -2747,7 +2747,7 @@ impl<'a> Walker<'a> {
             // the initialiser was read for its assignments alone, so every nested
             // creation stayed in the tree and out of the call table.
             "object_initializer" | "array_initializer" | "anonymous_body"
-            | "using_statement" | "foreach_statement" | "lock_statement"
+            | "using_statement"
             | "fixed_statement" | "yield_statement"
                 if self.language.name == "csharp" =>
             {
@@ -3287,7 +3287,7 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
-            "for_statement" | "for_in_statement" => {
+            "for_statement" | "for_in_statement" | "foreach_statement" => {
                 self.event("[\"b\"]");
                 if let Some((target, value)) = self.loop_binding(id) {
                     self.assignment_event(target, value, self.line(id), false);
@@ -3316,6 +3316,12 @@ impl<'a> Walker<'a> {
                 }
             }
             "while_statement" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
+            // `lock (obj) stmt`: evaluates the lock expression and opens a
+            // block, like `while`, rather than walking the body via `lambda_calls`.
+            "lock_statement" if self.language.name == "csharp" => {
                 self.condition_before(id);
                 self.event("[\"b\"]");
             }
@@ -3450,7 +3456,9 @@ impl<'a> Walker<'a> {
                 | "guard_statement"
                 | "for_statement"
                 | "for_in_statement"
+                | "foreach_statement"
                 | "while_statement"
+                | "lock_statement"
                 | "do_statement"
                 | "try_statement"
                 | "switch_statement"
