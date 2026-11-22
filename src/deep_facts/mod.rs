@@ -1336,6 +1336,21 @@ impl<'a> Walker<'a> {
         let tokens: Vec<u32> = self.children(id);
         let mut at = 0;
         while at < tokens.len() {
+            if matches!(
+                self.kind(tokens[at]),
+                "member_access_expression" | "member_access" | "conditional_member_access"
+            ) {
+                let name = self.path_of(tokens[at]);
+                if !name.is_empty()
+                    && at + 1 < tokens.len()
+                    && matches!(self.kind(tokens[at + 1]), "(" | "argument_list" | "arguments")
+                {
+                    let line = self.line(tokens[at]);
+                    self.push_call(name, line);
+                }
+                at += 1;
+                continue;
+            }
             let Some(mut name) = self.leaf_name(tokens[at]) else {
                 at += 1;
                 continue;
@@ -1396,7 +1411,9 @@ impl<'a> Walker<'a> {
             }
             if after < tokens.len() {
                 let next_kind = self.kind(tokens[after]);
-                if next_kind == "(" || (is_new && next_kind == "{") {
+                if matches!(next_kind, "(" | "argument_list" | "arguments")
+                    || (is_new && next_kind == "{")
+                {
                     self.push_call(name.clone(), line);
                     let last = name.rsplit('.').next().unwrap_or("");
                     if last.starts_with(|ch: char| ch.is_uppercase()) {

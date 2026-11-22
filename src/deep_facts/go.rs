@@ -5655,6 +5655,29 @@ fn dotted_piece(text: &str) -> bool {
         let tokens: Vec<u32> = self.children(id);
         let mut at = 0;
         while at < tokens.len() {
+            // Recovery inside an expression-bodied property/accessor may leave a
+            // `member_access_expression` (`_egl.GetCurrentDisplay`) intact right
+            // before `(` or `argument_list`.
+            if matches!(
+                self.kind(tokens[at]),
+                "member_access_expression"
+                    | "member_expression"
+                    | "member_access"
+                    | "conditional_member_access"
+                    | "navigation_expression"
+                    | "field_expression"
+            ) {
+                let name = self.path_of(tokens[at]);
+                if !name.is_empty()
+                    && at + 1 < tokens.len()
+                    && matches!(self.kind(tokens[at + 1]), "(" | "argument_list" | "arguments")
+                {
+                    let line = self.line(tokens[at]);
+                    calls.push(self.push_call(name, line));
+                }
+                at += 1;
+                continue;
+            }
             if self.kind(tokens[at]) != "identifier" {
                 at += 1;
                 continue;
@@ -5671,7 +5694,9 @@ fn dotted_piece(text: &str) -> bool {
                 name.push_str(&self.text_string(tokens[end + 2]));
                 end += 2;
             }
-            if end + 1 < tokens.len() && self.kind(tokens[end + 1]) == "(" {
+            if end + 1 < tokens.len()
+                && matches!(self.kind(tokens[end + 1]), "(" | "argument_list" | "arguments")
+            {
                 let line = self.line(tokens[at]);
                 calls.push(self.push_call(name, line));
             }
@@ -6319,7 +6344,36 @@ fn dotted_piece(text: &str) -> bool {
                 }
             }
             _ => {
-                let path = self.path_of(callee);
+                let mut path = self.path_of(callee);
+                // Recovery may wrap tokens before `(` (e.g. `_focus is object ? GetOrCreate`)
+                // into an `ERROR` or expression callee of an `invocation_expression`;
+                // the rightmost name before the argument list is the callee.
+                if path.is_empty() && self.language.name == "csharp" {
+                    let mut cur = callee;
+                    loop {
+                        let Some(last) = self
+                            .children(cur)
+                            .into_iter()
+                            .rev()
+                            .find(|&child| !self.is_layout(child))
+                        else {
+                            break;
+                        };
+                        let p = self.path_of(last);
+                        if !p.is_empty() {
+                            path = p;
+                            break;
+                        }
+                        if matches!(
+                            self.kind(last),
+                            "ERROR" | "conditional_expression" | "binary_expression" | "is_expression"
+                        ) {
+                            cur = last;
+                        } else {
+                            break;
+                        }
+                    }
+                }
                 let receiver = if path.is_empty() {
                     receiver_call.unwrap_or_else(|| "0".to_string())
                 } else {
