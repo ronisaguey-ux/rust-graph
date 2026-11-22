@@ -795,7 +795,13 @@ impl<'a> Walker<'a> {
                 text
             };
             let first = text[0];
-            if first.is_ascii_digit() || first == b'"' || first == b'\'' || first == b'`' {
+            // Java's float has no digit before the dot (`.005`), so read by its
+            // first character alone it was punctuation and returned nothing —
+            // `assertEquals(1.0, x, .005, "msg")` lost the argument. A dot that
+            // is followed by a digit is the numeric literal the lexer writes as
+            // the constant 0.
+            let leading_dot_number = first == b'.' && text.len() > 1 && text[1].is_ascii_digit();
+            if first.is_ascii_digit() || first == b'"' || first == b'\'' || first == b'`' || leading_dot_number {
                 return "0".to_string();
             }
             if first.is_ascii_alphabetic() || first == b'_' || (self.language.name == "csharp" && first >= 0x80) {
@@ -978,6 +984,23 @@ impl<'a> Walker<'a> {
                     if self.kind(object) == "composite_literal" {
                         let literal = self.decl_value(object);
                         return format!("[\"m\",[{literal},{call}]]");
+                    }
+                }
+            }
+            // `() -> new BeanE() { @Override public void afterPropertiesSet() { … } }`:
+            // a body that builds an anonymous class keeps the class's members —
+            // the one-pass reader merges the creation with the body it opens
+            // (`m:[c(0;[]), m:[m:[n:Override,n:public,c(0;[]),m:[c(0;[0])]]]]`) —
+            // while the call alone dropped them wherever the creation was read
+            // as a value (`context.registerBean(name, BeanE.class, () -> new
+            // BeanE() { … })`: 2 rows of the java corpus, spring-context and
+            // junit-platform). `java_argument_value` already wrote the merge for
+            // an argument; this is the same merge for every other value path.
+            if self.kinds.family == Family::Java && kind == "object_creation_expression" {
+                if let Some(body) = self.child_of_kind(id, "class_body") {
+                    let members = self.java_anon_body(body);
+                    if !members.is_empty() && members != "0" {
+                        return format!("[\"m\",[{call},{members}]]");
                     }
                 }
             }
@@ -1672,6 +1695,24 @@ impl<'a> Walker<'a> {
                 .expression_child(id)
                 .map(|child| self.decl_path_seg(child, root))
                 .unwrap_or_default(),
+            // `((InheritMe) from).privateInherited = "foo"`: the one-pass reader
+            // spells a cast as its type and its value with nothing between them
+            // (`InheritMefrom.privateInherited`). Read through the leaf fallback
+            // the cast named nothing at all, so the target lost its receiver and
+            // the assignment left the record (mockito's LenientCopyToolTest, 2
+            // rows).
+            "cast_expression" => {
+                let mut out = String::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    out.push_str(&self.decl_path_seg(child, root));
+                }
+                out
+            }
+            // `(InheritMe) from`: the type half of a cast.
+            "cast_type" => self.last_name(id).or_else(|| self.leaf_name(id)).unwrap_or_default(),
             "generic_type" => {
                 self.children(id).first().map(|&base| self.decl_path_seg(base, root)).unwrap_or_default()
             }
@@ -6552,6 +6593,20 @@ fn dotted_piece(text: &str) -> bool {
         Some(format!("[\"m\",[{head},{lam_form}]]"))
     }
 
+    /// A Kotlin call that carries a trailing lambda and is read inside an
+    /// argument list: the one-pass reader merges the callee with the lambda's
+    /// body there (`add(CommandLineArgumentProvider { … })` is
+    /// `c(0;[n:add, m:[n:CommandLineArgumentProvider, m:[…]]]])`), while read as
+    /// the DSL name alone the argument was the bare name and the body's calls
+    /// were written as statements of their own.
+    fn kotlin_trailing_lambda_call(&self, id: u32) -> bool {
+        let kind = self.kind(id);
+        self.kinds.calls.contains(&kind)
+            && self.children(id).iter().any(|&child| {
+                matches!(self.kind(child), "lambda_literal" | "annotated_lambda" | "labeled_lambda" | "lambda_expression")
+            })
+    }
+
     /// The name of a Kotlin DSL call: an identifier followed by a single
     /// lambda argument, which the lexer reads as the name alone.
     fn kotlin_dsl_name(&self, id: u32) -> Option<String> {
@@ -7146,6 +7201,12 @@ fn dotted_piece(text: &str) -> bool {
                     // read as a merge it lost the name off every annotation.
                     || (kind == "assignment_expression"
                         && (self.is_kotlin() || self.kind(list) == "annotation_arguments")))
+                // Java writes an assignment in an argument the same way
+                // (`CACHE.put(key, route = new Route(delegates))`) and the
+                // one-pass reader files it as the keyword form
+                // (`k(route):c(0;[n:delegates])`); read as a plain merge it
+                // disagreed at every such call.
+                || (self.kinds.family == Family::Java && kind == "assignment_expression")
             {
                 // `@deprecated("old", since = "2")`: a named argument is the
                 // lexer's keyword form, not the assignment's merge.
@@ -7155,13 +7216,28 @@ fn dotted_piece(text: &str) -> bool {
                 // the value alone - the key `level` left the record.
                 let parts = self.children(child);
                 let name = parts.first().map(|&node| self.path_of(node)).unwrap_or_default();
-                let inner = parts.last().map(|&node| self.form(node)).unwrap_or_else(|| "0".to_string());
+                // Java records its calls in `decl_value`, not in `form` (its
+                // `calls` list is empty), so the right-hand side is read the
+                // Java way: `route = new Route(delegates)` is the keyword form
+                // whose value is the creation's call, not the constant `0`.
+                let inner = parts
+                    .last()
+                    .map(|&node| if self.kinds.family == Family::Java { self.decl_value(node) } else { self.form(node) })
+                    .unwrap_or_else(|| "0".to_string());
                 let mut out = "[\"k\",".to_string();
                 push_string(&mut out, &name);
                 out.push(',');
                 out.push_str(&inner);
                 out.push(']');
                 out
+            } else if self.is_kotlin() && self.kotlin_trailing_lambda_call(child) {
+                // `jvmArgumentProviders.add(CommandLineArgumentProvider { … })`:
+                // inside an argument list the one-pass reader merges the callee
+                // with the lambda's body, and the DSL-name reading dropped both
+                // (`c(0;[c(n:configurations.errorproneJavac;[]),0,…])` left the
+                // value — mockito's error-prone build script and spring's
+                // TestItemStoredProcedure, 2 rows).
+                self.kotlin_expr_call_form(child).unwrap_or_else(|| self.form(child))
             } else {
                 match self.kinds.family {
                     Family::Go => self.decl_value(child),
