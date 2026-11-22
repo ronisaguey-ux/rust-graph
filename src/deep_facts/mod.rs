@@ -236,6 +236,13 @@ const CS_IMPORTS: &[&str] = &["using_directive"];
 // `value` and `remove` are C# contextual keywords that also name parameters and locals.
 const CS_SOFT: &[&str] = &["value", "remove"];
 
+/// Java's module-directive words are restricted identifiers: `to` is a name
+/// everywhere but `exports a.b to c`, and a variable called `to` is ordinary
+/// code. Read as layout, every `to = high - 1`, every `swap(array, from, to)`
+/// and every `int low = from + 1, high = to` lost it — 44 rows of the java
+/// dump, 5 in guava's QuantilesAlgorithm alone.
+const JAVA_SOFT: &[&str] = &["to"];
+
 const KT_DEFS: &[Def] = &[
     Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "interface_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
@@ -417,7 +424,7 @@ fn kinds(lang: Lang) -> Kinds {
         // lexer's statement model is mirrored by `decl_value` rather than by
         // `form`, so the generic arms below are not reached.
         Lang::Go => Kinds { definitions: GO_DEFS, calls: &[], imports: GO_IMPORTS, soft: &[], family: Family::Go },
-        Lang::Java => Kinds { definitions: JAVA_DEFS, calls: &[], imports: JAVA_IMPORTS, soft: &[], family: Family::Java },
+        Lang::Java => Kinds { definitions: JAVA_DEFS, calls: &[], imports: JAVA_IMPORTS, soft: JAVA_SOFT, family: Family::Java },
         Lang::CSharp => Kinds { definitions: CS_DEFS, calls: CS_CALLS, imports: CS_IMPORTS, soft: CS_SOFT, family: Family::Plain },
         Lang::Kotlin => {
             Kinds { definitions: KT_DEFS, calls: KT_CALLS, imports: KT_IMPORTS, soft: KT_SOFT, family: Family::Plain }
