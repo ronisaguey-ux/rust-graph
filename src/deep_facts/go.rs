@@ -882,6 +882,27 @@ impl<'a> Walker<'a> {
                 _ => format!("[\"m\",[{}]]", parts.join(",")),
             };
         }
+        // `{ 'a' }`, `{ 1, 2 }`, `{ { 1 }, { 2 } }`: an array initialiser is the
+        // list of its elements, and the one-pass reader writes it as one merge
+        // whatever the count (`m:[0]`, `m:[0,0]`, `m:[[m,[0]],[m,[0]]]`). Read by
+        // the generic arm below, a one-element initialiser collapsed to the
+        // element and came back as the literal `0` — the same value a plain
+        // `= 1` writes — and a nested one lost its own list (java: `= { 1 }`,
+        // 11 corpus rows across the guava array fields, protobuf's byte tables
+        // and commons-lang's DiffBuilderTest).
+        if self.language.name == "java" && kind == "array_initializer" {
+            let mut parts = Vec::new();
+            for child in self.children(id) {
+                let value = self.decl_value(child);
+                if !value.is_empty() {
+                    parts.push(value);
+                }
+            }
+            return match parts.len() {
+                0 => "0".to_string(),
+                _ => format!("[\"m\",[{}]]", parts.join(",")),
+            };
+        }
         if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression" | "object_creation" | "invocation_expression") {
             let callee = self.decl_callee(id);
             if self.language.name == "csharp" && kind == "object_creation" && matches!(self.kind(callee), "array_type" | "generic_type") {
@@ -926,21 +947,7 @@ impl<'a> Walker<'a> {
             // `getItems(makeKey(x))[pickIdx(x)].Render()`: when the receiver chain
             // carries calls of its own, form that receiver expression directly so
             // every intermediate call, its arguments, and its names reach the record.
-            let receiver = match self.decl_receiver_expr(id, callee) {
-                Some(expr) => self.decl_value(expr),
-                None => {
-                    let path = self.decl_path(callee);
-                    match path.rsplit_once('.') {
-                        Some((head, _)) if !head.is_empty() => {
-                            let mut out = "[\"n\",".to_string();
-                            push_string(&mut out, head);
-                            out.push(']');
-                            out
-                        }
-                        _ => "0".to_string(),
-                    }
-                }
-            };
+            let receiver = self.decl_call_receiver(id, callee);
             let index = self.decl_call(id);
             let args = self
                 .children(id)
@@ -1355,16 +1362,72 @@ impl<'a> Walker<'a> {
             "call_expression" | "method_invocation" | "object_creation_expression" => Some(callee),
             "selector_expression" | "member_expression" | "field_access" => {
                 let object = self.children(callee).into_iter().find(|&child| !self.is_layout(child))?;
-                (object != call && self.decl_has_call(object)).then_some(object)
+                // `((Map) actual).get("foo1")`, `((Mono<?>) responsePublisher).block(t)`:
+                // a parenthesised cast for a receiver holds no call, and the
+                // one-pass reader reads it as the merge of the cast's type and
+                // its operand. Left out, the receiver was the constant 0 and the
+                // cast's names were nowhere in the record (spring's
+                // JacksonJsonViewTests and HttpServiceMethod, commons-lang's
+                // EqualsBuilderTest: 6 rows).
+                let cast = matches!(self.kind(object), "parenthesized_expression" | "cast_expression");
+                (object != call && (cast || self.decl_has_call(object))).then_some(object)
             }
             // `Ordering.from(k).<K>onKeys()`: Java's `method_invocation` with
             // `type_arguments` keeps the receiver as a direct child of `call`
             // rather than wrapping it in `field_access`.
             _ if self.kind(call) == "method_invocation" => {
                 let object = self.children(call).into_iter().find(|&child| !self.is_layout(child))?;
-                (object != callee && self.decl_has_call(object)).then_some(object)
+                // A cast receiver, for the invocations this grammar keeps the
+                // object as a direct child of: same reading as the arm above.
+                let cast = matches!(self.kind(object), "parenthesized_expression" | "cast_expression");
+                (object != callee && (cast || self.decl_has_call(object))).then_some(object)
             }
             _ => None,
+        }
+    }
+
+    /// The receiver value of a call: the object expression's own value when it
+    /// is a call, and otherwise the dotted path the one-pass reader writes.
+    pub(crate) fn decl_call_receiver(&mut self, call: u32, callee: u32) -> String {
+        if let Some(expr) = self.decl_receiver_expr(call, callee) {
+            return self.decl_value(expr);
+        }
+        // `Collections.<Class<?>>emptySet()`: Java keeps the type-argument list
+        // between the receiver and the method name, inside the invocation's own
+        // children. The one-pass reader merges the receiver's name and the type
+        // argument into the call's receiver (`c(0;m:[n:Collections,n:Class];[])`),
+        // and read from the callee's path alone the receiver was the constant 0
+        // with the type argument nowhere in the record (mockito's
+        // TypeCachingMockBytecodeGeneratorTest: 2 rows).
+        if self.language.name == "java"
+            && self.kind(call) == "method_invocation"
+            && self.child_of_kind(call, "type_arguments").is_some()
+        {
+            let mut parts: Vec<String> = Vec::new();
+            for child in self.children(call) {
+                if child == callee || matches!(self.kind(child), "arguments" | ".") {
+                    continue;
+                }
+                let value = self.decl_value(child);
+                if !value.is_empty() && value != "0" {
+                    parts.push(value);
+                }
+            }
+            return match parts.len() {
+                0 => "0".to_string(),
+                1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+                _ => format!("[\"m\",[{}]]", parts.join(",")),
+            };
+        }
+        let path = self.decl_path(callee);
+        match path.rsplit_once('.') {
+            Some((head, _)) if !head.is_empty() => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, head);
+                out.push(']');
+                out
+            }
+            _ => "0".to_string(),
         }
     }
 
@@ -1429,6 +1492,41 @@ impl<'a> Walker<'a> {
                 } else {
                     text
                 }
+            }
+            // `Sup.super.isLongLived()`: the qualified `super` of an overriding
+            // class, spelled like `qualified_this` and dropped the same way, so
+            // the call's receiver was the constant 0 (java: Task.java's
+            // `SchedulingAwareRunnable.super.isLongLived()`).
+            "qualified_super" => {
+                let mut parts: Vec<String> = Vec::new();
+                for child in self.children(id) {
+                    let part = match self.kind(child) {
+                        "identifier" | "type_identifier" | "super" => self.text_string(child),
+                        _ => continue,
+                    };
+                    parts.push(part);
+                }
+                parts.join(".")
+            }
+            // `Outer.this.x`: an inner class's qualified receiver, and the type
+            // prefix is part of the name the one-pass reader builds. It spells
+            // the `this` verbatim in a value (`n:Outer.this.f`) and as `self` in
+            // a target list (`Outer.self.f = v`), which `decl_target` rewrites.
+            // With no arm the node named nothing at all, so the receiver of
+            // every call through it was dropped and a target list lost its
+            // prefix (java: Task.java's three `Task.this.lastExecutionOutcome`
+            // writes, FrameworkServlet's `FrameworkServlet.this.onApplicationEvent(event)`,
+            // GroovyMarkupConfigurer's `GroovyMarkupConfigurer.this.resolveTemplate(…)`).
+            "qualified_this" => {
+                let mut parts: Vec<String> = Vec::new();
+                for child in self.children(id) {
+                    let part = match self.kind(child) {
+                        "identifier" | "type_identifier" | "this" => self.text_string(child),
+                        _ => continue,
+                    };
+                    parts.push(part);
+                }
+                parts.join(".")
             }
             "selector_expression" | "qualified_type" | "field_access" | "scoped_identifier" | "dotted_name"
             | "scoped_type_identifier" | "nested_type_identifier" | "class_literal" | "method_reference"
@@ -1550,6 +1648,14 @@ impl<'a> Walker<'a> {
             }
             "identifier" | "field_identifier" | "this" | "selector_expression" | "field_access" => {
                 let path = self.decl_path(id);
+                // `Outer.this.f = v` binds `Outer.self.f`: the lexer writes a
+                // qualified receiver as `this` in a value and as `self` in a
+                // target list, and `decl_path` writes the value spelling.
+                let path = if path.contains(".this") {
+                    path.split('.').map(|segment| if segment == "this" { "self" } else { segment }).collect::<Vec<_>>().join(".")
+                } else {
+                    path
+                };
                 (!path.is_empty()).then_some(path)
             }
             // `ek[3] |= 2`: a subscript names its receiver, and Java's grammar
@@ -1562,6 +1668,13 @@ impl<'a> Walker<'a> {
                 (!path.is_empty()).then_some(path)
             }
             "parenthesized_expression" => self.expression_child(id).and_then(|child| self.decl_target(child)),
+            // A contextual keyword bound as a name: `to = high - 1` in a
+            // quickselect. Its kind is its own spelling, so the arms above never
+            // matched it and the target list came back empty.
+            kind if self.kinds.soft.contains(&kind) => {
+                let path = self.decl_path(id);
+                (!path.is_empty()).then_some(path)
+            }
             // `*out = *in`: a dereference writes through the name it points at,
             // and the one-pass lexer files that name as the statement's target.
             // With no arm the CST wrote an empty target list for every `*p = v`
