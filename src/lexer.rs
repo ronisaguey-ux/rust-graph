@@ -99,7 +99,9 @@ impl<'a> Lexer<'a> {
             || byte == b'_'
             || byte >= 0x80
             || self.lang.ident_extra.contains(&byte)
-            || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS" | "SWIFT"))
+            // Java's `$` is an identifier character anywhere in a name: `Ne$ted`
+            // is one class, and the CST writes it whole.
+            || (byte == b'$' && matches!(self.lang.tag, "JS" | "TS" | "SWIFT" | "JAVA"))
     }
 
     /// `/* outer /* inner */ outer */` nests in Kotlin and Rust: the first
