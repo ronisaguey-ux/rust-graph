@@ -510,9 +510,26 @@ impl<'a> Walker<'a> {
         // only the literal, so the name was the one fact every Go file with a
         // callback lost — 1,162 symbol losses, one per file.
         if let [target] = targets.as_slice() {
-            if let Some(literal) = self.go_find_func_literal(&children[at + 1..]) {
-                let line = self.line(id);
-                self.go_bind_func_literal(target, literal, line);
+            // The binder must be a plain name. `indexers[nodeIndex] = func(obj any) …`
+            // binds through an index expression, and the target read as the map's
+            // name filed the literal under `indexers`: a function symbol the
+            // lexer never opens, so every statement of that body was orphaned
+            // (kubernetes.go newIndexedPodsInformer: 10 rows).
+            let binder = children[..at].iter().copied().find(|&child| !self.is_layout(child));
+            let plain_name = binder.is_some_and(|child| {
+                let kind = self.kind(child);
+                kind == "identifier"
+                    || self.kinds.soft.contains(&kind)
+                    // `db.head.memTruncationCallBack = func() {`: a selector is
+                    // a name the lexer opens a symbol for too, so only targets
+                    // that are not names (`m["a"]`) are left out.
+                    || matches!(kind, "selector_expression" | "field_access" | "this")
+            });
+            if plain_name {
+                if let Some(literal) = self.go_find_func_literal(&children[at + 1..]) {
+                    let line = self.line(id);
+                    self.go_bind_func_literal(target, literal, line);
+                }
             }
         }
         let value = self.decl_values(&children[at + 1..]);
