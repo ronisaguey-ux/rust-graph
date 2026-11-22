@@ -4459,15 +4459,25 @@ impl<'a> Parser<'a> {
         if toks.get(at).is_some_and(|token| self.is_op(token, b"*")) {
             at += 1;
         }
-        // Go: `func (s *Server) Handle(x string)`.
-        if self.lang.tag == "GO" && toks.get(at).is_some_and(|token| self.is_op(token, b"(")) {
+        // Go: `func (s *Server) Handle(x string)` — only a method has a name
+        // (followed by `(` or `[`) after the receiver `(...)`; `func(x int) T`
+        // is an anonymous function's parameter list, not a receiver.
+        if self.lang.tag == "GO"
+            && toks.get(at).is_some_and(|token| self.is_op(token, b"("))
+        {
             let (inner, close) = self.group_at(toks, at)?;
-            let names: Vec<String> = toks[inner..close].iter().filter(|t| t.kind == Kind::Ident).map(|t| self.text(t)).collect();
-            if let (Some(first), Some(last)) = (names.first(), names.last()) {
-                head.receiver = first.clone();
-                head.owner = last.clone();
+            if toks.get(close + 1).is_some_and(|token| token.kind == Kind::Ident)
+                && toks
+                    .get(close + 2)
+                    .is_some_and(|token| self.is_op(token, b"(") || self.is_op(token, b"["))
+            {
+                let names: Vec<String> = toks[inner..close].iter().filter(|t| t.kind == Kind::Ident).map(|t| self.text(t)).collect();
+                if let (Some(first), Some(last)) = (names.first(), names.last()) {
+                    head.receiver = first.clone();
+                    head.owner = last.clone();
+                }
+                at = close + 1;
             }
-            at = close + 1;
         }
         // MATLAB: `function [a, b] = f(c)`.
         if self.lang.tag == "M" {
@@ -4583,6 +4593,11 @@ impl<'a> Parser<'a> {
             return None;
         }
         let equal = self.top_level_assign(toks)?;
+        // Go: `t, ok := func() ...` destructures an IIFE into multiple targets,
+        // not a function named `ok`.
+        if self.lang.tag == "GO" && self.go_has_top_level_comma(&toks[..equal]) {
+            return None;
+        }
         // Scala's `val f = () => x` binds a value that holds a function; only
         // `def` declares one. The CST writes no symbol for a val, so a head here
         // named a function the CST never had (`val doNothing: () => Unit = …`
@@ -4590,14 +4605,25 @@ impl<'a> Parser<'a> {
         if self.lang.tag == "SCALA" && toks[..equal].iter().any(|token| token.kind == Kind::Ident && matches!(self.raw(token), b"val" | b"var")) {
             return None;
         }
+        // Go: `var f Type = func(...)` puts the type between the name and `=`,
+        // so the token before `=` is the type, not the variable name.
+        let go_typed_var = self.lang.tag == "GO"
+            && self.word_at(toks, 0).as_deref() == Some("var")
+            && toks.get(1).is_some_and(|t| t.kind == Kind::Ident);
         // Only the chain touching the `=`: `export const f`, `const f: T` name `f`.
-        let mut start = equal.checked_sub(1).filter(|at| toks[*at].kind == Kind::Ident)?;
-        while start >= 2
-            && toks[start - 2].kind == Kind::Ident
-            && toks[start - 1].kind == Kind::Op
-            && matches!(self.raw(&toks[start - 1]), b"." | b":")
-        {
-            start -= 2;
+        let mut start = if go_typed_var {
+            1
+        } else {
+            equal.checked_sub(1).filter(|at| toks[*at].kind == Kind::Ident)?
+        };
+        if !go_typed_var {
+            while start >= 2
+                && toks[start - 2].kind == Kind::Ident
+                && toks[start - 1].kind == Kind::Op
+                && matches!(self.raw(&toks[start - 1]), b"." | b":")
+            {
+                start -= 2;
+            }
         }
         // `export const g: (i: number) => number = (i: number): number => i`:
         // the annotation is a function type, so the token before the `=` is its
@@ -4635,7 +4661,7 @@ impl<'a> Parser<'a> {
             }
         }
         let annotated = self.lang.tag != "LUA" && toks[start..equal].iter().any(|token| self.is_op(token, b":"));
-        let end = if annotated { start + 1 } else { equal };
+        let end = if annotated || go_typed_var { start + 1 } else { equal };
         let (name, owner, _) = self.name_chain(&toks[..end], start);
         let rhs = &toks[equal + 1..];
         let mut skip = 0;
@@ -4747,8 +4773,29 @@ impl<'a> Parser<'a> {
         keyword.and_then(|at| self.keyword_head(stmt, at)).unwrap_or_default()
     }
 
+    fn go_has_top_level_comma(&self, toks: &[Token]) -> bool {
+        let mut depth = 0i32;
+        for token in toks {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" | b"{" => depth += 1,
+                    b")" | b"]" | b"}" => depth -= 1,
+                    b"," if depth == 0 => return true,
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
     /// `ret name(args) ... {` where no keyword says it is a function.
     fn c_style_head(&self, toks: &[Token]) -> Option<Head> {
+        // Go functions always open with `func` (`keyword_head`), never C-style
+        // `ret name(args) {`. Returning early prevents `return func(...) {`
+        // and `type G [len(xs)]map[string]struct{}` from inventing symbols.
+        if self.lang.tag == "GO" {
+            return None;
+        }
         // Skip leading modifiers (`private protected override (A, B) F()`):
         // otherwise a modifier before a tuple return type looks like `name(`.
         let mod_skip = self.skip_modifiers(toks);
