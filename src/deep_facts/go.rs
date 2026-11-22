@@ -148,20 +148,7 @@ impl<'a> Walker<'a> {
         {
             return false;
         }
-        let Some(target) = children[..at]
-            .iter()
-            .rev()
-            .find(|&&child| {
-                self.kind(child) == "identifier"
-                    || (self.language.name == "csharp"
-                        && (self.kinds.soft.contains(&self.kind(child))
-                            || matches!(
-                                self.kind(child),
-                                "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "var"
-                            )))
-            })
-            .map(|&child| self.text_string(child))
-        else {
+        let Some(target) = self.cs_decl_target(&children[..at]) else {
             return false;
         };
         if self.language.name == "csharp" {
@@ -253,27 +240,7 @@ impl<'a> Walker<'a> {
                 let Some(&rhs) = all[idx + 1..].iter().find(|&&c| !self.is_layout(c) && self.kind(c) != "ref") else {
                     continue;
                 };
-                if let Some(target) = all[..idx]
-                    .iter()
-                    .copied()
-                    .rev()
-                    .find(|&c| {
-                        self.kind(c) == "identifier"
-                            || self.kinds.soft.contains(&self.kind(c))
-                            || matches!(
-                                self.kind(c),
-                                "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "member_access" | "field_access"
-                            )
-                    })
-                    .map(|c| {
-                        if matches!(self.kind(c), "member_access" | "field_access") {
-                            self.path_of(c)
-                        } else {
-                            self.text_string(c)
-                        }
-                    })
-                    .filter(|path| !path.is_empty())
-                {
+                if let Some(target) = self.cs_decl_target(&all[..idx]) {
                     self.cs_bind_constructed(target, rhs);
                 }
             }
@@ -297,30 +264,95 @@ impl<'a> Walker<'a> {
         }
         // `var context.Response.Headers = ToBase64String(x)` binds the dotted
         // path the one-pass reader writes, not just the last name.
-        let Some(target) = children[..children.len() - 1]
-            .iter()
-            .copied()
-            .rev()
-            .find(|&child| {
-                // C# contextual keywords (`value`, `file`, `set`, `remove`) are
-                // valid local variable names; the grammar keeps their keyword
-                // kind instead of `identifier`.
-                self.kind(child) == "identifier"
-                    || self.kinds.soft.contains(&self.kind(child))
-                    || matches!(self.kind(child), "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "member_access" | "field_access")
-            })
-            .map(|child| {
-                if matches!(self.kind(child), "member_access" | "field_access") {
-                    self.path_of(child)
-                } else {
-                    self.text_string(child)
-                }
-            })
-            .filter(|path| !path.is_empty())
-        else {
+        let Some(target) = self.cs_decl_target(&children[..children.len() - 1]) else {
             return;
         };
         self.cs_bind_constructed(target, initializer);
+    }
+
+    /// Extract the target name from the prefix before `=` in a C# declaration.
+    /// Skips trailing `[...]` when an element-access assignment (`bounds[i] = ...`)
+    /// was parsed as a declaration, accepts C# contextual keywords (`and`,
+    /// `file`, `set`, ...), and strips the verbatim `@` prefix (`@event`).
+    pub(crate) fn cs_decl_target(&self, prefix: &[u32]) -> Option<String> {
+        let mut i = prefix.len();
+        let mut bracket_depth = 0usize;
+        while i > 0 {
+            i -= 1;
+            let child = prefix[i];
+            let kind = self.kind(child);
+            if matches!(kind, "whitespace" | "comment") {
+                continue;
+            }
+            if kind == "]" {
+                bracket_depth += 1;
+                continue;
+            }
+            if kind == "[" {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                continue;
+            }
+            if bracket_depth > 0 {
+                continue;
+            }
+            let is_name = kind == "identifier"
+                || matches!(kind, "member_access" | "field_access")
+                || (self.language.name == "csharp"
+                    && (self.kinds.soft.contains(&kind)
+                        || matches!(
+                            kind,
+                            "file"
+                                | "set"
+                                | "remove"
+                                | "get"
+                                | "init"
+                                | "add"
+                                | "value"
+                                | "and"
+                                | "or"
+                                | "not"
+                                | "when"
+                                | "where"
+                                | "with"
+                                | "from"
+                                | "into"
+                                | "let"
+                                | "join"
+                                | "on"
+                                | "equals"
+                                | "by"
+                                | "ascending"
+                                | "descending"
+                                | "group"
+                                | "select"
+                                | "order"
+                                | "alias"
+                                | "async"
+                                | "await"
+                                | "dynamic"
+                                | "nameof"
+                                | "notnull"
+                                | "unmanaged"
+                                | "managed"
+                                | "required"
+                                | "scoped"
+                                | "args"
+                        )));
+            if is_name {
+                let raw = if matches!(kind, "member_access" | "field_access") {
+                    self.path_of(child)
+                } else {
+                    self.text_string(child)
+                };
+                let clean = if self.language.name == "csharp" {
+                    raw.strip_prefix('@').unwrap_or(&raw).to_string()
+                } else {
+                    raw
+                };
+                return (!clean.is_empty()).then_some(clean);
+            }
+        }
+        None
     }
 
     /// Bind `target` to the class of the call at the head of `value`: the

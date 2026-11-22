@@ -1467,6 +1467,27 @@ impl<'a> Walker<'a> {
                         }
                         if scan > 1 && self.kind(tokens[scan - 1]) == "=" {
                             let mut t_end = scan - 2;
+                            if self.kind(tokens[t_end]) == "]" {
+                                let mut depth = 0usize;
+                                while t_end > 0 {
+                                    match self.kind(tokens[t_end]) {
+                                        "]" => depth += 1,
+                                        "[" => {
+                                            depth -= 1;
+                                            if depth == 0 {
+                                                break;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    t_end -= 1;
+                                }
+                                if depth != 0 || t_end == 0 {
+                                    at = end + 1;
+                                    continue;
+                                }
+                                t_end -= 1;
+                            }
                             if let Some(mut target) = self.leaf_name(tokens[t_end]) {
                                 while t_end >= 2 && matches!(self.kind(tokens[t_end - 1]), "." | "?.") {
                                     if let Some(prev) = self.leaf_name(tokens[t_end - 2]) {
@@ -1477,7 +1498,7 @@ impl<'a> Walker<'a> {
                                         break;
                                     }
                                 }
-                                if !target.is_empty() {
+                                if !target.is_empty() && !target.contains('.') {
                                     self.facts.vars.push((target, last.to_string()));
                                 }
                             }
@@ -2142,21 +2163,7 @@ impl<'a> Walker<'a> {
                     // arm wrote the header alone - no event on the line at all.
                     let children = self.children(id);
                     let assigned = children.iter().position(|&child| self.kind(child) == "=");
-                    let target = assigned.and_then(|at| {
-                        children[..at]
-                            .iter()
-                            .rev()
-                            .find(|&&child| {
-                                self.kind(child) == "identifier"
-                                    || (self.language.name == "csharp"
-                                        && (self.kinds.soft.contains(&self.kind(child))
-                                            || matches!(
-                                                self.kind(child),
-                                                "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "var"
-                                            )))
-                            })
-                            .map(|&child| self.text_string(child))
-                    });
+                    let target = assigned.and_then(|at| self.cs_decl_target(&children[..at]));
                     match (assigned, target) {
                         (Some(at), Some(name)) => {
                             // C#: the initialiser is the value. `public bool Flag
@@ -2242,21 +2249,7 @@ impl<'a> Walker<'a> {
                 if !self.cs_field_assignment(id) {
                     let children = self.children(id);
                     let assigned = children.iter().position(|&child| self.kind(child) == "=");
-                    let target = assigned.and_then(|at| {
-                        children[..at]
-                            .iter()
-                            .rev()
-                            .find(|&&child| {
-                                self.kind(child) == "identifier"
-                                    || (self.language.name == "csharp"
-                                        && (self.kinds.soft.contains(&self.kind(child))
-                                            || matches!(
-                                                self.kind(child),
-                                                "file" | "set" | "remove" | "get" | "init" | "add" | "value" | "var"
-                                            )))
-                            })
-                            .map(|&child| self.text_string(child))
-                    });
+                    let target = assigned.and_then(|at| self.cs_decl_target(&children[..at]));
                     match (assigned, target) {
                         (Some(at), Some(name)) => {
                             let child = children[at + 1..]
