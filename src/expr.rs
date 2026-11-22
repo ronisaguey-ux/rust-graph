@@ -1798,6 +1798,12 @@ impl Emit<'_> {
             NOISE.contains(&word.as_str())
                 || (self.lang.tag == "SWIFT" && word == "try")
                 || (self.lang.tag == "CS" && matches!(word.as_str(), "checked" | "unchecked"))
+                // `public static X operator !(X b) { … }`: `operator` is the keyword
+                // that introduces an operator overload, and the operator after it is
+                // its name. Read as a callee, the header filed a call to `operator`
+                // the CST never writes (AvaloniaProperty, IndexerDescriptor,
+                // ExpressionVariant, Constraint). The word can never name a value in C#.
+                || (self.lang.tag == "CS" && word == "operator")
                 || (self.lang.tag == "CS" && word == "default" && self.op_byte(1) == b'(')
         };
         if noise && !go_word {
