@@ -1418,6 +1418,34 @@ fn phantom_call(path: &str) -> Option<Phantom> {
     (!path.contains('.') && KEYWORD_STATEMENTS.contains(&path)).then_some(Phantom::Keyword)
 }
 
+/// Whether a phantom call is one whose name the shape must drop. The one-pass
+/// reader spells a member call on a value it cannot name with a leading dot
+/// (`"text".length()` is `.length`, `f(x)(y)` is `.call`), and the CST spells
+/// the same call with the member alone (`length`). Only the application of a
+/// value has no name for the two records to agree on; a member name is a fact,
+/// so its shape keeps the call and pairs with the CST's `c(0;[])`. Dropping
+/// every leading-dot call replaced the call with its receiver, and the guard
+/// read the CST's surviving call as an invented one (`"a".hashCode()`,
+/// `"[Lj.lang.String;".length()` — 4 rows of one commons-lang test class and
+/// two more in the same package).
+///
+/// The receiver has to be the constant `0` for that: `i.Reader.(Flusher)` in Go
+/// and `Config{…}.Froze()` keep their receiver's value in the record and drop
+/// the call, and the erased form is what paired with them.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn anonymous_shape_call(path: &str, receiver: &str) -> bool {
+    match phantom_call(path) {
+        Some(Phantom::Anonymous) => {
+            let named_member = match path.strip_prefix('.') {
+                Some(member) => !member.is_empty() && member != "call",
+                None => false,
+            };
+            !(named_member && receiver == "0")
+        }
+        _ => false,
+    }
+}
+
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn is_keyword_statement_event(mut payload: &str) -> bool {
     while let Some(rest) = payload.strip_prefix("[\"t\",[").or_else(|| payload.strip_prefix("[\"m\",[")) {
@@ -3954,7 +3982,7 @@ fn shape_at(
                 && call.is_some_and(|call| {
                     src.get(call.line).is_some_and(|text| text.contains(&format!(">{path}(")))
                 });
-            if phantom_call(path) == Some(Phantom::Anonymous) || path.contains("().") {
+            if anonymous_shape_call(path, &receiver) || path.contains("().") {
                 if !typed_call {
                     return receiver;
                 }
