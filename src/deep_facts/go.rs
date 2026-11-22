@@ -837,6 +837,18 @@ impl<'a> Walker<'a> {
             let line = self.line(id);
             self.push_call("nameof".to_string(), line);
         }
+        // The same flat, numeric-free merge `form` writes for java, for the
+        // values that arrive through the declaration path (`int x = a + 1`,
+        // an `if` condition, a `return a + b`).
+        if kind == "binary_expression" && self.language.name == "java" {
+            let mut items = Vec::new();
+            self.java_binary(id, &mut items);
+            return match items.len() {
+                0 => "0".to_string(),
+                1 => items.pop().unwrap_or_else(|| "0".to_string()),
+                _ => format!("[\"m\",[{}]]", items.join(",")),
+            };
+        }
         // `new int[n]`, `new byte[len]`: an array creation states a type and
         // the sizes it is made with, and it calls nothing. Written as an
         // anonymous call (the callee is a primitive, the size is a
@@ -969,17 +981,6 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
-            // `new X() { … }`: the anonymous class body is part of the creation,
-            // and the lexer merges it with the call (`m:[c(X), body]`, `0` for an
-            // empty body). Dropping it lost every java `new` with a body that sat
-            // in an argument list.
-            if self.language.name == "java" && kind == "object_creation_expression" {
-                if let Some(body) = self.children(id).into_iter().find(|&child| self.kind(child) == "class_body") {
-                    let body = self.decl_value(body);
-                    let body = if body.is_empty() { "0".to_string() } else { body };
-                    return format!("[\"m\",[{call},{body}]]");
-                }
-            }
             return call;
         }
         // C# `[Attr(…)]`: the lexer reads an attribute section as a value with
@@ -992,6 +993,24 @@ impl<'a> Walker<'a> {
         // 1,081 of the corpus files on their own.
         if self.language.name == "csharp" && matches!(kind, "attribute_section" | "attribute_list") {
             return self.csharp_attribute_section(id, false);
+        }
+        // `Car.class`: the node is its dotted path and nothing else. Pushed by
+        // the member list below and then read child by child as well, the
+        // value came out `m:[Car.class,Car,class]` - three names for one.
+        if kind == "class_literal" {
+            let path = self.decl_path(id);
+            if !path.is_empty() {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &path);
+                out.push(']');
+                return out;
+            }
+        }
+        // `catch (IOException e) { … }` read as a value: the one-pass reader
+        // reads the declaration as a call of the keyword with the exception as
+        // its argument (see `java_catch_clause`).
+        if self.language.name == "java" && kind == "catch_clause" {
+            return self.java_catch_clause(id);
         }
         let mut parts = Vec::new();
         if matches!(
@@ -3815,6 +3834,49 @@ fn dotted_piece(text: &str) -> bool {
     /// ["c",id,recv,[arg]]  a call; `id` indexes the symbol's call table
     /// ["k","name",e]       a keyword argument, only inside a call's arguments
     /// ```
+    /// `a + b`, `a + 1`, `-a + b`, `a - (b - c)`: the one-pass reader keeps a
+    /// binary chain as one flat merge of the operands that name something. A
+    /// numeric operand adds no name to the flow and is dropped (`a + 1` is
+    /// just `a`), the chain is flattened across operators and precedence
+    /// (`a * 2 + b` is `m:[a,b]`), and only a parenthesised sub-expression
+    /// stays one nested merge (`a + (b - c)` is `m:[a,m:[b,c]]`). Merging
+    /// every operand, constants included, and nesting every chain meant no
+    /// arithmetic value in the java corpus could match; a string constant is
+    /// kept as the `0` it is (`"x" + a` is `m:[0,a]`).
+    pub(crate) fn java_binary(&mut self, id: u32, items: &mut Vec<String>) {
+        for child in self.children(id) {
+            let kind = self.kind(child);
+            if self.is_layout(child) || matches!(kind, "(" | ")") {
+                continue;
+            }
+            if kind == "binary_expression" {
+                self.java_binary(child, items);
+                continue;
+            }
+            if self.java_numeric_operand(child) {
+                continue;
+            }
+            let value = self.decl_value(child);
+            if !value.is_empty() {
+                items.push(value);
+            }
+        }
+    }
+
+    /// A numeric literal, or a unary or parenthesised one: the operands the
+    /// one-pass reader drops from a merge. A string or char literal is not
+    /// one — it is the constant 0 in the value — and `true`/`false`/`null`
+    /// are names.
+    pub(crate) fn java_numeric_operand(&self, id: u32) -> bool {
+        match self.kind(id) {
+            "integer_literal" | "floating_point_literal" => true,
+            "unary_expression" | "parenthesized_expression" => {
+                self.expression_child(id).is_some_and(|child| self.java_numeric_operand(child))
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn form(&mut self, id: u32) -> String {
         let kind = self.kind(id);
 
@@ -4718,6 +4780,15 @@ fn dotted_piece(text: &str) -> bool {
                 };
                 self.delim_depth -= 1;
                 out
+            }
+            "binary_expression" if self.language.name == "java" => {
+                let mut items = Vec::new();
+                self.java_binary(id, &mut items);
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => items.pop().unwrap_or_else(|| "0".to_string()),
+                    _ => format!("[\"m\",[{}]]", items.join(",")),
+                }
             }
             "binary_operator" | "comparison_operator" | "boolean_operator" | "binary_expression" | "ternary_expression"
             // `f() ?: g()`: the elvis holds two values the way a binary
@@ -7017,7 +7088,8 @@ fn dotted_piece(text: &str) -> bool {
                 out
             } else {
                 match self.kinds.family {
-                    Family::Go | Family::Java => self.decl_value(child),
+                    Family::Go => self.decl_value(child),
+                    Family::Java => self.java_argument_value(child),
                     _ => self.form(child),
                 }
             };
