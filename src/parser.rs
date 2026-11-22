@@ -2331,10 +2331,10 @@ impl<'a> Parser<'a> {
         start
     }
 
-    /// A word that opens a control header. Swift's `guard` is one, like `if`:
-    /// its condition is an expression, not a `guard count` declaration.
+    /// A word that opens a control header. Swift's `guard` and C#'s `lock` are
+    /// ones, like `if`: their condition is an expression, not a declaration.
     fn is_control(&self, word: &str) -> bool {
-        CONTROL.contains(&word) || (self.lang.tag == "SWIFT" && word == "guard")
+        CONTROL.contains(&word) || (self.lang.tag == "SWIFT" && word == "guard") || (self.lang.tag == "CS" && word == "lock")
     }
 
     fn head_word(&self, toks: &[Token]) -> Option<String> {
@@ -2775,7 +2775,9 @@ impl<'a> Parser<'a> {
             self.brace_statement(&stmt[1..]);
             return;
         }
-        if let Some(word) = word.filter(|word| matches!(word.as_str(), "if" | "for" | "while" | "foreach")) {
+        if let Some(word) = word
+            .filter(|word| matches!(word.as_str(), "if" | "for" | "while" | "foreach") || (self.lang.tag == "CS" && word == "lock"))
+        {
             let _ = word;
             if let Some(end) = self.matching_close(stmt, 1) {
                 if end + 1 < stmt.len() {
@@ -2783,7 +2785,7 @@ impl<'a> Parser<'a> {
                     // iterable, not an expression: the CST writes `a` with the
                     // binder as the target. Read as `x` the header lost the
                     // iterable name it does read.
-                    if word == "for" {
+                    if matches!(word.as_str(), "for" | "foreach") {
                         self.loop_header(&stmt[2..end], stmt[0].line);
                     } else {
                         self.expression_event("x", &stmt[2..end]);
