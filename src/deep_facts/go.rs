@@ -93,6 +93,20 @@ impl<'a> Walker<'a> {
             "return_statement" => self.go_return(id),
             "var_declaration" | "const_declaration" => self.go_var(id),
             "send_statement" => self.go_send(id),
+            // `inserted:` then `s.n += x` on the next line: the lexer reads the
+            // label as a statement of its own, and the statement it labels is
+            // a statement too. Dropped whole, the statement was a lost event.
+            "labeled_statement" => {
+                let parts: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child) && self.kind(child) != ":").collect();
+                if let Some((&label, body)) = parts.split_first() {
+                    let value = self.decl_value(label);
+                    let line = self.line(label);
+                    self.lexer_event(b'x', line, &[], &value, false);
+                    for &child in body {
+                        self.go_statement(child);
+                    }
+                }
+            }
             "call_expression" | "defer_statement" | "go_statement" | "inc_statement" | "dec_statement" => {
                 self.decl_statement(id)
             }
@@ -836,7 +850,8 @@ impl<'a> Walker<'a> {
             if first.is_ascii_digit() || first == b'"' || first == b'\'' || first == b'`' || leading_dot_number {
                 return "0".to_string();
             }
-            if first.is_ascii_alphabetic() || first == b'_' || (self.language.name == "csharp" && first >= 0x80) {
+            // Go identifiers may be Unicode too: `stream{ƒ: ƒ}` names `ƒ`.
+            if first.is_ascii_alphabetic() || first == b'_' || (matches!(self.language.name, "csharp" | "go") && first >= 0x80) {
                 // `this` is the flow form's `self`, exactly as `form`'s leaf arm
                 // and `path_of` spell it: the lexer names the receiver `self` in
                 // every language, and read verbatim the java record wrote

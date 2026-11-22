@@ -1143,12 +1143,15 @@ impl<'a> Walker<'a> {
         } else {
             text
         };
+        // Go and C# identifiers may be Unicode (`s.ƒ(s)`): a leaf that starts
+        // with a non-ASCII byte is the name, not a token to skip.
+        let unicode = matches!(self.language.name, "csharp" | "go");
         let first = *text.first()?;
-        if !(first.is_ascii_alphabetic() || first == b'_' || (self.language.name == "csharp" && first >= 0x80)) {
+        if !(first.is_ascii_alphabetic() || first == b'_' || (unicode && first >= 0x80)) {
             return None;
         }
         if !text.iter().all(|byte| {
-            byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$' || (self.language.name == "csharp" && *byte >= 0x80)
+            byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$' || (unicode && *byte >= 0x80)
         }) {
             return None;
         }
