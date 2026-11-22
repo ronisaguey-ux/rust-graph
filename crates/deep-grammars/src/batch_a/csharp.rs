@@ -29,8 +29,8 @@
 //! holes are not parsed (the same choice as Python's f-strings and
 //! TypeScript's template literals). Raw string literals are single tokens.
 //! LINQ query syntax (`from x in xs where ... select`) is not modelled; the
-//! method form (`xs.Where(...)`) is. Switch *expressions* are not modelled
-//! (only switch statements); pattern combinators are modelled for `is` and
+//! method form (`xs.Where(...)`) is. Switch expressions (`x switch { ... }`)
+//! are a postfix on their subject. Pattern combinators are modelled for `is` and
 //! `case` (`and`, `or`, `not` between patterns), but property patterns are
 //! reduced to an `is` type/constant test. Preprocessor
 //! directives are comments. XML documentation comments are ordinary comments. Local
@@ -494,17 +494,30 @@ rust_graph_deep::grammar! { CSHARP {
     foreach_header: "(" _local_modifiers _type _name "in" _expression ")",
     switch_statement: "switch" parenthesized_expression switch_body,
     switch_body: "{" switch_section* "}",
+    // `x switch { Pattern when guard => value, ... }`: each arm is a pattern,
+    // an optional guard, and the value. The guard is read below the lambda
+    // tier, or `when flag => 1` would read `flag => 1` as a lambda.
+    switch_expr_body: "{" (switch_expr_arm %? ",") "}",
+    switch_expr_arm: _pattern_chain ["when" _expression@assign] "=>" _expression,
     switch_section: (switch_label ":" | "default" ":") _statement*,
     switch_label: "case" _pattern_chain ["when" _expression],
     // A pattern is what `is` and `case` take: `int n`, `string`, `not null`,
     // `3`, `{ Length: 0 }`. A designator names the value the test binds.
-    _pattern: pattern_object | _type [_pattern_designator] | _literal,
+    // `DirectoryInfo { Exists: false }`: a type may carry a property pattern,
+    // then a designator, as in `Point { X: 1 } p`.
+    _pattern: pattern_object | _type [pattern_object] [_pattern_designator] | _literal,
     pattern_object: "{" [pattern_members] "}",
     pattern_members: _pattern_member ("," _pattern_member)*,
     _pattern_member: _name ":" _pattern,
     // A designator is a plain name: `o is string s` binds `s`, but in
     // `o is A or B` the `or` is a combinator, never a binder named `or`.
-    _pattern_designator: "var" _name | _plain_name,
+    // `when` is not a designator: `_ when flag => 1` is a discard with a guard,
+    // and the designator would take `when` as its name and fail on `flag`.
+    _pattern_designator: "var" _name | _designator_name,
+    _designator_name:
+        IDENT | "async" | "record" | "partial" | "where" | "get" | "set" | "init" | "add"
+        | "remove" | "value" | "required" | "global" | "dynamic" | "scoped"
+        | "yield" | "alias" | "not",
     // `A or B`, `A and not B`: combinators read left to right, each side a pattern.
     _pattern_chain: _pattern ((KW_AND | KW_OR) [KW_NOT] _pattern)*,
     try_statement: "try" block catch_clause* [finally_clause],
@@ -566,6 +579,11 @@ rust_graph_deep::grammar! { CSHARP {
         postfix subscript => element_access,
         postfix "!" => null_forgiving,
         with_expr: postfix "with" object_initializer => with_expression,
+        // `x switch { null => 0, _ => x }`: a switch expression is a postfix on
+        // the value it switches on. Without it the whole initialiser was an
+        // ERROR and the CST dropped the subject and every arm (the lexer kept
+        // them), so every such expression was a lost row.
+        switch_expr: postfix "switch" switch_expr_body => switch_expression,
         postfix &(type_arguments arguments) type_arguments arguments => generic_invocation,
     },
 
@@ -1140,6 +1158,17 @@ mod tests {
         assert!(fixtures::clean(&CSHARP, "class C { int F(int x) { switch (x) { case 1 or 2: return 1; } return 0; } }"));
         // `or` and `and` stay ordinary names outside a pattern.
         assert!(fixtures::clean(&CSHARP, "class C { int or; int F() { var and = 1; return and; } }"));
+    }
+
+    #[test]
+    fn csharp_switch_expressions_are_not_recovery_errors() {
+        assert!(fixtures::clean(&CSHARP, "class C { object P { get; } = fsi switch { null => throw new E(), _ => fsi }; }"));
+        assert!(fixtures::clean(&CSHARP, "class C { int F(object o) { return o switch { null => 1, int n when n > 0 => n, _ => 2, }; } }"));
+        // `DirectoryInfo { Exists: false } => ...`: a type then a property pattern
+        // is one arm, and the arm after it still parses.
+        assert!(fixtures::clean(&CSHARP, "class C { int F(object o) { return o switch { D { Exists: false } => 1, _ => 2 }; } }"));
+        // `when flag => 1` is a guard then an arm, never a lambda `flag => 1`.
+        assert!(fixtures::clean(&CSHARP, "class C { int F(bool flag) { return 0 switch { _ when flag => 1, _ => 2 }; } }"));
     }
 
     #[test]

@@ -3913,6 +3913,49 @@ fn dotted_piece(text: &str) -> bool {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 };
             }
+            // `x switch { null => 1, _ => y }`: the subject, the keyword, and
+            // each arm's value, as the one-pass reader writes it. The arms'
+            // patterns bind nothing a call can reach, but a guard and an arm
+            // value can hold calls, which are recorded by visiting them. Read
+            // through the default arm the switch had no children it knew, so
+            // every name in it was lost and its value was `0`.
+            "switch_expression" if self.language.name == "csharp" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                let subject = match items.first() {
+                    Some(&first) if self.kind(first) != "switch" => self.form(first),
+                    _ => "0".to_string(),
+                };
+                let mut arms: Vec<String> = Vec::new();
+                let bodies: Vec<u32> = items.iter().copied().filter(|&child| self.kind(child) == "switch_expr_body").collect();
+                for body in bodies {
+                    let arm_nodes: Vec<u32> = self.children(body).into_iter().filter(|&child| self.kind(child) == "switch_expr_arm").collect();
+                    for arm in arm_nodes {
+                        // Punctuation (`=>`, `when`) is a leaf the layout filter
+                        // drops, so the arm is read whole and split on the arrow.
+                        let all: Vec<u32> = self.children(arm);
+                        let Some(arrow) = all.iter().position(|&child| self.kind(child) == "=>") else {
+                            continue;
+                        };
+                        // The guard sits between `when` and `=>`: its calls are
+                        // facts, but it is not the arm's value.
+                        let mut in_guard = false;
+                        for &part in &all[..arrow] {
+                            match self.kind(part) {
+                                "when" => in_guard = true,
+                                _ if in_guard && !self.is_layout(part) => {
+                                    self.form(part);
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some(&value) = all[arrow + 1..].iter().find(|&&child| !self.is_layout(child)) {
+                            arms.push(self.form(value));
+                        }
+                    }
+                }
+                let arm_list = if arms.is_empty() { "0".to_string() } else { arms.join(",") };
+                return format!("[\"m\",[{subject},[\"n\",\"switch\"],[\"m\",[{arm_list}]]]]");
+            }
             // `x is null`, `x is not null`, `x is string s`: C#'s `is_pattern`
             // names its subject and the pattern's type, constant, or designator
             // leaves, as the one-pass reader does. Read through the default
