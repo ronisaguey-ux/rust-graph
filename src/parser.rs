@@ -3982,9 +3982,31 @@ impl<'a> Parser<'a> {
                     // ternary bails elsewhere are load-bearing (the kotlin lambda
                     // arrow test caught exactly that when this ran everywhere).
                     if matches!(self.lang.tag, "CS" | "SWIFT") {
-                        let ternary = toks[index + 1..]
-                            .iter()
-                            .any(|token| token.kind == Kind::Op && self.raw(token) == b":");
+                        // The `:` must sit at the `?`'s own depth. A named
+                        // argument's `:` inside a call (`Register<A, object?>(
+                        // nameof(X), enableDataValidation: true)`) is not a
+                        // ternary's colon, and matching it bailed the declaration.
+                        let mut local = 0i32;
+                        let mut ternary = false;
+                        for token in &toks[index + 1..] {
+                            if token.kind != Kind::Op {
+                                continue;
+                            }
+                            match self.raw(token) {
+                                b"(" | b"[" | b"{" => local += 1,
+                                b")" | b"]" | b"}" => {
+                                    local -= 1;
+                                    if local < 0 {
+                                        break;
+                                    }
+                                }
+                                b":" if local == 0 => {
+                                    ternary = true;
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
                         if !ternary {
                             continue;
                         }
