@@ -2152,8 +2152,12 @@ impl<'a> Walker<'a> {
                 }
                 let mut parts: Vec<String> = Vec::new();
                 let mut attributed = false;
+                // The header words run up to the parameter list, so the name and
+                // the generic parameters (`MapFrom<TMember>`) reach the value the
+                // way the lexer writes them; stopping at `type_parameters` lost
+                // every generic abstract member's name and type parameters.
                 for child in &children {
-                    if matches!(self.kind(*child), "parameter_list" | "formal_parameters" | "type_parameters") || *child == named {
+                    if matches!(self.kind(*child), "parameter_list" | "formal_parameters") {
                         break;
                     }
                     if self.language.name == "csharp"
