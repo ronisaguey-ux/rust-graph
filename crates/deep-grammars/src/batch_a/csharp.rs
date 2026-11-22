@@ -193,6 +193,7 @@ rust_graph_deep::grammar! { CSHARP {
         NULLISH_EQ = "??=",
         CONDITIONAL_ACCESS = "?.",
         ARROW = "=>",
+        SPREAD = "..",
         ASSIGN = "=",
         EQ = "==",
         NE = "!=",
@@ -295,8 +296,15 @@ rust_graph_deep::grammar! { CSHARP {
         | &([attributes] [modifiers] "record") record_declaration
         | &([attributes] [modifiers] "delegate") delegate_declaration,
 
-    class_declaration: [attributes] [modifiers] "class" _name [type_parameters] [base_list] [type_parameter_constraints] class_body [";"],
-    struct_declaration: [attributes] [modifiers] "struct" _name [type_parameters] [base_list] [type_parameter_constraints] class_body [";"],
+    // `private class HomeSectionBuilder(HomeSection section) : List<PageItem>`:
+    // C# 12 put a primary constructor on ordinary classes and structs, and the
+    // rule only knew the record form, so every such type was an ERROR and the
+    // whole file fell back to the lexer.
+    class_declaration: [attributes] [modifiers] "class" _name [type_parameters] [class_parameters] [base_list] [type_parameter_constraints] class_body [";"],
+    class_parameters: "(" (parameter %? ",") ")",
+    struct_parameters: "(" (parameter %? ",") ")",
+
+    struct_declaration: [attributes] [modifiers] "struct" _name [type_parameters] [struct_parameters] [base_list] [type_parameter_constraints] class_body [";"],
     interface_declaration: [attributes] [modifiers] "interface" _name [type_parameters] [base_list] [type_parameter_constraints] class_body [";"],
     record_declaration: [attributes] [modifiers] "record" ["class" | "struct"] _name [type_parameters] [record_parameters] [base_list] [type_parameter_constraints] (class_body | ";"),
     record_parameters: "(" (parameter %? ",") ")",
@@ -505,7 +513,13 @@ rust_graph_deep::grammar! { CSHARP {
     // `3`, `{ Length: 0 }`. A designator names the value the test binds.
     // `DirectoryInfo { Exists: false }`: a type may carry a property pattern,
     // then a designator, as in `Point { X: 1 } p`.
-    _pattern: pattern_object | _type [pattern_object] [_pattern_designator] | _literal,
+    // `a is [1, ..]`, `case [var first, ..]:` - C# 11 list patterns. The rule
+    // only knew object patterns, so every list pattern was an ERROR.
+    _pattern: pattern_object | list_pattern | _type [pattern_object] [_pattern_designator] | _literal,
+    list_pattern: "[" [list_pattern_items] "]",
+    list_pattern_items: list_pattern_item ("," list_pattern_item)* [","],
+    list_pattern_item: spread_element | _pattern,
+    spread_element: SPREAD [_expression],
     pattern_object: "{" [pattern_members] "}",
     pattern_members: _pattern_member ("," _pattern_member)*,
     _pattern_member: _name ":" _pattern,
@@ -1058,6 +1072,10 @@ fn operator(c: &mut Cursor) -> Kind {
         (b';', _, _) => (SEMI, 1),
         (b',', _, _) => (COMMA, 1),
         (b'.', b'.', b'.') => (ELLIPSIS, 3),
+        // `[..a, b]` and `is [1, ..]`: the spread of a collection expression
+        // and of a list pattern. Without the token the grammar could not even
+        // name it.
+        (b'.', b'.', _) => (SPREAD, 2),
         (b'.', _, _) => (DOT, 1),
         (b'@', _, _) => (AT, 1),
         (b':', b':', _) => (COLONCOLON, 2),
