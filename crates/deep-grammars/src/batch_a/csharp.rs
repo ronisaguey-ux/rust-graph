@@ -426,7 +426,12 @@ rust_graph_deep::grammar! { CSHARP {
     // `scoped ref int d`, `ref readonly int e`: a parameter writes two of these
     // and the rule allowed one, so every such signature was one ERROR (62 corpus
     // files write `scoped ref`, 183 `ref readonly`).
-    parameter: [attributes] _parameter_modifier* _type ["?"] _name ["=" _expression@assign],
+    // `Guid id = default(Guid)`, `int n = default`: a parameter default is a
+    // value, and `default` is kept out of `_primary` on purpose (it also labels
+    // a switch section), so the parameter rule names `default_expression`
+    // itself. Without it every signature with a defaulted parameter was one
+    // ERROR and the whole file fell back to the lexer (180 rows in the corpus).
+    parameter: [attributes] _parameter_modifier* _type ["?"] _name ["=" (_expression@assign | default_expression)],
     _parameter_modifier: "this" | "ref" | "out" | "in" | "params" | "scoped" | "readonly",
     arguments: "(" (_argument %? ",") ")",
     // `f(timeout: 5, default)` and `new Foo(reader, path: null)`: a named
