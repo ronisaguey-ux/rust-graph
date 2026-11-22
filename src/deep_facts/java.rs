@@ -42,7 +42,7 @@ impl<'a> Walker<'a> {
             }
         }
         let value = match parts.len() {
-            0 => return,
+            0 => String::new(),
             1 => parts.pop().unwrap_or_default(),
             _ => format!("[\"m\",[{}]]", parts.join(",")),
         };
@@ -55,6 +55,80 @@ impl<'a> Walker<'a> {
                 line = self.line(first);
             }
         }
+        if !value.is_empty() {
+            self.lexer_event(b'x', line, &[], &value, false);
+        }
+        // `@NullUnmarked enum QuantilesAlgorithm { SORTING { … } }`: with an
+        // annotation in front of it the one-pass reader does not see the type
+        // declaration at all — `class_head` skips Rust attributes and Scala
+        // annotations but not a Java one — so it opens a plain block and reads
+        // the constant list as statements. Each run of body-less constants
+        // became one `x` (a tuple when a comma splits it) and each constant with
+        // a body became an `x` of its own name. Nothing read them here, so every
+        // annotated enum in the corpus lost its constants (java: 11 rows in
+        // guava's QuantilesAlgorithm/CollectorTester, jackson's
+        // EnumNaming{Ser,Des}erializationTest).
+        if self.language.name == "java" && self.kind(id) == "enum_declaration" {
+            self.java_enum_constants(id);
+        }
+    }
+
+    /// The enum constants of an enum whose declaration the one-pass reader did
+    /// not recognise: one `x` per run of body-less constants (the line of the
+    /// first), and one `x` per constant that carries a class body. An
+    /// unannotated enum is left alone: the plain reader opens a class frame for
+    /// it, and a member of a class body binds nothing.
+    pub(crate) fn java_enum_constants(&mut self, id: u32) {
+        let annotated = self.child_of_kind(id, "modifiers").is_some_and(|modifiers| {
+            self.children(modifiers)
+                .into_iter()
+                .any(|mark| matches!(self.kind(mark), "annotation" | "marker_annotation"))
+        });
+        if !annotated {
+            return;
+        }
+        let Some(body) = self.child_of_kind(id, "enum_body") else {
+            return;
+        };
+        let mut run: Vec<u32> = Vec::new();
+        for child in self.children(body) {
+            match self.kind(child) {
+                "enum_constant" => {
+                    if self.child_of_kind(child, "class_body").is_some() {
+                        self.java_enum_constant_run(&mut run);
+                        // `SORTING { … }` names the constant and nothing else: the
+                        // one-pass reader closed the statement at the brace, and
+                        // the body's members are statements of its own.
+                        let head: Vec<u32> = self
+                            .children(child)
+                            .into_iter()
+                            .take_while(|&node| self.kind(node) != "class_body")
+                            .collect();
+                        let value = self.decl_values(&head);
+                        let line = self.line(child);
+                        if !value.is_empty() && value != "0" {
+                            self.lexer_event(b'x', line, &[], &value, false);
+                        }
+                    } else {
+                        run.push(child);
+                    }
+                }
+                // `;` starts the body proper, and its members are read as
+                // statements of their own.
+                "enum_body_declarations" => self.java_enum_constant_run(&mut run),
+                _ => {}
+            }
+        }
+        self.java_enum_constant_run(&mut run);
+    }
+
+    fn java_enum_constant_run(&mut self, run: &mut Vec<u32>) {
+        if run.is_empty() {
+            return;
+        }
+        let constants = std::mem::take(run);
+        let value = self.decl_values(&constants);
+        let line = self.line(constants[0]);
         self.lexer_event(b'x', line, &[], &value, false);
     }
 
@@ -215,7 +289,22 @@ impl<'a> Walker<'a> {
                 self.facts.vars.push((target, class));
             }
         }
-        let value = self.decl_values(&parts[equal + 1..]);
+        // `int low = from + 1, high = to;` is one statement to the one-pass
+        // reader, and its value is the tuple of the comma-separated pieces: the
+        // first initialiser, then every later declarator. Read from the first
+        // declarator alone, every later declarator vanished from the record —
+        // `high` and its `to` were simply gone, and `int a = 1, b = 2, c;` came
+        // back as the constant `0` (java: guava's QuantilesAlgorithm, 3 rows of
+        // this shape).
+        let mut values: Vec<u32> = parts[equal + 1..].to_vec();
+        let mut later = false;
+        for child in children.iter().copied() {
+            if child != declarator && self.kind(child) == "variable_declarator" {
+                values.push(child);
+                later = true;
+            }
+        }
+        let value = if later { self.decl_values(&values) } else { self.decl_values(&parts[equal + 1..]) };
         let targets = self.java_targets(id);
         let line = self.line(id);
         self.lexer_event(b'a', line, &targets, &value, false);
