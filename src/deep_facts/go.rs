@@ -490,7 +490,7 @@ impl<'a> Walker<'a> {
         let children = self.children(id);
         let split = children.iter().position(|&child| {
             self.node(child).first_child == NONE
-                && matches!(self.text_string(child).as_str(), "=" | ":=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=")
+                && matches!(self.text_string(child).as_str(), "=" | ":=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "&^=")
         });
         let Some(at) = split else { return };
         let operator = self.text_string(children[at]);
@@ -1483,11 +1483,19 @@ impl<'a> Walker<'a> {
     /// A dotted name built the way the lexer builds one, with the enclosing
     /// method's receiver spelled `self` as both paths spell it.
     pub(crate) fn decl_path(&self, id: u32) -> String {
+        self.decl_path_seg(id, true)
+    }
+
+    /// The path a dotted name writes, remembering whether `id` is the leftmost
+    /// segment of it. Only that segment can be the receiver: renaming every
+    /// leaf whose text matches the receiver spelled `cc.cc.mu` as
+    /// `self.self.mu`, a value the lexer never writes (transport.go:2959).
+    fn decl_path_seg(&self, id: u32, root: bool) -> String {
         match self.kind(id) {
             "identifier" | "type_identifier" | "field_identifier" | "this" | "super" => {
                 let text = self.text_string(id);
                 let receiver = self.frame().receiver.as_str();
-                if text == "this" || (!receiver.is_empty() && text == receiver) {
+                if text == "this" || (root && !receiver.is_empty() && text == receiver) {
                     "self".to_string()
                 } else {
                     text
@@ -1549,13 +1557,13 @@ impl<'a> Walker<'a> {
                     .copied()
                     .rev()
                     .find(|&child| self.kind(child) != "." && self.leaf_name(child).is_some())
-                    .map(|child| self.decl_path(child))
+                    .map(|child| self.decl_path_seg(child, false))
                     .unwrap_or_default();
                 let base = children
                     .first()
                     .copied()
                     .filter(|&first| self.kind(first) != ".")
-                    .map(|first| self.decl_path(first))
+                    .map(|first| self.decl_path_seg(first, root))
                     .unwrap_or_default();
                 let base = if base.is_empty() { String::new() } else { format!("{base}.") };
                 format!("{base}{name}")
@@ -1566,17 +1574,17 @@ impl<'a> Walker<'a> {
                 if callee == id {
                     return String::new();
                 }
-                self.decl_path(callee)
+                self.decl_path_seg(callee, root)
             }
             "call_expression" => {
                 let callee = self.decl_callee(id);
                 if callee == id {
                     return String::new();
                 }
-                self.decl_path(callee)
+                self.decl_path_seg(callee, root)
             }
             "index_expression" | "array_access" => {
-                self.children(id).first().map(|&base| self.decl_path(base)).unwrap_or_default()
+                self.children(id).first().map(|&base| self.decl_path_seg(base, root)).unwrap_or_default()
             }
             // `[]byte(x)`, `*T`, `map[K]V`: a conversion names its type, and the
             // lexer reads the type's own name as the callee.
@@ -1586,9 +1594,11 @@ impl<'a> Walker<'a> {
                 .unwrap_or_default(),
             "parenthesized_expression" | "unary_expression" | "type_assertion" => self
                 .expression_child(id)
-                .map(|child| self.decl_path(child))
+                .map(|child| self.decl_path_seg(child, root))
                 .unwrap_or_default(),
-            "generic_type" => self.children(id).first().map(|&base| self.decl_path(base)).unwrap_or_default(),
+            "generic_type" => {
+                self.children(id).first().map(|&base| self.decl_path_seg(base, root)).unwrap_or_default()
+            }
             _ => self.leaf_name(id).unwrap_or_default(),
         }
     }

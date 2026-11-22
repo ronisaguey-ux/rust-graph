@@ -1543,21 +1543,44 @@ impl<'a> Parser<'a> {
         if matches!(self.lang.tag, "TS" | "TSX") && self.conditional_type_head(&self.stmt) {
             return true;
         }
-        if last.kind == Kind::Ident && !BLOCK_WORDS.contains(&self.raw(&last)) && self.field_key_ahead() {
-            return false;
-        }
         // Go writes a control header without parentheses: `for i := 0; i < n; i++ {`,
         // `if err := f(); err != nil {`, `switch v := f(x); v {`. The `:=` made the
         // last test below read the brace as a composite literal, so the whole body
         // merged into one value and every statement in it lost its own event.
+        // The `;` is not needed to say it: the Go spec forbids a composite
+        // literal in a control header unless it is parenthesised, so for these
+        // four heads the brace always opens the body. `for !sawEOF {` has no
+        // `;`, and its body's first `n, err := …` read as a field list, which
+        // merged the whole loop into one value (transport.go:1548,
+        // syscall_linux.go:1434).
         if self.lang.tag == "GO"
             && self
                 .word_at(&self.stmt, 0)
                 .as_deref()
                 .is_some_and(|word| matches!(word, "for" | "if" | "switch" | "select"))
-            && self.stmt.iter().any(|token| self.is_op(token, b";"))
         {
             return true;
+        }
+        if last.kind == Kind::Ident && !BLOCK_WORDS.contains(&self.raw(&last)) && self.field_key_ahead() {
+            return false;
+        }
+        // `return []T{ { A: 1, B: 2 } }`: the brace after the element type
+        // opens the slice's element list, and the element's own brace opens a
+        // struct literal — Go has no block expression, and no assignment is
+        // involved. Read as a block, each field of the element became a
+        // statement of its own (`x A:string`, `x B:string`) where the CST
+        // writes one value for the whole literal (full-struct_test.go:50).
+        // `field_key_ahead` cannot say it here: the word behind this brace is
+        // the element's own `{`, not a key.
+        if self.lang.tag == "GO"
+            && last.kind == Kind::Ident
+            && self.top_level_assign(&self.stmt).is_none()
+            && !self.has_def_word(&self.stmt)
+            // `else {`, `case x {`: an arm word opens the branch it names.
+            && !self.is_control(&self.text(&last))
+            && !ARMS.contains(&self.text(&last).as_str())
+        {
+            return false;
         }
         if last.kind == Kind::Op {
             let raw = self.raw(&last);
@@ -2572,11 +2595,33 @@ impl<'a> Parser<'a> {
 
     /// After a closed branch: an arm word reopens it, anything else ends it.
     fn settle_branch(&mut self, next: Option<&Token>) {
+        let is_arm = next.is_some_and(|token| token.kind == Kind::Ident && ARMS.contains(&self.text(token).as_str()));
+        // An arm continues the branch it names, and that branch is the one that
+        // opened at or outside the arm's column. A closed `if` sitting deeper
+        // than the `case` that follows it is not that branch: `case a:` whose
+        // body holds an `if` left the if's frame on the stack, the `case` below
+        // re-armed it, and then the switch's and the function's `}` each closed
+        // the wrong frame — the function's span ran to EOF and every
+        // package-level `const`/`var` after it was filed inside the function
+        // (http2.go, trace.go, transport.go: 20 rows of "no event on a line
+        // both readers can mean"). Popping it here writes the branch-close the
+        // if's own `}` owed and leaves the arm to the switch above it. Only a
+        // branch whose `}` was just read is closed: an open frame deeper than
+        // the arm is the arm's own body, and popping it unbalanced the stack.
+        while self.closed_branch
+            && is_arm
+            && self.frames.len() > 1
+            && self.top().kind == FrameKind::Control
+            && next.is_some_and(|token| token.col < self.top().col)
+        {
+            self.event("[\"j\"]");
+            self.pop_frame();
+            self.closed_branch = true;
+        }
         if !self.closed_branch {
             return;
         }
         self.closed_branch = false;
-        let is_arm = next.is_some_and(|token| token.kind == Kind::Ident && ARMS.contains(&self.text(token).as_str()));
         if is_arm {
             self.event("[\"e\"]");
             self.rearmed = true;
@@ -4115,9 +4160,18 @@ impl<'a> Parser<'a> {
                     continue
                 }
                 b"=" | b":=" | b"+=" | b"-=" | b".=" | b"|=" | b"||=" | b"&&=" | b"??=" | b"<-" | b"*=" | b"/=" | b"%="
-                | b"&=" | b"^=" | b"<<=" | b">>="
+                | b"&=" | b"^=" | b"<<=" | b">>=" | b"&^="
                     if depth == 0
                         && found.is_none()
+                        // `var respHeaderTimer <-chan time.Time` declares a
+                        // channel type: the `<-` there is part of the type and
+                        // not the receive assignment, which gave the variable a
+                        // value the CST never writes (transport.go:1215).
+                        && !(self.raw(token) == b"<-"
+                            && (toks.get(index + 1).is_some_and(|next| next.kind == Kind::Ident && self.raw(next) == b"chan")
+                                || toks
+                                    .get(index.wrapping_sub(1))
+                                    .is_some_and(|prev| prev.kind == Kind::Ident && self.raw(prev) == b"chan")))
                         && !(matches!(self.lang.tag, "TS" | "TSX") && angle > 0) =>
                 {
                     found = Some(index);
@@ -5486,6 +5540,14 @@ impl<'a> Parser<'a> {
             }
         }
         if let Some(equal) = self.top_level_assign(stmt) {
+            // `<-cc.reqHeaderMu` on its own is a receive statement: the value
+            // it receives is thrown away, and the CST writes no event for it.
+            // Filed as an expression it was a value no CST record has, so every
+            // Go file that waits on a channel kept a row of its own
+            // (transport.go:1145,1172).
+            if self.lang.tag == "GO" && equal == 0 && self.is_op(&stmt[0], b"<-") {
+                return;
+            }
             // In Kotlin, `->` separates a `when` arm or lambda parameter header
             // from its body: `pat -> lhs = rhs` assigns `lhs`, not `pat.lhs`.
             let (targets, line) = if self.lang.tag == "KT" {
@@ -6223,6 +6285,10 @@ impl<'a> Parser<'a> {
         }
         let mut path = String::new();
         let mut at_token = start;
+        // Only the leftmost segment can be the receiver. Renaming every segment
+        // whose text matches the receiver's name spelled `cc.cc.mu` as
+        // `self.self.mu`, a target the CST never writes (transport.go:2959).
+        let mut root = true;
         while at_token < at {
             let token = &toks[at_token];
             // A subscript names no part of the path, but its receiver does.
@@ -6309,11 +6375,12 @@ impl<'a> Parser<'a> {
                         || toks
                             .get(at_token)
                             .is_some_and(|next| self.is_op(next, b".") || self.is_op(next, b"[")));
-                if this_is_a_receiver || (!receiver.is_empty() && word == receiver) {
+                if this_is_a_receiver || (root && !receiver.is_empty() && word == receiver) {
                     path.push_str("self");
                 } else {
                     path.push_str(&word);
                 }
+                root = false;
             } else if token.kind == Kind::Op && matches!(self.raw(token), b"(" | b")") {
                 // A parenthesised receiver contributes its contents, not a dot.
             } else {
