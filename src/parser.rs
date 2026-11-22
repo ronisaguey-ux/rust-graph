@@ -995,6 +995,37 @@ impl<'a> Parser<'a> {
             })
     }
 
+    /// Go: the statement so far ends in a `struct{…}` or `interface{…}` type
+    /// whose closing `}` is the last token, so a brace here opens a composite
+    /// literal of that type (`struct{}{`), not a block.
+    fn go_type_literal_tail(&self) -> bool {
+        let Some(last) = self.stmt.last() else {
+            return false;
+        };
+        if last.kind != Kind::Op || self.raw(last) != b"}" {
+            return false;
+        }
+        let mut depth = 0i32;
+        for (index, token) in self.stmt.iter().enumerate().rev() {
+            if token.kind != Kind::Op {
+                continue;
+            }
+            match self.raw(token) {
+                b"}" => depth += 1,
+                b"{" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return index > 0
+                            && self.stmt[index - 1].kind == Kind::Ident
+                            && matches!(self.raw(&self.stmt[index - 1]), b"struct" | b"interface");
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// `enum class Kind {` in Kotlin: the body holds entries, and an entry
     /// with a body (`A { … }`) states no value of its own.
     fn kotlin_enum_body(&self) -> bool {
@@ -1306,6 +1337,14 @@ impl<'a> Parser<'a> {
 
     /// Whether a `{` here starts statements rather than a value.
     fn is_block(&mut self) -> bool {
+        // Go `return struct{}{}, nil`: the brace after a `struct{…}` or
+        // `interface{…}` type is the composite literal's body, a value of the
+        // statement. Read as a block, its `}` ended the statement and the
+        // elements after it were written as statements of their own (the
+        // `nil` of `nopEndpoint`, token_bucket_test.go:15).
+        if self.lang.tag == "GO" && self.go_type_literal_tail() {
+            return false;
+        }
         // `public subscript(_ name: String) -> String? { get … set … }`: the
         // header's optional return type ends in `?`, and the generic op test
         // below would call the brace an object literal, merging the whole
@@ -6183,6 +6222,21 @@ impl<'a> Parser<'a> {
         // target took the first value's class — `send = RecvChannel` — which
         // is a fact the source does not state. A target list longer than the
         // value list states no per-name class at all, so it names none.
+        // Go `var _ error = ErrorCode(0)`: the declaration is `var NAME TYPE`,
+        // so the word before `=` is the type, and the binding is `NAME`. Read
+        // as the target, the type named a variable of the call's class
+        // (errcode/errors.go: 3 rows). `_` binds nothing at all.
+        if self.lang.tag == "GO" && self.word_at(targets, 0).as_deref() == Some("var") {
+            match targets.get(1) {
+                Some(name) if self.raw(name) == b"_" => return,
+                Some(name) if targets.len() > 2 => {
+                    let name = std::slice::from_ref(name);
+                    self.note_class(name, value);
+                    return;
+                }
+                _ => {}
+            }
+        }
         let target_parts = self.top_commas(targets);
         if target_parts.len() > 1 {
             let value_parts = self.top_commas(value);

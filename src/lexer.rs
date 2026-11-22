@@ -561,7 +561,21 @@ impl<'a> Lexer<'a> {
             || self.lang.sigils
             || self.lang.interp == Interp::Hash
             || self.lang.tag == "RS";
-        let parts = self.scan_interpolated(close, interp, multi_line);
+        // A Go raw string has no escapes: a backslash is an ordinary byte, so
+        // `\\?\` closes at its final backtick rather than swallowing it.
+        let parts = if self.lang.tag == "GO" && quote == b'`' {
+            while self.pos < self.src.len() && self.src[self.pos] != b'`' {
+                if self.src[self.pos] == b'\n' {
+                    self.newline();
+                } else {
+                    self.pos += 1;
+                }
+            }
+            self.pos = (self.pos + 1).min(self.src.len());
+            Vec::new()
+        } else {
+            self.scan_interpolated(close, interp, multi_line)
+        };
         let mut token = self.token(Kind::Str, start, line, col);
         if !parts.is_empty() {
             token.interp = Some(Box::new(parts));
