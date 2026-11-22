@@ -12,7 +12,7 @@
 //! (`g<number>(x)`) that the lexer records too since it learned to skip a type
 //! argument on a callee, so that file is now a tie rather than a win,
 //! `opaque.js` holds a call inside a JSX element's child expression, which the
-//! fact reader does not descend into, `tie.py` is one function with nothing to
+//! fact reader reads now, so it is a tie, `tie.py` is one function with nothing to
 //! differ on, and `plain.c` has no CST at all. The expected counters in the
 //! tests are the values this fixture produces.
 //!
@@ -20,11 +20,10 @@
 //! `${...}`, which the grammar kept as one token. The grammar parses a
 //! substitution now, so that file is a tie (`deep:tie`, `calls deep=1 lexer=1`).
 //! The JSX gap moved twice: the grammar now parses the element and every
-//! `{...}` part, so the old attribute-arrow fixture is a tie too, but the fact
-//! reader (`src/deep_facts.rs`) still reads a JSX element's first child as its
-//! value, so a call inside a bare child expression is a fact only the lexer
-//! records. `opaque.js` is that shape, re-measured; the counters below are the
-//! values this fixture produces, not the old ones.
+//! `{...}` part, and the fact reader descends into a child expression, so the
+//! old attribute-arrow fixture and `opaque.js` are both ties. The fixture has
+//! no fallback row left; `tests/deep_pipeline.rs` covers that mechanism. The
+//! counters below are the values this fixture produces, not the old ones.
 #![cfg(all(feature = "deep", feature = "parser"))]
 
 use std::fs;
@@ -40,9 +39,9 @@ const FIXTURE: &[(&str, &str)] = &[
     // It used to be a generic call (`g<number>(x)`); the lexer reads that as a
     // call now, so that shape is a tie and could not pin the strict win.
     ("deep_more.ts", "type A = { x: number };\nconst v: A = { x: 1 };\n"),
-    // The CST parses the element's `{...}` part, but the fact reader stops at
-    // the element's first child, so a call in a bare child expression is a
-    // fact only the lexer's record carries; the guard keeps it.
+    // Both paths read the call inside the element's child expression, so this
+    // file weighs the same on either side: it pins that the JSX child fact is
+    // no longer the lexer's alone.
     ("opaque.js", "function panel(x) {\n  return <button label={handle(x)}>press</button>;\n}\n"),
     // Nothing to differ on: both records weigh the same.
     ("tie.py", "def f(x):\n    return x\n"),
@@ -93,16 +92,17 @@ fn the_paths_object_counts_candidates_and_choices() {
     let tree = Tree::new("counts");
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
-    // Three files had a CST record to weigh, one did not. Two records were the
-    // CST's (the strict win and the tie), two the lexer's (the lost-fact file
-    // and the language with no CST). The totals agree with the rows below.
+    // Three files had a CST record to weigh, one did not. All three records are
+    // the CST's now that the deep reader understands a JSX child expression, so
+    // only the language with no CST reaches the lexer. The totals agree with the
+    // rows below.
     assert!(
-        json.contains(r#""paths":{"deep":3,"lexer":1,"chosen_deep":2,"chosen_lexer":2}"#),
+        json.contains(r#""paths":{"deep":3,"lexer":1,"chosen_deep":3,"chosen_lexer":1}"#),
         "the paths object does not match the fixture: {json}"
     );
     // `deep` and `lexer` in the older object still count the emitted record, so
     // the two summaries cannot disagree.
-    assert!(json.contains(r#""deep":{"mode":"auto","deep":2,"lexer":2,"fallbacks":1}"#), "{json}");
+    assert!(json.contains(r#""deep":{"mode":"auto","deep":3,"lexer":1,"fallbacks":0}"#), "{json}");
 }
 
 #[test]
@@ -119,20 +119,20 @@ fn a_strict_win_goes_to_the_cst_and_says_which_count_won() {
 }
 
 #[test]
-fn a_lost_fact_keeps_the_lexer_and_is_counted_as_a_fallback() {
+fn a_jsx_child_call_is_a_fact_on_both_paths() {
     let tree = Tree::new("loss");
     let (json, _) = tree.json(&["--stdout", "--no-cache"]);
 
+    // The fact reader descends into a JSX element's child expression, so the
+    // call the element holds is no longer the lexer's alone and the row is a
+    // tie. `tests/deep_pipeline.rs` still covers the fallback mechanism with a
+    // file that does lose a fact.
     let row = source_row(&json, "opaque.js");
-    assert!(row.contains("\"path_choice\":\"lexer:fallback\""), "{row}");
-    assert!(row.contains("\"parsed_by\":\"lexer\""), "{row}");
-    // The reason names the fact, so a reader never has to re-run both paths to
-    // find out what the CST missed.
-    assert!(row.contains("\"deep_fallback\":\"the CST lost a call"), "{row}");
-    // The call inside the JSX child expression is only in the lexer's record,
-    // so it survives the fallback.
+    assert!(row.contains("\"path_choice\":\"deep:tie\""), "{row}");
+    assert!(row.contains("\"parsed_by\":\"deep\""), "{row}");
+    assert!(!row.contains("deep_fallback"), "{row}");
     assert!(json.contains(r#""calls":[["handle",2,null,null,0]]"#), "{json}");
-    assert!(json.contains(r#""fallbacks":1"#), "{json}");
+    assert!(json.contains(r#""fallbacks":0"#), "{json}");
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
         "{text}"
     );
     assert!(
-        text.contains("opaque.js\tsymbols deep=2 lexer=2 (+0)\tcalls deep=0 lexer=1 (-1)\timports deep=0 lexer=0 (+0)\n"),
+        text.contains("opaque.js\tsymbols deep=2 lexer=2 (+0)\tcalls deep=0 lexer=0 (+0)\timports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
     assert!(
@@ -178,7 +178,7 @@ fn compare_prints_both_sides_per_file_and_chooses_nothing() {
     );
     assert!(text.contains("compare: 4 files, 3 with a CST record, 1 lexer-only\n"), "{text}");
     assert!(
-        text.contains("compare totals: symbols deep=6 lexer=7 (-1), calls deep=0 lexer=2 (-2), imports deep=0 lexer=0 (+0)\n"),
+        text.contains("compare totals: symbols deep=6 lexer=7 (-1), calls deep=0 lexer=1 (-1), imports deep=0 lexer=0 (+0)\n"),
         "{text}"
     );
 
@@ -220,10 +220,10 @@ fn the_report_states_the_same_split_as_the_json() {
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let report = fs::read_to_string(out.join("report.md")).unwrap();
     assert!(
-        report.contains("Paths: {\"deep\": 3, \"lexer\": 1, \"chosen_deep\": 2, \"chosen_lexer\": 2}"),
+        report.contains("Paths: {\"deep\": 3, \"lexer\": 1, \"chosen_deep\": 3, \"chosen_lexer\": 1}"),
         "{report}"
     );
     // The older line stays: a report a reader already parses does not change
     // shape to gain the new one.
-    assert!(report.contains("Parsed by: 2 files through the CST, 2 through the lexer, 1 requested CST parses fell back."), "{report}");
+    assert!(report.contains("Parsed by: 3 files through the CST, 1 through the lexer, 0 requested CST parses fell back."), "{report}");
 }
