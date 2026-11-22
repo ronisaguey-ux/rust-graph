@@ -518,6 +518,10 @@ struct Walker<'a> {
     /// does not split a multiline binary expression at a newline inside
     /// delimiters.
     delim_depth: usize,
+    /// `name := func(...) { ... }` / `var name = func(...) { ... }`: maps the
+    /// `func_literal` node to the function symbol created for its binding so
+    /// the walk enters that symbol's frame for the literal's body.
+    go_literal_frames: std::collections::HashMap<u32, usize>,
 }
 
 /// The deep language for a lexer tag (`langs::Language::tag`), or `None` when
@@ -961,6 +965,7 @@ impl<'a> Walker<'a> {
             call_texts: std::collections::HashMap::new(),
             in_kotlin_expr_body: false,
             delim_depth: 0,
+            go_literal_frames: std::collections::HashMap::new(),
         }
     }
 
