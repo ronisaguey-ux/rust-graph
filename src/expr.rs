@@ -342,9 +342,73 @@ impl Emit<'_> {
         None
     }
 
+    /// Whether the argument list the cursor is in belongs to a C# attribute:
+    /// `[Name(…)]` or one item of `[A, Name(…)]`. C# writes `name: value` there as a
+    /// keyword argument (`k(...)`), and an attribute's `[NotNullWhen(returnValue: true)]`
+    /// read `returnValue` as a variable. The same shape in an ordinary call is written
+    /// as a merge by the CST, so the rule stays off outside attributes.
+    fn csharp_attribute_args(&self) -> bool {
+        let mut depth = 0usize;
+        let mut open = None;
+        for at in (0..self.pos).rev() {
+            match self.op_byte_at(at) {
+                b')' => depth += 1,
+                b'(' if depth == 0 => {
+                    open = Some(at);
+                    break;
+                }
+                b'(' => depth -= 1,
+                b';' | b'{' | b'}' if depth == 0 => return false,
+                _ => {}
+            }
+        }
+        let Some(open) = open else { return false };
+        let mut depth = 0usize;
+        let mut start = None;
+        for at in (0..open).rev() {
+            match self.op_byte_at(at) {
+                b')' => depth += 1,
+                b'(' if depth == 0 => return false,
+                b'(' => depth -= 1,
+                b'[' if depth == 0 => {
+                    start = Some(at);
+                    break;
+                }
+                b',' if depth == 0 => {}
+                b']' | b'{' | b'}' | b';' if depth == 0 => return false,
+                _ => {}
+            }
+        }
+        let Some(start) = start else { return false };
+        // `x = [Mocks(uniqueID: 0)]` is a collection expression, and so is `return [...]`:
+        // an attribute list follows no `=`, `=>` or `return`.
+        if start > 0 && (self.op_byte_at(start - 1) == b'=' || self.toks[start - 1].kind == Kind::Ident && self.raw_is(&self.toks[start - 1], b"return")) {
+            return false;
+        }
+        // An attribute's `]` is followed by the declaration it decorates; a collection
+        // expression is followed by `,`, `)`, `;` or `]`.
+        let mut depth = 0usize;
+        for at in start..self.toks.len() {
+            match self.op_byte_at(at) {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let next = self.toks[at + 1..].iter().find(|token| token.kind != Kind::Newline);
+                        return next.is_some_and(|token| token.kind == Kind::Ident);
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn argument(&mut self, out: &mut String, close: u8) {
         if let Some(name) = self.word(0) {
-            let colon = self.op_byte(1) == b':' && NAMED_ARGS_WITH_COLON.contains(&self.lang.tag);
+            let colon = self.op_byte(1) == b':'
+                && (NAMED_ARGS_WITH_COLON.contains(&self.lang.tag)
+                    || (self.lang.tag == "CS" && self.csharp_attribute_args()));
             // `isNaN(it = +it)` in JS/TS and `g(x = 1)` / `cfg!(all(feature = "deep"))`
             // in Rust: `=` in an argument is an assignment expression or macro key-value
             // token, not a keyword argument — the CST writes a merge, never `k(...)`.
