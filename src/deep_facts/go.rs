@@ -3590,6 +3590,53 @@ fn dotted_piece(text: &str) -> bool {
                     return out;
                 }
             }
+            // `(ushort)((codePoint + idDelta) & 0xFFFF)`: tree-sitter C# parses
+            // a cast of a parenthesized expression as an `invocation_expression`
+            // whose callee is `(predefined_type)`. It is a cast, not a call, so
+            // evaluate the operand without recording a call.
+            if self.language.name == "csharp" && kind == "invocation_expression" {
+                let children = self.children(id);
+                let is_predefined_cast = children
+                    .iter()
+                    .copied()
+                    .find(|&c| !self.is_layout(c) && !matches!(self.kind(c), "(" | ")"))
+                    .is_some_and(|callee| {
+                        let text = self.text_string(callee);
+                        let inner = text
+                            .trim()
+                            .trim_start_matches('(')
+                            .trim_end_matches(')')
+                            .trim();
+                        matches!(
+                            inner,
+                            "bool"
+                                | "byte"
+                                | "sbyte"
+                                | "char"
+                                | "decimal"
+                                | "double"
+                                | "float"
+                                | "int"
+                                | "uint"
+                                | "nint"
+                                | "nuint"
+                                | "long"
+                                | "ulong"
+                                | "short"
+                                | "ushort"
+                                | "object"
+                                | "string"
+                        )
+                    });
+                if is_predefined_cast {
+                    if let Some(args) = children
+                        .into_iter()
+                        .find(|&c| matches!(self.kind(c), "argument_list" | "arguments"))
+                    {
+                        return self.form(args);
+                    }
+                }
+            }
             return self.call_form(id);
         }
         // `val on = false`: the lexer writes a boolean or `null` literal as the

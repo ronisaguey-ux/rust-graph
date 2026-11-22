@@ -1087,6 +1087,39 @@ impl Emit<'_> {
                 }
             }
         }
+        // `(ushort)((codePoint + idDelta) & 0xFFFF)`: a C# cast of a
+        // parenthesized expression has `(` right after `)`, so without skipping
+        // the predefined type the chain read it as a call on the type name.
+        if self.lang.tag == "CS"
+            && self.word(1).is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "bool"
+                        | "byte"
+                        | "sbyte"
+                        | "char"
+                        | "decimal"
+                        | "double"
+                        | "float"
+                        | "int"
+                        | "uint"
+                        | "nint"
+                        | "nuint"
+                        | "long"
+                        | "ulong"
+                        | "short"
+                        | "ushort"
+                        | "object"
+                        | "string"
+                )
+            })
+            && self.is_op(2, b")")
+            && self.is_op(3, b"(")
+        {
+            self.pos += 3;
+            self.group(out);
+            return;
+        }
         self.pos += 1;
         if self.lang.prefix_calls {
             if let Some(name) = self.word(0) {
@@ -1696,10 +1729,12 @@ impl Emit<'_> {
             // Swift's `try` marks a throwing call and names no value: the CST
             // writes `try build()` as the call alone, so the word is noise here.
             // C#'s `checked` / `unchecked` are operator keywords that wrap an
-            // expression in parentheses without being a call.
+            // expression in parentheses without being a call; `default(T)` is
+            // a default-value expression rather than a call to `default`.
             NOISE.contains(&word.as_str())
                 || (self.lang.tag == "SWIFT" && word == "try")
                 || (self.lang.tag == "CS" && matches!(word.as_str(), "checked" | "unchecked"))
+                || (self.lang.tag == "CS" && word == "default" && self.op_byte(1) == b'(')
         };
         if noise && !go_word {
             self.pos += 1;
@@ -2345,11 +2380,14 @@ impl Emit<'_> {
                 self.pos += 1;
                 continue;
             }
-            // `remainingPath!.count` (Swift) and `row.N_N_Bool!.Value` (C#): the
-            // postfix force-unwrap / null-forgiving `!` is the same kind of
-            // marker before `.`, and ending the value at `!` split the chain
-            // into two merged names (`m:[n:row.N_N_Bool,n:Value]`).
-            if matches!(self.lang.tag, "SWIFT" | "CS") && self.is_op(0, b"!") && self.is_op(1, b".") {
+            // `remainingPath!.count` (Swift) and `row.N_N_Bool!.Value` / `_list![i]` (C#):
+            // the postfix force-unwrap / null-forgiving `!` is the same kind of
+            // marker before `.`, `[`, or `(`, and ending the value at `!` split
+            // the chain into two merged items (`m:[n:_list,t:[n:index]]`).
+            if matches!(self.lang.tag, "SWIFT" | "CS")
+                && self.is_op(0, b"!")
+                && matches!(self.op_byte(1), b'.' | b'[' | b'(')
+            {
                 self.pos += 1;
                 continue;
             }
