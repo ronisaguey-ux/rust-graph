@@ -4062,6 +4062,13 @@ fn dotted_piece(text: &str) -> bool {
                 return out;
             }
         }
+        // `[obj insertObject:x atIndex:1]`: an Objective-C message send is a
+        // call whose receiver is the expression before the selector.
+        if self.language.name == "objc" && kind == "message" {
+            if let Some(out) = self.c_message_form(id) {
+                return out;
+            }
+        }
         if self.kinds.calls.contains(&kind) {
             // `repositories { mavenCentral() }`: the Kotlin DSL idiom, a call
             // whose only argument is a lambda. The lexer files the line as the

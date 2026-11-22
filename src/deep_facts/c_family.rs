@@ -341,7 +341,8 @@ impl<'a> Walker<'a> {
             // `[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(200, 100)]`:
             // a call written as a message argument was never recorded - the
             // message node is not a call to this reader, so nothing descended
-            // into its arguments. 9 one-loss files on the corpus.
+            // into its arguments. 9 one-loss files on the corpus. The message
+            // itself is read where it is a value, in `c_message_form`.
             "message" => {
                 let mut calls = Vec::new();
                 self.c_calls_in(id, &mut calls);
@@ -2090,6 +2091,70 @@ impl<'a> Walker<'a> {
     /// The path a receiver goes by: a chain of members, with element accesses
     /// unwrapped, because `f->locvars[i].varname` is `f.locvars.varname` to the
     /// one-pass reader.
+    /// `[obj insertObject:x atIndex:1]`: a message send is a call. The
+    /// receiver is the expression in front of the selector and the name is the
+    /// selector itself, one colon per keyword part, which is the shape the
+    /// guard pairs. Read as an anonymous value it wrote no call at all, so
+    /// every message line was a row nothing could pair.
+    pub(crate) fn c_message_form(&mut self, id: u32) -> Option<String> {
+        let kids: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .filter(|&child| !self.is_layout(child))
+            .collect();
+        let (&receiver, selector_parts) = kids.split_first()?;
+        // `[[Greeter alloc] initWithName:@"world"]`: a receiver that is itself
+        // a message is a call of its own, so it is read as a value. A plain
+        // name or member path is written as the name, which is what the
+        // one-pass reader puts in the receiver slot.
+        let receiver_value = if matches!(self.kind(receiver), "message" | "call_expression") {
+            self.form(receiver)
+        } else {
+            match self.c_receiver_path(receiver) {
+                Some(path) if !path.is_empty() => {
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, &path);
+                    form.push(']');
+                    form
+                }
+                _ => self.form(receiver),
+            }
+        };
+        let mut selector = String::new();
+        let mut args: Vec<String> = Vec::new();
+        for &kid in selector_parts {
+            // A name with a `:` after it is a keyword part of the selector
+            // (`insertObject:`); every other node is an argument of the part
+            // before it.
+            if self.kind(kid) == "identifier" && self.colon_follows(kid) {
+                selector.push_str(&self.text_string(kid));
+                selector.push(':');
+            } else if selector.is_empty() {
+                selector.push_str(&self.text_string(kid));
+            } else {
+                let value = self.form(kid);
+                args.push(value);
+            }
+        }
+        if selector.is_empty() {
+            return None;
+        }
+        let line = self.line(id);
+        let index = self.push_call(selector, line);
+        Some(format!("[\"c\",{index},{receiver_value},[{}]]", args.join(",")))
+    }
+
+    /// Whether the token right after `id` is a `:` — how a message's keyword
+    /// part is told from an argument, since the grammar keeps the colons out
+    /// of the tree.
+    fn colon_follows(&self, id: u32) -> bool {
+        let end = self.node(id).end as usize;
+        self.src[end..]
+            .iter()
+            .find(|byte| !byte.is_ascii_whitespace())
+            .is_some_and(|byte| *byte == b':')
+    }
+
     fn c_receiver_path(&self, id: u32) -> Option<String> {
         if let Some(path) = self.c_path(id) {
             return Some(path);
