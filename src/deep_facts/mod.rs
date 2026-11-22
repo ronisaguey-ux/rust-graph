@@ -1376,8 +1376,32 @@ impl<'a> Walker<'a> {
         }
     }
 
+    pub(crate) fn cs_has_error(&self, id: u32) -> bool {
+        if self.kind(id) == "ERROR" {
+            return true;
+        }
+        self.children(id).into_iter().any(|c| self.cs_has_error(c))
+    }
+
+    pub(crate) fn cs_collect_leaves(&self, id: u32, out: &mut Vec<u32>) {
+        let node = self.node(id);
+        if node.first_child == NONE {
+            if node.start < node.end && !self.kind(id).contains("comment") {
+                out.push(id);
+            }
+            return;
+        }
+        for child in self.children(id) {
+            self.cs_collect_leaves(child, out);
+        }
+    }
+
     pub(crate) fn cs_recovered_calls(&mut self, id: u32) {
         let tokens: Vec<u32> = self.children(id);
+        self.cs_recovered_calls_tokens(&tokens);
+    }
+
+    pub(crate) fn cs_recovered_calls_tokens(&mut self, tokens: &[u32]) {
         let mut at = 0;
         while at < tokens.len() {
             if matches!(
@@ -2732,6 +2756,38 @@ impl<'a> Walker<'a> {
                 }
                 if kind == "object_initializer" {
                     self.cs_initializer_first_member(id);
+                }
+                // `using (a.B()) stmt`: the C# grammar expects a declaration
+                // inside `using (...)`, so an expression resource puts `(` into
+                // an `ERROR` node and leaves `a.B` outside it as a type/name.
+                // Recover calls from the flattened header tokens when errored.
+                if kind == "using_statement" && self.cs_has_error(id) {
+                    let mut leaves = Vec::new();
+                    for child in self.children(id) {
+                        if self.kind(child) != "using" {
+                            self.cs_collect_leaves(child, &mut leaves);
+                        }
+                    }
+                    if let Some(open) = leaves.iter().position(|&n| self.kind(n) == "(") {
+                        let mut depth = 0i32;
+                        let mut close = leaves.len();
+                        for (i, &n) in leaves[open..].iter().enumerate() {
+                            match self.kind(n) {
+                                "(" => depth += 1,
+                                ")" => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        close = open + i;
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if close > open + 1 {
+                            self.cs_recovered_calls_tokens(&leaves[open + 1..close]);
+                        }
+                    }
                 }
                 let mut calls = Vec::new();
                 self.lambda_calls(id, &mut calls);
