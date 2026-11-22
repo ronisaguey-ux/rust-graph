@@ -954,6 +954,13 @@ impl Emit<'_> {
                         b'[' if self.lang.tag == "SWIFT" && self.is_op(1, b":") && self.is_op(2, b"]") => {
                             self.pos += 3;
                         }
+                        // `[obj insertObject:x atIndex:1]`: an Objective-C
+                        // message send is a call — the receiver is the
+                        // expression in front of the selector and the name is
+                        // the selector with one colon per keyword part — which
+                        // is the shape the CST reader writes, so the guard can
+                        // pair the line instead of losing it.
+                        b'[' if self.lang.tag == "OBJC" => self.objc_message(out),
                         b'[' => {
                             let mut key = String::new();
                             self.display(&mut key, b']', "t");
@@ -1422,6 +1429,142 @@ impl Emit<'_> {
             _ => (format!("[\"t\",[{items}]]"), String::new()),
         };
         self.chain(out, value, path, line);
+    }
+
+    /// `[receiver selector]` at the cursor, read as one call. Objective-C has
+    /// no other meaning for a `[` that opens a value.
+    fn objc_message(&mut self, out: &mut String) {
+        let all = self.toks;
+        let start = self.pos;
+        let mut depth = 0usize;
+        let mut end = None;
+        let mut at = start;
+        while let Some(token) = all.get(at) {
+            if token.kind == Kind::Op {
+                match self.op_byte_at(at) {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(at);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            at += 1;
+        }
+        let Some(end) = end else { return };
+        // The selector starts at the first name with a `:` after it; a message
+        // with no keyword part (`[obj go]`) is the last name before the `]`.
+        let mut selector_start = None;
+        let mut d = 0usize;
+        for i in start + 1..end {
+            if all[i].kind == Kind::Op {
+                match self.op_byte_at(i) {
+                    b'(' | b'[' | b'{' => d += 1,
+                    b')' | b']' | b'}' => d = d.saturating_sub(1),
+                    _ => {}
+                }
+                continue;
+            }
+            if d == 0 && all[i].kind == Kind::Ident && self.op_byte_at(i + 1) == b':' {
+                selector_start = Some(i);
+                break;
+            }
+        }
+        let (receiver_end, selector_start) = match selector_start {
+            Some(s) => (s, s),
+            None => {
+                let last = (start + 1..end).rev().find(|&i| all[i].kind == Kind::Ident);
+                match last {
+                    Some(l) if l > start + 1 => (l, l),
+                    _ => return,
+                }
+            }
+        };
+        let receiver = self.token_range_value(start + 1, receiver_end);
+        let line = all[start].line;
+        let mut selector = String::new();
+        let mut args: Vec<String> = Vec::new();
+        let mut i = selector_start;
+        while i < end {
+            if all[i].kind != Kind::Ident {
+                i += 1;
+                continue;
+            }
+            selector.push_str(&lexeme(self.src, &all[i], self.lang));
+            if self.op_byte_at(i + 1) != b':' {
+                i += 1;
+                continue;
+            }
+            selector.push(':');
+            // The argument runs to the next keyword part or the `]`, and a
+            // comma separates several arguments of one part.
+            let mut arg_end = i + 2;
+            let mut d2 = 0usize;
+            while arg_end < end {
+                if all[arg_end].kind == Kind::Op {
+                    match self.op_byte_at(arg_end) {
+                        b'(' | b'[' | b'{' => d2 += 1,
+                        b')' | b']' | b'}' => d2 = d2.saturating_sub(1),
+                        _ => {}
+                    }
+                } else if d2 == 0 && all[arg_end].kind == Kind::Ident && self.op_byte_at(arg_end + 1) == b':' {
+                    break;
+                }
+                arg_end += 1;
+            }
+            let mut from = i + 2;
+            let mut d3 = 0usize;
+            for at in i + 2..=arg_end {
+                let split = at == arg_end
+                    || (all[at].kind == Kind::Op && self.op_byte_at(at) == b',' && d3 == 0);
+                if !split {
+                    if all[at].kind == Kind::Op {
+                        match self.op_byte_at(at) {
+                            b'(' | b'[' | b'{' => d3 += 1,
+                            b')' | b']' | b'}' => d3 = d3.saturating_sub(1),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                args.push(self.token_range_value(from, at));
+                from = at + 1;
+            }
+            i = arg_end;
+        }
+        if selector.is_empty() {
+            return;
+        }
+        let id = self.new_call(selector, line);
+        out.push_str(&format!("[\"c\",{id},{receiver},[{}]]", args.join(",")));
+        self.pos = end + 1;
+    }
+
+    /// The value of one run of tokens, read by the same machinery as the rest
+    /// of the expression: the tokens are lent to the reader as if they were the
+    /// whole file, so a name, a dotted path and a call in an argument all come
+    /// back in the shape the CST reader writes.
+    fn token_range_value(&mut self, from: usize, to: usize) -> String {
+        if from >= to {
+            return "0".to_string();
+        }
+        let saved_toks = self.toks;
+        let saved_pos = self.pos;
+        self.toks = &saved_toks[from..to];
+        self.pos = 0;
+        let mut items = String::new();
+        let count = self.list(&mut items, 0, false);
+        self.toks = saved_toks;
+        self.pos = saved_pos;
+        match count {
+            0 => "0".to_string(),
+            1 => items,
+            _ => format!("[\"m\",[{items}]]"),
+        }
     }
 
     fn display(&mut self, out: &mut String, close: u8, form: &str) {
