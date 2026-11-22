@@ -34,6 +34,12 @@ const CONTROL: [&str; 24] = [
     "if", "elif", "elsif", "elseif", "else", "for", "foreach", "while", "until", "unless", "switch", "match", "try",
     "catch", "except", "finally", "rescue", "ensure", "do", "loop", "when", "with", "select", "repeat",
 ];
+/// Java's own control words. `CONTROL` also carries Python, Ruby and Go words
+/// (`select`, `with`, `when`, `match`, `loop`, …), and in Java every one of
+/// them is an ordinary method name: read as a header, `select(...)` was never
+/// opened as a symbol and its whole body was written on the module
+/// (QuantilesAlgorithm's `select`, 8 rows twice over).
+const JAVA_CONTROL: [&str; 9] = ["if", "else", "for", "while", "do", "switch", "try", "catch", "finally"];
 /// A word that continues the branch just closed instead of following it.
 const ARMS: [&str; 11] =
     ["else", "elif", "elsif", "elseif", "catch", "except", "finally", "rescue", "ensure", "when", "case"];
@@ -1829,6 +1835,35 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+            // `@SuppressWarnings("x")\nprivate record Person(...)`: a Java
+            // annotation on its own line sits where the modifiers do, and a
+            // head that is not skipped is no class head at all - the record
+            // fell through to the function rule and opened a `function`
+            // symbol named Person that the tree does not write. `@interface`
+            // is not an annotation here; the class head below reads it.
+            if self.lang.tag == "JAVA"
+                && toks.get(index).is_some_and(|t| self.is_op(t, b"@"))
+                && self.word_at(toks, index + 1).as_deref() != Some("interface")
+            {
+                let mut next = index + 1;
+                if toks.get(next).is_some_and(|t| t.kind == Kind::Ident) {
+                    next += 1;
+                    while toks.get(next).is_some_and(|t| self.is_op(t, b"."))
+                        && toks.get(next + 1).is_some_and(|t| t.kind == Kind::Ident)
+                    {
+                        next += 2;
+                    }
+                    if toks.get(next).is_some_and(|t| self.is_op(t, b"(")) {
+                        if let Some((_, close)) = self.group_at(toks, next) {
+                            next = close + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    index = next;
+                    continue;
+                }
+            }
             if self.lang.tag == "KT" && toks.get(index).is_some_and(|t| self.is_op(t, b"@")) {
                 let mut next = index + 1;
                 if toks.get(next).is_some_and(|t| t.kind == Kind::Ident) {
@@ -2485,6 +2520,9 @@ impl<'a> Parser<'a> {
     /// A word that opens a control header. Swift's `guard` and C#'s `lock` are
     /// ones, like `if`: their condition is an expression, not a declaration.
     fn is_control(&self, word: &str) -> bool {
+        if self.lang.tag == "JAVA" {
+            return JAVA_CONTROL.contains(&word);
+        }
         CONTROL.contains(&word) || (self.lang.tag == "SWIFT" && word == "guard") || (self.lang.tag == "CS" && word == "lock")
     }
 
@@ -3852,7 +3890,11 @@ impl<'a> Parser<'a> {
                     alias = module.clone();
                     module.clear();
                 }
-                Kind::Ident if self.raw(token) == b"as" => {
+                // Java has no import alias: `import static …Assertions.as;`
+                // names the member `as`, and read as the alias keyword the
+                // segment left the module one level short (`Assertions` against
+                // the CST's `Assertions.as`, three corpus rows).
+                Kind::Ident if self.raw(token) == b"as" && self.lang.tag != "JAVA" => {
                     alias = self.word_at(rest, index + 1).unwrap_or_default();
                     index += 1;
                 }
