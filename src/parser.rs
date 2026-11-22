@@ -5220,6 +5220,18 @@ impl<'a> Parser<'a> {
             self.expression_event("r", &stmt[1..]);
             return;
         }
+        // C# `yield return v;` hands `v` out of the body exactly as `return v;`
+        // does (the CST reader reads it the same way). Read as a bare expression
+        // it was an `x` event, so an iterator accessor such as
+        // `get { yield return f(); }` disagreed with the CST on its marker.
+        if self.lang.tag == "CS"
+            && matches!(word.as_deref(), Some("yield"))
+            && stmt.len() > 1
+            && self.word_at(stmt, 1).as_deref() == Some("return")
+        {
+            self.expression_event("r", &stmt[2..]);
+            return;
+        }
         let line = first.line;
         // A let-chain whose condition continues on the next line arrives as a
         // statement of its own: `&& let Some(old) = w.pop_front()`. Read as an

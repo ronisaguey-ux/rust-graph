@@ -2841,9 +2841,16 @@ impl<'a> Walker<'a> {
             // a creation inside an object initialiser is a call of its own, and
             // the initialiser was read for its assignments alone, so every nested
             // creation stayed in the tree and out of the call table.
+            // `yield return v;` hands `v` out of the body exactly as `return v;`
+            // does, so it is read by the return handler. It used to fall into the
+            // arm below, which forms only lambdas, so the yielded expression and
+            // every call in it (and every `new T[]` event) vanished from the
+            // CST: an iterator accessor such as `get { yield return f(); }` lost
+            // its whole body.
+            "yield_statement" if self.language.name == "csharp" => self.return_statement(id),
             "object_initializer" | "array_initializer" | "anonymous_body"
             | "using_statement"
-            | "fixed_statement" | "yield_statement"
+            | "fixed_statement"
                 if self.language.name == "csharp" =>
             {
                 if matches!(kind, "object_initializer" | "array_initializer" | "anonymous_body") {
