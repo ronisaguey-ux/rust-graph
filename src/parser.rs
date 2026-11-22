@@ -1034,7 +1034,7 @@ impl<'a> Parser<'a> {
                 }
             }
             let macro_body = self.macro_rules_head();
-            let initialiser = self.lang.tag == "CS" && self.opens_cs_initialiser();
+            let initialiser = self.lang.tag == "CS" && self.cs_new_initialiser();
             let before = self.frames.len();
             self.open_block();
             if (type_body || macro_body) && self.frames.len() > before {
@@ -1054,7 +1054,8 @@ impl<'a> Parser<'a> {
 
     /// Whether `self.stmt` has a top-level C# `new` creation expression
     /// (`new() {`, `new[] {`, `new T() {`, `return new T {`), rather than a
-    /// member-hiding `new` modifier (`public new void Foo() {`).
+    /// member-hiding `new` modifier (`public new void Foo() {`,
+    /// `new string? SkipReason { get; }`).
     fn cs_new_initialiser(&self) -> bool {
         let mut depth = 0i32;
         for (i, token) in self.stmt.iter().enumerate() {
@@ -1065,6 +1066,13 @@ impl<'a> Parser<'a> {
                     _ => {}
                 }
             } else if depth == 0 && token.kind == Kind::Ident && self.raw(token) == b"new" {
+                // Standalone `new ... {` at statement start: distinguish a `new`
+                // creation expression (`new {`, `new() {`, `new[] {`, `new T {`,
+                // `new T() {`) from a member-hiding `new` modifier (`new void Foo() {`,
+                // `new string? SkipReason {`, `new (int, int) Pair {`).
+                if i == 0 {
+                    return self.cs_starts_with_new_expr();
+                }
                 let next_is_delim = self
                     .stmt
                     .get(i + 1)
@@ -1072,48 +1080,105 @@ impl<'a> Parser<'a> {
                 if next_is_delim {
                     return true;
                 }
-                let prev_is_expr = i > 0
-                    && (self.stmt[i - 1].kind == Kind::Op
-                        || (self.stmt[i - 1].kind == Kind::Ident
-                            && matches!(
-                                self.raw(&self.stmt[i - 1]),
-                                b"return" | b"throw" | b"yield" | b"await" | b"in" | b"else" | b"case"
-                            )));
+                let prev_is_expr = self.stmt[i - 1].kind == Kind::Op
+                    || (self.stmt[i - 1].kind == Kind::Ident
+                        && matches!(
+                            self.raw(&self.stmt[i - 1]),
+                            b"return" | b"throw" | b"yield" | b"await" | b"in" | b"else" | b"case"
+                        ));
                 if prev_is_expr {
                     return true;
-                }
-                // Standalone `new T() { ... }` or `new T { ... }` at statement start:
-                // a member modifier `new void Foo()` has two adjacent idents before `(`.
-                if i == 0 {
-                    let two_idents = self.stmt.get(1).is_some_and(|t| t.kind == Kind::Ident)
-                        && self.stmt.get(2).is_some_and(|t| t.kind == Kind::Ident);
-                    if !two_idents {
-                        return true;
-                    }
                 }
             }
         }
         false
     }
 
-    /// `return new Dto {` and `Address = new Address() {`: a `new` at the top
-    /// level of the header, so the brace that follows is an object or collection
-    /// initialiser. A `new` inside the parentheses of a call or a constructor's
-    /// base list is an argument, and its brace is a body.
-    fn opens_cs_initialiser(&self) -> bool {
-        let mut depth = 0i32;
-        for token in &self.stmt {
-            if token.kind == Kind::Op {
-                match self.raw(token) {
-                    b"(" | b"[" => depth += 1,
-                    b")" | b"]" => depth -= 1,
-                    _ => {}
+    /// Distinguishes a statement-start `new` creation expression (`new {`,
+    /// `new() {`, `new T {`, `new A.B() {`) from a `new` member-hiding
+    /// modifier (`new string? SkipReason {`, `new string[] Names {`,
+    /// `new string this[int i] {`, `new string? M() {`).
+    fn cs_starts_with_new_expr(&self) -> bool {
+        let len = self.stmt.len();
+        if len <= 1 {
+            return true;
+        }
+        let last = &self.stmt[len - 1];
+        if last.kind == Kind::Ident {
+            // `new T {` and `new A.B.T {` have `new`, `.`, or `::` immediately
+            // before the type name; a member declaration has `<Type> <Name>`.
+            let prev = &self.stmt[len - 2];
+            return (prev.kind == Kind::Ident && self.raw(prev) == b"new")
+                || (prev.kind == Kind::Op && matches!(self.raw(prev), b"." | b"::"));
+        }
+        if self.is_op(last, b")") {
+            let mut depth = 0i32;
+            let mut open = None;
+            for j in (0..len).rev() {
+                if self.is_op(&self.stmt[j], b")") {
+                    depth += 1;
+                } else if self.is_op(&self.stmt[j], b"(") {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(j);
+                        break;
+                    }
                 }
-            } else if depth == 0 && token.kind == Kind::Ident && self.raw(token) == b"new" {
+            }
+            let Some(open) = open else { return true };
+            if open <= 1 {
+                // `new(...) {`
                 return true;
             }
+            let mut head = open - 1;
+            if self.is_op(&self.stmt[head], b">") {
+                let mut adepth = 0i32;
+                let mut found = None;
+                for j in (0..=head).rev() {
+                    if self.is_op(&self.stmt[j], b">") {
+                        adepth += 1;
+                    } else if self.is_op(&self.stmt[j], b"<") {
+                        adepth -= 1;
+                        if adepth == 0 {
+                            found = Some(j);
+                            break;
+                        }
+                    }
+                }
+                let Some(lt) = found else { return true };
+                if lt == 0 {
+                    return true;
+                }
+                head = lt - 1;
+            }
+            if self.stmt[head].kind == Kind::Ident && head >= 1 {
+                let prev = &self.stmt[head - 1];
+                return (prev.kind == Kind::Ident && self.raw(prev) == b"new")
+                    || (prev.kind == Kind::Op && matches!(self.raw(prev), b"." | b"::"));
+            }
+            return true;
         }
-        false
+        if self.is_op(last, b"]") {
+            let mut depth = 0i32;
+            let mut open = None;
+            for j in (0..len).rev() {
+                if self.is_op(&self.stmt[j], b"]") {
+                    depth += 1;
+                } else if self.is_op(&self.stmt[j], b"[") {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(j);
+                        break;
+                    }
+                }
+            }
+            if let Some(open) = open {
+                if open > 1 && self.stmt[open - 1].kind == Kind::Ident && self.raw(&self.stmt[open - 1]) == b"this" {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     fn on_close_brace(&mut self, token: Token) {
