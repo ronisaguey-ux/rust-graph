@@ -980,6 +980,28 @@ impl Emit<'_> {
                         // never writes (PDBCache.swift:65).
                         b'{' if self.lang.tag == "SWIFT" => self.skip_block(),
                         b'{' => self.display(out, b'}', "m"),
+                        // `<Stack …>…</Stack>`: a JSX element writes no names —
+                        // its tags and its text are markup, not code — and the
+                        // CST's record of it is the constant 0. Read as
+                        // comparisons, every word of the tree merged into the
+                        // value (the render's `r` event disagreed on 29 tsx
+                        // rows) and the `{…}` expressions the element carries
+                        // were never read, so their calls were missing too.
+                        b'<' if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") && self.jsx_head() =>
+                        {
+                            // The element is only a JSX one if its closing tag
+                            // comes: `<Foo>bar` in a `.ts` file is a type
+                            // assertion, and `.tsx` is read as TS, so the scan
+                            // is what tells the two apart.
+                            let start = self.pos;
+                            match self.jsx_skip() {
+                                Some(end) => {
+                                    self.pos = end;
+                                    out.push('0');
+                                }
+                                None => self.pos = start + 1,
+                            }
+                        }
                         // `a ? b : c ? b : a`: the whole conditional is one
                         // merge to the CST, and a conditional inside a branch
                         // is a merge inside it. Dropped as layout, the `?` and
@@ -1085,6 +1107,129 @@ impl Emit<'_> {
                 out.push_str("]]");
             }
         }
+    }
+
+    /// Whether the `<` at the cursor opens a JSX element rather than being a
+    /// comparison: a tag name (or a fragment's `>`) followed by attribute
+    /// syntax, and no value on its left. `<T>(x) => x` is a generic arrow —
+    /// its `(` is not an attribute — so it stays a comparison.
+    fn jsx_head(&self) -> bool {
+        if self.pos > 0 {
+            let before = &self.toks[self.pos - 1];
+            let value_before = match before.kind {
+                Kind::Ident => !matches!(
+                    lexeme(self.src, before, self.lang).as_str(),
+                    "return" | "case" | "typeof" | "new" | "await" | "yield" | "delete" | "void"
+                        | "throw" | "else" | "do" | "in" | "of" | "instanceof" | "default" | "from"
+                        | "as" | "satisfies" | "export"
+                ),
+                Kind::Num | Kind::Str => true,
+                Kind::Op => {
+                    self.raw_is(before, b")") || self.raw_is(before, b"]") || self.raw_is(before, b"}")
+                }
+                _ => false,
+            };
+            if value_before {
+                return false;
+            }
+        }
+        match self.tok(1).map(|token| token.kind) {
+            Some(Kind::Ident) => match self.tok(2) {
+                Some(token) if token.kind == Kind::Op => {
+                    // `<React.Fragment …>`: a dotted (or dashed, or namespaced)
+                    // tag name is several tokens.
+                    self.raw_is(token, b">")
+                        || self.raw_is(token, b"/")
+                        || self.raw_is(token, b"{")
+                        || self.raw_is(token, b"=")
+                        || self.raw_is(token, b".")
+                        || self.raw_is(token, b"-")
+                        || self.raw_is(token, b":")
+                }
+                Some(token) => matches!(token.kind, Kind::Ident | Kind::Str),
+                None => false,
+            },
+            // `<>…</>`: a fragment.
+            Some(Kind::Op) => self.op_byte(1) == b'>',
+            _ => false,
+        }
+    }
+
+    /// One JSX tag, from its `<` to just past its `>`: `(closing, self_closing)`.
+    /// The `{…}` groups of its attributes are read for the calls they spell.
+    fn jsx_tag(&mut self) -> Option<(bool, bool)> {
+        self.pos += 1;
+        let closing = self.op_byte(0) == b'/';
+        if closing {
+            self.pos += 1;
+        }
+        loop {
+            let token = self.tok(0)?;
+            match token.kind {
+                Kind::Ident | Kind::Num | Kind::Str => self.pos += 1,
+                Kind::Op => match self.op_byte(0) {
+                    b'.' | b'-' | b':' | b'=' => self.pos += 1,
+                    b'>' => {
+                        self.pos += 1;
+                        return Some((closing, false));
+                    }
+                    b'/' if self.op_byte(1) == b'>' => {
+                        self.pos += 2;
+                        return Some((closing, true));
+                    }
+                    // The attributes' own expressions are skipped with the
+                    // element: the CST writes 0 for the whole element and
+                    // records nothing inside it.
+                    b'{' => match self.skip_balanced(self.pos, b"{", b"}") {
+                        Some(after) => self.pos = after,
+                        None => return None,
+                    },
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        }
+    }
+
+    /// Skip a whole JSX element from its `<`: its tags, its text and its nested
+    /// elements carry no names, while the `{…}` expressions it holds are code
+    /// and their calls are real.
+    fn jsx_skip(&mut self) -> Option<usize> {
+        let start = self.pos;
+        let (_, self_closing) = self.jsx_tag()?;
+        if self_closing {
+            return Some(self.pos);
+        }
+        let mut depth = 1usize;
+        while depth > 0 {
+            let Some(token) = self.tok(0) else {
+                self.pos = start;
+                return None;
+            };
+            if token.kind != Kind::Op {
+                self.pos += 1;
+                continue;
+            }
+            match self.op_byte(0) {
+                b'<' => {
+                    let Some((closing, self_closing)) = self.jsx_tag() else {
+                        self.pos = start;
+                        return None;
+                    };
+                    if closing {
+                        depth -= 1;
+                    } else if !self_closing {
+                        depth += 1;
+                    }
+                }
+                b'{' => match self.skip_balanced(self.pos, b"{", b"}") {
+                    Some(after) => self.pos = after,
+                    None => self.pos += 1,
+                },
+                _ => self.pos += 1,
+            }
+        }
+        Some(self.pos)
     }
 
     /// Whether the `[` at the cursor opens a computed property name that is a
@@ -1897,6 +2042,10 @@ impl Emit<'_> {
         let go_word = match word.as_str() {
             "go" => self.lang.tag != "GO",
             "defer" => !matches!(self.lang.tag, "GO" | "SWIFT"),
+            // `pub.X.Bytes()`: `pub` is Rust's visibility keyword and an ordinary
+            // name in Go. Skipped, the first segment of the receiver vanished
+            // (`c(n:X;[])` where the CST writes `pub.X`) (jwk.go: 2 rows).
+            "pub" => self.lang.tag == "GO",
             _ => false,
         };
         // `typeof(Foo<,>)` in C#: an open generic names its type and nothing
