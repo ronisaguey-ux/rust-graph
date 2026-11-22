@@ -1030,6 +1030,27 @@ impl<'a> Walker<'a> {
                 push_string(&mut out, &path);
                 out.push(']');
                 parts.push(out);
+                // A Java dotted name whose base names something and whose
+                // leaves spell the path is one name to the one-pass reader
+                // (`n:Label.FLAG_DEBUG_ONLY`, `n:BigInteger.class`). Descending
+                // into its children as well wrote the path and each segment
+                // beside it
+                // (`m:[n:Label.FLAG_DEBUG_ONLY,n:Label,n:FLAG_DEBUG_ONLY]`), a
+                // value the lexer never writes (java: ClassReader,
+                // JdbcClientQueryTests). A cast receiver keeps the descent: the
+                // lexer writes the cast's own names beside the member, and Go's
+                // selectors are its own shape.
+                if self.language.name == "java" && !self.decl_has_call(id) {
+                    let leaves: Vec<String> =
+                        self.children(id).iter().filter_map(|&child| self.leaf_name(child)).collect();
+                    let base_named = self
+                        .children(id)
+                        .first()
+                        .is_some_and(|&first| !self.decl_path_seg(first, true).is_empty());
+                    if base_named && !leaves.is_empty() && leaves.join(".") == path {
+                        return parts.pop().unwrap_or_else(|| "0".to_string());
+                    }
+                }
             }
         }
         for child in self.children(id) {
@@ -1366,10 +1387,46 @@ impl<'a> Walker<'a> {
     pub(crate) fn decl_call(&mut self, id: u32) -> usize {
         let callee = self.decl_callee(id);
         let path = self.decl_path(callee);
+        // `"content".getBytes()`, `"/echo".length()`: a Java member call whose
+        // base names nothing has no qualified path, and the one-pass reader
+        // spells that `.getBytes` - the marker the value check reads as "the
+        // receiver is not a name". Written bare, the name claimed a free
+        // function and the receiver value rendered as a call the lexer never
+        // wrote (java: FileCopyUtilsTests, UtcDateTypeAdapter, SockJsServiceTests,
+        // HeaderMethodArgumentResolver).
+        let path = if self.language.name == "java"
+            && !path.is_empty()
+            && !path.starts_with('.')
+            && self.decl_base_unnamed(callee)
+        {
+            format!(".{path}")
+        } else {
+            path
+        };
         let line = self.call_line(callee, id);
         self.push_call(path, line)
     }
 
+
+    /// Whether a dotted callee names only its last segment: the base is no
+    /// name at all (`"content".getBytes()`), so nothing qualifies the member.
+    fn decl_base_unnamed(&self, id: u32) -> bool {
+        if !matches!(
+            self.kind(id),
+            "field_access"
+                | "member_access"
+                | "conditional_member_access"
+                | "selector_expression"
+                | "navigation_expression"
+        ) {
+            return false;
+        }
+        let Some(&first) = self.children(id).first() else { return false };
+        if self.kind(first) == "." {
+            return false;
+        }
+        self.decl_path_seg(first, true).is_empty()
+    }
 
     /// The receiver expression of a chained call when it contains a call of its
     /// own (`a(x).b(y)`, `f(x)(y)`, `getItems(k)[idx()].Render()`).
@@ -1633,11 +1690,19 @@ impl<'a> Walker<'a> {
         let mut at = id;
         loop {
             match self.kind(at) {
-                "selector_expression" | "field_access" => match self.children(at).first() {
+                "selector_expression" | "field_access" | "member_access" => match self.children(at).first() {
                     Some(&base) => at = base,
                     None => return false,
                 },
-                "call_expression" => return true,
+                // Java and C# spell a call with their own node kinds, so
+                // `readLabel(offset, labels).flags = v` read as a path through
+                // the method's name instead of the member after the call
+                // (java: ClassReader).
+                "call_expression"
+                | "method_invocation"
+                | "invocation_expression"
+                | "object_creation_expression"
+                | "object_creation" => return true,
                 _ => return false,
             }
         }
@@ -1655,8 +1720,19 @@ impl<'a> Walker<'a> {
             .map(|child| self.decl_path(child))
             .unwrap_or_default();
         let head = match children.first().copied() {
-            Some(base) if self.kind(base) == "call_expression" => String::new(),
-            Some(base) if matches!(self.kind(base), "selector_expression" | "field_access") && self.go_chain_has_call(base) => {
+            Some(base)
+                if matches!(
+                    self.kind(base),
+                    "call_expression"
+                        | "method_invocation"
+                        | "invocation_expression"
+                        | "object_creation_expression"
+                        | "object_creation"
+                ) =>
+            {
+                String::new()
+            }
+            Some(base) if matches!(self.kind(base), "selector_expression" | "field_access" | "member_access") && self.go_chain_has_call(base) => {
                 self.go_call_tail(base)
             }
             Some(base) => self.decl_path(base),
