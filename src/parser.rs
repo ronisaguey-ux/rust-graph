@@ -1052,6 +1052,50 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether `self.stmt` has a top-level C# `new` creation expression
+    /// (`new() {`, `new[] {`, `new T() {`, `return new T {`), rather than a
+    /// member-hiding `new` modifier (`public new void Foo() {`).
+    fn cs_new_initialiser(&self) -> bool {
+        let mut depth = 0i32;
+        for (i, token) in self.stmt.iter().enumerate() {
+            if token.kind == Kind::Op {
+                match self.raw(token) {
+                    b"(" | b"[" => depth += 1,
+                    b")" | b"]" => depth -= 1,
+                    _ => {}
+                }
+            } else if depth == 0 && token.kind == Kind::Ident && self.raw(token) == b"new" {
+                let next_is_delim = self
+                    .stmt
+                    .get(i + 1)
+                    .is_some_and(|t| t.kind == Kind::Op && matches!(self.raw(t), b"(" | b"["));
+                if next_is_delim {
+                    return true;
+                }
+                let prev_is_expr = i > 0
+                    && (self.stmt[i - 1].kind == Kind::Op
+                        || (self.stmt[i - 1].kind == Kind::Ident
+                            && matches!(
+                                self.raw(&self.stmt[i - 1]),
+                                b"return" | b"throw" | b"yield" | b"await" | b"in" | b"else" | b"case"
+                            )));
+                if prev_is_expr {
+                    return true;
+                }
+                // Standalone `new T() { ... }` or `new T { ... }` at statement start:
+                // a member modifier `new void Foo()` has two adjacent idents before `(`.
+                if i == 0 {
+                    let two_idents = self.stmt.get(1).is_some_and(|t| t.kind == Kind::Ident)
+                        && self.stmt.get(2).is_some_and(|t| t.kind == Kind::Ident);
+                    if !two_idents {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// `return new Dto {` and `Address = new Address() {`: a `new` at the top
     /// level of the header, so the brace that follows is an object or collection
     /// initialiser. A `new` inside the parentheses of a call or a constructor's
@@ -1430,6 +1474,12 @@ impl<'a> Parser<'a> {
         // their existing path.
         if self.lang.tag == "KT" && self.is_kotlin_assign_trailing_lambda() {
             return true;
+        }
+        // `new List<int>() { 1, 2, 3 }`, `new() { ... }`, `return new[] { ... }`:
+        // a C# object, collection, or array initialiser is part of the
+        // enclosing expression, not a statement block.
+        if self.lang.tag == "CS" && self.cs_new_initialiser() {
+            return false;
         }
         !(self.top_level_assign(&self.stmt).is_some() && !self.is_op(&last, b")"))
     }

@@ -478,6 +478,10 @@ struct Frame {
 
 struct Walker<'a> {
     src: &'a [u8],
+    /// Unpatched source bytes when `cs_strip_primary_constructors` rewrote C# 12
+    /// syntax (such as `[x]` -> `(x)`) before parsing, so `parenthesized_expression`
+    /// can tell a single-element collection expression from real parentheses.
+    orig_src: &'a [u8],
     nodes: &'a [Node],
     language: &'static Language,
     kinds: Kinds,
@@ -576,6 +580,7 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
             if let Some(re_tree) = crate::deep_integration::parse_file(&patched, lang) {
                 if re_tree.errors < tree.errors || re_tree.nodes.len() > tree.nodes.len() {
                     let mut walker = Walker::new(&patched, &re_tree, lang);
+                    walker.orig_src = root;
                     walker.run();
                     return walker.facts;
                 }
@@ -941,6 +946,7 @@ impl<'a> Walker<'a> {
         facts.symbols.push(Symbol { key: "<module>".into(), kind: KIND_MODULE, line: 1, ..Symbol::default() });
         Walker {
             src,
+            orig_src: src,
             nodes: &tree.nodes,
             language: lang.language(),
             kinds: kinds(lang),
