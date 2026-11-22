@@ -3962,16 +3962,25 @@ fn dotted_piece(text: &str) -> bool {
             // arm it kept only the first child and returned `0` whenever the
             // subject was a bare identifier leaf.
             "is_pattern" if self.language.name == "csharp" => {
-                let items: Vec<u32> = self
-                    .children(id)
-                    .into_iter()
-                    .filter(|&child| self.binary_operand(child) && !matches!(self.kind(child), "is" | "not"))
-                    .collect();
-                match items.len() {
-                    0 => return "0".to_string(),
-                    1 => return self.form(items[0]),
-                    _ => return self.merge_form(&items),
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if !self.binary_operand(child) || matches!(self.kind(child), "is" | "not") {
+                        continue;
+                    }
+                    let form = self.form(child);
+                    if form != "0" {
+                        parts.push(form);
+                    } else if let Some(pat) = self.cs_pattern_form(child) {
+                        parts.push(pat);
+                    } else {
+                        parts.push("0".to_string());
+                    }
                 }
+                return match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                };
             }
 
             // `T(text = writer.toString())`: a named argument is its value. Read
@@ -5539,11 +5548,14 @@ fn dotted_piece(text: &str) -> bool {
             // list is its element types, which the lexer reads as a tuple. The
             // generic arm below read the node as nothing, so `Int, Int` were
             // lost from the value.
-            "tuple_type" if self.language.name == "swift" => {
+            "tuple_type" if matches!(self.language.name, "swift" | "csharp") => {
                 let items: Vec<u32> = self
                     .children(id)
                     .into_iter()
-                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")" | ","))
+                    .filter(|&child| {
+                        !(self.is_layout(child) && !(self.language.name == "csharp" && self.leaf_name(child).is_some()))
+                            && !matches!(self.kind(child), "(" | ")" | ",")
+                    })
                     .collect();
                 self.delim_depth += 1;
                 let out = if items.is_empty() {
@@ -5553,6 +5565,28 @@ fn dotted_piece(text: &str) -> bool {
                 };
                 self.delim_depth -= 1;
                 out
+            }
+            "tuple_element" if self.language.name == "csharp" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) && self.leaf_name(child).is_none() && self.kind(child) != "predefined_type" {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        parts.push(value);
+                    } else if let Some(word) = self.leaf_name(child).or_else(|| (self.kind(child) == "predefined_type").then(|| self.text_string(child))) {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, &word);
+                        out.push(']');
+                        parts.push(out);
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
             }
             // `UnsafeCell<State>`, `Vec<Entry>`: a generic type holds the base
             // and the type arguments, and both are names the lexer reads.
@@ -5698,7 +5732,7 @@ fn dotted_piece(text: &str) -> bool {
             // whose text is `string` / `float`), not literals (`string_literal`
             // / `real_literal`), so the one-pass reader writes `n:string` /
             // `n:float`.
-            "string" | "float" if self.language.name == "csharp" => format!("[\"n\",\"{kind}\"]"),
+            "string" | "float" | "bool" if self.language.name == "csharp" => format!("[\"n\",\"{kind}\"]"),
             "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
             | "none" | "null" | "undefined" | "regex" | "comment"
             | "arrow_function" | "function_expression" | "generator_function" => "0".to_string(),
@@ -6440,7 +6474,7 @@ fn dotted_piece(text: &str) -> bool {
             // the call had no name at all.
             "attribute" | "member_expression" | "member_access_expression" | "member_access"
             | "conditional_member_access" | "navigation_expression" | "optional_chaining_expression"
-            | "field_expression" | "select" => {
+            | "field_expression" | "select" | "qualified_type" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
                 let object = children.first().copied();
@@ -6740,6 +6774,40 @@ fn dotted_piece(text: &str) -> bool {
 
     /// A dotted name off the source: `a . b` and `a.b` are the same path, and
     /// `this` becomes `self` as the flow form spells it.
+    /// Formats a C# pattern child (`{ BoolValue: true }`, `{ } x`) when
+    /// `form` has no dedicated arm for its node kind.
+    fn cs_pattern_form(&mut self, id: u32) -> Option<String> {
+        let node = self.node(id);
+        if node.first_child == NONE {
+            if let Some(name) = self.leaf_name(id) {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &name);
+                out.push(']');
+                return Some(out);
+            }
+            return None;
+        }
+        let mut parts = Vec::new();
+        for child in self.children(id) {
+            if matches!(self.kind(child), "{" | "}" | "(" | ")" | "," | ":")
+                || (self.is_layout(child) && self.leaf_name(child).is_none())
+            {
+                continue;
+            }
+            let form = self.form(child);
+            if form != "0" {
+                parts.push(form);
+            } else if let Some(pat) = self.cs_pattern_form(child) {
+                parts.push(pat);
+            }
+        }
+        match parts.len() {
+            0 => None,
+            1 => Some(parts.remove(0)),
+            _ => Some(format!("[\"m\",[{}]]", parts.join(","))),
+        }
+    }
+
     pub(crate) fn path_of(&self, id: u32) -> String {
         if let Some(name) = self.soft_name(id) {
             return name;
