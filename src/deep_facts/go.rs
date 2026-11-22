@@ -594,6 +594,21 @@ impl<'a> Walker<'a> {
             if let Some(literal) = self.go_find_func_literal(&parts[equal + 1..]) {
                 self.go_bind_func_literal(&declared[0], literal, line);
             }
+            // `var emptyJSON = JSONText("{}")` binds the name to the class it
+            // converts to, as `emptyJSON := JSONText("{}")` does in `go_assign`.
+            // The value is the spec's one expression, possibly in a list.
+            let values: Vec<u32> = parts[equal + 1..]
+                .iter()
+                .flat_map(|&part| match self.kind(part) {
+                    "expression_list" => self.children(part).into_iter().filter(|&child| !self.is_layout(child)).collect(),
+                    _ => vec![part],
+                })
+                .collect();
+            if let [value] = values[..] {
+                if let Some(class) = self.constructed(value) {
+                    self.facts.vars.push((declared[0].clone(), class));
+                }
+            }
         }
         for name in declared {
             self.lexer_event(b'a', line, std::slice::from_ref(&name), &value, false);
