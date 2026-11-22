@@ -1617,6 +1617,33 @@ impl Emit<'_> {
         // with no callee and no argument, and a call the lexer names then has
         // no atom in that value to be covered by, where the merge of names it
         // replaced was excused. That is the C# reader's gap, not this one.
+        // `new System.NotSupportedException()`: a C# qualified constructor call
+        // constructs the named type rather than calling a method on the
+        // namespace prefix, so its receiver is empty (`0`).
+        if word == "new" && self.lang.tag == "CS" {
+            let mut at = 1usize;
+            let mut name = String::new();
+            if let Some(first) = self.word(at) {
+                name.push_str(&first);
+                at += 1;
+                while self.op_byte(at) == b'.' {
+                    match self.word(at + 1) {
+                        Some(segment) => {
+                            name.push('.');
+                            name.push_str(&segment);
+                            at += 2;
+                        }
+                        None => break,
+                    }
+                }
+            }
+            if name.contains('.') && self.op_byte(at) == b'(' {
+                let line = self.toks[self.pos + 1].line;
+                self.pos += at;
+                self.chain(out, String::new(), name, line);
+                return;
+            }
+        }
         if word == "new" && matches!(self.lang.tag, "JAVA" | "KT") {
             let mut at = 1usize;
             let mut name = String::new();
