@@ -101,6 +101,9 @@ pub struct Emit<'a> {
     pub calls: &'a mut Vec<Call>,
     /// The name this function's receiver goes by, besides `self` and `this`.
     pub receiver: &'a str,
+    /// The statement is a declaration with no block after it (see
+    /// `Parser::bodyless`), so a generic method's name is a call.
+    pub bodyless: bool,
 }
 
 impl Emit<'_> {
@@ -1378,7 +1381,7 @@ impl Emit<'_> {
         if from >= to {
             return String::new();
         }
-        let mut nested = Emit { src, lang, toks: &all[from..to], pos: 0, calls: self.calls, receiver };
+        let mut nested = Emit { src, lang, toks: &all[from..to], pos: 0, calls: self.calls, receiver, bodyless: false };
         let mut value = String::new();
         nested.mix(&mut value, 0);
         value
@@ -1408,7 +1411,7 @@ impl Emit<'_> {
                     }
                 }
                 let mut nested =
-                    Emit { src: slice, lang: self.lang, toks: &tokens, pos: 0, calls: self.calls, receiver: self.receiver };
+                    Emit { src: slice, lang: self.lang, toks: &tokens, pos: 0, calls: self.calls, receiver: self.receiver, bodyless: false };
                 let mut value = String::new();
                 nested.mix(&mut value, 0);
                 if value != "0" {
@@ -1535,6 +1538,34 @@ impl Emit<'_> {
                 }
             }
             return;
+        }
+        // `void MapFrom<TValueResolver>(Expression<...> e) where ...;` in an
+        // interface, or `public T Get<T>(int a)`: a C# generic method
+        // declaration. The type parameters sit between the name and its
+        // parameter list, and read as comparisons they put `MapFrom` and its
+        // type parameter into the record as names, where the CST writes the
+        // method's call with its parameters. Only a name that follows a type
+        // word opens a declaration: `Gen<T>(a)` after `=` or `return` is a
+        // generic invocation the CST writes as names, and is left alone.
+        if self.lang.tag == "CS"
+            && self.pos > 0
+            && self.toks[self.pos - 1].kind == Kind::Ident
+            && !matches!(
+                lexeme(self.src, &self.toks[self.pos - 1], self.lang).as_str(),
+                "return" | "new" | "await" | "throw" | "case" | "is" | "as" | "in" | "out" | "ref" | "yield" | "else" | "when"
+            )
+            && self.op_byte(1) == b'<'
+        {
+            if let Some(after) = self.skip_balanced(self.pos + 1, b"<", b">") {
+                if self.op_byte_at(after) == b'(' && self.bodyless {
+                    self.pos = after + 1;
+                    let id = self.new_call(word.clone(), line);
+                    let mut args = String::new();
+                    self.list(&mut args, b')', true);
+                    out.push_str(&format!("[\"c\",{id},0,[{args}]]"));
+                    return;
+                }
+            }
         }
         // Scala's `new Foo { ... }` and `new A with B { ... }` build an
         // anonymous class: a constructor call on the first type, not a run of
@@ -2752,7 +2783,7 @@ mod tests {
             }
         }
         let mut calls = Vec::new();
-        let mut emit = Emit { src: body.as_bytes(), lang, toks: &tokens, pos: 0, calls: &mut calls, receiver: "" };
+        let mut emit = Emit { src: body.as_bytes(), lang, toks: &tokens, pos: 0, calls: &mut calls, receiver: "", bodyless: false };
         let mut out = String::new();
         emit.mix(&mut out, 0);
         (out, calls.into_iter().map(|call| call.path).collect())

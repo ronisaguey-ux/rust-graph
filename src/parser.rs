@@ -124,6 +124,9 @@ pub struct Parser<'a> {
     closed_line: u32,
     /// The next `{` belongs to an arm of the open branch.
     rearmed: bool,
+    /// The statement being read is a bodyless declaration: nothing followed it
+    /// that opens a block, so a `;` or the line ends it.
+    bodyless: bool,
     /// Pascal: a header waiting for its `begin`.
     pending: Option<Head>,
     last_line: u32,
@@ -158,6 +161,7 @@ pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
         closed_branch: false,
         closed_line: 0,
         rearmed: false,
+        bodyless: false,
         pending: None,
         last_line: 1,
         ahead: VecDeque::new(),
@@ -2537,7 +2541,15 @@ impl<'a> Parser<'a> {
         let receiver = self.top().receiver.clone();
         let mut calls = std::mem::take(&mut self.facts.symbols[symbol].calls);
         let mut out = String::new();
-        let mut emit = Emit { src: self.src, lang: self.lang, toks, pos: 0, calls: &mut calls, receiver: &receiver };
+        let mut emit = Emit {
+            src: self.src,
+            lang: self.lang,
+            toks,
+            pos: 0,
+            calls: &mut calls,
+            receiver: &receiver,
+            bodyless: self.bodyless,
+        };
         write(&mut emit, &mut out);
         self.facts.symbols[symbol].calls = calls;
         out
@@ -4897,7 +4909,11 @@ impl<'a> Parser<'a> {
             self.inline_function(head, stmt);
             return;
         }
+        // A statement that ends at `;` or the line, not at a block, is a
+        // bodyless declaration when it is one (`void F<T>() where T : X;`).
+        self.bodyless = !stmt.iter().any(|token| self.is_op(token, b"{"));
         self.statement(stmt);
+        self.bodyless = false;
         let _ = line;
     }
 
