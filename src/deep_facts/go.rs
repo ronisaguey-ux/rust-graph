@@ -1497,8 +1497,57 @@ impl<'a> Walker<'a> {
 
     /// The name an assignment target binds: `x`, `this.index`, `xs[0]` -> `xs`
     /// (`x, y := ...` splits into two children before this is called).
+    /// A selector whose receiver chain runs through a call, `flags.Lookup("h").Hidden`.
+    /// The call has no name of its own, so the target is the member after the
+    /// call: `.Hidden`, as the lexer writes it. `decl_path` named the callee's
+    /// chain instead and read the methods `PersistentFlags` and `Lookup` as
+    /// fields, which made every such assignment a target list the lexer never wrote.
+    fn go_chain_has_call(&self, id: u32) -> bool {
+        let mut at = id;
+        loop {
+            match self.kind(at) {
+                "selector_expression" | "field_access" => match self.children(at).first() {
+                    Some(&base) => at = base,
+                    None => return false,
+                },
+                "call_expression" => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    /// The name a selector writes after the last call in its receiver chain.
+    /// `a.B().C.D` names `.C.D`; `f().x` names `.x`.
+    fn go_call_tail(&self, id: u32) -> String {
+        let children = self.children(id);
+        let name = children
+            .iter()
+            .copied()
+            .rev()
+            .find(|&child| self.kind(child) != "." && self.leaf_name(child).is_some())
+            .map(|child| self.decl_path(child))
+            .unwrap_or_default();
+        let head = match children.first().copied() {
+            Some(base) if self.kind(base) == "call_expression" => String::new(),
+            Some(base) if matches!(self.kind(base), "selector_expression" | "field_access") && self.go_chain_has_call(base) => {
+                self.go_call_tail(base)
+            }
+            Some(base) => self.decl_path(base),
+            None => String::new(),
+        };
+        if head.is_empty() {
+            format!(".{name}")
+        } else {
+            format!("{head}.{name}")
+        }
+    }
+
     pub(crate) fn decl_target(&self, id: u32) -> Option<String> {
         match self.kind(id) {
+            "selector_expression" | "field_access" if self.go_chain_has_call(id) => {
+                let path = self.go_call_tail(id);
+                (!path.is_empty()).then_some(path)
+            }
             "identifier" | "field_identifier" | "this" | "selector_expression" | "field_access" => {
                 let path = self.decl_path(id);
                 (!path.is_empty()).then_some(path)
