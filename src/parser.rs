@@ -1011,6 +1011,7 @@ impl<'a> Parser<'a> {
                     self.word_at(&self.stmt, index).is_some_and(|w| matches!(w.as_str(), "struct" | "enum" | "union"))
                 })
                 || self.c_enum_body()
+                || self.java_annotation_type_body()
                 || self.go_type_body()
                 // `enum class Kind { A { … }, B { … } }`: an entry's body is a
                 // type body too, and the entry itself (`A {`) is a member, not
@@ -4798,6 +4799,45 @@ impl<'a> Parser<'a> {
         false
     }
 
+    /// `public @interface Retryable {`: the body of an annotation type holds
+    /// element declarations, `long maxRetries() default 3;`. `default 3` is an
+    /// element's value, not a call, and the CST writes no event for any of it,
+    /// so the body is a type body like an interface's.
+    fn java_annotation_type_body(&self) -> bool {
+        // The header may start with annotations of its own (`@Target({…})
+        // @Retention(…) public @interface Retryable {`), so any `@interface` counts.
+        self.lang.tag == "JAVA"
+            && (0..self.stmt.len()).any(|at| self.is_op(&self.stmt[at], b"@") && self.word_at(&self.stmt, at + 1).as_deref() == Some("interface"))
+    }
+
+    /// The tokens a Java declaration spends on annotations in front of its
+    /// modifiers and type: `@Override`, `@Bean(name = "x")`, `@java.lang.Deprecated`,
+    /// with modifiers allowed between them. `@interface` is a declaration, not
+    /// an annotation, and stops the walk.
+    fn skip_java_annotations(&self, toks: &[Token]) -> usize {
+        let mut at = 0;
+        loop {
+            at += self.skip_modifiers(&toks[at..]);
+            if !toks.get(at).is_some_and(|t| self.is_op(t, b"@")) || self.word_at(toks, at + 1).as_deref() == Some("interface") {
+                return at;
+            }
+            at += 1;
+            if self.word_at(toks, at).is_none() {
+                return at;
+            }
+            at += 1;
+            while toks.get(at).is_some_and(|t| self.is_op(t, b".")) && self.word_at(toks, at + 1).is_some() {
+                at += 2;
+            }
+            if toks.get(at).is_some_and(|t| self.is_op(t, b"(")) {
+                match self.group_at(toks, at) {
+                    Some((_, close)) => at = close + 1,
+                    None => return at,
+                }
+            }
+        }
+    }
+
     /// `ret name(args) ... {` where no keyword says it is a function.
     fn c_style_head(&self, toks: &[Token]) -> Option<Head> {
         // Go functions always open with `func` (`keyword_head`), never C-style
@@ -4808,7 +4848,13 @@ impl<'a> Parser<'a> {
         }
         // Skip leading modifiers (`private protected override (A, B) F()`):
         // otherwise a modifier before a tuple return type looks like `name(`.
-        let mod_skip = self.skip_modifiers(toks);
+        let mut mod_skip = self.skip_modifiers(toks);
+        // Java: `@Bean(name = "x") public Object make() {`. The annotation's own
+        // parenthesised group is the first `name(` in the statement, and it named
+        // the method `Bean`. The annotations in front of a declaration name nothing.
+        if self.lang.tag == "JAVA" {
+            mod_skip += self.skip_java_annotations(&toks[mod_skip..]);
+        }
         let toks = &toks[mod_skip..];
         if self.top_level_assign(toks).is_some_and(|equal| !toks[..equal].iter().any(|t| self.is_op(t, b"("))) {
             return None;
