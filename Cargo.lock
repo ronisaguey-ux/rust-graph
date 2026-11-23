@@ -28,6 +28,7 @@ dependencies = [
 name = "deep-grammars"
 version = "0.1.0"
 dependencies = [
+ "deep-rt",
  "rust-graph-deep",
 ]
 
