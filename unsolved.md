@@ -301,3 +301,19 @@ token after four stalled attempts, so this class of hang cannot come back throug
 
 Verified: the full hostile-input sweep (43 languages, four rounds each, every 7th prefix) runs with
 zero hangs and zero slow cases, where before it produced seven hangs (Objective-C x4, MATLAB x3).
+
+## 2026-11-23 — erlang's whole corpus loses one call per file
+
+The dump says erlang is 2105 files with a loss out of 2115 rows, and the loss kind split is calls
+2057, events 49, imports 7, var 1, symbol 1. It is not the functions: `--deep` on a single
+cowboy file already writes `cowboy_app.erl:start` and `:stop`, and a node-kind table for
+`function_head` moved the corpus numbers by exactly zero (measured, then reverted).
+
+The call is `module` on the line of `-module(cowboy_app).`. The lexer path reads the attribute as a
+call — `--lexer` on that file lists `['module',15], ['behaviour',16], ['export',18], ['export',19],
+['start',21], ['pid',21], ['stop',25], ['start_link',23]` — and the CST record writes no call for an
+attribute. Only `module` is unmatched (the other attributes pair), so one line per file is the whole
+of erlang's loss count.
+
+The fix belongs where the lexer decides a name followed by `(` is a call: an erlang attribute
+`-name(...)` is a declaration, never a call. Guard on the `-` before the name and on ERL.
