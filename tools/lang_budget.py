@@ -89,6 +89,11 @@ def measure(binary: Path, root: Path, limit: int) -> dict:
             value = row.get("micros")
             if isinstance(value, int):
                 micros.append(value)
+    # The first parse of a run pays for the workspace allocation, which is a
+    # property of starting the process and not of the language. Dropping it is
+    # what makes the number comparable between a 200-file sample and a corpus.
+    if len(micros) > 5:
+        micros = micros[1:]
     for path in sorted(work.rglob("*"), reverse=True):
         if path.is_file():
             path.unlink()
@@ -139,12 +144,18 @@ def main() -> int:
         print(json.dumps(rows, indent=1))
         return 0
 
-    over = [row for row in rows if row["p95"] > BUDGET_US]
+    # A sample too small to have a p95 says so instead of reporting the max as
+    # if it were one.
+    thin = [row for row in rows if row["parsed"] < 20]
+    over = [row for row in rows if row["parsed"] >= 20 and row["p95"] > BUDGET_US]
     print(f"{'language':<14}{'files':>7}{'parsed':>8}{'p50 us':>9}{'p95 us':>9}{'max us':>9}  budget")
     for row in rows:
-        mark = "OVER" if row["p95"] > BUDGET_US else "ok"
+        if row["parsed"] < 20:
+            mark = "sample"
+        else:
+            mark = "OVER" if row["p95"] > BUDGET_US else "ok"
         print(f"{row['language']:<14}{row['files']:>7}{row['parsed']:>8}{row['p50']:>9}{row['p95']:>9}{row['max']:>9}  {mark}")
-    print(f"\n{len(rows)} languages, {len(over)} over the {BUDGET_US} us p95 budget")
+    print(f"\n{len(rows)} languages, {len(over)} over the {BUDGET_US} us p95 budget, {len(thin)} with a sample too thin to judge")
     if args.check and over:
         return 1
     return 0

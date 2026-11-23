@@ -227,3 +227,59 @@ The earlier dead ends are still accurate and are not repeated here: `P2-02`
 (exact-value-first pairing) stays reverted, the struct-literal-vs-block question
 is settled by `deep_facts`' `rust_form` arms, and the arrow-function symbol
 disagreement is closed by `nested` in the guard.
+
+## 2026-11-23 — the 45-language wiring and the 31-lane fleet
+
+Owner order: "wire it all fucking in ... perfected for all 45 languages", "never leave the box idle,
+don't stop launching till the plan is DONE", "keep logging stuff to unsolved.md", "when I say ts I
+mean this" (the whole 45-language corpus, never TypeScript).
+
+What landed in the tree (not yet pushed — suite run pending):
+- `language_for` now routes 25 more languages to a CST reader: php, ruby, dart, elixir, haskell,
+  lua, r, solidity, sql, shell, groovy, julia, visual-basic, pascal, cobol, nim, crystal, zig, d,
+  fsharp, ocaml, erlang, clojure, tcl, awk. Before this, batch_d/e/f grammars existed in the repo
+  but were never compiled into the binary, so those languages were lexer-only and invisible in
+  every number we quoted.
+- `deep_integration::Lang` gained the 25 variants and their `language()` arms;
+  `deep_facts::{tag, lang_for_forced}` gained their tags. `auto` still picks only PY/JS/TS/RS, so
+  the default build's behaviour is unchanged — `RG_AUDIT=1` is what measures the new ones.
+- batch_d/e/f imported their lexer helpers as `crate::batch_d::…`, which only resolves inside
+  `deep-grammars`; changed to `super::…` (batch_d) and `super::super::batch_d::…` (batch_e/f) so
+  the same files compile both in that crate and by path inside the binary.
+- The binary builds with all 25 wired (verified: `box-lane . build` EXIT=0).
+
+Still missing, named rather than hidden:
+- ruby and elm have no grammar at all (batch_b has ruby; elm has none). ruby IS wired; elm is not.
+- assembly, matlab, fortran, powershell, css, html, yaml, json have grammars but no definition
+  tables in `deep_facts::kinds`, so their CST record is the module symbol only — they need a
+  `Kinds` table each before their numbers mean anything.
+- The 45 corpora are on the box at /tmp/opencode/corpus45 (4.6G, 129,915 files), and
+  /root/dump45.sh is writing one loss dump per language to /root/dump45/<lang>.log.
+
+Fleet on the box (31 lanes, 5 shared target dirs so the disk holds them):
+- 10 Claude haiku (l1-l10): java/kotlin, go/zig, csharp/fsharp, swift/objc, scala/groovy,
+  rust/d, js/ts, python/ruby, php/perl, lua/tcl/awk.
+- 5 hy4-free (l11-l15), 5 beam-free (l16-l20), 6 free-model lanes (l26-l30).
+- 5 hydrogen (l21-l25) run on the laptop because agy on the box refuses its copied OAuth creds
+  ("authentication required"); their builds still go to the box through box-lane.
+- opencode needed `~/.config/opencode/opencode.json` with V1 `permission` rules (V2 `permissions`
+  is rejected by OpenCode V1) and PATH=/root/.cargo/bin in the environment, or every bash call is
+  refused and cargo is "not found".
+
+## 2026-11-23 — P6-11 shared infrastructure, measured
+
+The item asks for one node-kind table per language, one recovery policy, and no per-language
+copies of the arena or the guard. What the tree now shows:
+
+- `crates/deep-rt/src/cst.rs:17` is the only `struct Arena` in `src/` and `crates/`.
+- `crates/deep-rt/src/recovery.rs:56` is the only `fn recover`.
+- The six copied runtime files are gone from `src/deep/` (`budget.rs`, `pairs.rs`, `lexer.rs`,
+  `parser.rs`, `syntax.rs`, `tree.rs`), each in its own commit; `crates/deep-grammars/src/deep.rs`
+  is now a re-export shim over `deep_rt`, so the grammars and the binary compile one runtime.
+- `deep_facts::kinds(lang)` is the single table mechanism: one `Kinds { definitions, calls,
+  imports, soft, family }` per language, 15 arms with a documented empty default for the
+  languages whose tables have not landed yet. That default is a data gap, not a second mechanism.
+
+Budget gate for P6-13 is now measurable rather than asserted: `tools/lang_budget.py` runs the
+binary over a per-language sample and reads the `micros` it already emits, printing p50/p95/max
+and exiting 1 when any language's p95 is over the 3000 us line.
