@@ -199,10 +199,10 @@ fn a_language_without_a_deep_parser_is_a_recorded_and_counted_fallback() {
     assert!(source_row(&json, "src/app.py").contains("\"parsed_by\":\"deep\""));
     assert!(json.contains(r#""deep":2,"lexer":1,"fallbacks":1"#), "{json}");
     // A fallback is a downgrade, not a failure: the facts are still there.
-    assert!(json.contains("\"id\":\"src/main.rb:greet\""), "{json}");
+    assert!(json.contains("\"id\":\"src/main.elm:greet\""), "{json}");
     assert!(json.contains("\"id\":\"src/lib.rs:f\""), "{json}");
 
-    // Under `auto` the `.rb` file is the lexer's by choice, not by fallback, and
+    // Under `auto` the `.elm` file is the lexer's by choice, not by fallback, and
     // the counter stays at zero.
     let (auto, _) = tree.json(&["--stdout", "--no-cache"]);
     assert!(auto.contains(r#""deep":2,"lexer":1,"fallbacks":0"#), "{auto}");
