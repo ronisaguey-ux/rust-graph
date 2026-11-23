@@ -338,3 +338,27 @@ compared anyway. Now the CST record is compared on all of them and the mismatche
 powershell is the worst, 333 of its files lose something, which is a grammar with no fact table
 rather than a regression. This is P6-15's case — documented, not left failing quietly — and the
 new baselines are the ones to work from.
+
+## Erlang: an attribute is not a call (2026-11-23, bb4ce6ca8)
+
+`-module(cowboy_app).`, `-export([start/2]).`, `-record(state, {..}).` open nearly every Erlang file,
+and the lexer read the attribute name as a callee and its group as arguments: one call the CST never
+writes, on the first form of 2,048 files. Because the call check stops at a symbol's first miss, that
+single call was 2,048 of erlang's 2,115 loss rows.
+
+The fix is in the reader, not a guard on the comparison: when a name is followed by `(` and the name
+itself follows a `-` that opens the form, the group is consumed and no value is written — which is
+what the CST records for an attribute. `X = a - b(c)` keeps its call, because its `-` follows an
+expression.
+
+Measured on the full corpus45/erlang tree (4,335 files, 433 MB, release, `--no-cache`):
+
+| metric | before | after |
+|---|---|---|
+| files that lose something | 2,105 | 1,819 |
+| loss rows | 2,115 | 1,851 |
+
+The 286 files that went clean were losing only the attribute call. What remains is a different class:
+1,728 call rows where the lexer records a call (`start_link`, `supervisor:start_link(..)`) and the
+deep record has none, because Erlang has no fact table in `deep_facts` — `--deep` on the corpus
+returns no symbols at all. That is the next item, and it is a table, not a guard.
