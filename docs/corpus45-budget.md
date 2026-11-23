@@ -167,16 +167,21 @@ skipping.
 
 ## The scoreboard after the 2026-11-23 fixes
 
-> **Caveat, read before quoting these numbers.** The box was at load average 17 with two lane
-> agents running when this pass was taken, so every absolute value here is inflated — p50 as well as
-> p95. It is a shape, not a verdict: the ordering is what it is for, and the gate count must be
-> re-taken on an idle box before it is called.
+Re-taken on a quiet box (the runaway lane processes were killed first: eight `rust-graph build`
+runs had been burning every core for 6-13 hours, all of them stale binaries with an Objective-C hang
+that is already fixed - the same corpora parse in 5 s with the current one).
 
-Measured against the freshly built binary (`--sample 200`), under that load: **26 of 44 judged
-languages read as over the 3 ms line** (visual-basic has no sample). c, cobol, kotlin, php, powershell, ruby, r, tcl,
-typescript, elm, groovy, haskell, matlab, ocaml, solidity, fortran, assembly and bash are under it;
-lua is 3.06 ms, i.e. a hair over. The heavy ones are d 21.4, fsharp 18.4, zig 16.0, vbnet 15.5,
-perl 9.8, julia 8.8, rust 8.2, elixir 8.1, sql 8.1, swift 8.0, go 7.9, nim 7.3, python 7.3, erlang 6.3.
+**26 of 44 judged languages are over the 3 ms line** (visual-basic has no sample). Under it: c, cobol,
+kotlin, php, powershell, ruby, r, tcl, typescript, elm, groovy, haskell, matlab, ocaml, solidity,
+fortran, assembly, bash. Over it: d 20.3, fsharp 18.3, zig 15.9, vbnet 14.9, perl 9.7, julia 8.6,
+rust 8.2, awk 8.2, elixir 8.1, swift 7.9, sql 7.9, go 7.7, erlang 7.4, nim 7.4, python 7.1,
+crystal 6.6, dart 6.1, objective-c 6.1, clojure 5.9, javascript 5.9, cpp 5.5, csharp 5.4, pascal 5.0,
+java 4.1, scala 3.7, lua 3.1 (ms, p95).
+
+The tail is **size × the base rate**, not a pathological construct: awk's five slowest files are its
+biggest (273 KB at 0.056 µs/byte, 258 KB of `.awk` at 0.057), and every language's p95 sits at
+0.05-0.12 µs/byte. P6-13 is therefore one global constant-factor problem, and it closes for many
+languages at once when the rate falls.
 
 ### Where a statement's time goes: calls are 7× a bare value
 
