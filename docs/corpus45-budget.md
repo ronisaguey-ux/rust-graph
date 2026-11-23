@@ -149,3 +149,18 @@ The next lever is therefore inside a token, not above it. `perf` is blocked
 (`kernel.perf_event_paranoid = 4`, `ptrace_scope = 1`) and `valgrind` is not installed, so the
 sub-lexer split has to come from instrumentation in a debug build: time `skip_trivia`, the token
 classifier and the token build separately, the same way the lex/statement split above was taken.
+
+### Inside the lexer: trivia is a third of it
+
+Instrumented on the same file (debug, 38,311 tokens; the timing calls themselves inflate the total):
+
+| | ms | share of lex |
+|---|---:|---:|
+| `Lexer::next` total | 116.4 | 100% |
+| `skip_trivia` inside it | 38.1 | 33% |
+| classifier + token build | 78.3 | 67% |
+
+So the remaining order of attack, by measured size, is: the statement/facts layer (62% of the parse),
+then the token classifier (about 26%), then trivia (about 13%). Trivia alone cannot move the gate,
+which is why the next change belongs in the statement layer or the classifier, not in whitespace
+skipping.
