@@ -87,6 +87,9 @@ Two findings follow, and they are different work:
 1. **The gate is a constant factor, not a loss.** No loss-shaped fix moves a language from 13 ms to
    3 ms: the same one-pass reader costs 0.14 µs/byte for every language, so p95 falls when the reader
    gets faster, not when a language gets cleaner. That is the whole of P6-13's remaining distance.
-2. **A pathological case has its own item**: a 78 KB jQuery build takes 5.46 s, i.e. the deep
-   JavaScript reader is superlinear on one construct in that file. 490× the median per byte on a small
-   file is a bug, not a budget line, and it is worth a fixture of its own before the phase closes.
+2. **A pathological case has its own item, and it is quadratic**: the 78 KB jQuery build takes
+   3.1–5.4 s. The raw deep parse of it is 104 ms (debug `deep-scan probe`), so the time is in the
+   facts walk, not the grammar. Splitting the file in half gives 1.5 s for **both** halves
+   (~0.75 s each): half the bytes cost a quarter of the time, which is the classic O(n²). 490× the
+   median per byte on a small file is a bug, not a budget line — and because the same walk serves
+   every language, fixing it moves p95 for all of them at once, which is what P6-13 actually needs.
