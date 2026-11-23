@@ -726,6 +726,12 @@ pub const LANGUAGES: &[Language] = &[
         line_comments: &["%"],
         block_comments: &[],
         quotes: b"\"",
+        // OTP 27 documents a function with a triple-quoted string: an attribute
+        // that opens with three quotes and closes on its own line. Read one quote
+        // at a time the attribute swallowed the definitions below it, and a whole
+        // module came back with no symbols at all (stdlib/src/ets.erl: 0 from the
+        // lexer, 1 from the deep reader).
+        triple_quotes: true,
         semicolons: false,
         classes: &[],
         ..BASE
