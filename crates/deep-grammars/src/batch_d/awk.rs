@@ -18,7 +18,7 @@
 //!   `{ print }` alone is modelled, `{ print }` after a pattern is a
 //!   `pattern_action`.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 
