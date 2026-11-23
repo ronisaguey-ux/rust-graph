@@ -1993,7 +1993,7 @@ impl<'a> Walker<'a> {
                         walk.push(first);
                     }
                 }
-                "member_expression" | "attribute" => {
+                "member_expression" | "attribute" | "member" | "safe_member" | "member_access_expression" | "scoped_property_access_expression" => {
                     let path = self.path_of(node);
                     if !path.is_empty() {
                         out.push(path);
@@ -3244,7 +3244,11 @@ impl<'a> Walker<'a> {
             // (`import java.io.Serializable`) or with selectors
             // (`import a.b.{C, D}`), and neither had an arm: 147 files of the
             // scala corpus lost every import.
+            "import_declaration" if self.facts.tag == "HS" => self.hs_import(id),
             "import_declaration" if self.kinds.family == Family::Plain => self.scala_import(id),
+            "import_directive" | "require_statement" | "use_declaration" | "trait_use_declaration" | "include_expression" | "open_declaration" | "using_statement" | "uses_clause" => {
+                self.generic_path_import(id);
+            }
             "import_statement" | "import_from_statement" => {
                 if self.is_js() {
                     self.js_import(id);
@@ -3316,6 +3320,218 @@ impl<'a> Walker<'a> {
     /// way: the records have to mean the same thing for the guard to keep the
     /// tree. Generic type arguments on an aliased type (`Dictionary<K, V>`) and
     /// `global::` qualifiers are normalized to match the dotted module path.
+    pub(crate) fn hs_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut module = String::new();
+        let mut alias = String::new();
+        let mut after_as = false;
+        for child in self.children(id) {
+            match self.kind(child) {
+                "as" => after_as = true,
+                "module_name" => {
+                    let name = self.text_string(child);
+                    if after_as {
+                        alias = name;
+                    } else {
+                        module = name;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if module.is_empty() {
+            return;
+        }
+        if alias.is_empty() {
+            alias = module.rsplit('.').next().unwrap_or(&module).to_string();
+        }
+        self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+    }
+
+    pub(crate) fn generic_path_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let raw = self.text_string(id);
+        let mut strings: Vec<(usize, String)> = Vec::new();
+        let bytes = raw.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                let q = bytes[i];
+                let start = i;
+                i += 1;
+                let mut val = String::new();
+                while i < bytes.len() && bytes[i] != q {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 1;
+                    }
+                    val.push(bytes[i] as char);
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+                strings.push((start, val));
+            } else {
+                i += 1;
+            }
+        }
+        if !strings.is_empty() {
+            for (pos, module) in strings {
+                if module.is_empty() {
+                    continue;
+                }
+                let before = raw[..pos].trim_end();
+                let prev_word = before
+                    .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or("");
+                let is_kw = matches!(
+                    prev_word,
+                    "import" | "require" | "require_relative" | "require_once" | "include" | "include_once" | "load" | "use" | "open" | "using" | ""
+                );
+                let (alias, kind) = if !is_kw && !prev_word.is_empty() && before.ends_with(prev_word) {
+                    (prev_word.to_string(), IMPORT_MODULE)
+                } else {
+                    let last = module.rsplit('/').next().unwrap_or(&module).to_string();
+                    (last, IMPORT_STAR)
+                };
+                self.facts.imports.push(Import { line, module, alias, kind, ..Import::default() });
+            }
+            return;
+        }
+        let trimmed = raw.trim().trim_end_matches(';').trim();
+        let mut rest = trimmed;
+        for kw in ["import ", "uses ", "use ", "open ", "using ", "require ", "include "] {
+            if let Some(r) = rest.strip_prefix(kw) {
+                rest = r.trim();
+                break;
+            }
+        }
+        for kw in ["function ", "const ", "static "] {
+            if let Some(r) = rest.strip_prefix(kw) {
+                rest = r.trim();
+            }
+        }
+        if let Some(brace_open) = rest.find('{') {
+            if let Some(brace_close) = rest[brace_open..].find('}') {
+                let prefix = rest[..brace_open]
+                    .trim()
+                    .trim_matches(|c| c == '\\' || c == '.')
+                    .replace("\\", ".")
+                    .replace("::", ".");
+                let inner = &rest[brace_open + 1..brace_open + brace_close];
+                for part in inner.split(',') {
+                    let part = part.trim();
+                    if part.is_empty() {
+                        continue;
+                    }
+                    let (path_s, alias_s) = match part.split_once(" as ") {
+                        Some((p, a)) => (p.trim(), Some(a.trim().to_string())),
+                        None => (part, None),
+                    };
+                    let segs: Vec<&str> = path_s.split(|c| c == '\\' || c == '.').filter(|s| !s.is_empty()).collect();
+                    if let Some((&last, init)) = segs.split_last() {
+                        let mut module = prefix.clone();
+                        for s in init {
+                            if !module.is_empty() {
+                                module.push('.');
+                            }
+                            module.push_str(s);
+                        }
+                        let alias = alias_s.unwrap_or_else(|| last.to_string());
+                        self.facts.imports.push(Import {
+                            line,
+                            module,
+                            name: last.to_string(),
+                            alias,
+                            kind: IMPORT_MODULE,
+                        });
+                    }
+                }
+                return;
+            }
+        }
+        for item in rest.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            let item = item.split('(').next().unwrap_or(item).trim();
+            let (path_part, explicit_alias) = match item.split_once(" as ") {
+                Some((p, a)) => (p.trim(), a.split_whitespace().next().unwrap_or("").to_string()),
+                None => (item, String::new()),
+            };
+            let mut module = String::new();
+            for tok in path_part.split_whitespace() {
+                if matches!(tok, "hiding" | "show" | "hide" | "if" | "deferred") {
+                    break;
+                }
+                let cleaned = tok.trim_matches(|c| c == '\\' || c == '.').replace("\\", ".").replace("::", ".");
+                if cleaned.is_empty() {
+                    continue;
+                }
+                module.push_str(&cleaned);
+            }
+            let module = module.trim_end_matches('.').to_string();
+            if module.is_empty() {
+                continue;
+            }
+            let alias = if explicit_alias.is_empty() {
+                module.rsplit('.').next().unwrap_or("").to_string()
+            } else {
+                explicit_alias
+            };
+            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+        }
+    }
+
+    pub(crate) fn lua_local_declaration(&mut self, id: u32) {
+        let line = self.line(id);
+        let raw = self.text_string(id);
+        if raw.contains("require") {
+            if let Some((lhs, rhs)) = raw.split_once('=') {
+                let rhs_t = rhs.trim();
+                if rhs_t.starts_with("require") {
+                    let bytes = rhs_t.as_bytes();
+                    let mut i = 0;
+                    while i < bytes.len() {
+                        if bytes[i] == b'"' || bytes[i] == b'\'' {
+                            let q = bytes[i];
+                            i += 1;
+                            let mut val = String::new();
+                            while i < bytes.len() && bytes[i] != q {
+                                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                    i += 1;
+                                }
+                                val.push(bytes[i] as char);
+                                i += 1;
+                            }
+                            let alias = lhs
+                                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                                .filter(|s| !s.is_empty() && *s != "local")
+                                .last()
+                                .unwrap_or("")
+                                .to_string();
+                            if !val.is_empty() && !alias.is_empty() {
+                                self.facts.imports.push(Import {
+                                    line,
+                                    module: val,
+                                    alias,
+                                    kind: IMPORT_MODULE,
+                                    ..Import::default()
+                                });
+                                return;
+                            }
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+            }
+        }
+        self.expression_statement(id);
+    }
+
     pub(crate) fn cs_using(&mut self, id: u32) {
         let line = self.line(id);
         let raw = self.text_string(id);
@@ -4223,6 +4439,18 @@ fn dotted_piece(text: &str) -> bool {
             push_string(&mut out, &name);
             out.push(']');
             return out;
+        }
+                if matches!(
+            kind,
+            "member" | "safe_member" | "scope" | "member_access_expression" | "scoped_property_access_expression"
+        ) && matches!(self.facts.tag.as_str(), "RB" | "CR" | "PHP" | "LUA" | "DART" | "SOL" | "R") {
+            let p = self.path_of(id);
+            if !p.is_empty() {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &p);
+                out.push(']');
+                return out;
+            }
         }
         match kind {
             // `Foo::class`, `Foo::bar`: a callable reference is one dotted name
@@ -7149,7 +7377,7 @@ fn dotted_piece(text: &str) -> bool {
             if self.node(child).first_child != NONE {
                 // Swift's `.some(...)` parses `some` as an `ERROR` node inside
                 // `implicit_member_expression` because `some` is also a keyword.
-                if self.kind(child) == "ERROR" {
+                if matches!(self.kind(child), "ERROR" | "member_expression" | "method_call_tail") {
                     let name = self.member_name(child);
                     if !name.is_empty() {
                         return name;
@@ -7391,10 +7619,13 @@ fn dotted_piece(text: &str) -> bool {
         }
         match self.kind(id) {
             "identifier" | "property_identifier" | "private_property_identifier" | "type_identifier"
-            | "shorthand_property_identifier" | "this" | "super" => {
+            | "shorthand_property_identifier" | "this" | "super"
+            | "constant" | "name" | "variable_name" | "self" | "parent" => {
                 let text = self.text_string(id);
-                if text == "this" {
+                if text == "this" || text == "$this" {
                     "self".to_string()
+                } else if self.facts.tag == "PHP" && text.starts_with('$') && text.len() > 1 {
+                    text[1..].to_string()
                 } else if self.language.name == "csharp" && text.starts_with('@') && text.len() > 1 {
                     text[1..].to_string()
                 } else {
@@ -7410,6 +7641,7 @@ fn dotted_piece(text: &str) -> bool {
             // Swift's `a?.f()` is an `optional_chaining_expression`; read through
             // the default arm the call lost its name and was written as `""`.
             "attribute" | "member_expression" | "member_access" | "conditional_member_access"
+            | "member" | "safe_member" | "scope" | "member_access_expression" | "scoped_property_access_expression"
             // Scala spells `x.y` as `select`; without it a dotted call callee
             // path was empty, so every `a.b(c)` call lost its name.
             | "select"
