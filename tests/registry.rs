@@ -64,7 +64,10 @@ fn every_cst_grammar_answers_on_the_extensions_it_ships() {
         let language = deep::language_for(path).unwrap_or_else(|| panic!("{path} has no CST grammar"));
         assert_eq!(language.name, name, "{path}");
     }
-    assert!(deep::language_for("a.rb").is_none(), "an unregistered extension must not answer");
+    // Ruby has a grammar now, so the extension that must stay unanswered is the
+    // one language with none: elm. A negative assertion on a language that has
+    // since been wired in is a test that fails for the right change.
+    assert!(deep::language_for("a.elm").is_none(), "an unregistered extension must not answer");
 }
 
 #[cfg(all(feature = "deep", feature = "parser"))]
