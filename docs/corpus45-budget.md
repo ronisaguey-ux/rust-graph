@@ -113,3 +113,20 @@ Losses are byte-identical on `corpus45/erlang` (1,851 rows over 1,819 files, bef
 is what the early return promises: no want, no loss. Corpus times on a quiet machine: p50 365 µs,
 p95 7.5 ms, 9.3 s for 4,335 files. Earlier percentiles in this document were measured while a test
 run was compiling and are optimistic-looking by ~2×; these are the numbers to compare against.
+
+## What the gate now needs: where the 0.1 µs/byte goes
+
+Measured on `otp/lib/stdlib/src/ets.erl` (133,466 bytes, 38,311 tokens, the p95 file of the erlang
+tree) with the token loop instrumented: **lexing is 38% of the parse and the statement/fact layer is
+62%** (debug: 45.1 ms of 117.4 ms). Per token that is ~390 ns of total work in release, and the gate
+(3 ms for this file) is ~78 ns — so P6-13 is a ~5× constant-factor job on both layers, not a
+single bug:
+
+| layer | share | note |
+|---|---:|---|
+| `Lexer::next` | 38% | one pass, no re-reading; the token itself is cheap |
+| statements + facts | 62% | `Emit`, event strings, `format!` per value, frame bookkeeping |
+
+The corpus p95 is not a pathological file at all: the file at p95 is 133 KB at 0.116 µs/byte, and the
+density of files over 20 KB is p50 0.139 / p95 0.392 / p99 0.502 µs/byte. The tail is size × a
+uniform constant, so every language closes at once when the constant falls.
