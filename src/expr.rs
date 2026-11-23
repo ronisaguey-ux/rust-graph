@@ -78,7 +78,109 @@ pub(crate) fn c_declaration_word(word: &str) -> bool {
     C_SPECIFIERS.contains(&word) || C_TYPE_WORDS.contains(&word) || matches!(word, "enum" | "union" | "_Atomic")
 }
 
+/// Function-level sampling profiler. `perf` is unusable on this machine
+/// (`kernel.perf_event_paranoid=4`, `ptrace_scope=1`) and valgrind is not
+/// installed, so the binary samples itself: `RG_SAMPLE=1` starts a thread that
+/// every 200 µs reads the tag the code last set and rewrites a table of counts
+/// to `$RG_SAMPLE` (or `/tmp/opencode/rg-profile.txt` when it is just `1`).
+///
+/// The tag is restored when the function returns — without that, every sample
+/// after a nested call was credited to the child, and the parent (the statement
+/// preamble) looked five times cheaper than it is.
+///
+/// The whole cost when the profiler is off is one relaxed load per call site.
+pub mod prof {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+
+    const UNKNOWN: u8 = 2;
+    static SAMPLING: AtomicU8 = AtomicU8::new(UNKNOWN);
+    static PROBE: AtomicU8 = AtomicU8::new(0);
+    static SAMPLES: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+    const NAMES: [&str; 13] = [
+        "idle", "next_token", "end_statement", "values", "mix", "chain", "argument", "list", "ident", "event",
+        "with_emit", "lexeme", "parse",
+    ];
+
+    /// Whether to sample. The first call resolves `RG_SAMPLE` and starts the
+    /// thread; after that it is one relaxed load, so an off profiler costs a
+    /// branch and the parse is the tree's own (measured, not assumed).
+    #[inline]
+    pub fn on() -> bool {
+        match SAMPLING.load(Ordering::Relaxed) {
+            UNKNOWN => {
+                let value = std::env::var_os("RG_SAMPLE");
+                let sampling = value.is_some();
+                if sampling {
+                    let path = value
+                        .and_then(|text| text.into_string().ok())
+                        .filter(|text| text.contains('/'))
+                        .unwrap_or_else(|| "/tmp/opencode/rg-profile.txt".to_string());
+                    std::thread::spawn(move || sample(path));
+                }
+                SAMPLING.store(sampling as u8, Ordering::Relaxed);
+                sampling
+            }
+            other => other == 1,
+        }
+    }
+
+    /// The tag to restore on drop: the caller's.
+    pub struct Probe(u8);
+
+    impl Probe {
+        #[inline]
+        pub fn enter(id: u8) -> Self {
+            Probe(PROBE.swap(id, Ordering::Relaxed))
+        }
+    }
+
+    impl Drop for Probe {
+        #[inline]
+        fn drop(&mut self) {
+            PROBE.store(self.0, Ordering::Relaxed);
+        }
+    }
+
+    fn sample(path: String) {
+        let mut at = 0u32;
+        loop {
+            std::thread::sleep(std::time::Duration::from_micros(200));
+            SAMPLES[PROBE.load(Ordering::Relaxed) as usize & 31].fetch_add(1, Ordering::Relaxed);
+            at += 1;
+            if at % 500 == 0 {
+                write_table(&path);
+            }
+        }
+    }
+
+    fn write_table(path: &str) {
+        use std::fmt::Write as _;
+        let mut total = 0u64;
+        let mut rows: Vec<(u64, usize)> = Vec::new();
+        for (id, count) in SAMPLES.iter().enumerate() {
+            let n = count.load(Ordering::Relaxed);
+            total += n;
+            rows.push((n, id));
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut out = String::new();
+        let _ = writeln!(out, "samples {total}");
+        for (n, id) in rows {
+            if n == 0 {
+                continue;
+            }
+            let name = NAMES.get(id).copied().unwrap_or("?");
+            let _ = writeln!(out, "{name}\t{n}\t{:.1}%", 100.0 * n as f64 / total.max(1) as f64);
+        }
+        let tmp = format!("{path}.tmp");
+        if std::fs::write(&tmp, out).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
 pub fn lexeme(src: &[u8], token: &Token, lang: &Language) -> String {
+    let _probe = prof::on().then(|| prof::Probe::enter(11));
     let text = String::from_utf8_lossy(&src[token.start as usize..token.end as usize]);
     if lang.case_insensitive {
         text.to_ascii_lowercase()
@@ -154,6 +256,7 @@ impl Emit<'_> {
 
     /// Comma-separated values up to `close` (0: the end of the tokens).
     pub fn list(&mut self, out: &mut String, close: u8, in_call: bool) -> usize {
+        let _probe = prof::on().then(|| prof::Probe::enter(7));
         let mut count = 0;
         loop {
             let before = self.pos;
@@ -408,6 +511,7 @@ impl Emit<'_> {
     }
 
     fn argument(&mut self, out: &mut String, close: u8) {
+        let _probe = prof::on().then(|| prof::Probe::enter(6));
         if let Some(name) = self.word(0) {
             let colon = self.op_byte(1) == b':'
                 && (NAMED_ARGS_WITH_COLON.contains(&self.lang.tag)
@@ -433,6 +537,7 @@ impl Emit<'_> {
 
     /// Everything up to a comma or closer, combined.
     pub fn mix(&mut self, out: &mut String, close: u8) {
+        let _probe = prof::on().then(|| prof::Probe::enter(4));
         let start = out.len();
         // Calls written by the pattern: in Rust `Pat => value` drops everything
         // before the arrow, so a call the pattern spelled — `Some(q @ ..)` in
@@ -1898,6 +2003,7 @@ impl Emit<'_> {
     }
 
     fn ident(&mut self, out: &mut String, close: u8) {
+        let _probe = prof::on().then(|| prof::Probe::enter(8));
         let token = &self.toks[self.pos];
         let line = token.line;
         let word = lexeme(self.src, token, self.lang);
@@ -2974,6 +3080,7 @@ impl Emit<'_> {
     }
 
     fn chain(&mut self, out: &mut String, mut value: String, mut path: String, line: u32) {
+        let _probe = prof::on().then(|| prof::Probe::enter(5));
         let mut constructed = None;
         let mut type_arg_line = None;
         let mut generic_callee = false;

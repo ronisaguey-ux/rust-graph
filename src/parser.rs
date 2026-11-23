@@ -161,6 +161,7 @@ pub struct Parser<'a> {
 }
 
 pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
+    let _probe = crate::expr::prof::on().then(|| crate::expr::prof::Probe::enter(12));
     let parser = Parser {
         src,
         lang,
@@ -291,6 +292,7 @@ impl<'a> Parser<'a> {
     /// meaning was decided by reading past it must not re-read those tokens
     /// from the lexer, which has already moved on.
     fn next_token(&mut self) -> Token {
+        let _probe = crate::expr::prof::on().then(|| crate::expr::prof::Probe::enter(1));
         self.ahead.pop_front().unwrap_or_else(|| self.lexer.next())
     }
 
@@ -2849,6 +2851,7 @@ impl<'a> Parser<'a> {
     }
 
     fn event(&mut self, text: &str) {
+        let _probe = crate::expr::prof::on().then(|| crate::expr::prof::Probe::enter(9));
         let symbol = self.top().symbol;
         let events = &mut self.facts.symbols[symbol].events;
         if !events.is_empty() {
@@ -2858,6 +2861,7 @@ impl<'a> Parser<'a> {
     }
 
     fn with_emit(&mut self, toks: &[Token], write: impl FnOnce(&mut Emit, &mut String)) -> String {
+        let _probe = crate::expr::prof::on().then(|| crate::expr::prof::Probe::enter(10));
         let symbol = self.top().symbol;
         // `Emit` borrows the receiver for the length of the walk, so it is moved
         // out of the frame and put back rather than cloned: one allocation and
@@ -2899,6 +2903,7 @@ impl<'a> Parser<'a> {
 
     /// A whole expression; several top-level values become one tuple.
     fn values(&mut self, toks: &[Token]) -> String {
+        let _probe = crate::expr::prof::on().then(|| crate::expr::prof::Probe::enter(3));
         if self.lang.tag == "RS"
             && toks.len() > 2
             && toks.iter().any(|t| t.kind == Kind::Ident && self.raw(t) == b"let")
@@ -2925,6 +2930,7 @@ impl<'a> Parser<'a> {
     }
 
     fn end_statement(&mut self) {
+        let _probe = crate::expr::prof::on().then(|| crate::expr::prof::Probe::enter(2));
         // A statement that opens with `.` is the tail of a chain whose head was
         // a block that just closed: `let line = if c { a } else { b }` then
         // `.max(1.0);`. The CST writes that chain inside the enclosing value, so
@@ -5408,6 +5414,7 @@ impl<'a> Parser<'a> {
     }
 
     fn statement(&mut self, stmt: &[Token]) {
+        let _probe = crate::expr::prof::on().then(|| crate::expr::prof::Probe::enter(11));
         let Some(first) = stmt.first() else { return };
         // `public typealias LoggingCollection<Base: Collection> = LoggingSequence<Base>`
         // and `associatedtype EncodedScalar: BidirectionalCollection where ...`
