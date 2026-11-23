@@ -315,7 +315,7 @@ fn line_prefix(c: &mut Cursor) -> Kind {
 fn word(c: &mut Cursor) -> Kind {
     let start = c.rest();
     let length = c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
-    let text = crate::batch_d::lex::upper(&start[..length]);
+    let text = super::super::batch_d::lex::upper(&start[..length]);
     keyword(&text)
 }
 
@@ -392,7 +392,7 @@ fn keyword(text: &[u8]) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_f::harness;
+    use super::harness;
 
     const VALID: &[(&str, &[&str])] = &[
         (

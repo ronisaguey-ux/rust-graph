@@ -349,7 +349,7 @@ pub fn lex_dart(c: &mut Cursor) -> Kind {
             COMMENT
         }
         b'/' if c.peek_at(1) == b'*' => {
-            if crate::batch_d::lex::block_comment(c, b"/*", b"*/", true) {
+            if super::super::batch_d::lex::block_comment(c, b"/*", b"*/", true) {
                 COMMENT
             } else {
                 COMMENT
@@ -549,7 +549,7 @@ fn number(c: &mut Cursor) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_f::harness;
+    use super::harness;
 
     const VALID: &[(&str, &[&str])] = &[
         (
