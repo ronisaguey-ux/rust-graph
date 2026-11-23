@@ -2859,9 +2859,12 @@ impl<'a> Parser<'a> {
 
     fn with_emit(&mut self, toks: &[Token], write: impl FnOnce(&mut Emit, &mut String)) -> String {
         let symbol = self.top().symbol;
-        let receiver = self.top().receiver.clone();
+        // `Emit` borrows the receiver for the length of the walk, so it is moved
+        // out of the frame and put back rather than cloned: one allocation and
+        // one copy saved per statement, and a large file has thousands.
+        let receiver = std::mem::take(&mut self.frames.last_mut().expect("the module frame is never popped").receiver);
         let mut calls = std::mem::take(&mut self.facts.symbols[symbol].calls);
-        let mut out = String::new();
+        let mut out = String::with_capacity(8 + toks.len() * 8);
         let mut emit = Emit {
             src: self.src,
             lang: self.lang,
@@ -2873,6 +2876,7 @@ impl<'a> Parser<'a> {
         };
         write(&mut emit, &mut out);
         self.facts.symbols[symbol].calls = calls;
+        self.frames.last_mut().expect("the module frame is never popped").receiver = receiver;
         out
     }
 
