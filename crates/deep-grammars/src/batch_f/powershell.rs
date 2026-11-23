@@ -842,7 +842,7 @@ fn here_string(c: &mut Cursor) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::harness;
+    use super::super::harness;
     use crate::deep::syntax::ERROR;
     use crate::deep::tree::{HAS_ERROR, TOKEN};
     use crate::deep::Budget;
