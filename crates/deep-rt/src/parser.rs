@@ -566,7 +566,14 @@ pub struct Workspace {
     pub events: Vec<Event>,
     pub tree: Tree,
     links: Vec<Link>,
+    /// How many parses grew a buffer of this workspace. Per-instance, so a test
+    /// measuring one workspace is not disturbed by another running in parallel.
+    allocations: u64,
 }
+
+/// How many parses had to grow the arena, process-wide. See
+/// [`Workspace::allocations`].
+pub static ALLOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Workspace {
     /// Lex, pair and parse a file with `language`.
@@ -590,10 +597,41 @@ impl Workspace {
         }
         lex(src, language, &mut self.tokens);
         self.pairs.build(&self.tokens, language);
-        match language.tables {
+        let capacity = self.capacity();
+        let outcome = match language.tables {
             Some(tables) => self.parse_tables(src, language, tables, budget),
             None => self.parse_descent(src, language, budget),
+        };
+        // A parse that grew a buffer allocated. The steady state over a corpus is
+        // zero: a run that keeps growing is a corpus whose largest file keeps
+        // getting bigger, and one that grows on every file is not reusing
+        // anything.
+        if self.capacity() != capacity {
+            self.allocations += 1;
+            ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        outcome
+    }
+
+    /// How many parses grew the arena, process-wide.
+    pub fn allocations() -> u64 {
+        ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many parses grew this workspace. The steady state is zero.
+    pub fn growth(&self) -> u64 {
+        self.allocations
+    }
+
+    /// The capacity of every buffer this workspace owns, summed: a parse that
+    /// changes it allocated.
+    fn capacity(&self) -> usize {
+        self.tokens.kind.capacity()
+            + self.tokens.end.capacity()
+            + self.pairs.pair.capacity()
+            + self.events.capacity()
+            + self.links.capacity()
+            + self.tree.nodes.capacity()
     }
 
     /// The recursive descent engine: the one `grammar!` code runs on.

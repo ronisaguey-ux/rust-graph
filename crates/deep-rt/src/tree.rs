@@ -95,7 +95,9 @@ impl Tree {
     }
 
     /// Builds the tree from the events, consuming forward-parent links as it goes.
-    pub(crate) fn build(&mut self, events: &mut [Event], tokens: &Tokens, language: &Language, src_len: u32) {
+    /// Build the tree from the driver's events. Public because a grammar's own
+    /// test can hand it a hand-made event list, as `src/deep/tests.rs` does.
+    pub fn build(&mut self, events: &mut [Event], tokens: &Tokens, language: &Language, src_len: u32) {
         self.nodes.clear();
         self.stack.clear();
         // Stack entries from `unset` up still lack a start: no token reached them yet.
