@@ -5,7 +5,7 @@
 //! A duplicate key is a tree with two `pair` nodes: JSON has no rule against it,
 //! and a scanner may care.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 
 rust_graph_deep::grammar! { JSON {

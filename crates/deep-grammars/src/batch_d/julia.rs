@@ -20,7 +20,7 @@
 //!   clause inside, not as their own node.
 //! - **`where` clauses** take a type parameter list, not full expressions.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 
