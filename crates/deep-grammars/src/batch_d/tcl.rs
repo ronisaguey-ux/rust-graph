@@ -18,7 +18,7 @@
 //! - **A missing final newline** is an error: every command needs its
 //!   terminator.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 

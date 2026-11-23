@@ -23,7 +23,7 @@
 //! - **Colon handling.** `:` is a key separator only when a space, a newline or
 //!   the end follows it, which is YAML's own rule; `a:b` is one scalar.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 
