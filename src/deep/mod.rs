@@ -21,7 +21,11 @@ pub mod batch_a;
 pub mod batch_b;
 #[path = "../../crates/deep-grammars/src/batch_c/mod.rs"]
 pub mod batch_c;
-pub mod budget;
+// The runtime lives once, in `crates/deep-rt`: one lexer, one pair pass, one
+// tree, one budget, one node-kind table. These names stay because every grammar
+// and every test in this package writes `crate::deep::…`.
+pub use deep_rt::{budget, lexer, pairs, parser, syntax, tree};
+
 pub mod go;
 pub mod java;
 // The one JavaScript grammar: the same file `deep-grammars` compiles against
@@ -33,16 +37,11 @@ pub mod javascript;
 pub mod javascript_tests;
 pub mod json;
 pub mod json_grammar;
-pub mod lexer;
-pub mod pairs;
-pub mod parser;
 // The one Python grammar: the same file `deep-grammars` compiles against
 // its runtime shim, so the two paths can never drift apart again.
 #[path = "../../crates/deep-grammars/src/python.rs"]
 pub mod python;
 pub mod rust;
-pub mod syntax;
-pub mod tree;
 
 #[cfg(test)]
 mod tests;
