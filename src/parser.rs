@@ -2237,6 +2237,14 @@ impl<'a> Parser<'a> {
                 stmt.drain(..label);
             }
         }
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && stmt.len() >= 2
+            && stmt[0].kind == Kind::Ident
+            && self.is_op(&stmt[1], b":")
+            && !matches!(self.word_at(&stmt, 0).as_deref(), Some("case") | Some("default"))
+        {
+            stmt.drain(..2);
+        }
         let in_expression = !self.brackets.is_empty();
         let rearmed = std::mem::take(&mut self.rearmed);
         let start_col = stmt.first().map_or(0, |token| token.col);
@@ -3994,7 +4002,8 @@ impl<'a> Parser<'a> {
 
     fn path_import(&mut self, stmt: &[Token]) -> bool {
         let mut start = 0;
-        while self.word_at(stmt, start).as_deref().is_some_and(|word| MODIFIERS.contains(&word)) {
+        let fsharp_open = self.lang.tag == "FS" && self.word_at(stmt, 0).as_deref() == Some("open");
+        while !fsharp_open && self.word_at(stmt, start).as_deref().is_some_and(|word| MODIFIERS.contains(&word)) {
             start += 1;
             if stmt.get(start).is_some_and(|t| self.is_op(t, b"(")) {
                 if let Some((_, close)) = self.group_at(stmt, start) {
@@ -5286,6 +5295,10 @@ impl<'a> Parser<'a> {
                         && !NOT_A_NAME.contains(&name.as_str())
                         && !(matches!(self.lang.tag, "C" | "CPP" | "OBJC")
                             && matches!(name.as_str(), "__attribute__" | "__attribute" | "__declspec"))
+                        && !(self.lang.tag == "PHP"
+                            && name == "use"
+                            && at > 0
+                            && self.is_op(&toks[at - 1], b")"))
                 }) || (js_class && self.is_op(&toks[at], b"]"))
             })
         })?;
@@ -5414,6 +5427,15 @@ impl<'a> Parser<'a> {
     }
 
     fn statement(&mut self, stmt: &[Token]) {
+        if matches!(self.lang.tag, "C" | "CPP" | "OBJC")
+            && stmt.len() >= 2
+            && stmt[0].kind == Kind::Ident
+            && self.is_op(&stmt[1], b":")
+            && !matches!(self.word_at(stmt, 0).as_deref(), Some("case") | Some("default"))
+        {
+            self.statement(&stmt[2..]);
+            return;
+        }
         let _probe = crate::expr::prof::on().then(|| crate::expr::prof::Probe::enter(11));
         let Some(first) = stmt.first() else { return };
         // `public typealias LoggingCollection<Base: Collection> = LoggingSequence<Base>`
@@ -5835,6 +5857,17 @@ impl<'a> Parser<'a> {
             // Go file that waits on a channel kept a row of its own
             // (transport.go:1145,1172).
             if self.lang.tag == "GO" && equal == 0 && self.is_op(&stmt[0], b"<-") {
+                return;
+            }
+            if self.lang.tag == "SH"
+                && equal >= 2
+                && stmt[equal - 1].kind == Kind::Ident
+                && stmt[equal - 2].kind == Kind::Ident
+                && !matches!(
+                    self.word_at(stmt, 0).as_deref(),
+                    Some("local" | "export" | "readonly" | "declare" | "typeset" | "let")
+                )
+            {
                 return;
             }
             // In Kotlin, `->` separates a `when` arm or lambda parameter header

@@ -747,6 +747,16 @@ impl<'a> Walker<'a> {
     }
 
     pub(crate) fn java_header(&mut self, id: u32) {
+        if self.kind(id) == "enhanced_for_statement" {
+            let children = self.children(id);
+            if let Some(colon) = children.iter().position(|&c| self.kind(c) == ":") {
+                if let Some(name) = children[..colon].iter().rev().find_map(|&c| self.leaf_name(c)) {
+                    let rhs = children[colon + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                    let val = rhs.map(|c| self.form(c)).filter(|v| !v.is_empty()).unwrap_or_else(|| "0".to_string());
+                    self.lexer_event(b'a', self.line(id), &[name], &val, false);
+                }
+            }
+        }
         let mut parts = Vec::new();
         for child in self.children(id) {
             if self.is_layout(child) {
@@ -770,6 +780,37 @@ impl<'a> Walker<'a> {
             // here: a nested `if`/`for`/`while` is a node of its own and
             // `java_enter` reaches it, so reading it here would write its events
             // twice.
+            if kind == "for_header" {
+                let fline = self.line(child);
+                let mut found_decl = false;
+                for fc in self.children(child) {
+                    if self.kind(fc) == "variable_declarator" {
+                        found_decl = true;
+                        let dch = self.children(fc);
+                        if let Some(eq) = dch.iter().position(|&n| self.kind(n) == "=") {
+                            if let Some(name) = dch[..eq].iter().rev().find_map(|&n| self.leaf_name(n)) {
+                                let rhs = dch[eq + 1..].iter().copied().find(|&n| !self.is_layout(n));
+                                let val = rhs.map(|n| self.form(n)).filter(|v| !v.is_empty()).unwrap_or_else(|| "0".to_string());
+                                self.lexer_event(b'a', fline, &[name], &val, false);
+                            }
+                        }
+                    }
+                }
+                if !found_decl && self.text(child).contains(&b':') {
+                    let non_layout: Vec<u32> = self.children(child).into_iter().filter(|&n| !self.is_layout(n)).collect();
+                    if non_layout.len() >= 2 {
+                        let rhs = non_layout[non_layout.len() - 1];
+                        let target_node = non_layout[non_layout.len() - 2];
+                        if let Some(name) = self.leaf_name(target_node) {
+                            let val = {
+                                let f = self.form(rhs);
+                                if !f.is_empty() { f } else { "0".to_string() }
+                            };
+                            self.lexer_event(b'a', fline, &[name], &val, false);
+                        }
+                    }
+                }
+            }
             if matches!(
                 kind,
                 "expression_statement"
