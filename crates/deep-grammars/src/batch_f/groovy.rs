@@ -22,7 +22,7 @@
 //! - **Annotations and traits** are lexed as `@` and a name and are accepted as
 //!   a statement of their own, not attached to the declaration that follows.
 
-use crate::batch_d::lex;
+use super::super::batch_d::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
 
@@ -427,7 +427,7 @@ fn number(c: &mut Cursor) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_f::harness;
+    use super::harness;
 
     const VALID: &[(&str, &[&str])] = &[
         (

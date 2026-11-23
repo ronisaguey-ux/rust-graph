@@ -21,7 +21,7 @@
 //! - **A `case` label range** (`1..10`) parses as two constants and `..`.
 //! - **Assembler blocks** (`asm ... end`) are not modelled.
 
-use crate::batch_d::lex;
+use super::super::batch_d::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
 
@@ -361,7 +361,7 @@ fn keyword(text: &[u8]) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_f::harness;
+    use super::harness;
 
     const VALID: &[(&str, &[&str])] = &[
         (
