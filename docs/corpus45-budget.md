@@ -198,3 +198,47 @@ A call costs 7.5× a constant, and calls are what a real source is made of (`ets
 them ≈ 7.5 ms of its 9 ms). The per-call work is `word()` returning a `String` (an allocation), the
 `Call.path` (a second), then `format!("[\"c\",{id},0,[{args}]]")` (a third, plus formatting). That is
 the next place to look, and it is inside the 62% statement share rather than the 38% lexer share.
+
+### Where the parse actually spends its time (measured, not guessed)
+
+`perf` is unusable on this machine (`kernel.perf_event_paranoid=4`, `ptrace_scope=1`) and valgrind is
+not installed, so the binary samples itself. `RG_SAMPLE=1` (or a path) turns the sampler on: a thread
+reads a global "current function" tag every 200 µs and rewrites a table of counts, every 100 ms, to
+`$RG_SAMPLE` or `/tmp/opencode/rg-profile.txt`. The tag is restored when the function returns, which
+matters — without the restore every sample after a nested call was credited to the child, and the
+parent (the statement preamble) looked five times cheaper than it is. With the sampler off, each
+call site costs one relaxed load and the parse is the tree's own.
+
+```
+RG_SAMPLE=1 rust-graph build corpus45/erlang --no-cache     # then read the table
+```
+
+4335 files / 423 MB / 15.0 s on a quiet box:
+
+| tag | share of the run | share of the parse |
+|---|---:|---:|
+| pipeline (read, sha256, facts → json) | 37.6 % | — |
+| `next_token` (the lexer) | 18.2 % | 29 % |
+| `chain` (postfix loop in the value walk) | 12.5 % | 20 % |
+| `mix` (one value, combined) | 9.3 % | 15 % |
+| `lexeme` (a word, as a `String`) | 9.0 % | 14 % |
+| `ident` | 4.5 % | 7 % |
+| `end_statement` bookkeeping | 3.4 % | 5 % |
+| `parse` body (statement loop) | 3.7 % | 6 % |
+| `list`, `values`, `argument`, `event`, `with_emit` | 2.0 % | 3 % |
+
+The pipeline share does not enter the budget: `note_micros` times `parse_source` only.
+
+Allocation traffic in the same run, counted with a temporary counter in the pool: **53.2 M blocks,
+4.4 GB** over 4335 files — about one allocation per token, which is `lexeme` (a fresh `String` per
+word, with a UTF-8 validation pass) plus `Call.path`. The counter is not in the tree: the sampler is
+the tool that ships, and a counter is three lines when a run needs one.
+
+So there is no single hot spot left. The 3-5× cannot come from one fix: the value walk
+(`chain` + `mix` + `lexeme` + `ident`) is 56 % of the parse and is token-at-a-time with a `String`
+per word, and the lexer is the other 29 %. That is a rewrite of both, in steps, with the sampler
+pointing at each step.
+
+The languages that cannot reach the line under this constant went to `docs/HANDOFF-ARGON.md` (P6-15),
+one row each: p95, the factor it needs, the construct that blocks it, what has already been measured
+and reverted, and the code the next attempt has to touch. No row there is an estimate.
