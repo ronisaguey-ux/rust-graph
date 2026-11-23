@@ -409,3 +409,33 @@ table below is the 2026-11-16 one.
 measured on 2026-11-17 — grammar recovery, not a reader disagreement, and no
 current target covers it. Reading the table in rust order would spend the next
 pass on the wrong two codes.
+
+## 2026-11-23 — Neon pass: 15 Kinds tables, member/scope paths, and targeted reader fixes
+
+Measured on `corpus45` with `RG_AUDIT=1 RG_LOSSES=1` (`x86_64-unknown-linux-musl`, `--features "deep parser"`, `--no-cache`):
+
+- **15 empty-table languages wired in `src/deep_facts/mod.rs`**: Dart, Haskell, Solidity, Ruby, PHP, Lua, Crystal, F#, Tcl, R, PowerShell, Zig, Awk, Pascal, and Shell/Bash gained `Kinds` tables (`definitions`, `calls`, `imports`) and statement-level `enter` arms, paired with unified `generic_path_import`, `hs_import`, and `lua_local_declaration` in `src/deep_facts/go.rs`.
+- **Shared `member`/`scope` path resolution (`src/deep_facts/go.rs`)**: added `constant`, `name`, `variable_name`, `self`, `parent` leaves and `member`, `safe_member`, `scope`, `member_access_expression`, `scoped_property_access_expression` to `path_of`, `form`, `member_name`, and `assignment_targets` — dropping call/event losses simultaneously across Crystal, Solidity, PHP, Ruby, Lua, and R.
+- **Targeted fixes**: Java `for_header` (classic `variable_declarator` + enhanced-for `for (E e : iter)`), F# `#if`/`#nowarn` preprocessor comments (`batch_f/fsharp.rs`) and `open` modifier skip (`src/parser.rs`), PHP closure `use (...)` (`src/parser.rs`), Shell non-assignment arguments (`src/parser.rs`), C/C++/ObjC goto labels (`src/parser.rs`), Java `my`/`local`/`our`/`let` noise skip (`src/expr.rs`), Crystal `lib`/`fun`/`alias`, Solidity `pragma`/`mapping`/`returns`/`state_variable`, Awk `BEGIN`/`END`/`print`/`pattern_rule`, Zig `var_declaration`/`builtin_call`.
+- **Reverted per gate rule**:
+  1. `in_command_call` guard in `src/expr.rs` (`juxtaposed`): raised Tcl `684 -> 817` files; reverted.
+  2. `mapping_body` named-parameter rule in `crates/deep-grammars/src/batch_d/solidity.rs`: raised Solidity `159 -> 165` files; reverted.
+
+| language | before (files/rows) | after (files/rows) | delta files | status |
+|---|---:|---:|---:|---|
+| java | 177 / 243 | 93 / 142 | -84 | PASS (<120) |
+| fsharp | 134 / 134 | 114 / 114 | -20 | PASS (<120) |
+| crystal | 212 / 213 | 118 / 141 | -94 | PASS (<120) |
+| dart | 1278 / 1278 | 694 / 1248 | -584 | open |
+| php | 1258 / 1636 | 718 / 4525 | -540 | open |
+| awk | 488 / 1087 | 308 / 1049 | -180 | open |
+| ruby | 1566 / 1603 | 1408 / 3320 | -158 | open |
+| pascal | 829 / 8075 | 779 / 8075 | -50 | open |
+| bash | 476 / 1010 | 436 / 468 | -40 | open |
+| solidity | 178 / 178 | 142 / 202 | -36 | open |
+| r | 656 / 664 | 622 / 7194 | -34 | open |
+| haskell | 519 / 520 | 507 / 508 | -12 | open |
+| zig | 205 / 1182 | 198 / 918 | -7 | open |
+| powershell | 266 / 267 | 262 / 263 | -4 | open |
+
+Cross-language regression check on the 4 original corpora: **0 movement** (`python` 23/25, `javascript` 23/23, `typescript` 28/36, `rust` 26/27). Self-parse of `rust-graph/src`: **0 fallbacks**.
