@@ -465,7 +465,26 @@ impl Emit<'_> {
         // an absent operand and wrong for a rest — that `0` was the whole of
         // `assert_matches!(r, ActivityTask { variant: Some(x), .. })`.
         let mut rest_only = false;
+        // A value reader that returns without moving the cursor is a hang, not a
+        // wrong value: the caller's loop reads the same token forever. The ObjC
+        // message reader did exactly that on a bare `[`, and one hostile-input
+        // test sat on it until the suite was killed. This guard makes the loop
+        // structurally unable to spin: after four attempts at the same token,
+        // the token is consumed.
+        let mut stalled = 0u32;
+        let mut last_pos = usize::MAX;
         while let Some(token) = self.tok(0) {
+            if self.pos == last_pos {
+                stalled += 1;
+                if stalled > 4 {
+                    self.pos += 1;
+                    stalled = 0;
+                    continue;
+                }
+            } else {
+                stalled = 0;
+                last_pos = self.pos;
+            }
             let kind = token.kind;
             if self.lang.tag == "RS" && kind == Kind::Ident && self.word(0).as_deref() == Some("if") {
                 calls_after_pattern = self.calls.len();
