@@ -287,13 +287,13 @@ pub fn lex_fortran(c: &mut Cursor) -> Kind {
                 BAD_STRING
             }
         }
-        b'0'..=b'9' => { crate::batch_d::lex::number(c); NUMBER }
+        b'0'..=b'9' => { super::super::batch_d::lex::number(c); NUMBER }
         b'.' if c.peek_at(1).is_ascii_alphabetic() => dotted_word(c),
-        b'.' if c.peek_at(1).is_ascii_digit() => { c.bump(); crate::batch_d::lex::number(c); NUMBER }
+        b'.' if c.peek_at(1).is_ascii_digit() => { c.bump(); super::super::batch_d::lex::number(c); NUMBER }
         b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
             let start = c.rest();
             let length = c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
-            keyword(&crate::batch_d::lex::upper(&start[..length]))
+            keyword(&super::super::batch_d::lex::upper(&start[..length]))
         }
         b'(' => { c.bump(); LPAREN }
         b')' => { c.bump(); RPAREN }
@@ -441,7 +441,7 @@ fn keyword(text: &[u8]) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_f::harness;
+    use super::harness;
 
     const VALID: &[(&str, &[&str])] = &[
         (

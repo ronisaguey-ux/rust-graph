@@ -228,7 +228,7 @@ pub fn lex_fsharp(c: &mut Cursor) -> Kind {
             COMMENT
         }
         b'(' if c.peek_at(1) == b'*' => {
-            crate::batch_d::lex::block_comment(c, b"(*", b"*)", true);
+            super::super::batch_d::lex::block_comment(c, b"(*", b"*)", true);
             COMMENT
         }
         b'"' => {
@@ -253,8 +253,8 @@ pub fn lex_fsharp(c: &mut Cursor) -> Kind {
             }
         }
         b'\'' => char_literal(c),
-        b'0'..=b'9' => { crate::batch_d::lex::number(c); NUMBER }
-        b'.' if c.peek_at(1).is_ascii_digit() => { c.bump(); crate::batch_d::lex::number(c); NUMBER }
+        b'0'..=b'9' => { super::super::batch_d::lex::number(c); NUMBER }
+        b'.' if c.peek_at(1).is_ascii_digit() => { c.bump(); super::super::batch_d::lex::number(c); NUMBER }
         b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
             let start = c.rest();
             let length = c.eat_while(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'\'');
@@ -364,7 +364,7 @@ fn keyword(text: &[u8]) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_f::harness;
+    use super::harness;
 
     const VALID: &[(&str, &[&str])] = &[
         (
