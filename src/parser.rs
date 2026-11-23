@@ -135,6 +135,11 @@ pub struct Parser<'a> {
     bodyless: bool,
     /// Pascal: a header waiting for its `begin`.
     pending: Option<Head>,
+    /// Every symbol key already used, so `add_symbol` does not rescan the whole
+    /// symbol list per definition. The scan was O(symbols²): 16,000 erlang
+    /// functions cost 883 ms against 107 ms for 4,000, and a 1.82 MB OTP test
+    /// file 1.28 s against 129 ms for its half.
+    taken: std::collections::HashSet<String>,
     last_line: u32,
     /// Tokens read past the cursor to decide what a `{` opens, in stream order.
     ahead: VecDeque<Token>,
@@ -169,6 +174,7 @@ pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
         rearmed: false,
         bodyless: false,
         pending: None,
+        taken: std::collections::HashSet::new(),
         last_line: 1,
         ahead: VecDeque::new(),
         declaring: false,
@@ -2705,7 +2711,7 @@ impl<'a> Parser<'a> {
 
     fn add_symbol(&mut self, name: String, owner: String, kind: u8, line: u32, params: Vec<String>) -> usize {
         let base = if owner.is_empty() { name.clone() } else { format!("{owner}.{name}") };
-        let taken = self.facts.symbols.iter().any(|symbol| symbol.key == base);
+        let taken = !self.taken.insert(base.clone());
         let key = if taken { format!("{base}@{line}") } else { base };
         self.facts.symbols.push(Symbol { key, name, owner, kind, line, end_line: line, params, ..Symbol::default() });
         self.facts.symbols.len() - 1
