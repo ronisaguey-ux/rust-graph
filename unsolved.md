@@ -283,3 +283,21 @@ copies of the arena or the guard. What the tree now shows:
 Budget gate for P6-13 is now measurable rather than asserted: `tools/lang_budget.py` runs the
 binary over a per-language sample and reads the `micros` it already emits, printing p50/p95/max
 and exiting 1 when any language's p95 is over the 3000 us line.
+
+## 2026-11-23 — the Objective-C bracket hang
+
+The suite kept dying at `hostile_input_does_not_crash_the_parser`, which had been "running for over
+60 seconds" and then hit the harness timeout. It was not slow, it was spinning.
+
+A minimal reproducer came out of a delta-debug over the test's own noise: a file whose whole body
+is `[` never returns. `--lexer` hangs too, so it was never the CST parser. The stack said
+`expr::Emit::mix` -> `list` -> `mix`, and instrumentation showed the loop with `pos=0 toks=1`
+forever: `objc_message` found the `[`, could not find a closer, and returned **without moving the
+cursor**, so the caller read the same token again and again.
+
+Three paths returned without advancing — no closer, no name inside the group, and no selector
+(`@[]`, `[]`). All three now skip the group. `mix` also carries a progress guard that consumes a
+token after four stalled attempts, so this class of hang cannot come back through another reader.
+
+Verified: the full hostile-input sweep (43 languages, four rounds each, every 7th prefix) runs with
+zero hangs and zero slow cases, where before it produced seven hangs (Objective-C x4, MATLAB x3).
