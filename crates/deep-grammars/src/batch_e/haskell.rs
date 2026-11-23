@@ -40,7 +40,7 @@
 //! - **Qualified names are one token** (`Data.List.sort`), so the module part
 //!   is not a node of its own.
 
-use crate::batch_d::lex;
+use super::super::batch_d::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
 

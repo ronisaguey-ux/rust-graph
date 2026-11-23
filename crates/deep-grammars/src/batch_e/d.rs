@@ -36,7 +36,7 @@
 //!   builtin storage classes and `pure`/`nothrow`/`override` are.
 //! - **`in`/`out` contract blocks** and `unittest` are not statements here.
 
-use crate::batch_d::lex;
+use super::super::batch_d::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
 
