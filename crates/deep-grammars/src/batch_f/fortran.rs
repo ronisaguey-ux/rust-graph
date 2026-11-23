@@ -441,7 +441,7 @@ fn keyword(text: &[u8]) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::harness;
+    use super::super::harness;
 
     const VALID: &[(&str, &[&str])] = &[
         (
