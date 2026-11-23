@@ -25,7 +25,10 @@ pub mod pascal;
 pub mod powershell;
 pub mod visual_basic;
 
-#[cfg(test)]
+// Not `#[cfg(test)]`: the grammars are also compiled by path into the binary's
+// integration tests, where the module's own cfg(test) does not reach, and every
+// fixture driver in this batch names `super::harness`.
+#[allow(dead_code)]
 pub(crate) mod harness {
     //! Shared fixture driver: parse a file, report the root, the error count and
     //! the top-level node kinds.
