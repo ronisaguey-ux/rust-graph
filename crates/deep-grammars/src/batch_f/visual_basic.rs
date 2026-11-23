@@ -22,7 +22,7 @@
 //!   is not checked against the procedure's head.
 //! - **A `#date#` literal** is one token, so its separators are not checked.
 
-use crate::batch_d::lex;
+use super::super::batch_d::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
 
@@ -440,7 +440,7 @@ fn keyword(text: &[u8]) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_f::harness;
+    use super::harness;
 
     const VALID: &[(&str, &[&str])] = &[
         ("Module1.vb", &["import_statement", "import_statement", "unmodified_declaration"]),

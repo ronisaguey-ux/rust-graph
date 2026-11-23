@@ -373,7 +373,7 @@ fn adjust_depth(change: i32) {
 }
 
 pub fn lex_powershell(c: &mut Cursor) -> Kind {
-    use crate::batch_d::lex;
+    use super::super::batch_d::lex;
     if c.pos() == 0 {
         with_frames(|frames| frames.clear());
     }
@@ -842,7 +842,7 @@ fn here_string(c: &mut Cursor) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch_f::harness;
+    use super::harness;
     use crate::deep::syntax::ERROR;
     use crate::deep::tree::{HAS_ERROR, TOKEN};
     use crate::deep::Budget;
