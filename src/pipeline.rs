@@ -1949,6 +1949,15 @@ fn uncovered(
         wanted.push((event.tag, shape_event(event.tag, event.line, event.payload, &symbol.calls, &mut *accepted, lines, macro_lines)));
     }
     cmp!(0);
+    // Nothing the lexer wrote for this symbol means nothing can be lost for it,
+    // and building the pool to discover that was the guard's quadratic cost:
+    // a module symbol's pool is every event in the file (61,633 rows for a 78 KB
+    // jQuery build) and it was cloned once per symbol comparison - 103 clones,
+    // ~19 million allocations, 2.0 s for a file whose two readers take 111 ms
+    // and 32 ms. Every one of those comparisons had `wanted` empty.
+    if wanted.is_empty() {
+        return Vec::new();
+    }
     let rows_of = |symbol: &crate::facts::Symbol, shapes: &mut std::collections::HashMap<String, Vec<(u8, Shape)>>| {
         shapes.get(&symbol.key).cloned().unwrap_or_else(|| {
             let rows: Vec<(u8, Shape)> = raw_events(&symbol.events)

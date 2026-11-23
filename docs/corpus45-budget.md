@@ -93,3 +93,23 @@ Two findings follow, and they are different work:
    (~0.75 s each): half the bytes cost a quarter of the time, which is the classic O(n²). 490× the
    median per byte on a small file is a bug, not a budget line — and because the same walk serves
    every language, fixing it moves p95 for all of them at once, which is what P6-13 actually needs.
+
+### Fixed: the gate's quadratic clone (2026-11-23)
+
+`uncovered` built its "found" pool — every event of the paired symbol plus every extra one — before
+looking at `wanted`. For a module symbol that pool is the whole file (61,633 rows for a 78 KB jQuery
+build), and it was rebuilt for each of the file's 103 symbol comparisons. Every one of those
+comparisons had `wanted` empty, so the pool could not match anything: it was pure cost.
+
+`if wanted.is_empty() { return Vec::new(); }` before the pool is built. Same file, same machine:
+
+| | before | after |
+|---|---:|---:|
+| `jquery-latest.js`, default (both readers + guard) | 2,070 ms | 476 ms |
+| guard only (`compare:` phase) | 1,919 ms | 240 ms |
+| peak RSS | 22.2 MB | 7.3 MB |
+
+Losses are byte-identical on `corpus45/erlang` (1,851 rows over 1,819 files, before and after), which
+is what the early return promises: no want, no loss. Corpus times on a quiet machine: p50 365 µs,
+p95 7.5 ms, 9.3 s for 4,335 files. Earlier percentiles in this document were measured while a test
+run was compiling and are optimistic-looking by ~2×; these are the numbers to compare against.
