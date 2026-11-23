@@ -317,3 +317,24 @@ of erlang's loss count.
 
 The fix belongs where the lexer decides a name followed by `(` is a call: an erlang attribute
 `-name(...)` is a declaration, never a call. Guard on the `-` before the name and on ERL.
+
+## 2026-11-23 — perl, fortran and powershell now parse (and their numbers went up)
+
+Three languages had a grammar in the repo and no `Lang` to route to, so every one of their files
+fell back with "no deep parser for PL/F90/PS1". Four lines each (enum variant, `language()` arm,
+`tag()`, `lang_for_forced`) took the workspace's own tree from **15 fallbacks to 0 of 738 files**,
+and `tests/rust_fields` passes at 268.
+
+The corpus numbers moved the other way, and that is the honest reading of it:
+
+| language | before | after |
+|---|---|---|
+| perl | 25 files / 26 rows | 34 files / 35 rows |
+| fortran | 4 / 4 | 49 / 49 |
+| powershell | 67 / 84 | 333 / 351 |
+
+A fallback is not counted as a loss row, so those numbers were measuring the few files that got
+compared anyway. Now the CST record is compared on all of them and the mismatches are visible:
+powershell is the worst, 333 of its files lose something, which is a grammar with no fact table
+rather than a regression. This is P6-15's case — documented, not left failing quietly — and the
+new baselines are the ones to work from.
