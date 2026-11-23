@@ -18,7 +18,12 @@ const BIN: &str = env!("CARGO_BIN_EXE_rust-graph");
 /// bytes and builds the same tree in 0.13 s. Each build is held to its own line
 /// rather than the pair being loosened.
 const DEEP_BUILD: bool = cfg!(all(feature = "deep", feature = "parser"));
-const MAX_BINARY_BYTES: u64 = if DEEP_BUILD { 7 * 1024 * 1024 } else { 2 * 1024 * 1024 };
+// The deep build now carries 33 grammars, not 15: wiring the batch_d, batch_e
+// and batch_f languages into `language_for` took the stripped musl binary from
+// about 6 MB to 10.1 MB. P8-13 sets the ceiling for a 45-grammar release at
+// 20 MB with the number recorded, so the budget follows the plan rather than
+// the old 15-language measurement.
+const MAX_BINARY_BYTES: u64 = if DEEP_BUILD { 20 * 1024 * 1024 } else { 2 * 1024 * 1024 };
 const MAX_COLD_START: Duration = Duration::from_millis(50);
 const MAX_THOUSAND_FILES: Duration = if DEEP_BUILD {
     // Measured 2026-11-17 on the 1,000-file tree the test builds (2,434 KB of
