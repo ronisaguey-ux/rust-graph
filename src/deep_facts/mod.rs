@@ -414,6 +414,125 @@ const JS_SOFT: &[&str] = &["from", "of", "get", "set", "module", "global", "type
 /// `match raw[0]` as punctuation and lost the value it names.
 const RS_SOFT: &[&str] = &["union", "default", "raw", "auto", "safe", "macro_rules"];
 
+
+// -- Wave 1 language tables (Dart, Haskell, Solidity, Ruby, PHP, Lua, Crystal, F#, Tcl, R, PowerShell) --
+
+const DART_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "mixin_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "extension_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_declaration", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: true, receiver: false, container: false },
+];
+const DART_CALLS: &[&str] = &["call"];
+const DART_IMPORTS: &[&str] = &["import_directive"];
+
+const HS_DEFS: &[Def] = &[
+    Def { kind: "data_declaration", name: &["constructor"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "newtype_declaration", name: &["constructor"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "type_declaration", name: &["constructor"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "class_declaration", name: &["constructor"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_binding", name: &["variable"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const HS_IMPORTS: &[&str] = &["import_declaration"];
+
+const SOL_DEFS: &[Def] = &[
+    Def { kind: "contract_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "struct_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "free_function", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "constructor_definition", name: &["constructor"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "modifier_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const SOL_CALLS: &[&str] = &["call", "payable_call"];
+const SOL_IMPORTS: &[&str] = &["import_directive"];
+
+const RB_DEFS: &[Def] = &[
+    Def { kind: "class_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "module_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "method_definition", name: &["method_name", "identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const RB_CALLS: &[&str] = &["call", "command_call", "bare_call", "super_call"];
+const RB_IMPORTS: &[&str] = &["require_statement"];
+
+const PHP_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["name"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "interface_declaration", name: &["name"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "trait_declaration", name: &["name"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["name"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "method_declaration", name: &["name"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "function_declaration", name: &["name"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const PHP_CALLS: &[&str] = &["function_call_expression", "new_expression"];
+const PHP_IMPORTS: &[&str] = &["use_declaration", "trait_use_declaration", "include_expression"];
+
+const LUA_DEFS: &[Def] = &[
+    Def { kind: "function_declaration", name: &["function_name", "identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "local_function", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const LUA_CALLS: &[&str] = &["call", "method_call"];
+
+const CR_DEFS: &[Def] = &[
+    Def { kind: "class_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "module_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "struct_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "lib_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "method_definition", name: &["method_name", "identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "fun_declaration", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const CR_CALLS: &[&str] = &["call", "command_call", "super_call"];
+const CR_IMPORTS: &[&str] = &["require_statement"];
+
+const FS_DEFS: &[Def] = &[
+    Def { kind: "module_declaration", name: &["qualified_name", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "namespace_declaration", name: &["qualified_name", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "type_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "let_binding", name: &["binding_pattern", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const FS_CALLS: &[&str] = &["application"];
+const FS_IMPORTS: &[&str] = &["open_declaration"];
+
+const TCL_DEFS: &[Def] = &[
+    Def { kind: "proc_command", name: &["word"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const TCL_CALLS: &[&str] = &["call_command"];
+
+const R_CALLS: &[&str] = &["call"];
+
+const PS1_DEFS: &[Def] = &[
+    Def { kind: "class_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const PS1_CALLS: &[&str] = &["command_expression"];
+
+
+const AWK_DEFS: &[Def] = &[
+    Def { kind: "function_definition", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const AWK_CALLS: &[&str] = &["call"];
+
+const PAS_DEFS: &[Def] = &[
+    Def { kind: "routine_declaration", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const PAS_CALLS: &[&str] = &["call"];
+const PAS_IMPORTS: &[&str] = &["uses_clause"];
+
+const SH_DEFS: &[Def] = &[
+    Def { kind: "function_definition", name: &["word", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "paren_function", name: &["word", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const SH_CALLS: &[&str] = &["simple_command"];
+
+const ZIG_DEFS: &[Def] = &[
+    Def { kind: "fn_declaration", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const ZIG_CALLS: &[&str] = &["call", "builtin_call"];
+
+const PS1_IMPORTS: &[&str] = &["using_statement"];
+
 fn kinds(lang: Lang) -> Kinds {
     match lang {
         Lang::Python => {
@@ -454,6 +573,51 @@ fn kinds(lang: Lang) -> Kinds {
         Lang::Swift => Kinds { definitions: SW_DEFS, calls: SW_CALLS, imports: SW_IMPORTS, soft: &[], family: Family::Plain },
         Lang::Erlang => {
             Kinds { definitions: ERL_DEFS, calls: ERL_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::Dart => {
+            Kinds { definitions: DART_DEFS, calls: DART_CALLS, imports: DART_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Haskell => {
+            Kinds { definitions: HS_DEFS, calls: &[], imports: HS_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Solidity => {
+            Kinds { definitions: SOL_DEFS, calls: SOL_CALLS, imports: SOL_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Ruby => {
+            Kinds { definitions: RB_DEFS, calls: RB_CALLS, imports: RB_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Php => {
+            Kinds { definitions: PHP_DEFS, calls: PHP_CALLS, imports: PHP_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Lua => {
+            Kinds { definitions: LUA_DEFS, calls: LUA_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::Crystal => {
+            Kinds { definitions: CR_DEFS, calls: CR_CALLS, imports: CR_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::FSharp => {
+            Kinds { definitions: FS_DEFS, calls: FS_CALLS, imports: FS_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Tcl => {
+            Kinds { definitions: TCL_DEFS, calls: TCL_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::R => {
+            Kinds { definitions: &[], calls: R_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::PowerShell => {
+            Kinds { definitions: PS1_DEFS, calls: PS1_CALLS, imports: PS1_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Zig => {
+            Kinds { definitions: ZIG_DEFS, calls: ZIG_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::Awk => {
+            Kinds { definitions: AWK_DEFS, calls: AWK_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::Pascal => {
+            Kinds { definitions: PAS_DEFS, calls: PAS_CALLS, imports: PAS_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Shell => {
+            Kinds { definitions: SH_DEFS, calls: SH_CALLS, imports: &[], soft: &[], family: Family::Plain }
         }
         // The other grammars have no definition table here yet; the walk still
         // returns a record with the module symbol, which is what the caller
@@ -2364,6 +2528,34 @@ impl<'a> Walker<'a> {
                 self.lexer_event(b'x', line, &[], &value, false);
             }
         }
+        if kind == "lib_definition" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let idx = self.push_call("lib".to_string(), line);
+            let cname = self.children(id).into_iter().find(|&c| matches!(self.kind(c), "constant" | "scope")).map(|c| self.text_string(c)).unwrap_or_default();
+            let val = if cname.is_empty() {
+                format!("[\"c\",{idx},0,[]]")
+            } else {
+                let mut arg = String::from("[\"n\",");
+                push_string(&mut arg, &cname);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
+            };
+            self.lexer_event(b'x', line, &[], &val, false);
+        }
+        if kind == "fun_declaration" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let idx = self.push_call("fun".to_string(), line);
+            let fname = self.children(id).into_iter().find(|&c| self.kind(c) == "identifier").map(|c| self.text_string(c)).unwrap_or_default();
+            let val = if fname.is_empty() {
+                format!("[\"c\",{idx},0,[]]")
+            } else {
+                let mut arg = String::from("[\"n\",");
+                push_string(&mut arg, &fname);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
+            };
+            self.lexer_event(b'x', line, &[], &val, false);
+        }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
             self.open_definition(id, def);
             if self.language.name == "csharp" && !def.container {
@@ -3070,6 +3262,184 @@ impl<'a> Walker<'a> {
                 self.cs_recovered_events(id);
             }
             "expression_statement" => self.expression_statement(id),
+            "command_call" if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
+                let children = self.children(id);
+                if let Some(&first) = children.first() {
+                    let name = self.text_string(first);
+                    if !name.is_empty() && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                        let line = self.line(id);
+                        self.push_call(name, line);
+                    }
+                }
+                self.expression_statement(id);
+            }
+            "include_statement" if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
+                let line = self.line(id);
+                self.push_call("include".to_string(), line);
+                self.expression_statement(id);
+            }
+            "pragma_directive" if self.facts.tag == "SOL" => {
+                let raw = self.text_string(id);
+                if raw.contains('=') {
+                    let line = self.line(id);
+                    self.lexer_event(b'a', line, &["solidity".to_string()], "0", false);
+                } else {
+                    self.decl_statement(id);
+                }
+            }
+            "alias_declaration" if self.facts.tag == "CR" => {
+                let children = self.children(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(name) = children[..eq].iter().rev().find_map(|&c| self.leaf_name(c)) {
+                        let rhs = children[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                        let val = rhs.map(|c| {
+                            let f = self.form(c);
+                            if !f.is_empty() && f != "0" {
+                                f
+                            } else {
+                                let t = self.text_string(c).trim().replace("::", ".");
+                                if t.is_empty() {
+                                    "0".to_string()
+                                } else {
+                                    let mut o = String::from("[\"n\",");
+                                    push_string(&mut o, &t);
+                                    o.push(']');
+                                    o
+                                }
+                            }
+                        }).unwrap_or_else(|| "0".to_string());
+                        self.lexer_event(b'a', self.line(id), &[name], &val, false);
+                    }
+                }
+            }
+            "var_declaration" if self.facts.tag == "ZIG" => {
+                let children = self.children(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(name) = children[..eq].iter().rev().find_map(|&c| self.leaf_name(c)) {
+                        let rhs = children[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                        let val = rhs.map(|c| self.form(c)).filter(|v| !v.is_empty()).unwrap_or_else(|| "0".to_string());
+                        self.lexer_event(b'a', self.line(id), &[name], &val, false);
+                    }
+                }
+            }
+            "begin_block" if self.facts.tag == "AWK" => {
+                self.lexer_event(b'x', self.line(id), &[], "[\"n\",\"BEGIN\"]", false);
+            }
+            "end_block" if self.facts.tag == "AWK" => {
+                self.lexer_event(b'x', self.line(id), &[], "[\"n\",\"END\"]", false);
+            }
+            "print_statement" | "delete_statement" if self.facts.tag == "AWK" => {
+                self.decl_statement(id);
+            }
+            "pattern_rule" if self.facts.tag == "AWK" => {
+                if let Some(first) = self.children(id).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "block") {
+                    let val = self.form(first);
+                    if !val.is_empty() && val != "0" {
+                        self.lexer_event(b'x', self.line(first), &[], &val, false);
+                    }
+                }
+            }
+            "program_header" | "unit_header" | "const_declaration" | "type_declaration" | "variable_declaration" if self.facts.tag == "PAS" => {
+                self.decl_statement(id);
+            }
+            "simple_command" if self.facts.tag == "SH" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                let mut words: Vec<String> = Vec::new();
+                for c in children {
+                    if self.kind(c) == "assignment_word" {
+                        continue;
+                    }
+                    let t = self.text_string(c);
+                    if !t.is_empty() {
+                        words.push(t);
+                    }
+                }
+                if let Some(first) = words.first() {
+                    if matches!(first.as_str(), "source" | ".") {
+                        if let Some(target) = words.get(1) {
+                            let module = target.trim_matches(|c| c == '"' || c == '\'').to_string();
+                            let alias = module.rsplit('/').next().unwrap_or(&module).to_string();
+                            if !module.is_empty() {
+                                self.facts.imports.push(Import { line, module, alias, kind: IMPORT_STAR, ..Import::default() });
+                            }
+                        }
+                    } else if first.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                        self.push_call(first.clone(), line);
+                    }
+                }
+            }
+            "builtin_call" if self.facts.tag == "ZIG" => {
+                if let Some(bn) = self.child_of_kind(id, "builtin_name") {
+                    let raw = self.text_string(bn);
+                    let name = raw.trim_start_matches('@').to_string();
+                    if !name.is_empty() {
+                        let line = self.line(id);
+                        self.push_call(name, line);
+                    }
+                }
+            }
+            "mapping_type" if self.facts.tag == "SOL" => {
+                let line = self.line(id);
+                self.push_call("mapping".to_string(), line);
+            }
+            "returns_clause" if self.facts.tag == "SOL" => {
+                let line = self.line(id);
+                self.push_call("returns".to_string(), line);
+            }
+            "state_variable" if self.facts.tag == "SOL" => {
+                if self.children(id).iter().any(|&c| self.kind(c) == "=") {
+                    self.expression_statement(id);
+                } else {
+                    self.decl_statement(id);
+                }
+            }
+            "metadata" if self.facts.tag == "DART" => {
+                let children = self.children(id);
+                if let Some(&ident) = children.iter().find(|&&c| self.kind(c) == "identifier") {
+                    let name = self.text_string(ident);
+                    if !name.is_empty() {
+                        let line = self.line(id);
+                        self.push_call(name, line);
+                    }
+                }
+            }
+            "call_command" if self.facts.tag == "TCL" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                for (idx, &ch) in children.iter().take(2).enumerate() {
+                    let name = self.text_string(ch);
+                    let clean = name.trim_start_matches("::");
+                    if !clean.is_empty() && clean.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                        if idx == 0 || matches!(children.first().map(|&c| self.text_string(c)).as_deref(), Some("package" | "namespace" | "interp" | "string" | "dict" | "array" | "file" | "info" | "clock" | "chan" | "binary" | "encoding" | "oo::define" | "oo::objdefine")) {
+                            self.push_call(clean.to_string(), line);
+                        }
+                    }
+                }
+            }
+            "command_expression" if self.facts.tag == "PS1" => {
+                let children = self.children(id);
+                if let Some(&first) = children.first() {
+                    let name = self.text_string(first).to_ascii_lowercase();
+                    if !name.is_empty() && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                        let line = self.line(id);
+                        self.push_call(name, line);
+                    }
+                }
+            }
+            "param_declaration" if self.facts.tag == "PS1" => {
+                let line = self.line(id);
+                self.push_call("param".to_string(), line);
+            }
+            "local_declaration" if self.facts.tag == "LUA" => {
+                self.lua_local_declaration(id);
+            }
+            _ if matches!(self.facts.tag.as_str(), "R" | "SOL" | "DART" | "RB" | "PHP" | "LUA" | "CR" | "PS1" | "FS" | "ZIG" | "AWK" | "PAS")
+                && self.kinds.calls.contains(&kind)
+                && !self.call_texts.contains_key(&id) =>
+            {
+                let _ = self.form(id);
+            }
             // `val x = f()`: a Scala val/var is not a definition node the walk
             // opens, so nothing formed the initializer and every call written
             // there (`new Array[T](n)`) was missing from the call table. Form
