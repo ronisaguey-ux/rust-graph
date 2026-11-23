@@ -2524,9 +2524,28 @@ impl Emit<'_> {
         // never writes on the first form of nearly every file. The CST records
         // the parenthesised body as an anonymous call, so that is what is
         // written here: no callee, the group as its arguments.
-        if self.lang.tag == "ERL" && self.op_byte(0) == b'(' && self.erlang_attribute() {
-            let mut args = String::new();
-            self.list(&mut args, b')', false);
+        if self.lang.tag == "ERL" && self.erlang_attribute() {
+            if self.op_byte(0) == b'(' {
+                let mut args = String::new();
+                self.list(&mut args, b')', false);
+                return;
+            }
+            // `-moduledoc false.`, `-doc "text".`: an attribute whose value is
+            // not parenthesised runs to the form's terminating dot. Left in the
+            // statement it became a merge of names (`m:[n:moduledoc,n:false]`)
+            // the CST never writes, one loss per file that has one.
+            let mut depth = 0i32;
+            while let Some(token) = self.tok(0) {
+                if token.kind == Kind::Op {
+                    match &self.src[token.start as usize..token.end as usize] {
+                        b"(" | b"[" | b"{" => depth += 1,
+                        b")" | b"]" | b"}" => depth -= 1,
+                        b"." if depth <= 0 => break,
+                        _ => {}
+                    }
+                }
+                self.pos += 1;
+            }
             return;
         }
         self.chain(out, String::new(), head, line);
