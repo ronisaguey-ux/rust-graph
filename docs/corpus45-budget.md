@@ -167,8 +167,13 @@ skipping.
 
 ## The scoreboard after the 2026-11-23 fixes
 
-Measured on the box against the freshly built binary (`--sample 200`): **26 of 44 judged languages
-are over the 3 ms line** (visual-basic has no sample). c, cobol, kotlin, php, powershell, ruby, r, tcl,
+> **Caveat, read before quoting these numbers.** The box was at load average 17 with two lane
+> agents running when this pass was taken, so every absolute value here is inflated — p50 as well as
+> p95. It is a shape, not a verdict: the ordering is what it is for, and the gate count must be
+> re-taken on an idle box before it is called.
+
+Measured against the freshly built binary (`--sample 200`), under that load: **26 of 44 judged
+languages read as over the 3 ms line** (visual-basic has no sample). c, cobol, kotlin, php, powershell, ruby, r, tcl,
 typescript, elm, groovy, haskell, matlab, ocaml, solidity, fortran, assembly and bash are under it;
 lua is 3.06 ms, i.e. a hair over. The heavy ones are d 21.4, fsharp 18.4, zig 16.0, vbnet 15.5,
 perl 9.8, julia 8.8, rust 8.2, elixir 8.1, sql 8.1, swift 8.0, go 7.9, nim 7.3, python 7.3, erlang 6.3.
