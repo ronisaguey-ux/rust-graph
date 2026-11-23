@@ -130,3 +130,22 @@ single bug:
 The corpus p95 is not a pathological file at all: the file at p95 is 133 KB at 0.116 µs/byte, and the
 density of files over 20 KB is p50 0.139 / p95 0.392 / p99 0.502 µs/byte. The tail is size × a
 uniform constant, so every language closes at once when the constant falls.
+
+### The base rate is ~100 ns/byte, or ~350 ns/token
+
+Two synthetics separate the cost that scales with *bytes* from the cost that scales with *symbols*:
+
+| synthetic | bytes | statements | time | ns/byte |
+|---|---:|---:|---:|---:|
+| one function, 16,000 expressions | 66 KB | 16,000 | 18 ms | 273 |
+| 16,000 one-line functions | 362 KB | 16,000 | 138 ms | 381 |
+
+Per statement those differ 8× (1.1 µs vs 8.6 µs), but per *byte* they are within 40% of each other,
+and a real 133 KB source (`stdlib/src/ets.erl`, ~38,000 tokens) sits at 116 ns/byte — **faster** than
+both synthetics. So the gate is not statements, symbols or constructs: it is the base rate of the
+one-pass reader, ~350 ns per token, split 38% lexing / 62% statements (above).
+
+The next lever is therefore inside a token, not above it. `perf` is blocked
+(`kernel.perf_event_paranoid = 4`, `ptrace_scope = 1`) and `valgrind` is not installed, so the
+sub-lexer split has to come from instrumentation in a debug build: time `skip_trivia`, the token
+classifier and the token build separately, the same way the lex/statement split above was taken.
