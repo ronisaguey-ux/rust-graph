@@ -492,6 +492,9 @@ fn tag(lang: Lang) -> &'static str {
         Lang::Clojure => "CLJ",
         Lang::Tcl => "TCL",
         Lang::Awk => "AWK",
+        Lang::Perl => "PL",
+        Lang::Fortran => "F90",
+        Lang::PowerShell => "PS1",
     }
 }
 
@@ -629,6 +632,9 @@ pub fn lang_for_forced(tag: &str) -> Option<Lang> {
         "CLJ" => Some(Lang::Clojure),
         "TCL" => Some(Lang::Tcl),
         "AWK" => Some(Lang::Awk),
+        "PL" => Some(Lang::Perl),
+        "PS1" => Some(Lang::PowerShell),
+        "F90" => Some(Lang::Fortran),
         // JSON stays out: a data file has no symbols, calls or imports to
         // read, so the CST would add the module symbol the lexer already
         // writes and nothing else. See `tests/facts_rust_json.rs`.

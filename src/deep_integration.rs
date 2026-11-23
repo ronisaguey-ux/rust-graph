@@ -117,6 +117,9 @@ pub enum Lang {
     Clojure,
     Tcl,
     Awk,
+    Perl,
+    Fortran,
+    PowerShell,
 }
 
 impl Lang {
@@ -164,6 +167,9 @@ impl Lang {
             Lang::Clojure => &deep::batch_d::clojure::CLOJURE,
             Lang::Tcl => &deep::batch_d::tcl::TCL,
             Lang::Awk => &deep::batch_d::awk::AWK,
+            Lang::Perl => &deep::batch_d::perl::PERL,
+            Lang::Fortran => &deep::batch_f::fortran::FORTRAN,
+            Lang::PowerShell => &deep::batch_f::powershell::POWERSHELL,
         }
     }
 }
