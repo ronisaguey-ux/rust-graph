@@ -280,6 +280,21 @@ const SC_DEFS: &[Def] = &[
 const SC_CALLS: &[&str] = &["call", "call_expression", "new_expression"];
 const SC_IMPORTS: &[&str] = &["import_declaration"];
 
+/// Erlang functions: every clause of a function shares one `function_definition`
+/// and its name is the atom inside the head. The language had no table at all,
+/// so the walk returned a record with nothing in it.
+const ERL_DEFS: &[Def] = &[Def {
+    kind: "function_definition",
+    name: &["function_head"],
+    params: Some("parameter_group"),
+    params_nth: 0,
+    name_last: false,
+    receiver: false,
+    container: false,
+}];
+/// `f(x)` and `mod:f(x)`: the grammar keeps the remote form as its own node.
+const ERL_CALLS: &[&str] = &["call", "remote_call"];
+
 const SW_DEFS: &[Def] = &[
     Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "struct_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
@@ -437,6 +452,9 @@ fn kinds(lang: Lang) -> Kinds {
         }
         Lang::Scala => Kinds { definitions: SC_DEFS, calls: SC_CALLS, imports: SC_IMPORTS, soft: &[], family: Family::Plain },
         Lang::Swift => Kinds { definitions: SW_DEFS, calls: SW_CALLS, imports: SW_IMPORTS, soft: &[], family: Family::Plain },
+        Lang::Erlang => {
+            Kinds { definitions: ERL_DEFS, calls: ERL_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
         // The other grammars have no definition table here yet; the walk still
         // returns a record with the module symbol, which is what the caller
         // falls back on. Named so a caller can tell "no facts" from "empty file".
@@ -3121,6 +3139,17 @@ impl<'a> Walker<'a> {
             // child is the expression itself. Nothing read that node, so a call
             // in an expression-bodied def never reached the record.
             "def_body" => self.expression_statement(id),
+            // Erlang writes a function's expressions under one `body`, separated
+            // by commas. Reading only the first left every later call out of the
+            // record (`A = f(), B:g().` recorded `f` and neither remote call).
+            "body" if self.facts.tag == "ERL" => {
+                for child in self.children(id) {
+                    if self.is_layout(child) || matches!(self.kind(child), "," | ".") {
+                        continue;
+                    }
+                    self.statement_node(child, child);
+                }
+            }
             // `companion object { … }`: the one-pass lexer files the introducer
             // as a header statement (`m:[n:companion,n:object,n:Name]`), and no
             // arm wrote an event for the tree's `companion_object`, so every
@@ -4376,6 +4405,11 @@ impl<'a> Walker<'a> {
             // `fun A.B.load()`: a Kotlin extension's head is its receiver and
             // its name, and the name is the last segment — the lexer files the
             // symbol under that alone.
+            if self.facts.tag == "ERL" && self.kind(node) == "function_head" {
+                if let Some(name) = self.child_of_kind(node, "function_name") {
+                    return Some(self.text_string(name));
+                }
+            }
             if self.facts.tag == "KT" && self.kind(node) == "function_head" {
                 if let Some((_, name)) = text.rsplit_once('.') {
                     return Some(name.to_string());

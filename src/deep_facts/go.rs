@@ -2040,7 +2040,14 @@ impl<'a> Walker<'a> {
     // -- statements ---------------------------------------------------------
 
     pub(crate) fn expression_statement(&mut self, id: u32) {
-        let Some(mut child) = self.expression_child(id) else { return };
+        let Some(child) = self.expression_child(id) else { return };
+        self.statement_node(id, child);
+    }
+
+    /// One expression of a statement list, dispatched by its kind. A grammar
+    /// that keeps several expressions in one node (Erlang's `body`) calls this
+    /// once per child; everything else reaches it through `expression_statement`.
+    pub(crate) fn statement_node(&mut self, id: u32, mut child: u32) {
         // Swift `var x: T { get set }`: the grammar reads `get` as a statement
         // and leaves `set` beside it as an ERROR leaf; the lexer files both
         // accessors as one event, so the pair is written here.
@@ -2112,7 +2119,11 @@ impl<'a> Walker<'a> {
             self.cs_lambda_assignment_symbol(child);
         }
         match self.kind(child) {
+            // Erlang spells a binding `match_expression`: `X = f(Y)`. Read
+            // through the default arm it formed the variable and dropped the
+            // call on its right, so every binding whose value is a call lost it.
             "assignment" | "assignment_expression" => self.assignment(child, false),
+            "match_expression" if self.facts.tag == "ERL" => self.assignment(child, false),
             // Rust's `=` is the same statement: the lexer records the target,
             // the value and the class the value constructs.
             _ if self.is_rust() && self.kind(child) == "assignment_expression" => {
@@ -4070,6 +4081,33 @@ fn dotted_piece(text: &str) -> bool {
             }
         }
         if self.kinds.calls.contains(&kind) {
+            // `mod:f(Args)`: the grammar writes the module as the first child and
+            // the function inside a `module_call`. Read through the generic arm
+            // the callee was the MODULE (`supervisor`), so every remote call
+            // disagreed with the one-pass lexer's `start_link` and 1,727 rows of
+            // the erlang corpus stopped there.
+            if self.facts.tag == "ERL" && kind == "remote_call" {
+                if let Some(module_call) = self.child_of_kind(id, "module_call") {
+                    let children = self.children(module_call);
+                    let name = children
+                        .iter()
+                        .copied()
+                        .find(|&child| self.kind(child) == "atom")
+                        .map(|child| self.text_string(child))
+                        .unwrap_or_default();
+                    if !name.is_empty() {
+                        let args = children
+                            .iter()
+                            .copied()
+                            .find(|&child| self.kind(child) == "call_arguments")
+                            .map(|list| self.arguments(list))
+                            .unwrap_or_else(|| "[]".to_string());
+                        let line = self.line(id);
+                        let index = self.push_call(name, line);
+                        return format!("[\"c\",{index},0,{args}]");
+                    }
+                }
+            }
             // `repositories { mavenCentral() }`: the Kotlin DSL idiom, a call
             // whose only argument is a lambda. The lexer files the line as the
             // name, not as a call, so the value is the name and the call below
