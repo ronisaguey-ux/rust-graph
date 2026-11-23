@@ -2371,7 +2371,7 @@ impl Emit<'_> {
             // C#'s `checked` / `unchecked` are operator keywords that wrap an
             // expression in parentheses without being a call; `default(T)` is
             // a default-value expression rather than a call to `default`.
-            NOISE.contains(&word.as_str())
+            (NOISE.contains(&word.as_str()) && !(self.lang.tag == "JAVA" && KT_NAMES.contains(&word.as_str())))
                 || (self.lang.tag == "SWIFT" && word == "try")
                 || (self.lang.tag == "CS" && matches!(word.as_str(), "checked" | "unchecked"))
                 // `public static X operator !(X b) { … }`: `operator` is the keyword

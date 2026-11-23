@@ -227,6 +227,10 @@ pub fn lex_fsharp(c: &mut Cursor) -> Kind {
             c.eat_while(|byte| byte != b'\n' && byte != b'\r');
             COMMENT
         }
+        b'#' if c.peek_at(1).is_ascii_alphabetic() => {
+            c.eat_while(|byte| byte != b'\n' && byte != b'\r');
+            COMMENT
+        }
         b'(' if c.peek_at(1) == b'*' => {
             super::super::batch_d::lex::block_comment(c, b"(*", b"*)", true);
             COMMENT
