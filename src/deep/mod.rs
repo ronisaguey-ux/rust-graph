@@ -21,6 +21,15 @@ pub mod batch_a;
 pub mod batch_b;
 #[path = "../../crates/deep-grammars/src/batch_c/mod.rs"]
 pub mod batch_c;
+// The scripting and table grammars: every language the lexer knows and this
+// package has a grammar for takes the CST path. Written once, in
+// `deep-grammars`, and compiled here by path like the C family.
+#[path = "../../crates/deep-grammars/src/batch_d/mod.rs"]
+pub mod batch_d;
+#[path = "../../crates/deep-grammars/src/batch_e/mod.rs"]
+pub mod batch_e;
+#[path = "../../crates/deep-grammars/src/batch_f/mod.rs"]
+pub mod batch_f;
 // The runtime lives once, in `crates/deep-rt`: one lexer, one pair pass, one
 // tree, one budget, one node-kind table. These names stay because every grammar
 // and every test in this package writes `crate::deep::…`.
@@ -73,6 +82,33 @@ pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
         "scala" | "sc" => Some(&batch_b::scala::SCALA),
         "swift" => Some(&batch_b::swift::SWIFT),
         "m" => Some(&batch_c::objc::OBJC),
+        // The grammars that were written but never connected: each of these is
+        // a real reader now, and its corpus is measurable.
+        "php" | "phtml" => Some(&batch_b::php::PHP),
+        "rb" | "rake" | "gemspec" => Some(&batch_b::ruby::RUBY),
+        "dart" => Some(&batch_f::dart::DART),
+        "ex" | "exs" => Some(&batch_d::elixir::ELIXIR),
+        "hs" | "lhs" => Some(&batch_e::haskell::HASKELL),
+        "lua" => Some(&batch_d::lua::LUA),
+        "r" | "rmd" => Some(&batch_d::r::R),
+        "sol" => Some(&batch_d::solidity::SOLIDITY),
+        "sql" | "ddl" => Some(&batch_d::sql::SQL),
+        "sh" | "bash" | "zsh" | "ksh" => Some(&batch_d::shell::SHELL),
+        "groovy" | "gradle" => Some(&batch_f::groovy::GROOVY),
+        "jl" => Some(&batch_d::julia::JULIA),
+        "vb" | "vbs" | "bas" | "cls" => Some(&batch_f::visual_basic::VISUAL_BASIC),
+        "pas" | "dpr" | "pp" => Some(&batch_f::pascal::PASCAL),
+        "cob" | "cbl" | "cpy" => Some(&batch_f::cobol::COBOL),
+        "nim" => Some(&batch_e::nim::NIM),
+        "cr" => Some(&batch_e::crystal::CRYSTAL),
+        "zig" => Some(&batch_d::zig::ZIG),
+        "d" => Some(&batch_e::d::D),
+        "fs" | "fsx" => Some(&batch_f::fsharp::FSHARP),
+        "ml" | "mli" => Some(&batch_e::ocaml::OCAML),
+        "erl" | "hrl" => Some(&batch_d::erlang::ERLANG),
+        "clj" | "cljs" | "cljc" => Some(&batch_d::clojure::CLOJURE),
+        "tcl" => Some(&batch_d::tcl::TCL),
+        "awk" => Some(&batch_d::awk::AWK),
         _ => None,
     }
 }
