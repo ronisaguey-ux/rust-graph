@@ -2518,9 +2518,37 @@ impl Emit<'_> {
             out.push(']');
             return;
         }
+        // Erlang's attributes: `-module(cowboy_app).`, `-export([start/2]).`,
+        // `-record(state, {..}).` Every form that opens with `-` is an
+        // attribute, and reading its name as a callee made one call the CST
+        // never writes on the first form of nearly every file. The CST records
+        // the parenthesised body as an anonymous call, so that is what is
+        // written here: no callee, the group as its arguments.
+        if self.lang.tag == "ERL" && self.op_byte(0) == b'(' && self.erlang_attribute() {
+            let mut args = String::new();
+            self.list(&mut args, b')', false);
+            return;
+        }
         self.chain(out, String::new(), head, line);
         if self.lang.command_calls || self.lang.apply_calls {
             self.juxtaposed(out, close, line);
+        }
+    }
+
+    /// Whether the name just read opens an Erlang attribute rather than a call:
+    /// a `-` that itself opens the form (`-module(..)`), not a subtraction in
+    /// front of a call (`X = a - b(c)`), whose `-` follows an expression.
+    fn erlang_attribute(&self) -> bool {
+        if self.pos < 2 {
+            return false;
+        }
+        let dash = &self.toks[self.pos - 2];
+        if dash.kind != Kind::Op || &self.src[dash.start as usize..dash.end as usize] != b"-" {
+            return false;
+        }
+        self.pos == 2 || {
+            let prev = &self.toks[self.pos - 3];
+            prev.kind == Kind::Op && &self.src[prev.start as usize..prev.end as usize] == b"."
         }
     }
 
