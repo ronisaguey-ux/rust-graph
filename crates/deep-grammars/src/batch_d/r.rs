@@ -23,7 +23,7 @@
 //! - **`%op%` custom infix operators** are lexed as one `%...%` token and are
 //!   not accepted where an operator is expected.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 
