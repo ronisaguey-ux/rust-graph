@@ -40,7 +40,7 @@
 //! - **Extension nodes** (`[%expr ...]`) and attributes (`[@warning ...]`) are
 //!   not modelled.
 
-use crate::batch_d::lex;
+use super::super::batch_d::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::{Kind, COMMENT, UNKNOWN, WHITESPACE};
 
