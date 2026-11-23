@@ -29,7 +29,7 @@
 //!   a string: `url(#grad)`, `url(a b.png)` and an escaped URL all stay inside
 //!   the token.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 

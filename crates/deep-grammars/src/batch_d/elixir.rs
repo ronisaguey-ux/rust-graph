@@ -26,7 +26,7 @@
 //!   node.
 //! - **A keyword list** (`[a: 1]`) is a call-free pair through the `pair` row.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 
