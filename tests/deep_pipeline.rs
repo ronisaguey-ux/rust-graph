@@ -172,7 +172,8 @@ fn a_language_without_a_deep_parser_is_a_recorded_and_counted_fallback() {
     //
     // C used to be the example here. P6-03 put it on the shared C-family
     // reader with a node table, so a forced `.c` parse is now the CST's work;
-    // Ruby is the language without a table.
+    // Elm is the language without a grammar: `deep-grammars` has none for it,
+    // so `lang_for_forced` answers nothing and the lexer keeps the file.
     //
     // Rust used to be in the same list. `lang_for` answers for `RS` now (the
     // field L3 tables), so the same `.rs` file is parsed by the CST here and
@@ -180,15 +181,15 @@ fn a_language_without_a_deep_parser_is_a_recorded_and_counted_fallback() {
     // `--deep`, and `fallbacks` stays 0 under `auto` because the CST record no
     // longer ties with the lexer on this file — it wins.
     let tree = Tree::new("fallback", &[
-        ("src/main.rb", "def greet(name)\n  name\nend\n"),
+        ("src/main.elm", "module Main exposing (greet)\n\ngreet name =\n    name\n"),
         ("src/lib.rs", "pub fn f() -> u32 {\n    1\n}\n"),
         ("src/app.py", "def f(x):\n    return x\n"),
     ]);
     let (json, _) = tree.json(&["--stdout", "--no-cache", "--deep"]);
 
-    let row = source_row(&json, "src/main.rb");
+    let row = source_row(&json, "src/main.elm");
     assert!(row.contains("\"parsed_by\":\"lexer\""), "{row}");
-    assert!(row.contains("\"deep_fallback\":\"no deep parser for RB\""), "{row}");
+    assert!(row.contains("\"deep_fallback\":\"no deep parser for ELM\""), "{row}");
     // Rust has a table and a grammar, so the forced CST parse is taken.
     let rust = source_row(&json, "src/lib.rs");
     assert!(rust.contains("\"parsed_by\":\"deep\""), "{rust}");
