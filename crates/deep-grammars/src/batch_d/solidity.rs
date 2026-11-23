@@ -13,7 +13,7 @@
 //!   a member rule; their bodies are a parameter list or a block.
 //! - **Overloads and inheritance** are names and lists, not resolved.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 

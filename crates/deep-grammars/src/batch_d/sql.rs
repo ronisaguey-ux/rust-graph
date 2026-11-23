@@ -34,7 +34,7 @@
 //! - **`MERGE` and `UPSERT` variants other than `ON CONFLICT`** are not
 //!   modelled.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 
