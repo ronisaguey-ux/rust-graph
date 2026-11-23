@@ -1455,7 +1455,14 @@ impl Emit<'_> {
             }
             at += 1;
         }
-        let Some(end) = end else { return };
+        let Some(end) = end else {
+            // An unterminated `[` has no closer to read. Consuming the opener is
+            // what makes the caller's loop advance: a bare `[` or `@[` at the end
+            // of a file used to be read forever, and one hostile-input test sat
+            // on that loop until the suite was killed.
+            self.pos += 1;
+            return;
+        };
         // The selector starts at the first name with a `:` after it; a message
         // with no keyword part (`[obj go]`) is the last name before the `]`.
         let mut selector_start = None;
@@ -1480,7 +1487,12 @@ impl Emit<'_> {
                 let last = (start + 1..end).rev().find(|&i| all[i].kind == Kind::Ident);
                 match last {
                     Some(l) if l > start + 1 => (l, l),
-                    _ => return,
+                    // `[]`: no name to read, so there is no message to write.
+                    // Skipping the group is what keeps the caller's loop moving.
+                    _ => {
+                        self.pos = end + 1;
+                        return;
+                    }
                 }
             }
         };
@@ -1537,6 +1549,9 @@ impl Emit<'_> {
             i = arg_end;
         }
         if selector.is_empty() {
+            // `[ ]` and `@[]` spell no selector: nothing to call, and the group
+            // still has to be consumed or the caller reads `[` forever.
+            self.pos = end + 1;
             return;
         }
         let id = self.new_call(selector, line);
