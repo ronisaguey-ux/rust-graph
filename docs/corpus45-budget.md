@@ -164,3 +164,27 @@ So the remaining order of attack, by measured size, is: the statement/facts laye
 then the token classifier (about 26%), then trivia (about 13%). Trivia alone cannot move the gate,
 which is why the next change belongs in the statement layer or the classifier, not in whitespace
 skipping.
+
+## The scoreboard after the 2026-11-23 fixes
+
+Measured on the box against the freshly built binary (`--sample 200`): **26 of 44 judged languages
+are over the 3 ms line** (visual-basic has no sample). c, cobol, kotlin, php, powershell, ruby, r, tcl,
+typescript, elm, groovy, haskell, matlab, ocaml, solidity, fortran, assembly and bash are under it;
+lua is 3.06 ms, i.e. a hair over. The heavy ones are d 21.4, fsharp 18.4, zig 16.0, vbnet 15.5,
+perl 9.8, julia 8.8, rust 8.2, elixir 8.1, sql 8.1, swift 8.0, go 7.9, nim 7.3, python 7.3, erlang 6.3.
+
+### Where a statement's time goes: calls are 7× a bare value
+
+One expression per statement is a fair unit. 16,000 single-expression statements, `--lexer`:
+
+| statement | time | per statement |
+|---|---:|---:|
+| a number | 8 ms | 0.50 µs |
+| an atom | 18 ms | 1.13 µs |
+| an assignment | 24 ms | 1.50 µs |
+| a call (`f(1)`) | 60 ms | 3.75 µs |
+
+A call costs 7.5× a constant, and calls are what a real source is made of (`ets.erl` is ~2,000 of
+them ≈ 7.5 ms of its 9 ms). The per-call work is `word()` returning a `String` (an allocation), the
+`Call.path` (a second), then `format!("[\"c\",{id},0,[{args}]]")` (a third, plus formatting). That is
+the next place to look, and it is inside the 62% statement share rather than the 38% lexer share.
