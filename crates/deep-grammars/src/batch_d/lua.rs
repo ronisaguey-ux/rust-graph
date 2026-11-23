@@ -17,7 +17,7 @@
 //! - **Operator precedence of `..` against unary `#`** follows Lua's table; a
 //!   `..` chain associates to the right as Lua's manual says.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 

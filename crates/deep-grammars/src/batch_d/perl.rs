@@ -17,7 +17,7 @@
 //! - **Postfix `if/unless/while`** are not modelled: `print $x if $y;` does not
 //!   parse.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 
