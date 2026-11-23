@@ -67,3 +67,26 @@ Re-run with:
     python3 tools/lang_budget.py --corpus /tmp/opencode/corpus45 --sample 200
 
 and `--check` to make the exit code the gate.
+
+## Where the time goes (erlang, whole tree, 2026-11-23)
+
+A whole-tree run of `corpus45/erlang` (4,335 files, release, `--no-cache`, per-file `micros` from the
+JSON): p50 643 µs, p95 13,404 µs, max 5,458 µs…sec. So the tail is **not** the fallback path — one
+file of the 4,335 was parsed by the deep reader, and every other file was the one-pass lexer. The p95
+is the lexer's own cost on the corpus's few ~1 MB test files, and that cost is linear:
+
+| file | bytes | µs/byte |
+|---|---:|---:|
+| median of the tree | — | 0.141 |
+| `re_testoutput1_split_test.erl` | 1.82 MB | 0.81 (6× median) |
+| `gl.erl` | 556 KB | 0.23 (2× median) |
+| `jquery-latest.js` | 78 KB | **69.3 (490× median, 5.46 s)** |
+
+Two findings follow, and they are different work:
+
+1. **The gate is a constant factor, not a loss.** No loss-shaped fix moves a language from 13 ms to
+   3 ms: the same one-pass reader costs 0.14 µs/byte for every language, so p95 falls when the reader
+   gets faster, not when a language gets cleaner. That is the whole of P6-13's remaining distance.
+2. **A pathological case has its own item**: a 78 KB jQuery build takes 5.46 s, i.e. the deep
+   JavaScript reader is superlinear on one construct in that file. 490× the median per byte on a small
+   file is a bug, not a budget line, and it is worth a fixture of its own before the phase closes.
