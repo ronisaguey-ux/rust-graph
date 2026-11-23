@@ -17,7 +17,7 @@
 //!   guard node.
 //! - **Bit syntax inside a binary** is not modelled at all.
 
-use crate::batch_d::lex;
+use super::lex;
 use crate::deep::lexer::Cursor;
 use crate::deep::syntax::Kind;
 
