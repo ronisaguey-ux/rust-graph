@@ -549,7 +549,7 @@ fn number(c: &mut Cursor) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::harness;
+    use super::super::harness;
 
     const VALID: &[(&str, &[&str])] = &[
         (
