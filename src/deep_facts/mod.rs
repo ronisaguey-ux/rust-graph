@@ -2558,3 +2558,323 @@ impl<'a> Walker<'a> {
                             break;
                         }
                         i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+            }
+            if i > start {
+                cur.push((tok_line, text[start..i].to_string()));
+            } else {
+                i += 1;
+            }
+        }
+        if !cur.is_empty() {
+            cmds.push((cmd_line, cur));
+        }
+        cmds
+    }
+
+    fn tcl_eval_words(&mut self, words: &[(u32, String)], cmd_line: u32, depth: usize) -> String {
+        if words.is_empty() || depth > 24 {
+            return String::new();
+        }
+        // Handle nested `proc name args body`
+        if words[0].1 == "proc" && words.len() >= 2 {
+            let args_braced = words.get(2).is_some_and(|w| w.1.starts_with('{'));
+            let body_braced = words.len() >= 4 && words.last().is_some_and(|w| w.1.starts_with('{'));
+            if !args_braced || !body_braced {
+                self.push_call("proc".to_string(), cmd_line);
+            }
+            let raw_name = words[1].1.trim_matches(|c| c == '{' || c == '}');
+            let sym_name = Self::tcl_clean_name(raw_name);
+            if !sym_name.is_empty() {
+                let sym = self.add_symbol(sym_name, String::new(), KIND_FUNCTION, cmd_line, Vec::new());
+                self.stack.push(Frame {
+                    node: 0,
+                    symbol: sym,
+                    class: String::new(),
+                    receiver: String::new(),
+                    container: false,
+                    defines: Some(sym),
+                });
+                if let Some((bline, body)) = words.last() {
+                    if words.len() >= 4 && body.starts_with('{') && body.ends_with('}') && body.len() >= 2 {
+                        let inner = &body[1..body.len() - 1];
+                        self.tcl_scan_script(inner, *bline, depth + 1);
+                    }
+                }
+                self.stack.pop();
+                return String::new();
+            }
+        }
+        // Scan braced_word bodies recursively
+        // Tuple: (wline, ident_opt, form_str, is_value_token)
+        // Only plain words, quoted strings, and $variables are value tokens that trigger juxtaposed command_calls
+        let mut word_forms: Vec<(u32, Option<String>, String, bool)> = Vec::new();
+        for (wline, w) in words {
+            if w.starts_with('{') && w.ends_with('}') && w.len() >= 2 {
+                let inner = &w[1..w.len() - 1];
+                self.tcl_scan_script(inner, *wline, depth + 1);
+                let bform = if !inner.contains('\n') {
+                    let bsegs: Vec<String> = inner
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    if bsegs.is_empty() {
+                        "0".to_string()
+                    } else if bsegs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, &bsegs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = bsegs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    }
+                } else {
+                    "0".to_string()
+                };
+                word_forms.push((*wline, None, bform, false));
+            } else if w.starts_with('[') && w.ends_with(']') && w.len() >= 2 {
+                let inner = &w[1..w.len() - 1];
+                let sub_cmds = Self::tcl_tokenize_commands(inner, *wline);
+                let mut last_form = "0".to_string();
+                for (sline, swords) in sub_cmds {
+                    let f = self.tcl_eval_words(&swords, sline, depth + 1);
+                    if !f.is_empty() {
+                        last_form = f;
+                    }
+                }
+                word_forms.push((*wline, None, format!("[\"t\",[{last_form}]]"), false));
+            } else if w.starts_with('"') && w.ends_with('"') && w.len() >= 2 {
+                // Scan any [...] inside quoted string
+                let inner = &w[1..w.len() - 1];
+                let ib = inner.as_bytes();
+                let mut j = 0;
+                let mut cur_line = *wline;
+                while j < ib.len() {
+                    if ib[j] == b'\\' && j + 1 < ib.len() {
+                        if ib[j + 1] == b'\n' {
+                            cur_line += 1;
+                        }
+                        j += 2;
+                        continue;
+                    }
+                    if ib[j] == b'\n' {
+                        cur_line += 1;
+                    } else if ib[j] == b'[' {
+                        let bstart = j + 1;
+                        let bline = cur_line;
+                        let mut d = 1usize;
+                        j += 1;
+                        while j < ib.len() && d > 0 {
+                            if ib[j] == b'\\' && j + 1 < ib.len() {
+                                if ib[j + 1] == b'\n' {
+                                    cur_line += 1;
+                                }
+                                j += 2;
+                                continue;
+                            }
+                            if ib[j] == b'\n' {
+                                cur_line += 1;
+                            } else if ib[j] == b'[' {
+                                d += 1;
+                            } else if ib[j] == b']' {
+                                d -= 1;
+                                if d == 0 {
+                                    let sub = &inner[bstart..j];
+                                    for (sline, swords) in Self::tcl_tokenize_commands(sub, bline) {
+                                        let _ = self.tcl_eval_words(&swords, sline, depth + 1);
+                                    }
+                                }
+                            }
+                            j += 1;
+                        }
+                        continue;
+                    }
+                    j += 1;
+                }
+                // Also extract $var interpolations inside quoted_word
+                let mut qvars: Vec<String> = Vec::new();
+                let mut qj = 0;
+                while qj < ib.len() {
+                    if ib[qj] == b'\\' && qj + 1 < ib.len() {
+                        qj += 2;
+                        continue;
+                    }
+                    if ib[qj] == b'$' {
+                        let rest = &inner[qj..];
+                        if let Some(vn) = Self::tcl_var_name(rest) {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &vn);
+                            n.push(']');
+                            qvars.push(n);
+                        }
+                    }
+                    qj += 1;
+                }
+                let qform = if qvars.is_empty() {
+                    "0".to_string()
+                } else if qvars.len() == 1 {
+                    qvars.remove(0)
+                } else {
+                    format!("[\"m\",[{}]]", qvars.join(","))
+                };
+                word_forms.push((*wline, None, qform, true));
+            } else if let Some(vname) = Self::tcl_var_name(w) {
+                if let Some((_, rest)) = w.split_once('(') {
+                    let cid = self.push_call(vname.clone(), *wline);
+                    let inner = rest.trim_end_matches(')');
+                    let isegs: Vec<String> = inner
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    let arg_form = if isegs.is_empty() {
+                        "0".to_string()
+                    } else if isegs.len() == 1 {
+                        let mut an = String::from("[\"n\",");
+                        push_string(&mut an, &isegs[0]);
+                        an.push(']');
+                        an
+                    } else {
+                        let parts: Vec<String> = isegs
+                            .iter()
+                            .map(|s| {
+                                let mut an = String::from("[\"n\",");
+                                push_string(&mut an, s);
+                                an.push(']');
+                                an
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    let form = format!("[\"c\",{cid},0,[{arg_form}]]");
+                    word_forms.push((*wline, Some(vname), form, true));
+                } else {
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &vname);
+                    n.push(']');
+                    word_forms.push((*wline, Some(vname), n, true));
+                }
+            } else if w.starts_with("::") {
+                let clean = Self::tcl_clean_name(w);
+                if Self::tcl_is_ident(&clean) {
+                    // Join leading ::name to previous identifier with '.' as reference lexer does
+                    if let Some(prev) = word_forms.last_mut() {
+                        if let Some(ref mut prev_id) = prev.1 {
+                            prev_id.push('.');
+                            prev_id.push_str(&clean);
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, prev_id);
+                            n.push(']');
+                            prev.2 = n;
+                            continue;
+                        }
+                    }
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &clean);
+                    n.push(']');
+                    word_forms.push((*wline, Some(clean), n, true));
+                } else {
+                    word_forms.push((*wline, None, "0".to_string(), false));
+                }
+            } else {
+                // Handle array element like env(FOO), RunTimes(command), hooks($curName)
+                if let Some((base, rest)) = w.split_once('(') {
+                    let clean = Self::tcl_clean_name(base);
+                    if Self::tcl_is_ident(&clean) {
+                        let cid = self.push_call(clean.clone(), *wline);
+                        let inner = rest.trim_end_matches(')');
+                        let arg_form = if let Some(vn) = Self::tcl_var_name(inner) {
+                            let mut an = String::from("[\"n\",");
+                            push_string(&mut an, &vn);
+                            an.push(']');
+                            an
+                        } else {
+                            let ic = Self::tcl_clean_name(inner);
+                            if Self::tcl_is_ident(&ic) {
+                                let mut an = String::from("[\"n\",");
+                                push_string(&mut an, &ic);
+                                an.push(']');
+                                an
+                            } else {
+                                "0".to_string()
+                            }
+                        };
+                        let form = format!("[\"c\",{cid},0,[{arg_form}]]");
+                        word_forms.push((*wline, Some(clean), form, true));
+                    } else {
+                        word_forms.push((*wline, None, "0".to_string(), false));
+                    }
+                } else {
+                    // Handle -flag, hyphenated words (amazon-s3), and slash/dot paths (tcl/httpd)
+                    let is_flag = w.starts_with('-') && w.len() > 1 && w.as_bytes()[1].is_ascii_alphabetic();
+                    let raw_tail = w.rsplit('-').next().unwrap_or(w);
+                    let clean = Self::tcl_clean_name(raw_tail);
+                    // Extract all identifier segments so hyphen/slash words never lose names
+                    let segs: Vec<String> = w
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    let seg_form = if segs.is_empty() {
+                        "0".to_string()
+                    } else if segs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, &segs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = segs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    const TCL_NOISE: &[&str] = &[
+                        "await", "yield", "new", "not", "typeof", "delete", "void", "throw", "raise", "async",
+                        "lambda", "in", "is", "and", "or", "if", "else", "for", "of", "as", "then", "do",
+                        "instanceof", "sizeof", "return", "my", "local", "let", "var", "const", "final",
+                        "mut", "ref", "unsafe", "defer", "go", "our", "pub",
+                    ];
+                    if !is_flag && TCL_NOISE.contains(&clean.as_str()) {
+                        // Reference lexer skips NOISE words and does not trigger juxtaposed calls on preceding words
+                        word_forms.push((*wline, None, "0".to_string(), false));
+                    } else if Self::tcl_is_ident(&clean) {
+                        // A -flag starts with '-', which is Op('-') so it does NOT trigger a call on the preceding word
+                        word_forms.push((*wline, Some(clean), seg_form, !is_flag));
+                    } else {
+                        let is_val = !is_flag && w.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+                        word_forms.push((*wline, None, seg_form, is_val));
+                    }
+                }
+            }
+        }
+        // Emit x-events for continuation-line words (wline != cmd_line)
+        let mut cont_line: u32 = 0;
+        let mut cont_parts: Vec<String> = Vec::new();
+        for &(wline, _, ref form_str, _) in &word_forms {
+            if wline != cmd_line && form_str != "0" && !form_str.is_empty() {
+                if cont_line != 0 && wline != cont_line && !cont_parts.is_empty() {
+                    let v = if cont_parts.len() == 1 {
+                        cont_parts.remove(0)
+                    } else {
+                        format!("[\"m\",[{}]]", cont_parts.join(","))
+                    };
+                    self.lexer_event(b'x', cont_line, &[], &v, false);
