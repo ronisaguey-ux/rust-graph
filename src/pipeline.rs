@@ -1705,7 +1705,8 @@ return verdict(Some("symbol"), detail, accepted);
                 if !lines.is_empty()
                     && (is_positional_call(&lines, &macro_lines, &name, call.line)
                         || (lexer.tag == "CS" && is_csharp_attribute(&lines, call.line))
-                        || (lexer.tag == "CS" && is_bracketed_attribute(&lines, &name, call.line)))
+                        || (lexer.tag == "CS" && is_bracketed_attribute(&lines, &name, call.line))
+                        || (lexer.tag == "ERL" && is_erlang_header_or_attr_line(&lines, call.line)))
                 {
                     accepted.positional_calls += 1;
                     continue;
@@ -1911,6 +1912,7 @@ fn uncovered(
             // declaration, so the line states nothing both readers can mean.
             || (matches!(lexer.tag.as_str(), "JAVA" | "SCALA" | "KT") && is_annotation_line(lines, event.line))
             || (lexer.tag == "CS" && is_csharp_attribute(lines, event.line))
+            || (lexer.tag == "ERL" && (is_erlang_header_or_attr_line(lines, event.line) || is_erlang_clause_line(lines, event.line)))
             || is_declaration_line(lines, event.line)
             || is_method_declaration_line(&lexer.tag, lines, event.line)
             || is_type_property_line(lines, event.line)
@@ -2315,6 +2317,74 @@ fn is_scala_control_header(src: &Lines<'_>, line: u32) -> bool {
 
 /// `#[cfg(feature = "deep")]`, `#![allow(dead_code)]`: the tokens inside an
 /// attribute are not a call, and the lexer reads `cfg` and `allow` as ones.
+/// Erlang module attributes (`-spec`, `-type`, `-record`, `-define`, `-doc`, …),
+/// multi-clause function headers at column 0 (`name(...) [when ...] ->`), and
+/// type-spec lines (`Field :: type()`). The one-pass lexer loses function scope
+/// after `;` or reads attribute/type forms as calls and module-scope events,
+/// while the CST models them as declarations rather than calls/statements.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_erlang_header_or_attr_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
+        return false;
+    };
+    let trimmed = text.trim_start();
+    // 1. Module attribute / preprocessor directive
+    if trimmed.starts_with('-') {
+        let after = &trimmed[1..];
+        let attr = after.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+        if matches!(
+            attr,
+            "define" | "spec" | "type" | "opaque" | "callback" | "record" | "export"
+                | "export_type" | "import" | "include" | "include_lib" | "ifdef" | "ifndef"
+                | "if" | "elif" | "compile" | "dialyzer" | "doc" | "moduledoc" | "module"
+                | "behaviour" | "behavior" | "vsn" | "file" | "nominal" | "optional_callbacks"
+        ) {
+            return true;
+        }
+    }
+    // 2. Column-0 function clause header: `atom(` or `'quoted'(` followed by `->` within 3 lines
+    if !text.starts_with(' ') && !text.starts_with('\t') && !trimmed.starts_with('%') {
+        let mut rest = trimmed;
+        let has_head = if let Some(after_q) = rest.strip_prefix('\'') {
+            if let Some(end_q) = after_q.find('\'') {
+                rest = after_q[end_q + 1..].trim_start();
+                rest.starts_with('(')
+            } else {
+                false
+            }
+        } else {
+            let ident_len = rest.bytes().take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'@')).count();
+            ident_len > 0 && rest[ident_len..].trim_start().starts_with('(')
+        };
+        if has_head {
+            for d in 0..=10 {
+                if let Some(next_line) = src.get(line + d) {
+                    if next_line.contains("->") {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    // 3. Type annotation line (`Name :: Type`)
+    if trimmed.contains("::") {
+        return true;
+    }
+    false
+}
+
+/// Erlang `case`/`if`/`receive`/`try`/`fun` clause headers (`Pat ->`, `when Guard ->`):
+/// like `=>` arms in Rust/C#, the one-pass lexer files the pattern or guard (including
+/// `=:=` misread as `=`) as a standalone event while the CST folds it into the clause.
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_erlang_clause_line(src: &Lines<'_>, line: u32) -> bool {
+    let Some(text) = src.get(line) else {
+        return false;
+    };
+    let code = text.split('%').next().unwrap_or(text).trim();
+    code.contains("->") || code.starts_with("when ") || code.starts_with("when\t")
+}
+
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn is_attribute_call(src: &Lines<'_>, line: u32) -> bool {
     src.lines()
@@ -4338,6 +4408,14 @@ fn is_keyword_callee(tag: &str, name: &str) -> bool {
         // into a surrounding statement, the word still arrives as a callee.
         // The CST names no such call, so it is not a lost fact.
         "SWIFT" => &["if", "for", "while", "return", "switch", "guard", "subscript"],
+        // Erlang reserved words and operator keywords are never callees:
+        // `(catch Expr)`, `case (A bor M) of`, `A andalso (B)`, `begin (...) end`,
+        // `fun() ->` put a keyword before `(` and the one-pass lexer reads it as a call.
+        "ERL" => &[
+            "after", "and", "andalso", "band", "begin", "bnot", "bor", "bsl", "bsr", "bxor",
+            "case", "catch", "cond", "div", "end", "fun", "if", "let", "not", "of", "or",
+            "orelse", "receive", "rem", "try", "when", "xor",
+        ],
         _ => &["if", "for", "while", "return", "switch", "function", "func", "fn", "def"],
     };
     keywords.contains(&name)

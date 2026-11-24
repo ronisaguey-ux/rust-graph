@@ -725,7 +725,7 @@ pub const LANGUAGES: &[Language] = &[
         blocks: Blocks::Column,
         line_comments: &["%"],
         block_comments: &[],
-        quotes: b"\"",
+        quotes: b"\"'",
         // OTP 27 documents a function with a triple-quoted string: an attribute
         // that opens with three quotes and closes on its own line. Read one quote
         // at a time the attribute swallowed the definitions below it, and a whole
