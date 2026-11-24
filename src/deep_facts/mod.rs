@@ -3698,12 +3698,173 @@ impl<'a> Walker<'a> {
                     }
                     if sib != NONE {
                         let line = self.line(id);
-                        self.lexer_event(b'x', line, &[], "[\"m\",[[\"n\",\"implementation\"],[\"n\",\"end\"]]]", false);
+                        match self.kind(sib) {
+                            "unit_end" => {
+                                self.lexer_event(b'x', line, &[], "[\"m\",[[\"n\",\"implementation\"],[\"n\",\"end\"]]]", false);
+                            }
+                            "routine_declaration" => {
+                                let rch = self.children(sib);
+                                let kw = rch.first().map(|&c| self.text_string(c).to_ascii_lowercase()).unwrap_or_default();
+                                let rname = rch.iter().copied().find(|&c| self.kind(c) == "identifier").map(|c| self.text_string(c).to_ascii_lowercase()).unwrap_or_default();
+                                if !kw.is_empty() && !rname.is_empty() {
+                                    let mut items = vec!["[\"n\",\"implementation\"]".to_string()];
+                                    let mut n1 = String::from("[\"n\",");
+                                    push_string(&mut n1, &kw);
+                                    n1.push(']');
+                                    items.push(n1);
+                                    let mut n2 = String::from("[\"n\",");
+                                    push_string(&mut n2, &rname);
+                                    n2.push(']');
+                                    items.push(n2);
+                                    if let Some(col) = rch.iter().position(|&c| self.kind(c) == ":") {
+                                        for &tc in &rch[col + 1..] {
+                                            let tck = self.kind(tc);
+                                            if tck == ";" { break; }
+                                            if !self.is_layout(tc) {
+                                                let tf = self.form(tc);
+                                                if !tf.is_empty() && tf != "0" {
+                                                    items.push(tf);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    self.lexer_event(b'x', line, &[], &format!("[\"m\",[{}]]", items.join(",")), false);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "field_list" if self.facts.tag == "PAS" => {
+                let children = self.children(id);
+                let mut cur_line: Option<u32> = None;
+                let mut cur_parts: Vec<String> = Vec::new();
+                for c in children {
+                    let ck = self.kind(c);
+                    if ck == ";" {
+                        if let Some(ln) = cur_line.take() {
+                            if !cur_parts.is_empty() {
+                                let val = if cur_parts.len() == 1 {
+                                    cur_parts.remove(0)
+                                } else {
+                                    format!("[\"m\",[{}]]", cur_parts.join(","))
+                                };
+                                self.lexer_event(b'x', ln, &[], &val, false);
+                                cur_parts.clear();
+                            }
+                        }
+                        continue;
+                    }
+                    if self.is_layout(c) || matches!(ck, ":" | ",") {
+                        continue;
+                    }
+                    if cur_line.is_none() {
+                        cur_line = Some(self.line(c));
+                    }
+                    if ck == "identifier_list" {
+                        for id_c in self.children(c) {
+                            if self.kind(id_c) == "identifier" {
+                                let nm = self.text_string(id_c).to_ascii_lowercase();
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, &nm);
+                                n.push(']');
+                                cur_parts.push(n);
+                            }
+                        }
+                    } else {
+                        let f = self.form(c);
+                        if !f.is_empty() && f != "0" {
+                            cur_parts.push(f);
+                        } else if ck == "identifier" {
+                            let nm = self.text_string(c).to_ascii_lowercase();
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &nm);
+                            n.push(']');
+                            cur_parts.push(n);
+                        }
+                    }
+                }
+                if let Some(ln) = cur_line {
+                    if !cur_parts.is_empty() {
+                        let val = if cur_parts.len() == 1 {
+                            cur_parts.remove(0)
+                        } else {
+                            format!("[\"m\",[{}]]", cur_parts.join(","))
+                        };
+                        self.lexer_event(b'x', ln, &[], &val, false);
                     }
                 }
             }
             "variable_declaration" if self.facts.tag == "PAS" => {
-                self.decl_statement(id);
+                let children = self.children(id);
+                let line = self.line(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    let name = children[..eq]
+                        .iter()
+                        .copied()
+                        .find_map(|c| {
+                            if self.kind(c) == "identifier_list" {
+                                self.children(c).into_iter().find(|&ic| self.kind(ic) == "identifier").map(|ic| self.text_string(ic).to_ascii_lowercase())
+                            } else if self.kind(c) == "identifier" {
+                                Some(self.text_string(c).to_ascii_lowercase())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    if !name.is_empty() {
+                        let mut parts = Vec::new();
+                        for &c in &children[eq + 1..] {
+                            if !self.is_layout(c) && self.kind(c) != ";" {
+                                let f = self.form(c);
+                                if !f.is_empty() && f != "0" {
+                                    parts.push(f);
+                                }
+                            }
+                        }
+                        let val = if parts.is_empty() {
+                            "0".to_string()
+                        } else if parts.len() == 1 {
+                            parts.into_iter().next().unwrap()
+                        } else {
+                            format!("[\"m\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'a', line, &[name], &val, false);
+                        return;
+                    }
+                }
+                let mut parts = Vec::new();
+                for c in children {
+                    let ck = self.kind(c);
+                    if self.is_layout(c) || matches!(ck, ":" | ";" | ",") {
+                        continue;
+                    }
+                    if ck == "identifier_list" {
+                        for ic in self.children(c) {
+                            if self.kind(ic) == "identifier" {
+                                let nm = self.text_string(ic).to_ascii_lowercase();
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, &nm);
+                                n.push(']');
+                                parts.push(n);
+                            }
+                        }
+                    } else {
+                        let f = self.form(c);
+                        if !f.is_empty() && f != "0" {
+                            parts.push(f);
+                        }
+                    }
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 {
+                        parts.into_iter().next().unwrap()
+                    } else {
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
             }
             "simple_command" if self.facts.tag == "SH" => {
                 let children = self.children(id);
@@ -3760,24 +3921,63 @@ impl<'a> Walker<'a> {
                     self.decl_statement(id);
                 }
             }
-            "library_directive" | "part_directive" | "export_directive" if self.facts.tag == "DART" => {
-                self.decl_statement(id);
-            }
-            "namespace_declaration" if self.facts.tag == "PHP" => {
-                self.decl_statement(id);
-            }
-            "property_declaration" | "const_declaration" if self.facts.tag == "PHP" => {
-                let children = self.children(id);
+            "variable_declaration" | "local_declaration" if self.facts.tag == "DART" => {
                 let line = self.line(id);
-                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
-                    let target = children[..eq]
+                let children = self.children(id);
+                let decls: Vec<u32> = children
+                    .iter()
+                    .copied()
+                    .filter(|&c| self.kind(c) == "declarator")
+                    .collect();
+                if !decls.is_empty() {
+                    for d in decls {
+                        let dch = self.children(d);
+                        let dline = self.line(d);
+                        if let Some(eq) = dch.iter().position(|&c| self.kind(c) == "=") {
+                            if let Some(name) = dch[..eq]
+                                .iter()
+                                .rev()
+                                .copied()
+                                .find(|&c| !self.is_layout(c))
+                                .map(|c| {
+                                    let t = self.text_string(c);
+                                    t.rsplit('$').next().unwrap_or(&t).to_string()
+                                })
+                                .filter(|s| !s.is_empty())
+                            {
+                                let rhs = dch[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                                let val = rhs
+                                    .map(|c| {
+                                        let k = self.kind(c);
+                                        if matches!(k, "true" | "false" | "null") {
+                                            format!("[\"n\",\"{k}\"]")
+                                        } else {
+                                            let f = self.form(c);
+                                            if f.is_empty() { "0".to_string() } else { f }
+                                        }
+                                    })
+                                    .unwrap_or_else(|| "0".to_string());
+                                if let Some(rnode) = rhs {
+                                    if let Some(cls) = self.constructed(rnode) {
+                                        self.facts.vars.push((name.clone(), cls));
+                                    }
+                                }
+                                self.lexer_event(b'a', dline, &[name], &val, false);
+                            }
+                        }
+                    }
+                } else if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(name) = children[..eq]
                         .iter()
                         .rev()
                         .copied()
-                        .find(|&c| matches!(self.kind(c), "variable_name" | "name" | "identifier"))
-                        .map(|c| self.text_string(c).trim_start_matches('$').to_string())
-                        .filter(|s| !s.is_empty());
-                    if let Some(name) = target {
+                        .find(|&c| self.kind(c) == "identifier")
+                        .map(|c| {
+                            let t = self.text_string(c);
+                            t.rsplit('$').next().unwrap_or(&t).to_string()
+                        })
+                        .filter(|s| !s.is_empty())
+                    {
                         let rhs = children[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
                         let val = rhs
                             .map(|c| {
@@ -3790,21 +3990,73 @@ impl<'a> Walker<'a> {
                                 }
                             })
                             .unwrap_or_else(|| "0".to_string());
+                        if let Some(rnode) = rhs {
+                            if let Some(cls) = self.constructed(rnode) {
+                                self.facts.vars.push((name.clone(), cls));
+                            }
+                        }
                         self.lexer_event(b'a', line, &[name], &val, false);
-                    } else {
-                        self.decl_statement(id);
                     }
-                } else {
-                    self.decl_statement(id);
                 }
+            }
+            "library_directive" | "part_directive" | "export_directive" if self.facts.tag == "DART" => {
+                self.decl_statement(id);
+            }
+            "closure_use" | "isset_expression" | "unset_statement" | "empty_expression" | "array_expression" if self.facts.tag == "PHP" => {
+                let cname = match kind {
+                    "closure_use" => "use",
+                    "isset_expression" => "isset",
+                    "unset_statement" => "unset",
+                    "empty_expression" => "empty",
+                    "array_expression" => "array",
+                    _ => "",
+                };
+                if !cname.is_empty() {
+                    let line = self.line(id);
+                    self.push_call(cname.to_string(), line);
+                }
+            }
+            "namespace_declaration" if self.facts.tag == "PHP" => {
+                self.decl_statement(id);
             }
             "metadata" if self.facts.tag == "DART" => {
                 let children = self.children(id);
+                let line = self.line(id);
+                let arg_list = children.iter().copied().find(|&c| self.kind(c) == "argument_list");
                 if let Some(&ident) = children.iter().find(|&&c| self.kind(c) == "identifier") {
                     let name = self.text_string(ident);
                     if !name.is_empty() {
-                        let line = self.line(id);
-                        self.push_call(name, line);
+                        let meta_val = if let Some(al) = arg_list {
+                            let idx = self.push_call(name, line);
+                            let args = self.arguments(al);
+                            format!("[\"c\",{idx},0,{args}]")
+                        } else {
+                            self.push_call(name.clone(), line);
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &name);
+                            n.push(']');
+                            n
+                        };
+                        let mut sib = self.node(id).next_sibling;
+                        while sib != NONE && self.is_layout(sib) {
+                            sib = self.node(sib).next_sibling;
+                        }
+                        if sib != NONE && self.kind(sib) == "library_directive" {
+                            self.lexer_event(b'x', line, &[], &format!("[\"m\",[ {meta_val},[\"n\",\"library\"]]]"), false);
+                        } else if sib != NONE && self.kind(sib) == "class_declaration" {
+                            let cname = self
+                                .children(sib)
+                                .into_iter()
+                                .find(|&c| self.kind(c) == "identifier")
+                                .map(|c| self.text_string(c))
+                                .unwrap_or_default();
+                            if !cname.is_empty() {
+                                let mut cn = String::from("[\"n\",");
+                                push_string(&mut cn, &cname);
+                                cn.push(']');
+                                self.lexer_event(b'x', line, &[], &format!("[\"m\",[ {meta_val},[\"n\",\"class\"],{cn}]]"), false);
+                            }
+                        }
                     }
                 }
             }
