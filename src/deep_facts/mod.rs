@@ -6398,3 +6398,323 @@ impl<'a> Walker<'a> {
             // C# and the brace languages beside it: `public enum ExclusionFilters`
             // is a statement to the lexer, and the tree wrote only the symbol, so
             // the header event had no counterpart on nearly every file.
+            if matches!(self.language.name, "csharp" | "kotlin" | "scala" | "swift" | "objc") {
+                self.java_header_event(id);
+            }
+            return;
+        }
+        // A computed property name on a method (`[expr]() {}`) is evaluated in
+        // the enclosing scope when the class or object is defined, not inside
+        // the method's own frame.
+        if let Some(computed) = self.child_of_kind(id, "computed_property_name") {
+            for child in self.children(computed) {
+                if !self.is_layout(child) {
+                    let value = self.form(child);
+                    if value != "0" {
+                        let at = self.line(child);
+                        self.event(&format!("[\"x\",{at},{value}]"));
+                    }
+                }
+            }
+        }
+        let named = self
+            .def_name(id, def)
+            .or_else(|| {
+                let at = self.bound.iter().position(|(node, _)| *node == id)?;
+                Some(self.bound.remove(at).1)
+            });
+        let name = named.unwrap_or_else(|| {
+            // Scala's secondary constructor `def this(...) = this(...)`: the
+            // grammar cannot name the `this` keyword, but the lexer opens a
+            // function symbol under it. Name it from the source line.
+            if self.language.name == "scala" && self.scala_source_line(line).contains("def this") {
+                "this".to_string()
+            } else {
+                format!("<anonymous>@{line}")
+            }
+        });
+        let owner = if self.frame().container { self.frame().class.clone() } else { String::new() };
+        // Go: a method's receiver decides its owner, and the receiver's name is
+        // what the lexer spells `self` for inside the body.
+        let (receiver, receiver_owner) = if def.receiver {
+            def.params
+                .map(|kind| self.nth_child_of_kind(id, kind, 0))
+                .flatten()
+                .map(|list| self.go_receiver(list))
+                .unwrap_or_default()
+        } else {
+            (String::new(), String::new())
+        };
+        let owner = if receiver_owner.is_empty() { owner } else { receiver_owner };
+        let mut params = def
+            .params
+            .map(|kind| self.nth_child_of_kind(id, kind, def.params_nth as usize))
+            .flatten()
+            .map(|node| self.params(id, node))
+            .unwrap_or_default();
+        // `x = lambda k: f(k)`: the lambda's own parameter list is where the
+        // names are, since this binding carries no `parameters` rule.
+        if params.is_empty() {
+            if let Some(list) = self.child_of_kind(id, "lambda_parameters") {
+                params = self.params(id, list);
+            }
+        }
+        if params.first().is_some_and(|first| matches!(first.as_str(), "self" | "cls" | "this")) {
+            params.remove(0);
+        }
+        let index = self.add_symbol(name, owner.clone(), KIND_FUNCTION, line, params);
+        self.stack.push(Frame { node: id, symbol: index, class: owner, receiver, container: false, defines: Some(index) });
+        // A binding whose body is a lambda (`x = lambda k: f(k)`) is a
+        // definition the grammar writes as one node: nothing else in the walk
+        // reads that lambda, so its body is read here, as this symbol's return.
+        if let Some(lambda) = self.child_of_kind(id, "lambda") {
+            if let Some(body) = self.children(lambda).into_iter().rev().find(|&child| !self.is_layout(child)) {
+                let at = self.line(lambda);
+                let value = self.form(body);
+                if value != "0" {
+                    self.event(&format!("[\"r\",{at},{value}]"));
+                }
+            }
+        }
+    }
+
+    /// `fun f(): T = expr`: an expression body is this function's return
+    /// value, which the lexer writes as an `r` event. A block body states its
+    /// own statements, so it is not read again here.
+    fn function_body(&mut self, id: u32) {
+        let Some(body) = self
+            .children(id)
+            .into_iter()
+            .find(|&child| !self.is_layout(child) && !matches!(self.kind(child), "block" | "statement_block"))
+        else {
+            return;
+        };
+        let line = self.line(body);
+        let value = self.form(body);
+        self.event(&format!("[\"r\",{line},{value}]"));
+    }
+
+    /// The name a definition node carries, if any.
+    pub(crate) fn def_name(&self, id: u32, def: &Def) -> Option<String> {
+        // Rust: a function named with a weak keyword (`fn union`,
+        // `fn default`) has no identifier node — the grammar reads the word as
+        // the keyword it is elsewhere — and the generic lookup then fell
+        // through to the return type, naming the method `bool`. The name is
+        // the leaf right after `fn`.
+        if self.kinds.family == Family::Rust && matches!(def.kind, "function_item" | "function_signature_item") {
+            let children = self.children(id);
+            if let Some(at) = children.iter().position(|&child| self.text_string(child) == "fn") {
+                if let Some(&name) = children.get(at + 1) {
+                    let text = self.text_string(name);
+                    if !text.is_empty() && !text.contains('(') && !text.contains(' ') {
+                        return Some(text);
+                    }
+                }
+            }
+        }
+        if def.name_last {
+            // Java writes the return type before the name: `Item find(int id)`.
+            let children = self.children(id);
+            // Java's contextual keywords (`open`, `module`, `record`, `sealed`,
+            // `permits`, `to`, `exports`, `with`) are legal method names, but the
+            // grammar gives the word its own anonymous token rather than an
+            // identifier, so no identifier child exists for them. The name is
+            // then the leaf right before the parameter list — and it is the name
+            // even when the return type is an identifier, which is why
+            // `public TestCompiler with(…)` was named after its return type
+            // (`TestCompiler`) and the method itself left the record.
+            if self.kinds.family == Family::Java {
+                if let Some(params) = def.params {
+                    if let Some(at) = children.iter().position(|&child| self.kind(child) == params) {
+                        if let Some(&name) = at.checked_sub(1).and_then(|at| children.get(at)) {
+                            let text = self.text_string(name);
+                            if self.node(name).first_child == NONE
+                                && !text.is_empty()
+                                && text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                            {
+                                return Some(text);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(node) = children.iter().copied().filter(|&child| def.name.contains(&self.kind(child))).next_back() {
+                return Some(self.text_string(node));
+            }
+            return None;
+        }
+        if let Some(node) = def.name.iter().find_map(|kind| self.child_of_kind(id, *kind)) {
+            let text = self.text_string(node);
+            // `fun A.B.load()`: a Kotlin extension's head is its receiver and
+            // its name, and the name is the last segment — the lexer files the
+            // symbol under that alone.
+            if self.facts.tag == "ERL" && self.kind(node) == "function_head" {
+                if let Some(name) = self.child_of_kind(node, "function_name") {
+                    return Some(self.text_string(name));
+                }
+            }
+            if self.facts.tag == "KT" && self.kind(node) == "function_head" {
+                if let Some((_, name)) = text.rsplit_once('.') {
+                    return Some(name.to_string());
+                }
+            }
+            return Some(text);
+        }
+        // A function or method called `get` or `set` reads as the modifier that
+        // introduces an accessor, so the grammar gives the name that anonymous
+        // token rather than an identifier: `function set(a) {}` and
+        // `class A { set(v) {} }` both came out unnamed while `setter` did not.
+        // The name is then the leaf just before the parameter list — but only
+        // that leaf: `const readBlob = async function* (blob) {}` puts a `*`
+        // and the `function` keyword there, and naming the definition after
+        // either one hides the assignment name that used to fill it.
+        if !matches!(
+            def.kind,
+            "method_definition"
+                | "function_declaration"
+                | "generator_function_declaration"
+                | "function_expression"
+        ) {
+            return None;
+        }
+        let params = def.params?;
+        let children = self.children(id);
+        let at = children.iter().position(|&child| self.kind(child) == params)?;
+        let mut name = *children.get(at.checked_sub(1)?)?;
+        // `get`, `set` and `async` ARE the name here; the words to step over are
+        // the ones the grammar writes between a declaration and its parameters.
+        if matches!(self.text_string(name).as_str(), "*" | "function" | "static") {
+            let before = *children.get(at.checked_sub(2)?)?;
+            if matches!(self.text_string(before).as_str(), "function" | "async") {
+                return None;
+            }
+            name = before;
+        }
+        if self.node(name).first_child != NONE {
+            return None;
+        }
+        let text = self.text_string(name);
+        (!text.is_empty()).then_some(text)
+    }
+
+    pub(crate) fn bases(&self, id: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        // Java writes the superclass and the interfaces in two clauses, so every
+        // heritage child is read, not only the first.
+        let heritage: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .filter(|&child| {
+                matches!(
+                    self.kind(child),
+                    "argument_list" | "class_heritage" | "implements_clause" | "superclass" | "super_interfaces"
+                        | "extends_interfaces"
+                )
+            })
+            .collect();
+        if heritage.is_empty() {
+            return out;
+        }
+        // Source order: the stack pops the last pushed first.
+        let mut walk: Vec<u32> = heritage.into_iter().rev().collect();
+        while let Some(node) = walk.pop() {
+            for child in self.children(node) {
+                match self.kind(child) {
+                    "identifier" | "type_identifier" => out.push(self.text_string(child)),
+                    "attribute" | "member_expression" | "nested_type_identifier" => {
+                        if let Some(last) = self.last_name(child) {
+                            out.push(last);
+                        }
+                    }
+                    "(" | ")" | "," | ":" | "extends" | "implements" | "with" | "argument_list" | "class_heritage"
+                    | "implements_clause" | "type_arguments" => walk.push(child),
+                    _ => walk.push(child),
+                }
+            }
+        }
+        out
+    }
+
+    /// The leftmost identifier under a node: for a generic type that is the
+    /// constructor, which is the name the type goes by — `JsonString<LogEntry>`
+    /// is `JsonString`, not the argument inside the angle brackets.
+    pub(crate) fn first_name(&self, id: u32) -> Option<String> {
+        let mut walk = vec![id];
+        while let Some(node) = walk.pop() {
+            let kind = self.kind(node);
+            if matches!(kind, "identifier" | "property_identifier" | "type_identifier") {
+                return Some(self.text_string(node));
+            }
+            let mut kids = Vec::new();
+            let mut child = self.node(node).first_child;
+            while child != NONE {
+                kids.push(child);
+                child = self.node(child).next_sibling;
+            }
+            for &child in kids.iter().rev() {
+                walk.push(child);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn last_name(&self, id: u32) -> Option<String> {
+        let mut last = None;
+        let mut walk = vec![id];
+        while let Some(node) = walk.pop() {
+            let kind = self.kind(node);
+            if matches!(kind, "identifier" | "property_identifier" | "type_identifier") {
+                last = Some(self.text_string(node));
+            }
+            // Depth-first in source order, so the last name assigned is the
+            // rightmost one: `func.placeholder` is `placeholder`. Pushing the
+            // children left to right popped them right to left and left the
+            // caller with `func`.
+            let mut kids = Vec::new();
+            let mut child = self.node(node).first_child;
+            while child != NONE {
+                kids.push(child);
+                child = self.node(child).next_sibling;
+            }
+            for &child in kids.iter().rev() {
+                walk.push(child);
+            }
+        }
+        last
+    }
+
+    /// `def f(a, b=1, *c)`, `function f(a, {b}, ...c)`, `(a, b) => {}`,
+    /// `func f(id int)`, `Item find(int id)`.
+    pub(crate) fn params(&self, def: u32, list: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        let list_kind = self.kind(list);
+        // JS class heritage shares the slot but is not a parameter list.
+        if list_kind == "class_heritage" {
+            return out;
+        }
+        // Java and C-family declarations are `type name`, so the name is the
+        // last identifier of the parameter, not the first (which is the type).
+        let type_first = self.kinds.family == Family::Java;
+        for child in self.children(list) {
+            let kind = self.kind(child);
+            match kind {
+                "(" | ")" | "," | "[" | "]" | "{" | "}" | ":" => {}
+                "parameter" | "identifier" | "required_parameter" | "optional_parameter" | "rest_parameter"
+                | "typed_parameter" | "default_parameter" | "typed_default_parameter" | "list_splat_pattern"
+                | "dictionary_splat_pattern" => {
+                    if let Some(name) = self.parameter_name(child, type_first) {
+                        out.push(name);
+                    }
+                }
+                "object_pattern" | "array_pattern" => {
+                    out.extend(self.pattern_names(child));
+                }
+                _ => {
+                    if let Some(name) = self.parameter_name(child, type_first) {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+        let _ = def;
+        out
