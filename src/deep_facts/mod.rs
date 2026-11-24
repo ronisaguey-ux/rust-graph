@@ -453,7 +453,7 @@ const RB_DEFS: &[Def] = &[
     Def { kind: "module_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "method_definition", name: &["method_name", "identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
-const RB_CALLS: &[&str] = &["call", "command_call", "bare_call", "super_call"];
+const RB_CALLS: &[&str] = &["call", "command_call", "bare_call", "super_call", "defined_expression"];
 const RB_IMPORTS: &[&str] = &["require_statement"];
 
 const PHP_DEFS: &[Def] = &[
@@ -1410,6 +1410,14 @@ impl<'a> Walker<'a> {
     pub(crate) fn is_layout(&self, id: u32) -> bool {
         let node = self.node(id);
         if node.first_child != NONE {
+            return false;
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR")
+            && matches!(
+                self.kind(id),
+                "instance_variable" | "class_variable" | "global_variable" | "simple_symbol" | "symbol" | "true" | "false" | "nil"
+            )
+        {
             return false;
         }
         let text = self.text(id);
@@ -3268,10 +3276,85 @@ impl<'a> Walker<'a> {
                     self.lexer_event(b'x', self.line(id), &[], &val, false);
                 }
             }
+            "if_statement" | "unless_statement" | "elsif_clause" | "case_statement" | "when_clause" | "while_statement" | "until_statement"
+                if self.facts.tag == "RB" =>
+            {
+                let line = self.line(id);
+                let mut parts = Vec::new();
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if matches!(ck, "body" | "else_clause" | "elsif_clause" | "when_clause" | "then_token" | "end") {
+                        break;
+                    }
+                    if matches!(ck, "if" | "unless" | "elsif" | "case" | "when" | "while" | "until") {
+                        continue;
+                    }
+                    if self.is_layout(ch) {
+                        continue;
+                    }
+                    let f = self.form(ch);
+                    if !f.is_empty() && f != "0" {
+                        parts.push(f);
+                    }
+                }
+                if parts.len() == 1 {
+                    self.lexer_event(b'x', line, &[], &parts[0], false);
+                } else if parts.len() > 1 {
+                    self.lexer_event(b'x', line, &[], &format!("[\"m\",[{}]]", parts.join(",")), false);
+                }
+            }
+            "multiple_assignment" if self.facts.tag == "RB" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    let mut targets = Vec::new();
+                    for &c in &children[..eq] {
+                        if self.is_layout(c) || self.kind(c) == "," {
+                            continue;
+                        }
+                        let p = self.path_of(c);
+                        if !p.is_empty() {
+                            targets.push(p);
+                        }
+                    }
+                    let mut vals = Vec::new();
+                    for &c in &children[eq + 1..] {
+                        if self.is_layout(c) || self.kind(c) == "," {
+                            continue;
+                        }
+                        let f = self.form(c);
+                        vals.push(if f.is_empty() { "0".to_string() } else { f });
+                    }
+                    if !targets.is_empty() && !vals.is_empty() {
+                        let val = if vals.len() == 1 {
+                            vals.remove(0)
+                        } else {
+                            format!("[\"t\",[{}]]", vals.join(","))
+                        };
+                        self.lexer_event(b'a', line, &targets, &val, false);
+                    }
+                }
+            }
             "include_statement" if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
                 let line = self.line(id);
-                self.push_call("include".to_string(), line);
-                self.expression_statement(id);
+                let children = self.children(id);
+                let kw = children
+                    .first()
+                    .map(|&c| self.text_string(c))
+                    .filter(|k| matches!(k.as_str(), "include" | "extend" | "prepend"))
+                    .unwrap_or_else(|| "include".to_string());
+                let idx = self.push_call(kw, line);
+                let mut args = Vec::new();
+                for &c in children.iter().skip(1) {
+                    if !self.is_layout(c) {
+                        let v = self.form(c);
+                        if !v.is_empty() {
+                            args.push(v);
+                        }
+                    }
+                }
+                let val = format!("[\"c\",{idx},0,[{}]]", args.join(","));
+                self.lexer_event(b'x', line, &[], &val, false);
             }
             "pragma_directive" if self.facts.tag == "SOL" => {
                 let raw = self.text_string(id);
@@ -3334,7 +3417,71 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
-            "program_header" | "unit_header" | "const_declaration" | "type_declaration" | "variable_declaration" if self.facts.tag == "PAS" => {
+            "unit_header" | "program_header" if self.facts.tag == "PAS" => {
+                let line = self.line(id);
+                let kw = if kind == "unit_header" { "unit" } else { "program" };
+                let name = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&c| matches!(self.kind(c), "dotted_name" | "identifier"))
+                    .map(|c| self.text_string(c).to_ascii_lowercase())
+                    .unwrap_or_default();
+                let val = if name.is_empty() {
+                    format!("[\"n\",\"{kw}\"]")
+                } else {
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &name);
+                    n.push(']');
+                    format!("[\"m\",[[\"n\",\"{kw}\"],{n}]]")
+                };
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
+            "const_declaration" | "type_declaration" if self.facts.tag == "PAS" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(name) = children[..eq]
+                        .iter()
+                        .copied()
+                        .find(|&c| !self.is_layout(c))
+                        .map(|c| self.text_string(c).to_ascii_lowercase())
+                        .filter(|n| !n.is_empty())
+                    {
+                        let mut parts = Vec::new();
+                        for &c in &children[eq + 1..] {
+                            if !self.is_layout(c) && self.kind(c) != ";" {
+                                let f = self.form(c);
+                                if !f.is_empty() && f != "0" {
+                                    parts.push(f);
+                                }
+                            }
+                        }
+                        let val = if parts.is_empty() {
+                            "0".to_string()
+                        } else if parts.len() == 1 {
+                            parts.into_iter().next().unwrap()
+                        } else {
+                            format!("[\"m\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'a', line, &[name], &val, false);
+                        return;
+                    }
+                }
+                self.decl_statement(id);
+            }
+            "section_marker" if self.facts.tag == "PAS" => {
+                if self.text_string(id).eq_ignore_ascii_case("implementation") {
+                    let mut sib = self.node(id).next_sibling;
+                    while sib != NONE && self.is_layout(sib) {
+                        sib = self.node(sib).next_sibling;
+                    }
+                    if sib != NONE && self.kind(sib) == "unit_end" {
+                        let line = self.line(id);
+                        self.lexer_event(b'x', line, &[], "[\"m\",[[\"n\",\"implementation\"],[\"n\",\"end\"]]]", false);
+                    }
+                }
+            }
+            "variable_declaration" if self.facts.tag == "PAS" => {
                 self.decl_statement(id);
             }
             "simple_command" if self.facts.tag == "SH" => {
@@ -3554,6 +3701,54 @@ impl<'a> Walker<'a> {
                         continue;
                     }
                     self.statement_node(child, child);
+                }
+            }
+            "attribute" if self.facts.tag == "ERL" => {
+                let attr_name = self
+                    .child_of_kind(id, "attribute_name")
+                    .map(|c| self.text_string(c))
+                    .unwrap_or_default();
+                if matches!(attr_name.as_str(), "define" | "if" | "elif" | "record") {
+                    if let Some(grp) = self.child_of_kind(id, "attribute_group") {
+                        if let Some(args) = self.child_of_kind(grp, "attribute_arguments") {
+                            let exprs: Vec<u32> = self
+                                .children(args)
+                                .into_iter()
+                                .filter(|&c| !self.is_layout(c) && self.kind(c) != ",")
+                                .collect();
+                            for &expr in &exprs {
+                                let _ = self.form(expr);
+                            }
+                        }
+                    }
+                }
+            }
+            "parameter_group" if self.facts.tag == "ERL" => {
+                if let Some(params) = self.child_of_kind(id, "parameters") {
+                    for expr in self.children(params) {
+                        if !self.is_layout(expr) && self.kind(expr) != "," {
+                            let _ = self.form(expr);
+                        }
+                    }
+                }
+            }
+            "guard" if self.facts.tag == "ERL" => {
+                let gline = self.line(id);
+                let mut first_checked = false;
+                for child in self.children(id) {
+                    if self.kind(child) == "guard_sequence" {
+                        for expr in self.children(child) {
+                            if !self.is_layout(expr) && !matches!(self.kind(expr), ";" | ",") {
+                                if !first_checked {
+                                    first_checked = true;
+                                    if self.kind(expr) == "paren_expression" {
+                                        self.push_call("when".to_string(), gline);
+                                    }
+                                }
+                                let _ = self.form(expr);
+                            }
+                        }
+                    }
                 }
             }
             // `companion object { … }`: the one-pass lexer files the introducer
