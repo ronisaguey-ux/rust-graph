@@ -451,3 +451,17 @@ Cross-language regression check on the 4 original corpora: **0 movement** (`pyth
 - **Solidity (`src/deep_facts/mod.rs`)**: `using_directive` / `event_definition` / `error_definition` statement emission -> `142/202 -> 141/189` (`-1` file, `-13` rows).
 - **Tcl (`src/deep_facts/mod.rs`)**: bare word/subcommand emission on `call_command` -> `684/684 -> 684/743` (`call` `681 -> 676`, zero crashes).
 - **Self-parse & regression**: `rust-graph/src` `0` losses; 4 original corpora (`python` 23/25, `javascript` 23/23, `typescript` 28/36, `rust` 26/27) unchanged.
+
+### Round 3 additions (2026-11-23)
+
+- **Ruby (`src/deep_facts/mod.rs`, `src/deep_facts/go.rs`)**: fixed `command_call` unwrapping (`form(id)` directly instead of `expression_statement(id)`) and emitted `["n","true"|"false"|"nil"]` for Ruby/Crystal boolean/nil literals -> `1401/3183 -> 1301/2263` (`-100` files, `-920` rows).
+- **Multi-language `call_arguments` (`src/deep_facts/go.rs`)**: added `"call_arguments"` to `call_form_link` (excluding `ZIG`/`R` where argument wrappers inflated rows):
+  - Awk `308/1049 -> 284/883` (`-24` files, `-166` rows)
+  - Erlang `1266/1355 -> 1242/1330` (`-24` files, `-25` rows)
+  - Lua `559/837 -> 551/795` (`-8` files, `-42` rows)
+  - Solidity `141/189 -> 139/184` (`-2` files, `-5` rows, including `struct_field`)
+  - Pascal `779/8075 -> 778/8056` (`-1` file, `-19` rows)
+- **PHP (`src/deep_facts/mod.rs`)**: added `property_declaration`, `const_declaration`, and `namespace_declaration` event emission -> `718/4525 -> 675/1330` (`-43` files, `-3,195` rows).
+- **Dart (`src/deep_facts/mod.rs`)**: added `library_directive`, `part_directive`, and `export_directive` event emission -> `694/1248 -> 668/1081` (`-26` files, `-167` rows).
+- **Reverted per row-regression rule**: Tcl Round 2 multi-word emission (`684/743 -> 684/684`), Bash/PowerShell `-flag` guard (`468 -> 4914` rows / `263 -> 305` rows), R generic `call_arguments` (`7194 -> 8636` rows), and Zig `test_declaration`/`builtin_call` form.
+- **7-corpus regression guard**: `javascript` 23/23, `typescript` 28/36, `python` 23/25, `rust` 26/27, `kotlin` 84/90, `scala` 82/112, `swift` 68/90 (0 regressions). `rust-graph/src`: `0` losses. Unit tests: `256 passed, 0 failed, 24 ignored`.

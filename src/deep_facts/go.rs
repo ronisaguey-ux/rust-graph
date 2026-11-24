@@ -4468,7 +4468,10 @@ fn dotted_piece(text: &str) -> bool {
             out.push(']');
             return out;
         }
-                if self.facts.tag == "LUA" && kind == "table_constructor" {
+                if matches!(self.facts.tag.as_str(), "RB" | "CR") && matches!(kind, "true" | "false" | "nil") {
+            return format!("[\"n\",\"{kind}\"]");
+        }
+        if self.facts.tag == "LUA" && kind == "table_constructor" {
             let mut parts = Vec::new();
             for child in self.children(id) {
                 let ck = self.kind(child);
@@ -7146,7 +7149,7 @@ fn dotted_piece(text: &str) -> bool {
         let args = children
             .iter()
             .copied()
-            .find(|&child| matches!(self.kind(child), "argument_list" | "arguments" | "template_string"));
+            .find(|&child| (matches!(self.kind(child), "argument_list" | "arguments" | "template_string") || (self.kind(child) == "call_arguments" && !matches!(self.facts.tag.as_str(), "ZIG" | "R"))));
         let mut targ = None;
         if let Some(list) = args.filter(|&list| self.kind(list) == "template_string") {
             let inner = self.form(list);
