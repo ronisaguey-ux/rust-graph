@@ -294,3 +294,24 @@ Measured 2026-11-17 at `0f638f5` over the local sweep root (65,000 files): the
 worst per-language p95 is C++ at 2.32 ms, and every other language is under
 1.7 ms. `--check` gates a language with fewer than 20 files out of the pass:
 five files have no p95 worth failing a phase on.
+
+## LOC-weighted fallback (added 2026-11-24)
+
+A file-weighted percentage treats a 40-line fixture like a 3,000-line module, and the
+45-language corpora are dominated by small files: median 9 non-blank lines in awk, 101 in
+powershell, 125 in tcl. Two numbers are now reported together, never one alone:
+
+- **file %** — files with at least one `loss` row / files in the corpus (what every earlier
+  round reported).
+- **LOC %** — non-blank lines inside those files / non-blank lines in the corpus, i.e. the
+  share of the *code* that still falls back.
+
+`tools/loc_weighted.py` produces both from one run, plus the median and p90 file size, so a
+corpus that is skewed small is visible in its own output. `tools/large_files.py` builds the
+counterweight: for every language, real files of 700+ non-blank lines harvested from the
+local tree, deduplicated by sha256, under `/tmp/opencode/lean/corpus45-large/<lang>/`, with a
+manifest. Each lane measures its three languages on the normal corpus and on the large-file
+corpus before the first attempt, and reports `file % / LOC %` for both.
+
+Note: `loss` rows print paths **relative to the corpus root**, so any consumer must join them
+to the root it passed in — matching on the raw path yields 0% LOC every time.
