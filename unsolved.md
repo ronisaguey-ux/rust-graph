@@ -418,3 +418,10 @@ Cross-language regression check on the 4 original corpora: **0 movement** (`pyth
 - **Dart (`src/deep_facts/mod.rs`)**: added `library_directive`, `part_directive`, and `export_directive` event emission -> `694/1248 -> 668/1081` (`-26` files, `-167` rows).
 - **Reverted per row-regression rule**: Tcl Round 2 multi-word emission (`684/743 -> 684/684`), Bash/PowerShell `-flag` guard (`468 -> 4914` rows / `263 -> 305` rows), R generic `call_arguments` (`7194 -> 8636` rows), and Zig `test_declaration`/`builtin_call` form.
 - **7-corpus regression guard**: `javascript` 23/23, `typescript` 28/36, `python` 23/25, `rust` 26/27, `kotlin` 84/90, `scala` 82/112, `swift` 68/90 (0 regressions). `rust-graph/src`: `0` losses. Unit tests: `256 passed, 0 failed, 24 ignored`.
+
+## Round 4 Fallback-Reduction Progress (2026-11-23)
+
+- **ruby**: `1301 files / 2263 rows` -> `1143 files / 1485 rows` (`-158 files / -778 rows`, 25 attempts)
+- **erlang**: `1242 files / 1330 rows` -> `741 files / 893 rows` (`-501 files / -437 rows`, 25 attempts)
+- **pascal**: `778 files / 8056 rows` -> `525 files / 2860 rows` (`-253 files / -5196 rows`, 8 attempts; resume at pascal attempt 9)
+- **7-corpus guard**: `js 23/23`, `ts 28/36`, `py 23/25`, `rs 26/27`, `kt 84/90`, `sc 82/112`, `sw 68/90` (7/7 PASS); `rust-graph/src` self-parse `0/0`; `cargo test` `256 passed, 0 failed, 24 ignored`.
