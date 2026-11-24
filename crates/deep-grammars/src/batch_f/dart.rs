@@ -158,7 +158,14 @@ rust_graph_deep::grammar! { DART {
         | export_directive
         | library_directive
         | part_directive
-        | class_declaration
+        | &("abstract" "final" "class") class_declaration
+        | &("abstract" "interface" "class") class_declaration
+        | &("abstract" "mixin" "class") class_declaration
+        | &("abstract" "class") class_declaration
+        | &("final" "class") class_declaration
+        | &("interface" "class") class_declaration
+        | &("mixin" "class") class_declaration
+        | &("class") class_declaration
         | mixin_declaration
         | enum_declaration
         | extension_declaration
@@ -179,7 +186,7 @@ rust_graph_deep::grammar! { DART {
 
     metadata: "@" _name ["." _name] [argument_list],
 
-    class_declaration: ["abstract"] "class" IDENT [type_parameters] [class_heritage] class_body,
+    class_declaration: ["abstract"] ["interface" | "final" | "mixin"] "class" IDENT [type_parameters] [class_heritage] class_body,
     mixin_declaration: "mixin" IDENT [type_parameters] [mixin_heritage] class_body,
     enum_declaration: "enum" IDENT [class_heritage] enum_body,
     extension_declaration: "extension" IDENT [type_parameters] ["on" _type] class_body,
@@ -258,6 +265,9 @@ rust_graph_deep::grammar! { DART {
         | break_statement
         | continue_statement
         | throw_statement
+        | &("const" IDENT argument_list) expression_statement
+        | &("const" IDENT ".") expression_statement
+        | &("const" list_literal) expression_statement
         | variable_declaration
         | &(IDENT IDENT "=") local_declaration
         | &(IDENT IDENT ";") local_declaration
@@ -306,8 +316,8 @@ rust_graph_deep::grammar! { DART {
         postfix "++" | "--" => update,
         prefix "++" | "--" => update,
         postfix argument_list => call,
-        postfix "." _name => member_access,
-        postfix "?." _name => null_aware_member,
+        postfix "." _member_name => member_access,
+        postfix "?." _member_name => null_aware_member,
         postfix index_expression => index,
         postfix "!" => null_assertion,
     },
@@ -317,6 +327,7 @@ rust_graph_deep::grammar! { DART {
     _argument: &(IDENT ":") named_argument | _expression,
     named_argument: _name ":" _expression,
     _name: IDENT,
+    _member_name: IDENT | "of" | "on" | "get" | "set" | "show" | "hide" | "part" | "library" | "export" | "import" | "factory" | "external" | "late" | "required" | "async" | "mixin" | "extension" | "typedef" | "operator" | "covariant" | "abstract" | "interface",
 
     _primary:
         IDENT
@@ -328,12 +339,25 @@ rust_graph_deep::grammar! { DART {
         | "this"
         | "super"
         | parenthesized_expression
-        | list_literal,
+        | list_literal
+        | const_object_expression,
 
     string_literal: (STRING | BAD_STRING)+,
-    parenthesized_expression: "(" (_expression %? ",") ")",
+    parenthesized_expression: paren_group [closure_tail],
+    paren_group: "(" [_paren_item %? ","] ")",
+    _paren_item:
+        &(IDENT IDENT) typed_parameter
+        | &("int" IDENT) typed_parameter
+        | &("double" IDENT) typed_parameter
+        | &("num" IDENT) typed_parameter
+        | &("bool" IDENT) typed_parameter
+        | &("dynamic" IDENT) typed_parameter
+        | &("void" IDENT) typed_parameter
+        | _expression,
+    closure_tail: [method_effect] (block | "=>" _expression),
     paren_expression: "(" _expression ")",
     list_literal: "[" [_expression %? ","] "]",
+    const_object_expression: "const" (list_literal | IDENT ("." _member_name)* argument_list),
 } }
 
 /// One token at the cursor.

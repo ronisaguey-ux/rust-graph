@@ -1993,7 +1993,7 @@ impl<'a> Walker<'a> {
                         walk.push(first);
                     }
                 }
-                "member_expression" | "attribute" | "member" | "safe_member" | "member_access_expression" | "scoped_property_access_expression" | "instance_variable" | "class_variable" | "global_variable" | "absolute_constant" => {
+                "member_expression" | "attribute" | "member" | "safe_member" | "member_access_expression" | "nullsafe_member_access_expression" | "scoped_property_access_expression" | "instance_variable" | "class_variable" | "global_variable" | "absolute_constant" => {
                     let path = self.path_of(node);
                     if !path.is_empty() {
                         out.push(path);
@@ -2615,7 +2615,7 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn assignment_targets(&self, id: u32) -> Vec<String> {
         match self.kind(id) {
-            "subscript" | "subscript_expression" | "index_expression" | "element_access" | "element_reference" => {
+            "subscript" | "subscript_expression" | "index_expression" | "element_access" | "element_reference" | "index" | "dereference" => {
                 let base = self.children(id).first().copied().unwrap_or(id);
                 self.assignment_targets(base)
             }
@@ -2816,15 +2816,19 @@ impl<'a> Walker<'a> {
         // whose base is the call. The lexer reads the first token, so the
         // chain is unwrapped to the call that starts it.
         let call = self.value_root_call(value)?;
-        if matches!(self.kind(call), "new_expression" | "object_creation" | "object_creation_expression") {
-            let path = if self.kind(call) == "new_expression" {
+        if matches!(self.kind(call), "new_expression" | "const_object_expression" | "object_creation" | "object_creation_expression") {
+            let path = if matches!(self.kind(call), "new_expression" | "const_object_expression") {
                 self.children(call).into_iter().find_map(|child| {
-                    matches!(self.kind(child), "identifier" | "member_expression" | "attribute").then(|| self.path_of(child))
+                    match self.kind(child) {
+                        "identifier" | "member_expression" | "attribute" | "name" => Some(self.path_of(child)),
+                        "qualified_name" => Some(self.text_string(child)),
+                        _ => None,
+                    }
                 })?
             } else {
                 self.decl_path(self.decl_callee(call))
             };
-            let last = path.rsplit('.').next().unwrap_or(&path);
+            let last = path.rsplit(|c| c == '.' || c == '\\').next().unwrap_or(&path);
             return last.starts_with(|ch: char| ch.is_uppercase()).then_some(last.to_string());
         }
         let path = self.root_callee(call)?;
@@ -2838,11 +2842,14 @@ impl<'a> Walker<'a> {
         match self.kind(id) {
             // C# spells calls as `invocation_expression` / `generic_invocation`
             // and `new T()` as `object_creation` / `object_creation_expression`.
-            "call" | "call_expression" | "new_expression" | "invocation_expression" | "object_creation"
+            "call" | "call_expression" | "new_expression" | "const_object_expression" | "invocation_expression" | "object_creation"
             | "object_creation_expression" | "generic_invocation" => Some(id),
-            "attribute" | "member_expression" | "member_access" | "field_access" | "subscript"
+            "attribute" | "member_expression" | "member_access" | "null_aware_member" | "field_access" | "subscript"
             | "subscript_expression" | "parenthesized_expression" => {
                 self.children(id).first().and_then(|&object| self.value_root_call(object))
+            }
+            "await_expression" if self.facts.tag == "DART" => {
+                self.children(id).into_iter().rev().find(|&c| !self.is_layout(c)).and_then(|c| self.value_root_call(c))
             }
             // `candidate = Path(x).parent / candidate`: a binary value starts
             // with its left operand, which is what the lexer's first token is.
@@ -2906,6 +2913,7 @@ impl<'a> Walker<'a> {
             }
             _ => {
                 let path = self.path_of(id);
+                let path = if self.facts.tag == "PAS" { path.to_ascii_lowercase() } else { path };
                 (!path.is_empty()).then_some(path)
             }
         }
@@ -3412,6 +3420,11 @@ impl<'a> Walker<'a> {
             return;
         }
         let trimmed = raw.trim().trim_end_matches(';').trim();
+        let trimmed = if self.facts.tag == "PHP" && self.kind(id) == "trait_use_declaration" {
+            trimmed.split('{').next().unwrap_or(trimmed).trim()
+        } else {
+            trimmed
+        };
         let mut rest = trimmed;
         for kw in ["import ", "uses ", "use ", "open ", "using ", "require ", "include "] {
             if let Some(r) = rest.strip_prefix(kw) {
@@ -3419,8 +3432,12 @@ impl<'a> Walker<'a> {
                 break;
             }
         }
+        let mut php_prefix = "";
         for kw in ["function ", "const ", "static "] {
             if let Some(r) = rest.strip_prefix(kw) {
+                if self.facts.tag == "PHP" && matches!(kw, "function " | "const ") {
+                    php_prefix = kw.trim();
+                }
                 rest = r.trim();
             }
         }
@@ -3488,6 +3505,11 @@ impl<'a> Walker<'a> {
             if module.is_empty() {
                 continue;
             }
+            let module = if !php_prefix.is_empty() {
+                format!("{php_prefix}{module}")
+            } else {
+                module
+            };
             let alias = if explicit_alias.is_empty() {
                 module.rsplit('.').next().unwrap_or("").to_string()
             } else {
@@ -4336,6 +4358,29 @@ fn dotted_piece(text: &str) -> bool {
                 return out;
             }
         }
+        if self.facts.tag == "DART" && kind == "const_object_expression" {
+            if let Some(ll) = self.child_of_kind(id, "list_literal") {
+                return self.form(ll);
+            }
+            let children = self.children(id);
+            let mut segs = Vec::new();
+            let mut arg_node = None;
+            for c in children {
+                let ck = self.kind(c);
+                if ck == "argument_list" {
+                    arg_node = Some(c);
+                } else if !self.is_layout(c) && !matches!(ck, "const" | ".") {
+                    segs.push(self.text_string(c));
+                }
+            }
+            let path = segs.join(".");
+            if !path.is_empty() && arg_node.is_some() {
+                let line = self.line(id);
+                let idx = self.push_call(path, line);
+                let args = arg_node.map(|a| self.arguments(a)).unwrap_or_else(|| "[]".to_string());
+                return format!("[\"c\",{idx},0,{args}]");
+            }
+        }
         if self.kinds.calls.contains(&kind) {
             // `mod:f(Args)`: the grammar writes the module as the first child and
             // the function inside a `module_call`. Read through the generic arm
@@ -4485,11 +4530,140 @@ fn dotted_piece(text: &str) -> bool {
             out.push(']');
             return out;
         }
+        if self.facts.tag == "DART" && matches!(kind, "await_expression" | "null_assertion") {
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if self.is_layout(c) || matches!(ck, "await" | "new" | "const" | "!") {
+                    continue;
+                }
+                let f = self.form(c);
+                if !f.is_empty() {
+                    return f;
+                }
+            }
+        }
+        if self.facts.tag == "DART" && kind == "list_literal" {
+            let mut items = Vec::new();
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if matches!(ck, "[" | "]" | ",") {
+                    continue;
+                }
+                if self.is_layout(c) && !matches!(ck, "string_literal" | "string" | "number" | "true" | "false" | "null") {
+                    continue;
+                }
+                let f = if matches!(ck, "true" | "false" | "null") {
+                    format!("[\"n\",\"{ck}\"]")
+                } else {
+                    self.form(c)
+                };
+                items.push(if f.is_empty() { "0".to_string() } else { f });
+            }
+            if items.is_empty() {
+                return "0".to_string();
+            }
+            return format!("[\"t\",[{}]]", items.join(","));
+        }
+        if self.facts.tag == "PHP" && kind == "variable_name" {
+            let nm = self.text_string(id).trim_start_matches('$').to_string();
+            if !nm.is_empty() {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &nm);
+                out.push(']');
+                return out;
+            }
+        }
+        if self.facts.tag == "PHP" && kind == "array_literal" {
+            let mut items = Vec::new();
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if matches!(ck, "[" | "]" | ",") {
+                    continue;
+                }
+                if self.is_layout(c) && !matches!(ck, "string" | "encapsed_string" | "integer" | "float" | "true" | "false" | "null") {
+                    continue;
+                }
+                if ck == "pair_element" {
+                    for pc in self.children(c) {
+                        let pck = self.kind(pc);
+                        if pck == "=>" || (self.is_layout(pc) && !matches!(pck, "string" | "encapsed_string" | "integer" | "float" | "true" | "false" | "null")) {
+                            continue;
+                        }
+                        let f = if matches!(pck, "true" | "false" | "null") {
+                            format!("[\"n\",\"{pck}\"]")
+                        } else {
+                            self.form(pc)
+                        };
+                        items.push(if f.is_empty() { "0".to_string() } else { f });
+                    }
+                } else {
+                    let f = if matches!(ck, "true" | "false" | "null") {
+                        format!("[\"n\",\"{ck}\"]")
+                    } else {
+                        self.form(c)
+                    };
+                    items.push(if f.is_empty() { "0".to_string() } else { f });
+                }
+            }
+            if items.is_empty() {
+                return "0".to_string();
+            }
+            return format!("[\"t\",[{}]]", items.join(","));
+        }
+        if self.facts.tag == "PAS" && kind == "identifier" {
+            let nm = self.text_string(id).to_ascii_lowercase();
+            let mut out = String::from("[\"n\",");
+            push_string(&mut out, &nm);
+            out.push(']');
+            return out;
+        }
+        if self.facts.tag == "PAS" && kind == "member" {
+            let path = self.path_of(id).to_ascii_lowercase();
+            if !path.is_empty() {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &path);
+                out.push(']');
+                return out;
+            }
+        }
+        if self.facts.tag == "PAS" && kind == "number" {
+            let raw = self.text_string(id);
+            if let Some(hex) = raw.strip_prefix('$') {
+                if hex.bytes().next().is_some_and(|b| b.is_ascii_alphabetic()) {
+                    let lower = hex.to_ascii_lowercase();
+                    let mut out = String::from("[\"n\",");
+                    push_string(&mut out, &lower);
+                    out.push(']');
+                    return out;
+                }
+            }
+        }
+        if self.facts.tag == "PAS" && kind == "nil" {
+            return "[\"n\",\"nil\"]".to_string();
+        }
+        if self.facts.tag == "PAS" && kind == "enumeration_type" {
+            let mut items = Vec::new();
+            for c in self.children(id) {
+                if self.kind(c) == "identifier" {
+                    let nm = self.text_string(c).to_ascii_lowercase();
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &nm);
+                    n.push(']');
+                    items.push(n);
+                }
+            }
+            if !items.is_empty() {
+                return format!("[\"t\",[{}]]", items.join(","));
+            }
+        }
+        if self.facts.tag == "PAS" && matches!(kind, "true" | "false") {
+            return format!("[\"n\",\"{kind}\"]");
+        }
         if self.facts.tag == "PAS"
             && matches!(
                 kind,
                 "additive" | "multiplicative" | "logical" | "comparison" | "unary"
-                    | "index" | "member" | "dereference" | "parenthesized_expression"
+                    | "index" | "dereference" | "parenthesized_expression"
             )
         {
             let mut parts = Vec::new();
@@ -4501,7 +4675,7 @@ fn dotted_piece(text: &str) -> bool {
                 if matches!(ck, "+" | "-" | "*" | "/" | "div" | "mod" | "shl" | "shr" | "and" | "or" | "not" | "=" | "<>" | "<" | ">" | "<=" | ">=" | "in" | "@" | "^" | "." | "(" | ")") {
                     continue;
                 }
-                let v = if matches!(ck, "string" | "number") {
+                let v = if ck == "string" {
                     "0".to_string()
                 } else {
                     self.form(c)
@@ -4515,6 +4689,9 @@ fn dotted_piece(text: &str) -> bool {
             }
             if parts.len() == 1 {
                 return parts.into_iter().next().unwrap();
+            }
+            if kind == "parenthesized_expression" {
+                return format!("[\"t\",[{}]]", parts.join(","));
             }
             return format!("[\"m\",[{}]]", parts.join(","));
         }
@@ -4862,7 +5039,7 @@ fn dotted_piece(text: &str) -> bool {
         }
         if matches!(
             kind,
-            "member" | "safe_member" | "scope" | "member_access_expression" | "scoped_property_access_expression"
+            "member" | "safe_member" | "scope" | "member_access_expression" | "nullsafe_member_access_expression" | "scoped_property_access_expression"
         ) && matches!(self.facts.tag.as_str(), "RB" | "CR" | "PHP" | "LUA" | "DART" | "SOL" | "R") {
             let p = self.path_of(id);
             if !p.is_empty() && !p.starts_with('.') {
@@ -5470,7 +5647,7 @@ fn dotted_piece(text: &str) -> bool {
                     _ => format!("[\"m\",[{}]]", parts.join(",")),
                 }
             }
-            "attribute" | "member_expression" | "member_access_expression" | "member_access" | "subscript" | "subscript_expression" | "element_access" | "field_expression" | "meta_property"
+            "attribute" | "member_expression" | "member_access_expression" | "nullsafe_member_access_expression" | "member_access" | "null_aware_member" | "subscript" | "subscript_expression" | "element_access" | "field_expression" | "meta_property"
             // `Ordering::Acquire` in an argument list is a path, not a constant.
             | "scoped_identifier" | "scoped_type_identifier" | "qualified_expression"
             // Kotlin's `user.title` in a `"${user.title}"` hole.
@@ -7439,7 +7616,7 @@ fn dotted_piece(text: &str) -> bool {
         // Scala's `select` is `object.name`: `s"...$x".format(y)` has the
         // interpolated string as its receiver, and that receiver is a value.
         let scala_select = self.language.name == "scala" && self.kind(callee) == "select";
-        if scala_select || matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access" | "conditional_member_access" | "navigation_expression" | "member" | "safe_member" | "scope" | "scoped_property_access_expression") {
+        if scala_select || matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "nullsafe_member_access_expression" | "member_access" | "null_aware_member" | "conditional_member_access" | "navigation_expression" | "member" | "safe_member" | "scope" | "scoped_property_access_expression") {
             if let Some(&object) = self.children(callee).first() {
                 if self.named_call(object) {
                     // `new URL(x).toString()`, `A().b()`, `A().b().c()`: a
@@ -7719,7 +7896,7 @@ fn dotted_piece(text: &str) -> bool {
             // `new ExampleTest.ClassA(0)`: C# parses a qualified constructor
             // type as `qualified_type`. Without splitting it here, `call_target`
             // kept the dotted path and dropped the owner from the receiver slot.
-            "attribute" | "member_expression" | "member_access_expression" | "member_access"
+            "attribute" | "member_expression" | "member_access_expression" | "nullsafe_member_access_expression" | "member_access" | "null_aware_member"
             | "conditional_member_access" | "navigation_expression" | "optional_chaining_expression"
             | "field_expression" | "select" | "qualified_type"
             | "member" | "safe_member" | "scope" | "scoped_property_access_expression" => {
@@ -7877,7 +8054,7 @@ fn dotted_piece(text: &str) -> bool {
         };
         let children = self.children(id);
         if !path.is_empty() && !path.starts_with('.') {
-            if matches!(kind, "attribute" | "member_expression" | "member_access" | "conditional_member_access" | "subscript" | "subscript_expression" | "element_access" | "field_expression") {
+            if matches!(kind, "attribute" | "member_expression" | "member_access" | "null_aware_member" | "conditional_member_access" | "subscript" | "subscript_expression" | "element_access" | "field_expression") {
                 if let Some(&object) = children.first() {
                     // A receiver can be any expression; nothing is recorded for a
                     // plain name, so this costs a walk and never a wrong fact.
@@ -7967,7 +8144,7 @@ fn dotted_piece(text: &str) -> bool {
             // (`path.Join(os.Getenv(..))`) would come back as `0`.
             let value = if ellipsis || nothing {
                 "0".to_string()
-            } else if kind == "labeled_argument" || (kind == "named_argument" && (self.is_kotlin() || self.language.name == "scala")) {
+            } else if kind == "labeled_argument" || (kind == "named_argument" && (self.is_kotlin() || self.language.name == "scala" || self.facts.tag == "DART")) {
                 // `Package(name: "x", platforms: [.macOS("10")])`: a Swift
                 // labeled argument is a keyword argument to the lexer -
                 // `[\"k\",name,value]` - and read as a plain form it came back
@@ -8120,8 +8297,8 @@ fn dotted_piece(text: &str) -> bool {
             // same path as a plain one.
             // Swift's `a?.f()` is an `optional_chaining_expression`; read through
             // the default arm the call lost its name and was written as `""`.
-            "attribute" | "member_expression" | "member_access" | "conditional_member_access"
-            | "member" | "safe_member" | "scope" | "member_access_expression" | "scoped_property_access_expression"
+            "attribute" | "member_expression" | "member_access" | "null_aware_member" | "conditional_member_access"
+            | "member" | "safe_member" | "scope" | "member_access_expression" | "nullsafe_member_access_expression" | "scoped_property_access_expression"
             // Scala spells `x.y` as `select`; without it a dotted call callee
             // path was empty, so every `a.b(c)` call lost its name.
             | "select"
@@ -8214,7 +8391,7 @@ fn dotted_piece(text: &str) -> bool {
             return Some(name);
         }
         match self.kind(id) {
-            "identifier" | "attribute" | "member_expression" | "subscript" | "subscript_expression" | "this" => {
+            "identifier" | "attribute" | "member_expression" | "member" | "dereference" | "subscript" | "subscript_expression" | "this" => {
                 let path = self.path_of(id);
                 (!path.is_empty()).then_some(path)
             }
