@@ -3529,6 +3529,34 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+        // Emit assignment event for `local a, b = expr1, expr2`
+        let children = self.children(id);
+        let namelist = children.iter().copied().find(|&c| self.kind(c) == "namelist");
+        let exprlist = children.iter().copied().find(|&c| self.kind(c) == "expression_list");
+        if let (Some(nl), Some(el)) = (namelist, exprlist) {
+            let targets: Vec<String> = self
+                .children(nl)
+                .into_iter()
+                .filter_map(|c| self.leaf_name(c))
+                .collect();
+            let mut vals: Vec<String> = Vec::new();
+            for ec in self.children(el) {
+                if self.is_layout(ec) || self.kind(ec) == "," {
+                    continue;
+                }
+                let f = self.form(ec);
+                vals.push(if f.is_empty() { "0".to_string() } else { f });
+            }
+            if !targets.is_empty() && !vals.is_empty() {
+                let val = if vals.len() == 1 {
+                    vals.remove(0)
+                } else {
+                    format!("[\"t\",[{}]]", vals.join(","))
+                };
+                self.lexer_event(b'a', line, &targets, &val, false);
+                return;
+            }
+        }
         self.expression_statement(id);
     }
 
@@ -4440,7 +4468,63 @@ fn dotted_piece(text: &str) -> bool {
             out.push(']');
             return out;
         }
-                if matches!(
+                if self.facts.tag == "LUA" && kind == "table_constructor" {
+            let mut parts = Vec::new();
+            for child in self.children(id) {
+                let ck = self.kind(child);
+                if self.is_layout(child) || matches!(ck, "{" | "}" | "," | ";") {
+                    continue;
+                }
+                if ck == "named_field" {
+                    let fch = self.children(child);
+                    let key = fch.first().map(|&n| self.text_string(n)).unwrap_or_default();
+                    let rhs = fch.iter().rev().copied().find(|&n| !self.is_layout(n) && Some(n) != fch.first().copied());
+                    let val = rhs.map(|n| self.form(n)).filter(|v| !v.is_empty()).unwrap_or_else(|| "0".to_string());
+                    if !key.is_empty() {
+                        let mut kf = String::from("[\"n\",");
+                        push_string(&mut kf, &key);
+                        kf.push(']');
+                        if val == "0" {
+                            parts.push(kf);
+                        } else {
+                            parts.push(format!("[\"m\",[{kf},{val}]]"));
+                        }
+                    } else if val != "0" {
+                        parts.push(val);
+                    }
+                } else if ck == "keyed_field" {
+                    let fch = self.children(child);
+                    let mut fparts = Vec::new();
+                    for fc in fch {
+                        if self.is_layout(fc) || matches!(self.kind(fc), "=" | "[" | "]") {
+                            continue;
+                        }
+                        let v = self.form(fc);
+                        if !v.is_empty() && v != "0" {
+                            fparts.push(v);
+                        }
+                    }
+                    if fparts.len() == 1 {
+                        parts.push(fparts.remove(0));
+                    } else if fparts.len() > 1 {
+                        parts.push(format!("[\"m\",[{}]]", fparts.join(",")));
+                    }
+                } else {
+                    let v = self.form(child);
+                    if !v.is_empty() && v != "0" {
+                        parts.push(v);
+                    }
+                }
+            }
+            return if parts.is_empty() {
+                "0".to_string()
+            } else if parts.len() == 1 {
+                parts.remove(0)
+            } else {
+                format!("[\"t\",[{}]]", parts.join(","))
+            };
+        }
+        if matches!(
             kind,
             "member" | "safe_member" | "scope" | "member_access_expression" | "scoped_property_access_expression"
         ) && matches!(self.facts.tag.as_str(), "RB" | "CR" | "PHP" | "LUA" | "DART" | "SOL" | "R") {
@@ -7090,6 +7174,49 @@ fn dotted_piece(text: &str) -> bool {
         let mut arg_list = match args {
             Some(list) if self.kind(list) == "template_string" => targ.unwrap_or_else(|| "[]".to_string()),
             Some(list) => self.arguments(list),
+            None if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
+                let mut items = Vec::new();
+                let mut past_callee = false;
+                for &child in &children {
+                    if !past_callee {
+                        if child == callee {
+                            past_callee = true;
+                        }
+                        continue;
+                    }
+                    let ck = self.kind(child);
+                    if self.is_layout(child) || matches!(ck, "do_block" | "brace_block" | "block" | ",") {
+                        continue;
+                    }
+                    if ck == "label_argument" {
+                        let lch = self.children(child);
+                        let key = lch.first().map(|&n| self.text_string(n).trim_end_matches(':').to_string()).unwrap_or_default();
+                        let val = lch.iter().rev().copied().find(|&n| !self.is_layout(n) && Some(n) != lch.first().copied()).map(|n| self.form(n)).unwrap_or_else(|| "0".to_string());
+                        if !key.is_empty() {
+                            let mut k = String::from("[\"k\",");
+                            push_string(&mut k, &key);
+                            k.push(',');
+                            k.push_str(&val);
+                            k.push(']');
+                            items.push(k);
+                        }
+                    } else if matches!(ck, "simple_symbol" | "symbol") {
+                        let sym = self.text_string(child).trim_start_matches(':').to_string();
+                        if !sym.is_empty() {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &sym);
+                            n.push(']');
+                            items.push(n);
+                        } else {
+                            items.push("0".to_string());
+                        }
+                    } else {
+                        let f = self.form(child);
+                        items.push(if f.is_empty() { "0".to_string() } else { f });
+                    }
+                }
+                format!("[{}]", items.join(","))
+            }
             None => "[]".to_string(),
         };
         if self.is_kotlin() && !self.in_kotlin_expr_body {
