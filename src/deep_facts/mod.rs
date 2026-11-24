@@ -2238,3 +2238,323 @@ impl<'a> Walker<'a> {
                         break;
                     }
                 }
+                let mut after = end + 1;
+                if after < nodes.len() && self.kind(nodes[after]) == "<" {
+                    let mut depth = 0i32;
+                    let mut j = after;
+                    while j < nodes.len() {
+                        match self.kind(nodes[j]) {
+                            "<" => depth += 1,
+                            ">" | ">joined" => {
+                                depth -= 1;
+                                if depth <= 0 {
+                                    after = j + 1;
+                                    break;
+                                }
+                            }
+                            ";" | "{" | "}" | "(" => break,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                }
+                if after < nodes.len() && self.kind(nodes[after]) == "(" {
+                    let mut depth = 0i32;
+                    let mut close = None;
+                    for (j, &tok) in nodes.iter().enumerate().skip(after) {
+                        match self.kind(tok) {
+                            "(" => depth += 1,
+                            ")" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close = Some(j);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(close_idx) = close {
+                        let mut args: Vec<String> = Vec::new();
+                        let mut arg_start = after + 1;
+                        let mut p = 0i32;
+                        let mut b = 0i32;
+                        for j in (after + 1)..close_idx {
+                            match self.kind(nodes[j]) {
+                                "(" | "[" => p += 1,
+                                ")" | "]" => p = (p - 1).max(0),
+                                "{" => b += 1,
+                                "}" => b = (b - 1).max(0),
+                                "," if p == 0 && b == 0 => {
+                                    args.push(self.cs_recovered_form(&nodes[arg_start..j]));
+                                    arg_start = j + 1;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if arg_start < close_idx {
+                            args.push(self.cs_recovered_form(&nodes[arg_start..close_idx]));
+                        }
+                        let recv = if !is_new && segs.len() > 1 {
+                            let recv_name = segs[..segs.len() - 1].join(".");
+                            let mut r = String::from("[\"n\",");
+                            push_string(&mut r, &recv_name);
+                            r.push(']');
+                            r
+                        } else {
+                            "0".to_string()
+                        };
+                        let call_name = segs.join(".");
+                        let call_line = self.line(nodes[end]);
+                        let call_idx = self.facts.symbols[symbol]
+                            .calls
+                            .iter()
+                            .position(|c| c.line == call_line && c.path == call_name)
+                            .unwrap_or(0);
+                        parts.push(format!("[\"c\",{call_idx},{recv},[{}]]", args.join(",")));
+                        i = close_idx + 1;
+                        continue;
+                    }
+                }
+                let name = segs.join(".");
+                let mut f = String::from("[\"n\",");
+                push_string(&mut f, &name);
+                f.push(']');
+                parts.push(f);
+                i = end + 1;
+                continue;
+            }
+            i += 1;
+        }
+        self.facts.symbols[symbol].calls.truncate(calls_len);
+        // Drop bare `0` literals when combined with names/calls in an expression,
+        // matching how `form` omits constants inside merges, while keeping `0`
+        // when it is the sole value (e.g. a call argument or `return 0;`).
+        if parts.len() > 1 && parts.iter().any(|p| p != "0") {
+            parts.retain(|p| p != "0");
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap(),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
+    pub(crate) fn push_call(&mut self, path: String, line: u32) -> usize {
+        let symbol = self.frame().symbol;
+        let calls = &mut self.facts.symbols[symbol].calls;
+        calls.push(Call { path, line });
+        calls.len() - 1
+    }
+
+    /// `new T { Name = value, ... }`: the one-pass reader writes one `a` event for
+    /// the initialiser, on its first member's line, targeting that member. The
+    /// other members are folded into its value as names, so a later member is
+    /// not written on a line of its own. The CST read the initialiser for calls
+    /// alone and dropped that line, which left every `new T { ... }` (Avalonia's
+    /// `FilePickerFileTypes`, 20+ rows in one corpus) without the event.
+    pub(crate) fn cs_initializer_first_member(&mut self, id: u32) {
+        let children = self.children(id);
+        let mut members: Vec<(u32, u32)> = Vec::new();
+        let mut at = 0;
+        while at < children.len() {
+            if self.kind(children[at]) == "identifier" {
+                if let Some(&value) = children[at + 1..].iter().find(|&&child| self.kind(child) != "=") {
+                    members.push((children[at], value));
+                    at = children.iter().position(|&child| child == value).unwrap_or(at) + 1;
+                    continue;
+                }
+            }
+            at += 1;
+        }
+        let Some(&(name_node, value_node)) = members.first() else {
+            return;
+        };
+        let name = self.text_string(name_node);
+        let line = self.line(name_node);
+        let value = if members.len() == 1 {
+            self.cs_member_value(value_node)
+        } else {
+            // The later members, as the lexer folds them: a number is only its
+            // member's name, anything else is the name merged with its value, so
+            // every name and keyword literal the lexer read is an atom here too.
+            let mut parts = vec![self.cs_member_value(value_node)];
+            for &(later_name, later_value) in &members[1..] {
+                let later = self.text_string(later_name);
+                if self.kind(later_value).ends_with("integer_literal") {
+                    parts.push(format!("[\"n\",\"{later}\"]"));
+                } else {
+                    parts.push(format!("[\"m\",[[\"n\",\"{later}\"],{}]]", self.cs_member_value(later_value)));
+                }
+            }
+            format!("[\"t\",[{}]]", parts.join(","))
+        };
+        self.lexer_event(b'a', line, &[name], &value, false);
+        // The one-pass reader binds every member to the class it constructs, as
+        // it does a declaration (`var Background = SolidColorBrush`), so each
+        // member gets the same binding.
+        for (name_node, value_node) in members {
+            let name = self.text_string(name_node);
+            self.cs_bind_constructed(name, value_node);
+        }
+    }
+
+    /// The value of one initialiser member: a keyword literal is a name to the
+    /// one-pass reader, as in a declaration's initialiser, and anything else is
+    /// its own form (a constant when the form is empty). The calls the form
+    /// reads are already facts of the object-initialiser walk, so they are
+    /// taken back out of the call table: the form is only the value's shape.
+    fn cs_member_value(&mut self, value_node: u32) -> String {
+        match self.kind(value_node) {
+            kind @ ("true" | "false" | "null") => format!("[\"n\",\"{kind}\"]"),
+            _ => {
+                let symbol = self.frame().symbol;
+                let calls = self.facts.symbols[symbol].calls.len();
+                let form = self.form(value_node);
+                self.facts.symbols[symbol].calls.truncate(calls);
+                if form.is_empty() { "0".to_string() } else { form }
+            }
+        }
+    }
+
+    // -- enter / leave ------------------------------------------------------
+
+
+    fn tcl_is_ident(s: &str) -> bool {
+        s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'.')
+    }
+
+    fn tcl_clean_name(s: &str) -> String {
+        s.trim_start_matches("::").replace("::", ".")
+    }
+
+    fn tcl_var_name(s: &str) -> Option<String> {
+        let rest = s.strip_prefix('$')?;
+        let rest = if let Some(after) = rest.strip_prefix('{') {
+            after.split('}').next().unwrap_or(after)
+        } else {
+            rest
+        };
+        let rest = rest.trim_start_matches("::");
+        let base = rest.split('(').next().unwrap_or(rest);
+        let name: String = base.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':').collect();
+        let clean = Self::tcl_clean_name(&name);
+        if !clean.is_empty() && clean.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+            Some(clean)
+        } else {
+            None
+        }
+    }
+
+    fn tcl_tokenize_commands(text: &str, start_line: u32) -> Vec<(u32, Vec<(u32, String)>)> {
+        let bytes = text.as_bytes();
+        let mut cmds: Vec<(u32, Vec<(u32, String)>)> = Vec::new();
+        let mut cur: Vec<(u32, String)> = Vec::new();
+        let mut cmd_line = start_line;
+        let mut line = start_line;
+        let mut i = 0;
+        let n = bytes.len();
+        while i < n {
+            let b = bytes[i];
+            if b == b' ' || b == b'\t' || b == b'\r' {
+                i += 1;
+                continue;
+            }
+            if b == b'\\' && i + 1 < n && bytes[i + 1] == b'\n' {
+                i += 2;
+                line += 1;
+                continue;
+            }
+            if b == b'\n' || b == b';' {
+                if !cur.is_empty() {
+                    cmds.push((cmd_line, std::mem::take(&mut cur)));
+                }
+                if b == b'\n' {
+                    line += 1;
+                }
+                i += 1;
+                continue;
+            }
+            if b == b'#' && cur.is_empty() {
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if cur.is_empty() {
+                cmd_line = line;
+            }
+            let tok_line = line;
+            let start = i;
+            if b == b'{' {
+                let mut depth = 0usize;
+                while i < n {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        if bytes[i + 1] == b'\n' {
+                            line += 1;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'\n' {
+                        line += 1;
+                    } else if bytes[i] == b'{' {
+                        depth += 1;
+                    } else if bytes[i] == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            } else if b == b'[' {
+                let mut depth = 0usize;
+                while i < n {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        if bytes[i + 1] == b'\n' {
+                            line += 1;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'\n' {
+                        line += 1;
+                    } else if bytes[i] == b'[' {
+                        depth += 1;
+                    } else if bytes[i] == b']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            } else if b == b'"' {
+                i += 1;
+                while i < n {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        if bytes[i + 1] == b'\n' {
+                            line += 1;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'\n' {
+                        line += 1;
+                    } else if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                while i < n && !matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n' | b';' | b'[') {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        if bytes[i + 1] == b'\n' {
+                            break;
+                        }
+                        i += 2;
