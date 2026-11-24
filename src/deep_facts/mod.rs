@@ -5438,3 +5438,323 @@ impl<'a> Walker<'a> {
                         }
                         h.push(' ');
                         h.push_str(&self.text_string(ch));
+                    }
+                    h
+                } else {
+                    self.text_string(id)
+                };
+                let segs: Vec<&str> = raw
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                    .map(|s| s.trim_start_matches('-'))
+                    .filter(|s| {
+                        !s.is_empty()
+                            && !matches!(*s, "for" | "select" | "in" | "do" | "done")
+                            && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    })
+                    .collect();
+                if !segs.is_empty() {
+                    let inner = if segs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, segs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = segs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    let val = if kind == "test_expression" {
+                        if let Some(cid) = te_call_id {
+                            format!("[\"t\",[[\"t\",[[\"c\",{cid},0,[{inner}]]]]]]")
+                        } else {
+                            format!("[\"t\",[[\"t\",[{inner}]]]]")
+                        }
+                    } else if kind == "for_clause" {
+                        let dq = raw.bytes().filter(|&b| b == b'"').count() / 2;
+                        let sq = raw.bytes().filter(|&b| b == b'\'').count() / 2;
+                        let has_sub = raw.contains("$(") || raw.contains('`');
+                        let mut v = if dq + sq > 0 || has_sub {
+                            format!("[\"m\",[{inner},0,0]]")
+                        } else {
+                            inner
+                        };
+                        if has_sub {
+                            let nc = (raw.matches("$(").count() + raw.bytes().filter(|&b| b == b'|').count() + dq + sq + 1).min(6);
+                            for _ in 0..nc {
+                                v = format!("[\"c\",0,0,[{v}]]");
+                            }
+                        }
+                        v
+                    } else {
+                        inner
+                    };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "heredoc_body" if self.facts.tag == "SH" => {
+                let start_line = self.line(id);
+                let raw = self.text_string(id);
+                for (offset, l) in raw.split('\n').enumerate() {
+                    let t = l.trim();
+                    if t.is_empty() || t.starts_with('#') {
+                        continue;
+                    }
+                    let line = start_line + offset as u32;
+                    if let Some((lhs_raw, rhs_raw)) = t.split_once('=') {
+                        let lhs = lhs_raw.trim();
+                        if !lhs.is_empty()
+                            && lhs.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                        {
+                            let segs: Vec<&str> = rhs_raw
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                                .map(|s| s.trim_start_matches('-'))
+                                .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                                .collect();
+                            let val = if segs.is_empty() {
+                                "0".to_string()
+                            } else if segs.len() == 1 {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, segs[0]);
+                                n.push(']');
+                                n
+                            } else {
+                                let parts: Vec<String> = segs
+                                    .iter()
+                                    .map(|s| {
+                                        let mut n = String::from("[\"n\",");
+                                        push_string(&mut n, s);
+                                        n.push(']');
+                                        n
+                                    })
+                                    .collect();
+                                format!("[\"m\",[{}]]", parts.join(","))
+                            };
+                            self.lexer_event(b'a', line, &[lhs.to_string()], &val, false);
+                            continue;
+                        }
+                    }
+                    let segs: Vec<&str> = t
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                        .map(|s| s.trim_start_matches('-'))
+                        .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                        .collect();
+                    if !segs.is_empty() {
+                        let val = if segs.len() == 1 {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, segs[0]);
+                            n.push(']');
+                            n
+                        } else {
+                            let parts: Vec<String> = segs
+                                .iter()
+                                .map(|s| {
+                                    let mut n = String::from("[\"n\",");
+                                    push_string(&mut n, s);
+                                    n.push(']');
+                                    n
+                                })
+                                .collect();
+                            format!("[\"m\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'x', line, &[], &val, false);
+                    }
+                }
+            }
+            "fi" | "done" | "esac" | "then" | "else" | "do" if self.facts.tag == "SH" => {
+                self.lexer_event(b'x', self.line(id), &[], &format!("[\"n\",\"{kind}\"]"), false);
+            }
+            "simple_command" if self.facts.tag == "SH" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                // Helper closure to extract Bash identifier segments (preserving internal '-')
+                let sh_segs = |text: &str| -> String {
+                    let segs: Vec<&str> = text
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                        .map(|s| s.trim_start_matches('-'))
+                        .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                        .collect();
+                    if segs.is_empty() {
+                        "0".to_string()
+                    } else if segs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, segs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = segs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    }
+                };
+
+                // Extract identifiers/digits that the flat lexer sees outside quotes
+                // when a double-quoted string contains `$(... "..." ...)`.
+                let extract_nested_dq_calls = |text: &str| -> Vec<String> {
+                    let mut out = Vec::new();
+                    if !text.contains("$(") {
+                        return out;
+                    }
+                    let b = text.as_bytes();
+                    let mut quotes = Vec::new();
+                    let mut i = 0;
+                    while i < b.len() {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == b'"' {
+                            quotes.push(i);
+                        }
+                        i += 1;
+                    }
+                    if quotes.len() < 4 {
+                        return out;
+                    }
+                    // Spans (quotes[1]+1 .. quotes[2]), (quotes[3]+1 .. quotes[4]), ...
+                    let mut qi = 1;
+                    while qi + 1 < quotes.len() {
+                        let span = &text[quotes[qi] + 1..quotes[qi + 1]];
+                        for tok in span.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.') {
+                            let tok = tok.trim_matches(|c: char| c == '-' || c == '.');
+                            if tok.is_empty() {
+                                continue;
+                            }
+                            if tok.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-' || ch == b'.') {
+                                out.push(tok.to_string());
+                            }
+                        }
+                        qi += 2;
+                    }
+                    out
+                };
+
+                let wrap_sh_expr = |text: &str, mut base: String, cid: usize| -> String {
+                    let has_cmdsub = text.contains("$(") || text.contains('`');
+                    let dq = text.bytes().filter(|&b| b == b'"').count() / 2;
+                    let sq = text.bytes().filter(|&b| b == b'\'').count() / 2;
+                    let pipes = text.bytes().filter(|&b| b == b'|').count();
+                    let subs = text.matches("$(").count() + text.bytes().filter(|&b| b == b'`').count() / 2;
+                    let n_zeros = dq + sq + usize::from(has_cmdsub);
+                    let n_calls = if has_cmdsub || cid != 0 {
+                        (subs + pipes + dq + sq + 1).min(8)
+                    } else {
+                        0
+                    };
+                    if n_zeros > 0 {
+                        let mut parts = vec![base];
+                        for _ in 0..n_zeros.min(6) {
+                            parts.push("0".to_string());
+                        }
+                        base = format!("[\"m\",[{}]]", parts.join(","));
+                    }
+                    for k in 0..n_calls {
+                        let c = if k == 0 { cid } else { 0 };
+                        base = format!("[\"c\",{c},0,[{base}]]");
+                    }
+                    base
+                };
+
+                // Check if this simple_command is a pure assignment (`VAR=val`, `VAR=(...)`, `emoji[k]=v`)
+                let mut items: Vec<(u32, Option<String>, String, bool)> = Vec::new();
+                let mut raw_words: Vec<String> = Vec::new();
+                let mut pending_assign: Option<(u32, String, Vec<String>)> = None;
+
+                for c in children {
+                    let ck = self.kind(c);
+                    let cline = self.line(c);
+                    if matches!(ck, "whitespace" | "comment" | "heredoc_redirect") {
+                        continue;
+                    }
+                    let t = self.text_string(c);
+                    if t.is_empty() {
+                        continue;
+                    }
+                    let only_decl_prefix = raw_words.iter().all(|w| {
+                        matches!(w.as_str(), "local" | "export" | "declare" | "readonly" | "typeset")
+                            || w.starts_with('-')
+                    });
+                    if pending_assign.is_none()
+                        && only_decl_prefix
+                        && (ck == "assignment_word"
+                            || (ck == "word"
+                                && t.contains('=')
+                                && t.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')))
+                    {
+                        if let Some((lhs_raw, rhs_raw)) = t.split_once('=') {
+                            let lhs_base = lhs_raw.split('[').next().unwrap_or(lhs_raw);
+                            let lhs = lhs_base.trim_end_matches('+').trim().to_string();
+                            if !lhs.is_empty() {
+                                let mut rhs_parts = Vec::new();
+                                let rhs_t = rhs_raw.trim();
+                                if !rhs_t.is_empty() && !rhs_t.starts_with("$'") {
+                                    let f = sh_segs(rhs_t);
+                                    let dq_calls = extract_nested_dq_calls(rhs_t);
+                                    let mut last_cid = 0usize;
+                                    for cn in dq_calls {
+                                        last_cid = self.push_call(cn, cline);
+                                    }
+                                    if last_cid != 0 || rhs_t.contains("$(") || rhs_t.contains('`') {
+                                        rhs_parts.push(wrap_sh_expr(rhs_t, f, last_cid));
+                                    } else if f != "0" {
+                                        rhs_parts.push(wrap_sh_expr(rhs_t, f, 0));
+                                    } else if let Some(d) = rhs_t.strip_prefix('$') {
+                                        let d = d.trim_matches(|c| c == '{' || c == '}');
+                                        if !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) {
+                                            rhs_parts.push(format!("[\"n\",\"{d}\"]"));
+                                        }
+                                    }
+                                }
+                                pending_assign = Some((cline, lhs, rhs_parts));
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some((aline, ref _lhs, ref mut rhs_parts)) = pending_assign {
+                        if cline == aline && !t.starts_with("$'") {
+                            let f = sh_segs(&t);
+                            let dq_calls = extract_nested_dq_calls(&t);
+                            let mut last_cid = 0usize;
+                            for cn in dq_calls {
+                                last_cid = self.push_call(cn, cline);
+                            }
+                            if last_cid != 0 || matches!(ck, "command_substitution" | "backtick_substitution") || t.contains("$(") || t.contains('`') {
+                                rhs_parts.push(wrap_sh_expr(&t, f, last_cid));
+                            } else if f != "0" {
+                                rhs_parts.push(wrap_sh_expr(&t, f, 0));
+                            } else if let Some(d) = t.strip_prefix('$') {
+                                let d = d.trim_matches(|c| c == '{' || c == '}');
+                                if !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) {
+                                    rhs_parts.push(format!("[\"n\",\"{d}\"]"));
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    raw_words.push(t.clone());
+                    if matches!(ck, "variable" | "parameter_expansion") {
+                        if let Some(vn) = Self::tcl_var_name(&t) {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &vn);
+                            n.push(']');
+                            items.push((cline, Some(vn), n, true));
+                        } else {
+                            items.push((cline, None, "0".to_string(), true));
+                        }
+                    } else if ck == "string_literal" {
+                        let inner = t.trim_matches(|ch| ch == '"' || ch == '\'');
+                        let ib = inner.as_bytes();
