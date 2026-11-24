@@ -2238,3 +2238,323 @@ impl<'a> Walker<'a> {
             return;
         }
         let line = self.line(id);
+        let owner = self.frame().class.clone();
+        self.add_symbol(target, String::new(), KIND_FUNCTION, line, Vec::new());
+    }
+
+    /// `handler = (a, b) => f(a, b);` and `cfg.P = x => x;`: in the C#
+    /// grammar `=>` has lower precedence than `=`, so a statement-level lambda
+    /// assignment parses as `lambda_expression(assignment_expression(lhs, =, params), =>, body)`.
+    /// Declare the target as `KIND_FUNCTION` to match the one-pass lexer.
+    pub(crate) fn cs_lambda_assignment_symbol(&mut self, id: u32) {
+        let Some(lhs) = self.children(id).into_iter().find(|&c| !self.is_layout(c)) else {
+            return;
+        };
+        if self.kind(lhs) != "assignment_expression" {
+            return;
+        }
+        let children = self.children(lhs);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "=") else {
+            return;
+        };
+        let Some(target) = children[..at]
+            .iter()
+            .rev()
+            .find(|&&child| matches!(self.kind(child), "identifier" | "member_access" | "field_access"))
+            .and_then(|&child| self.last_name(child))
+        else {
+            return;
+        };
+        if target.is_empty() {
+            return;
+        }
+        let line = self.line(id);
+        let owner = self.frame().class.clone();
+        self.add_symbol(target, String::new(), KIND_FUNCTION, line, Vec::new());
+    }
+
+    /// Every call inside a lambda body, block or expression, at any depth. The
+    /// shared `c_calls_in_pub` stops at a block and at a nested lambda because a
+    /// C/C++ lambda body is entered on its own walk; a C# lambda is not, so its
+    /// block has to be read here or not at all.
+    pub(crate) fn cs_initializer_vars(&mut self, id: u32) {
+        let children: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .filter(|&c| !self.is_layout(c) && !matches!(self.kind(c), "{" | "}" | ","))
+            .collect();
+        let mut i = 0;
+        while i + 2 < children.len() {
+            if self.kind(children[i + 1]) == "=" {
+                if let Some(target) = self.leaf_name(children[i]) {
+                    self.cs_bind_constructed(target, children[i + 2]);
+                }
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub(crate) fn lambda_calls(&self, id: u32, out: &mut Vec<u32>) {
+        for child in self.children(id) {
+            if matches!(
+                self.kind(child),
+                "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression"
+                    | "generic_invocation" | "conditional_invocation"
+            ) {
+                out.push(child);
+            }
+            self.lambda_calls(child, out);
+        }
+    }
+
+    pub(crate) fn cs_has_error(&self, id: u32) -> bool {
+        if self.kind(id) == "ERROR" {
+            return true;
+        }
+        self.children(id).into_iter().any(|c| self.cs_has_error(c))
+    }
+
+    pub(crate) fn cs_collect_leaves(&self, id: u32, out: &mut Vec<u32>) {
+        let node = self.node(id);
+        if node.first_child == NONE {
+            if node.start < node.end && !self.kind(id).contains("comment") {
+                out.push(id);
+            }
+            return;
+        }
+        for child in self.children(id) {
+            self.cs_collect_leaves(child, out);
+        }
+    }
+
+    pub(crate) fn cs_recovered_calls(&mut self, id: u32) {
+        let tokens: Vec<u32> = self.children(id);
+        self.cs_recovered_calls_tokens(&tokens);
+    }
+
+    pub(crate) fn cs_recovered_calls_tokens(&mut self, tokens: &[u32]) {
+        let mut at = 0;
+        while at < tokens.len() {
+            if matches!(
+                self.kind(tokens[at]),
+                "member_access_expression" | "member_access" | "conditional_member_access"
+            ) {
+                let name = self.path_of(tokens[at]);
+                if !name.is_empty()
+                    && at + 1 < tokens.len()
+                    && matches!(self.kind(tokens[at + 1]), "(" | "argument_list" | "arguments")
+                {
+                    let line = self.line(tokens[at]);
+                    self.push_call(name, line);
+                }
+                at += 1;
+                continue;
+            }
+            let Some(mut name) = self.leaf_name(tokens[at]) else {
+                at += 1;
+                continue;
+            };
+            if matches!(
+                name.as_str(),
+                "if" | "for" | "foreach" | "while" | "switch" | "catch" | "using" | "lock" | "fixed"
+                    | "checked" | "unchecked" | "sizeof" | "typeof" | "default" | "return" | "throw"
+                    | "yield" | "await" | "new" | "class" | "struct" | "interface" | "enum" | "record"
+                    | "delegate" | "namespace" | "where" | "when" | "is" | "as" | "in" | "out" | "ref"
+            ) {
+                at += 1;
+                continue;
+            }
+            if at > 0
+                && matches!(
+                    self.kind(tokens[at - 1]),
+                    "class" | "struct" | "interface" | "enum" | "record" | "namespace"
+                )
+            {
+                at += 1;
+                continue;
+            }
+            let is_new = at > 0 && self.kind(tokens[at - 1]) == "new";
+            if name == "this" {
+                name = "self".to_string();
+            }
+            let mut end = at;
+            let mut line = self.line(tokens[at]);
+            while end + 2 < tokens.len() && matches!(self.kind(tokens[end + 1]), "." | "?." | "::") {
+                let Some(seg) = self.leaf_name(tokens[end + 2]) else {
+                    break;
+                };
+                name.push('.');
+                name.push_str(&seg);
+                line = self.line(tokens[end + 2]);
+                end += 2;
+            }
+            let mut after = end + 1;
+            if after < tokens.len() && self.kind(tokens[after]) == "<" {
+                let mut depth = 0i32;
+                let mut j = after;
+                while j < tokens.len() {
+                    match self.kind(tokens[j]) {
+                        "<" => depth += 1,
+                        ">" | ">joined" => {
+                            depth -= 1;
+                            if depth <= 0 {
+                                after = j + 1;
+                                break;
+                            }
+                        }
+                        ";" | "{" | "}" => break,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+            }
+            if after < tokens.len() {
+                let next_kind = self.kind(tokens[after]);
+                if matches!(next_kind, "(" | "argument_list" | "arguments")
+                    || (is_new && next_kind == "{")
+                {
+                    self.push_call(name.clone(), line);
+                    let last = name.rsplit('.').next().unwrap_or("");
+                    if last.starts_with(|ch: char| ch.is_uppercase()) {
+                        let mut scan = at;
+                        if is_new && scan > 0 {
+                            scan -= 1;
+                        }
+                        if scan > 1 && self.kind(tokens[scan - 1]) == "=" {
+                            let mut t_end = scan - 2;
+                            if self.kind(tokens[t_end]) == "]" {
+                                let mut depth = 0usize;
+                                while t_end > 0 {
+                                    match self.kind(tokens[t_end]) {
+                                        "]" => depth += 1,
+                                        "[" => {
+                                            depth -= 1;
+                                            if depth == 0 {
+                                                break;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    t_end -= 1;
+                                }
+                                if depth != 0 || t_end == 0 {
+                                    at = end + 1;
+                                    continue;
+                                }
+                                t_end -= 1;
+                            }
+                            if let Some(mut target) = self.leaf_name(tokens[t_end]) {
+                                while t_end >= 2 && matches!(self.kind(tokens[t_end - 1]), "." | "?.") {
+                                    if let Some(prev) = self.leaf_name(tokens[t_end - 2]) {
+                                        let prev = if prev == "this" { "self".to_string() } else { prev };
+                                        target = format!("{prev}.{target}");
+                                        t_end -= 2;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if !target.is_empty() && !target.contains('.') {
+                                    self.facts.vars.push((target, last.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            at = end + 1;
+        }
+    }
+
+    /// Recover statement events (`x`, `a`, `r`) from flat tokens inside a C#
+    /// `ERROR` node. `cs_recovered_calls` already recovers calls and `vars`
+    /// bindings, but emitted no events, leaving every statement inside an
+    /// unparsed property/accessor/method body without an event on its line.
+    pub(crate) fn cs_recovered_events(&mut self, id: u32) {
+        let children: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .filter(|&c| {
+                let node = self.node(c);
+                node.start < node.end && !self.kind(c).contains("comment")
+            })
+            .collect();
+        let mut stmt: Vec<u32> = Vec::new();
+        let mut paren_depth = 0i32;
+        let mut brace_depth = 0i32;
+
+        for (idx, &child) in children.iter().enumerate() {
+            let kind = self.kind(child);
+            if Self::is_cs_handled_node(kind) {
+                self.cs_emit_recovered_stmt(&stmt);
+                stmt.clear();
+                paren_depth = 0;
+                brace_depth = 0;
+                continue;
+            }
+            match kind {
+                "(" | "[" => {
+                    paren_depth += 1;
+                    stmt.push(child);
+                }
+                ")" | "]" => {
+                    paren_depth = (paren_depth - 1).max(0);
+                    stmt.push(child);
+                    if kind == ")" && paren_depth == 0 && brace_depth == 0 {
+                        if let Some(&first) = stmt.first() {
+                            if matches!(
+                                self.kind(first),
+                                "if" | "while" | "for" | "foreach" | "using" | "lock" | "fixed" | "catch"
+                            ) {
+                                let next_kind = children.get(idx + 1).map(|&n| self.kind(n)).unwrap_or("");
+                                if !matches!(next_kind, "{" | ";") {
+                                    self.cs_emit_recovered_stmt(&stmt);
+                                    stmt.clear();
+                                }
+                            }
+                        }
+                    }
+                }
+                "{" => {
+                    if paren_depth > 0 || brace_depth > 0 || self.cs_is_expr_brace(&stmt) {
+                        brace_depth += 1;
+                        stmt.push(child);
+                    } else {
+                        self.cs_emit_recovered_stmt(&stmt);
+                        stmt.clear();
+                    }
+                }
+                "}" => {
+                    if brace_depth > 0 {
+                        brace_depth -= 1;
+                        stmt.push(child);
+                    } else {
+                        self.cs_emit_recovered_stmt(&stmt);
+                        stmt.clear();
+                    }
+                }
+                ";" if paren_depth == 0 && brace_depth == 0 => {
+                    self.cs_emit_recovered_stmt(&stmt);
+                    stmt.clear();
+                }
+                "=>" if paren_depth == 0 && brace_depth == 0 => {
+                    if self.cs_is_accessor_tokens(&stmt) {
+                        self.cs_emit_recovered_stmt(&stmt);
+                    }
+                    stmt.clear();
+                }
+                "else" if paren_depth == 0 && brace_depth == 0 && stmt.is_empty() => {}
+                _ => {
+                    stmt.push(child);
+                }
+            }
+        }
+        self.cs_emit_recovered_stmt(&stmt);
+    }
+
+    fn is_cs_handled_node(kind: &str) -> bool {
+        matches!(
+            kind,
+            "class_declaration"
+                | "struct_declaration"
