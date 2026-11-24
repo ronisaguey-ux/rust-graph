@@ -7358,3 +7358,323 @@ impl<'a> Walker<'a> {
                                 }
                                 for &tok in lhs_toks.iter().rev().take(4) {
                                     if !emitted.contains(&tok) {
+                                        emitted.push(tok);
+                                        ev_as.push(mk_a(&[tok.to_string()], &wrapped));
+                                    }
+                                }
+                                let rhs_first: String = rhs_raw
+                                    .chars()
+                                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '\'')
+                                    .collect();
+                                if !rhs_first.is_empty() && rhs_first.bytes().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                    let conid = rhs_first.rsplit('.').next().unwrap_or(&rhs_first).to_string();
+                                    for &tok in &emitted {
+                                        self.facts.vars.push((tok.to_string(), conid.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        let push_ev = |events: &mut String, ev: &str| {
+                            if !events.is_empty() {
+                                events.push(',');
+                            }
+                            events.push_str(ev);
+                        };
+                        push_ev(&mut self.facts.symbols[active_sym].events, &ev_x);
+                        push_ev(&mut self.facts.symbols[active_sym].events, &ev_r);
+                        for ea in &ev_as {
+                            push_ev(&mut self.facts.symbols[active_sym].events, ea);
+                        }
+                        if active_sym != 0 {
+                            push_ev(&mut self.facts.symbols[0].events, &ev_x);
+                            push_ev(&mut self.facts.symbols[0].events, &ev_r);
+                            for ea in &ev_as {
+                                push_ev(&mut self.facts.symbols[0].events, ea);
+                            }
+                        }
+                    }
+                }
+            }
+            "indented_header" | "module_exports_and_where" if self.facts.tag == "HS" => {
+                let line = self.line(id);
+                let raw = self.text_string(id);
+                // Strip `-- ...` line comments before extracting exported names
+                let cleaned: String = raw
+                    .split('\n')
+                    .map(|l| l.split("--").next().unwrap_or(l))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let segs: Vec<&str> = cleaned
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                    .map(|s| s.trim_matches('.'))
+                    .filter(|s| {
+                        !s.is_empty()
+                            && !matches!(*s, "where" | "module" | "type" | "pattern")
+                            && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    })
+                    .collect();
+                if !segs.is_empty() {
+                    let parts: Vec<String> = segs
+                        .iter()
+                        .map(|s| {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, s);
+                            n.push(']');
+                            n
+                        })
+                        .collect();
+                    let mut val = format!(
+                        "[\"m\",[[\"t\",[{}]],[\"n\",\"where\"],0,0,0,0]]",
+                        parts.join(",")
+                    );
+                    for _ in 0..segs.len().clamp(2, 10) {
+                        val = format!("[\"c\",0,0,[{val}]]");
+                    }
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "application_expression" if self.facts.tag == "HS" => {
+                let kids = self.children(id);
+                if let Some(&first) = kids.first() {
+                    let fk = self.kind(first);
+                    if !matches!(fk, "application_expression" | "binary_expression" | "tuple" | "list" | "lambda" | "if_expression" | "case_expression" | "do_expression" | "let_expression") {
+                        let callee = self.text_string(first);
+                        let callee = callee.trim();
+                        if !callee.is_empty()
+                            && callee.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && callee.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'' || b == b'.')
+                        {
+                            self.push_call(callee.to_string(), self.line(first));
+                        }
+                    }
+                }
+                // Also handle `f x (y)` where the lexer sees `x(...)` because of the following `(`
+                if kids.len() >= 2 && self.kind(kids[kids.len() - 1]) == "tuple" {
+                    let prev_txt = self.text_string(kids[kids.len() - 2]);
+                    if let Some(last_tok) = prev_txt.split_whitespace().last() {
+                        let last_tok = last_tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.');
+                        if !last_tok.is_empty()
+                            && last_tok.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && last_tok.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'' || b == b'.')
+                        {
+                            self.push_call(last_tok.to_string(), self.line(kids[kids.len() - 1]));
+                        }
+                    }
+                }
+            }
+            "export_item" if self.facts.tag == "HS" => {
+                let raw = self.text_string(id);
+                if raw.contains('(') {
+                    if let Some(name) = raw.split('(').next() {
+                        let name = name.trim();
+                        if !name.is_empty()
+                            && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'' || b == b'.')
+                        {
+                            self.push_call(name.to_string(), self.line(id));
+                        }
+                    }
+                }
+            }
+            "instance_declaration" if self.facts.tag == "HS" => {
+                self.push_call("instance".to_string(), self.line(id));
+            }
+            "case_expression" if self.facts.tag == "HS" => {
+                self.push_call("case".to_string(), self.line(id));
+            }
+            "do_bind" if self.facts.tag == "HS" => {
+                let line = self.line(id);
+                let raw = self.text_string(id);
+                if let Some((lhs_raw, rhs_raw)) = raw.split_once("<-") {
+                    let targets: Vec<String> = lhs_raw
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                        .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_lowercase() || b == b'_'))
+                        .map(|s| s.to_string())
+                        .collect();
+                    let rhs_segs: Vec<&str> = rhs_raw
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                        .map(|s| s.trim_matches('.'))
+                        .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                        .collect();
+                    let mut parts: Vec<String> = rhs_segs
+                        .iter()
+                        .map(|s| {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, s);
+                            n.push(']');
+                            n
+                        })
+                        .collect();
+                    parts.push("0".to_string());
+                    parts.push("0".to_string());
+                    parts.push("0".to_string());
+                    let base = format!("[\"m\",[{}]]", parts.join(","));
+                    let val = format!("[\"c\",0,0,[[\"c\",0,0,[[\"c\",0,0,[{base}]]]]]]");
+                    if !targets.is_empty() {
+                        self.lexer_event(b'a', line, &targets, &val, false);
+                    } else {
+                        self.lexer_event(b'x', line, &[], &val, false);
+                    }
+                }
+            }
+            "do_expression_statement" if self.facts.tag == "HS" => {
+                let line = self.line(id);
+                let raw = self.text_string(id);
+                let segs: Vec<&str> = raw
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                    .map(|s| s.trim_matches('.'))
+                    .filter(|s| {
+                        !s.is_empty()
+                            && !matches!(*s, "let" | "in" | "where" | "do" | "of" | "case" | "if" | "then" | "else")
+                            && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    })
+                    .collect();
+                let mut parts: Vec<String> = segs
+                    .iter()
+                    .map(|s| {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, s);
+                        n.push(']');
+                        n
+                    })
+                    .collect();
+                parts.push("0".to_string());
+                parts.push("0".to_string());
+                parts.push("0".to_string());
+                parts.push("0".to_string());
+                let base = format!("[\"m\",[{}]]", parts.join(","));
+                let val = format!("[\"c\",0,0,[[\"c\",0,0,[[\"c\",0,0,[{base}]]]]]]");
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
+            "deriving_clause" if self.facts.tag == "HS" => {
+                self.push_call("deriving".to_string(), self.line(id));
+            }
+            "module_header" if self.facts.tag == "HS" => {
+                self.push_call("module".to_string(), self.line(id));
+            }
+            "type_signature" | "function_rhs" if self.facts.tag == "HS" => {
+                let line = self.line(id);
+                let raw = self.text_string(id);
+                if kind == "type_signature" {
+                    if let Some((lhs_raw, rhs_raw)) = raw.split_once("::") {
+                        let lhs = lhs_raw.trim();
+                        let rhs = rhs_raw.trim();
+                        if !lhs.is_empty()
+                            && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'')
+                            && rhs.contains('(')
+                        {
+                            let ty = rhs
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.')
+                                .find(|s| !s.is_empty())
+                                .unwrap_or("");
+                            if !ty.is_empty() {
+                                self.push_call(format!("{lhs}.{ty}"), line);
+                            }
+                        }
+                    }
+                }
+                let segs: Vec<&str> = raw
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                    .map(|s| s.trim_matches('.'))
+                    .filter(|s| {
+                        !s.is_empty()
+                            && !matches!(*s, "let" | "in" | "where" | "do" | "of" | "case" | "if" | "then" | "else" | "forall")
+                            && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    })
+                    .collect();
+                let val = if segs.is_empty() {
+                    "0".to_string()
+                } else if segs.len() == 1 {
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, segs[0]);
+                    n.push(']');
+                    n
+                } else {
+                    let parts: Vec<String> = segs
+                        .iter()
+                        .map(|s| {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, s);
+                            n.push(']');
+                            n
+                        })
+                        .collect();
+                    format!("[\"m\",[{}]]", parts.join(","))
+                };
+                let wrapped = format!("[\"c\",0,0,[[\"c\",0,0,[[\"c\",0,0,[[\"m\",[{val},0,0,0,0,0,0]]]]]]]]");
+                if kind == "function_rhs" {
+                    self.lexer_event(b'r', line, &[], &wrapped, false);
+                } else if val != "0" {
+                    self.lexer_event(b'x', line, &[], &wrapped, false);
+                }
+            }
+            "builtin_call" if self.facts.tag == "ZIG" => {
+                if let Some(bn) = self.child_of_kind(id, "builtin_name") {
+                    let raw = self.text_string(bn);
+                    let name = raw.trim_start_matches('@').to_string();
+                    if !name.is_empty() {
+                        let line = self.line(id);
+                        self.push_call(name, line);
+                    }
+                }
+            }
+            "mapping_type" if self.facts.tag == "SOL" => {
+                let line = self.line(id);
+                self.push_call("mapping".to_string(), line);
+            }
+            "using_directive" | "event_definition" | "error_definition" | "struct_field" if self.facts.tag == "SOL" => {
+                self.decl_statement(id);
+            }
+            "returns_clause" if self.facts.tag == "SOL" => {
+                let line = self.line(id);
+                self.push_call("returns".to_string(), line);
+            }
+            "state_variable" if self.facts.tag == "SOL" => {
+                if self.children(id).iter().any(|&c| self.kind(c) == "=") {
+                    self.expression_statement(id);
+                } else {
+                    self.decl_statement(id);
+                }
+            }
+            "variable_declaration" | "local_declaration" if self.facts.tag == "DART" => {
+                let line = self.line(id);
+                let children = self.children(id);
+                let decls: Vec<u32> = children
+                    .iter()
+                    .copied()
+                    .filter(|&c| self.kind(c) == "declarator")
+                    .collect();
+                if !decls.is_empty() {
+                    for d in decls {
+                        let dch = self.children(d);
+                        let dline = self.line(d);
+                        if let Some(eq) = dch.iter().position(|&c| self.kind(c) == "=") {
+                            if let Some(name) = dch[..eq]
+                                .iter()
+                                .rev()
+                                .copied()
+                                .find(|&c| !self.is_layout(c))
+                                .map(|c| {
+                                    let t = self.text_string(c);
+                                    t.rsplit('$').next().unwrap_or(&t).to_string()
+                                })
+                                .filter(|s| !s.is_empty())
+                            {
+                                let rhs = dch[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                                let val = rhs
+                                    .map(|c| {
+                                        let k = self.kind(c);
+                                        if matches!(k, "true" | "false" | "null") {
+                                            format!("[\"n\",\"{k}\"]")
+                                        } else {
+                                            let f = self.form(c);
+                                            if f.is_empty() { "0".to_string() } else { f }
+                                        }
+                                    })
+                                    .unwrap_or_else(|| "0".to_string());
+                                if let Some(rnode) = rhs {
+                                    if let Some(cls) = self.constructed(rnode) {
+                                        self.facts.vars.push((name.clone(), cls));
+                                    }
+                                }
+                                self.lexer_event(b'a', dline, &[name], &val, false);
