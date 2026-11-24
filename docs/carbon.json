@@ -1,0 +1,106 @@
+{
+  "meta": {
+    "kind": "hard-bugs handoff - highest priority only",
+    "repo": "rust-graph",
+    "commit": "b9d078221 (integ-45 == main)",
+    "issued": "2026-11-24",
+    "who_this_is_for": "an agent with limited usage but strong reasoning: three problems, each one blocked a whole language lane and each one has already eaten multiple failed attempts. Do not start a fourth.",
+    "state_snapshot": {
+      "languages_under_5pct": "15 of 45",
+      "files_still_to_cut": 7540,
+      "worst": ["ruby 62.19", "clojure 70.01", "r 63.29", "tcl 54.07", "bash 34.62"],
+      "attempt_keep_rate": "about 35 percent (13/30, 4/16, 5/13, 11/29 across the last four rounds) - most attempts are reverted by the two rules below, which is why these three problems are worth more than any single language"
+    },
+    "environment": {
+      "build": "CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=$PWD/.cargo-target CARGO_PROFILE_RELEASE_OPT_LEVEL=3 cargo build --release --target x86_64-unknown-linux-musl --features 'deep parser'",
+      "corpora": "/tmp/opencode/lean/corpus45/<lang>/  (tcl 1104 files, clojure 1454, bash 1681, rust 1118, c 2010)",
+      "measure": "RG_LOSSES=1 RG_AUDIT=1 $BIN build /tmp/opencode/lean/corpus45/<lang> --no-cache 2>&1 | awk -F'\\t' '/^loss\\t/{f[$2]=1; r++} END{print length(f)\" files \"r\" rows\"}'",
+      "guards": [
+        "cargo test --bin rust-graph  (must stay 256 passed / 0 failed)",
+        "7-corpus guard: js 23/23, ts 28/36, py 23/25, rs 26/27, kt 84/90, sc 82/112, sw 68/90",
+        "self-parse: $BIN build rust-graph/src --no-cache must stay 0 files / 0 rows"
+      ],
+      "rules": [
+        "files down and rows up = revert",
+        "one language measured at a time, never a 45-language sweep per attempt",
+        "measure the language you touched plus the 7-corpus guard; nothing else"
+      ]
+    },
+    "reading_order": ["H1", "H2", "H3"]
+  },
+  "items": [
+    {
+      "id": "H1",
+      "priority": 1,
+      "title": "A brace or bracket opens a block before the call/import reader sees the statement, so no per-statement guard can reach it",
+      "languages_blocked": ["tcl", "clojure", "rust (brace imports)", "bash (arrays)"],
+      "evidence": {
+        "tcl": "598 files / 729 rows on 1104 files (54.07%) after a full 25 measured attempts. Started this campaign at 957/957 (86.53%). Round 6 found and round 7 applied all three named root causes (is_layout skipping braced_word/command_substitution/quoted_word; proc_command recorded outside the proc scope; call_command emitting no x-events) and it still will not cross 54 percent.",
+        "clojure": "1018 files / 1454 (70.01%). A lane sat on it for three hours without a single kept attempt.",
+        "rust": "the same mechanism previously blocked `use {a as b, c};` - the statement produces no event at all because the brace splits it into a block before the import reader runs. Four separate guard attempts failed on it.",
+        "tcl_loss_mix_measured_2026_11_24": {"call": 523, "event": 201, "var": 3, "symbol": 2, "total_rows": 729, "reading": "73 percent of what tcl pays is the call bucket, i.e. exactly the call_command path below - this is not a spread of small bugs, it is one reader"},
+        "reverted_attempts": [
+          "`in_command_call` juxtaposed guard in src/expr.rs raised tcl 684 -> 817 files, reverted",
+          "round 6 attempt a029 (0 files / +59 rows) and a030 (0 files / +1001 rows), both reverted"
+        ]
+      },
+      "where": {
+        "brace_classifier": "src/parser.rs:191 (enum BraceContext), src/parser.rs:1369 (classify_brace_context) - it exists but is only consulted for initialisers (block vs struct literal vs table constructor), never on the import or call statement path",
+        "tcl_call_path": "src/deep_facts/mod.rs:3001 (tcl_call_command), src/deep_facts/mod.rs:6283 (dispatch on call_command), TCL_CALLS at src/deep_facts/mod.rs:501",
+        "layout_filter": "src/deep_facts/mod.rs:1411 (is_layout) - the function every failed guard tried to work around"
+      },
+      "why_hard": "every fix so far has been a per-statement guard, and the statement does not exist as a statement by the time the reader runs. The fix has to move up a layer: the lexer must classify the brace before it decides to open a block, and the call/import readers must consume the classified construct rather than filter tokens after the fact.",
+      "definition_of_done": "tcl below 598 files without its rows rising above 729; clojure moves at all (below 1018) with rows not rising above 1454; rust stays at 26/27 and self-parse at 0 rows.",
+      "do_not": [
+        "do not add another is_layout skip-list entry - that is the shape of all six prior failures",
+        "do not raise the loss threshold to make the percentage move"
+      ],
+      "known_extra": "tcl also exits rc=-11 (SIGSEGV) after printing its loss rows. The rows are complete before the crash, so measurement is valid, but the crash is unfixed and may be a second bug hiding in the same reader."
+    },
+    {
+      "id": "H2",
+      "priority": 2,
+      "title": "Unmasking one fact kind makes the row count explode, so every attempt at it gets reverted - the x-event nesting invariant is not written down anywhere",
+      "affected": "all 45 languages, and it is the single biggest reason attempts are wasted",
+      "evidence": {
+        "bash": "the -flag guard turned 468 files/1,010 rows into 4,914 rows and was reverted",
+        "r": "generic call_arguments turned 7,194 rows into 8,636 and was reverted",
+        "tcl": "multi-word emission was reverted at 684 files/743 rows; and a round 7 call fix unmasked exactly 1,034 x-event rows in one step",
+        "zig": "test_declaration / builtin_call form, reverted on the same rule",
+        "solidity": "mapping_body named-parameter rule raised 159 -> 165 files, reverted"
+      },
+      "where": {
+        "value_shapes": "src/expr.rs - where both readers' value shapes are decided for every language, and where the reverted in_command_call guard lived",
+        "event_emitters": "src/deep_facts/mod.rs (per-language emit arms), src/deep_facts/go.rs (shared path/form/member_name helpers)",
+        "reason_codes": "src/pipeline.rs (reason_code - the strings CST_SHAPE_MISMATCH:targets, LEX_OVER_EMIT:call etc. come from here)"
+      },
+      "why_hard": "the reference lexer emits right-nested x-events per call, so the moment a calls bucket is unmasked, every call demands a matching x-event chain. Files fall, rows multiply 2-10x, the rule forces a revert, and the knowledge of what the invariant actually is never gets captured. Nobody has written the invariant down, so each lane rediscovers it and loses the same attempts.",
+      "definition_of_done": "a written statement of the x-event nesting rule (with a small fixture per language that asserts it), plus at least one language where unmasking calls drops files with flat rows - bash is the best candidate (1,681 files, 582 currently failing).",
+      "do_not": [
+        "do not unmask a calls bucket without predicting the row delta from the event counts first",
+        "do not accept rows up on the grounds that files dropped"
+      ]
+    },
+    {
+      "id": "H3",
+      "priority": 3,
+      "title": "Grammar recovery swallows whole C blocks and no target covers it",
+      "evidence": {
+        "c_corpus": "CST_DEGRADED:recovery accounted for 128 of C's 554 fallback files in the 2026-11-16 sweep, and 137 of the 295 measured on 2026-11-17",
+        "rust": "the same bucket holds 2 rust rows, both the same file: the source repeats a `fn` header line so the whole block sits in recovery and the call inside it has no CST node to be read from (CST_MISSING_KIND:call, 2 rows)"
+      },
+      "where": {
+        "grammar": "src/deep/ and the grammar tables; the CVD parser's error recovery",
+        "budget": "docs/parse-budgets.md and the recovery threshold",
+        "rust_bug": "the repeated `fn` header case - a grammar gap, not a reader guard"
+      },
+      "why_hard": "unsolved.md is explicit: 'error nodes are the CVD parser's recovery, not a reader disagreement, and the threshold is the only knob that is honest here'. Raising the budget hides the problem; fixing it means teaching recovery to resynchronise on the next item boundary instead of consuming the block.",
+      "definition_of_done": "C below 200 fallback files (from 295) with the recovery threshold unchanged, the 7-corpus guard unchanged, and the repeated-fn-header fixture parsing with 0 rows.",
+      "do_not": ["do not raise the recovery budget or the parse budget to move the number"]
+    }
+  ],
+  "omitted_on_purpose": {
+    "why": "everything else on the board is a per-language reader fix that a lane can land without design work, so it is not worth this agent's usage",
+    "examples": ["PAIR_AMBIGUOUS:1 (no rust row, one ts row)", "LEX_OVER_EMIT:name (1 rust row, fix belongs in src/expr.rs = H2's area)", "CST_MISSING_KIND:symbol (no rust row)", "the 13 languages still to rebaseline"]
+  }
+}
