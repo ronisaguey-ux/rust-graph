@@ -576,6 +576,13 @@ impl<'a> Lexer<'a> {
         } else {
             self.scan_interpolated(close, interp, multi_line)
         };
+        if self.lang.tag == "CS"
+            && close == b"\""
+            && matches!(self.src.get(self.pos..self.pos + 2), Some(b"u8" | b"U8"))
+            && !self.src.get(self.pos + 2).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        {
+            self.pos += 2;
+        }
         let mut token = self.token(Kind::Str, start, line, col);
         if !parts.is_empty() {
             token.interp = Some(Box::new(parts));

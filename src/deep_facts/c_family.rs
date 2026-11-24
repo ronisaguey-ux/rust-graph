@@ -1553,9 +1553,12 @@ impl<'a> Walker<'a> {
             // `#import "Local.h"` in the corpus lost its import (464 rows on
             // the Objective-C corpus alone).
             let trimmed = line.trim_start();
-            let Some(rest) = trimmed
-                .strip_prefix("#include")
-                .or_else(|| trimmed.strip_prefix("#import"))
+            let Some(after_hash) = trimmed.strip_prefix('#').map(str::trim_start) else {
+                continue;
+            };
+            let Some(rest) = after_hash
+                .strip_prefix("include")
+                .or_else(|| after_hash.strip_prefix("import"))
             else {
                 continue;
             };
