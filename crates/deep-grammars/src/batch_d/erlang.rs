@@ -125,7 +125,7 @@ rust_graph_deep::grammar! { ERLANG {
     parameters: _expression ("," _expression)*,
 
     guard: "when" guard_sequence,
-    guard_sequence: _expression (";" _expression)*,
+    guard_sequence: _expression (("," | ";") _expression)*,
     body: _expression ("," _expression)*,
 
     _expression: precedence _primary {
@@ -138,7 +138,7 @@ rust_graph_deep::grammar! { ERLANG {
         left "bor" | "bxor" | "band" | "bsl" | "bsr" => bitwise,
         left "*" | "/" => arithmetic,
         left "div" | "rem" => arithmetic,
-        prefix "not" | "-" | "+" => unary,
+        prefix "not" | "-" | "+" | "catch" => unary,
         postfix call_arguments => call,
         postfix module_call => remote_call,
         postfix "." NAME => record_access,
@@ -146,7 +146,7 @@ rust_graph_deep::grammar! { ERLANG {
 
     call_arguments: "(" [(argument %? ",")] ")",
     argument: _expression,
-    module_call: ":" (ATOM | VARIABLE | QUOTED_ATOM) call_arguments,
+    module_call: ":" (ATOM | VARIABLE | QUOTED_ATOM | "type" | "module" | "export" | "import" | "record" | "include" | "define" | "spec" | "behaviour") call_arguments,
 
     _primary:
         ATOM
@@ -165,6 +165,7 @@ rust_graph_deep::grammar! { ERLANG {
         | fun_expression
         | begin_expression
         | receive_expression
+        | try_expression
         | map_literal
         | macro_reference,
 
@@ -183,7 +184,12 @@ rust_graph_deep::grammar! { ERLANG {
     anonymous_clauses: anonymous_clause (";" anonymous_clause)*,
     anonymous_clause: parameter_group [guard] "->" body,
     begin_expression: "begin" body "end",
-    receive_expression: "receive" case_clauses "end",
+    receive_expression: "receive" [case_clauses] [after_clause] "end",
+    after_clause: "after" _expression "->" body,
+    try_expression: "try" body ["of" case_clauses] [catch_clause] ["after" body] "end",
+    catch_clause: "catch" catch_clauses,
+    catch_clauses: catch_item (";" catch_item)*,
+    catch_item: _expression [":" _expression] [":" _expression] [guard] "->" body,
     map_literal: "#" map_body,
     map_body: "{" [(map_field %? ",")] "}",
     map_field: _expression [map_assoc],
@@ -202,6 +208,7 @@ pub fn lex_erlang(c: &mut Cursor) -> Kind {
         b'%' => { lex::line_comment(c); COMMENT }
         b'"' => if lex::quoted(c, b'"') { STRING } else { BAD_STRING },
         b'\'' => if lex::quoted(c, b'\'') { QUOTED_ATOM } else { BAD_STRING },
+
         b'0'..=b'9' => { lex::number(c); NUMBER }
         b'a'..=b'z' => {
             let start = c.rest();

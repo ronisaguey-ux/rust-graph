@@ -65,6 +65,7 @@ rust_graph_deep::grammar! { PASCAL {
         KW_FINALIZATION = "finalization",
         KW_USES = "uses",
         KW_CONST = "const",
+        KW_RESOURCESTRING = "resourcestring",
         KW_TYPE = "type",
         KW_VAR = "var",
         KW_BEGIN = "begin",
@@ -112,6 +113,7 @@ rust_graph_deep::grammar! { PASCAL {
         program_header
         | unit_header
         | section_marker
+        | init_section
         | uses_clause
         | const_section
         | type_section
@@ -121,13 +123,14 @@ rust_graph_deep::grammar! { PASCAL {
     program_header: "program" _name [program_parameters] ";",
     program_parameters: "(" identifier_list ")",
     unit_header: "unit" dotted_name ";",
-    section_marker: ("interface" | "implementation" | "initialization" | "finalization"),
+    section_marker: ("interface" | "implementation"),
+    init_section: ("initialization" | "finalization") _statements,
     uses_clause: "uses" dotted_name ("," dotted_name)* ";",
     dotted_name: _name ("." _name)*,
     identifier_list: _name ("," _name)*,
 
-    const_section: "const" const_declaration+,
-    const_declaration: _name ["=" _expression] ";",
+    const_section: ("const" | "resourcestring") const_declaration+,
+    const_declaration: _name [":" _type] ["=" _expression] ";",
     type_section: "type" type_declaration+,
     type_declaration: _name "=" _type ";",
     var_section: "var" variable_declaration+,
@@ -210,7 +213,7 @@ rust_graph_deep::grammar! { PASCAL {
         | "false"
         | parenthesized_expression,
     _name: IDENT,
-    parenthesized_expression: "(" _expression ")",
+    parenthesized_expression: "(" _expression ("," _expression)* ")",
 } }
 
 pub fn lex_pascal(c: &mut Cursor) -> Kind {
@@ -321,6 +324,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"FINALIZATION" => KW_FINALIZATION,
         b"USES" => KW_USES,
         b"CONST" => KW_CONST,
+        b"RESOURCESTRING" => KW_RESOURCESTRING,
         b"TYPE" => KW_TYPE,
         b"VAR" => KW_VAR,
         b"BEGIN" => KW_BEGIN,
