@@ -638,3 +638,323 @@ fn tag(lang: Lang) -> &'static str {
         Lang::Json => "JSON",
         Lang::Python => "PY",
         Lang::Rust => "RS",
+        Lang::JavaScript => "JS",
+        Lang::TypeScript | Lang::Tsx => "TS",
+        Lang::Go => "GO",
+        Lang::Java => "JAVA",
+        Lang::C => "C",
+        Lang::Cpp => "CPP",
+        Lang::CSharp => "CS",
+        Lang::Kotlin => "KT",
+        Lang::Scala => "SCALA",
+        Lang::Swift => "SWIFT",
+        Lang::ObjC => "OBJC",
+        Lang::Php => "PHP",
+        Lang::Ruby => "RB",
+        Lang::Dart => "DART",
+        Lang::Elixir => "EX",
+        Lang::Haskell => "HS",
+        Lang::Lua => "LUA",
+        Lang::R => "R",
+        Lang::Solidity => "SOL",
+        Lang::Sql => "SQL",
+        Lang::Shell => "SH",
+        Lang::Groovy => "GROOVY",
+        Lang::Julia => "JL",
+        Lang::VisualBasic => "VB",
+        Lang::Pascal => "PAS",
+        Lang::Cobol => "COBOL",
+        Lang::Nim => "NIM",
+        Lang::Crystal => "CR",
+        Lang::Zig => "ZIG",
+        Lang::D => "D",
+        Lang::FSharp => "FS",
+        Lang::Ocaml => "ML",
+        Lang::Erlang => "ERL",
+        Lang::Clojure => "CLJ",
+        Lang::Tcl => "TCL",
+        Lang::Awk => "AWK",
+        Lang::Perl => "PL",
+        Lang::Fortran => "F90",
+        Lang::PowerShell => "PS1",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The walk.
+// ---------------------------------------------------------------------------
+
+/// What the walk is inside: which symbol owns new calls and events, which class
+/// a member belongs to, and how this node's `end_line` is set on the way out.
+struct Frame {
+    node: u32,
+    /// The symbol that receives calls and events written while inside this
+    /// node. A class body writes onto the enclosing symbol, exactly as the
+    /// lexer does: `class A: X = f()` puts that call on the module.
+    symbol: usize,
+    class: String,
+    /// Go's method receiver's own name (`c` in `func (c *Cache) Get`). The
+    /// lexer spells `c.mu` as `self.mu`, so the path builder does too.
+    receiver: String,
+    container: bool,
+    defines: Option<usize>,
+}
+
+struct Walker<'a> {
+    src: &'a [u8],
+    /// Unpatched source bytes when `cs_strip_primary_constructors` rewrote C# 12
+    /// syntax (such as `[x]` -> `(x)`) before parsing, so `parenthesized_expression`
+    /// can tell a single-element collection expression from real parentheses.
+    orig_src: &'a [u8],
+    nodes: &'a [Node],
+    language: &'static Language,
+    kinds: Kinds,
+    line_starts: Vec<u32>,
+    facts: Facts,
+    stack: Vec<Frame>,
+    /// `const f = () => {}` / `f = lambda ...`: the definition node and the name
+    /// the binding gives it. A function expression has no name of its own; the
+    /// binding is the name, exactly as the lexer reads it.
+    bound: Vec<(u32, String)>,
+    /// Nodes whose statement an enclosing arm already wrote as one event: the
+    /// members of an enum are a single assignment to the lexer, so visiting
+    /// each one on its own must not write a second, unpaired event.
+    consumed: Vec<u32>,
+    /// `hidden void f(void);`: the macro that opened the declaration, read by
+    /// the item's own node and spent on the declaration inside it.
+    macro_prefix: Option<String>,
+    /// The line a declaration's statement starts on, by declaration node: the
+    /// lexer opens a statement at the first token after the previous `;`, so
+    /// `TEST_END` and `seq_define(…)` — macro invocations with no `;` of their
+    /// own — put the declaration that follows them on the macro's line while
+    /// the declaration's own line is the later one (c corpus, 6 files).
+    statement_lines: std::collections::HashMap<u32, u32>,
+    /// The form text a call node already produced, by node id. A block value is
+    /// read twice — once for the value the assignment carries, once when the
+    /// walk reaches the statements inside it — and the second read pushed a
+    /// second `Call` for the same source call. Returning the first text keeps
+    /// one call and one index, which is what the text in the event refers to
+    /// (P5-11).
+    call_texts: std::collections::HashMap<u32, String>,
+    in_kotlin_expr_body: bool,
+    /// Depth inside `(...)` or `[...]` while forming expressions; the lexer
+    /// does not split a multiline binary expression at a newline inside
+    /// delimiters.
+    delim_depth: usize,
+    /// `name := func(...) { ... }` / `var name = func(...) { ... }`: maps the
+    /// `func_literal` node to the function symbol created for its binding so
+    /// the walk enters that symbol's frame for the literal's body.
+    go_literal_frames: std::collections::HashMap<u32, usize>,
+}
+
+/// The deep language for a lexer tag (`langs::Language::tag`), or `None` when
+/// this path has no grammar for it. The pipeline uses this to pick the deep
+/// path for exactly the files whose facts it can produce.
+pub fn lang_for(tag: &str) -> Option<Lang> {
+    // `auto` picks only languages whose record reliably beats the lexer. Go and
+    // Java have tables (see `lang_for_forced`) but their records still lose the
+    // lexer's artefacts often enough that the guard keeps the lexer on most
+    // files, so choosing them automatically would pay for a second parse and
+    // then throw it away.
+    // `RG_AUDIT=1` asks for the guard's verdict on every language this build can
+    // parse, including the ones `auto` will not pay a second parse for. The
+    // audit that decides whether a language is ready to enter `auto` needs that
+    // number, and `--deep` cannot give it: it forces the CST on every file
+    // instead of comparing the two readers. Measurement only, off by default.
+    if std::env::var_os("RG_AUDIT").is_some() {
+        return lang_for_forced(tag);
+    }
+    match tag {
+        "PY" | "JS" | "TS" | "RS" => lang_for_forced(tag),
+        _ => None,
+    }
+}
+
+/// The languages this build can parse at all, whether or not `auto` would pick
+/// them. `--deep` uses this, so a caller can still ask for the CST on a language
+/// whose record is better for calls than the lexer's even where the guard would
+/// keep the lexer.
+pub fn lang_for_forced(tag: &str) -> Option<Lang> {
+    match tag {
+        "PY" => Some(Lang::Python),
+        "JS" => Some(Lang::JavaScript),
+        "TS" => Some(Lang::TypeScript),
+        "RS" => Some(Lang::Rust),
+        "GO" => Some(Lang::Go),
+        "JAVA" => Some(Lang::Java),
+        "C" => Some(Lang::C),
+        "CPP" => Some(Lang::Cpp),
+        "CS" => Some(Lang::CSharp),
+        "KT" => Some(Lang::Kotlin),
+        "SCALA" => Some(Lang::Scala),
+        "SWIFT" => Some(Lang::Swift),
+        "OBJC" => Some(Lang::ObjC),
+        "PHP" => Some(Lang::Php),
+        "RB" => Some(Lang::Ruby),
+        "DART" => Some(Lang::Dart),
+        "EX" => Some(Lang::Elixir),
+        "HS" => Some(Lang::Haskell),
+        "LUA" => Some(Lang::Lua),
+        "R" => Some(Lang::R),
+        "SOL" => Some(Lang::Solidity),
+        "SQL" => Some(Lang::Sql),
+        "SH" => Some(Lang::Shell),
+        "GROOVY" => Some(Lang::Groovy),
+        "JL" => Some(Lang::Julia),
+        "VB" => Some(Lang::VisualBasic),
+        "PAS" => Some(Lang::Pascal),
+        "COBOL" => Some(Lang::Cobol),
+        "NIM" => Some(Lang::Nim),
+        "CR" => Some(Lang::Crystal),
+        "ZIG" => Some(Lang::Zig),
+        "D" => Some(Lang::D),
+        "FS" => Some(Lang::FSharp),
+        "ML" => Some(Lang::Ocaml),
+        "ERL" => Some(Lang::Erlang),
+        "CLJ" => Some(Lang::Clojure),
+        "TCL" => Some(Lang::Tcl),
+        "AWK" => Some(Lang::Awk),
+        "PL" => Some(Lang::Perl),
+        "PS1" => Some(Lang::PowerShell),
+        "F90" => Some(Lang::Fortran),
+        // JSON stays out: a data file has no symbols, calls or imports to
+        // read, so the CST would add the module symbol the lexer already
+        // writes and nothing else. See `tests/facts_rust_json.rs`.
+        _ => None,
+    }
+}
+
+/// Read a file's facts off its CST.
+pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
+    // C# 12 primary constructors on `class` and `struct` (`class C(int x) { ... }`)
+    // are not in the C# grammar yet, so tree-sitter terminates the class at
+    // its name and dumps `(x) { ... }` into an `ERROR` region. Blanking the
+    // parameter list (and any `: Base(x)` argument list) with spaces preserves
+    // every line number and lets the CST read the class body normally.
+    if lang == Lang::CSharp && tree.errors > 0 {
+        if let Some(patched) = cs_strip_primary_constructors(root) {
+            if let Some(re_tree) = crate::deep_integration::parse_file(&patched, lang) {
+                if re_tree.errors < tree.errors || re_tree.nodes.len() > tree.nodes.len() {
+                    let mut walker = Walker::new(&patched, &re_tree, lang);
+                    walker.orig_src = root;
+                    walker.run();
+                    return walker.facts;
+                }
+            }
+        }
+    }
+    let mut walker = Walker::new(root, tree, lang);
+    walker.run();
+    walker.facts
+}
+
+fn cs_skip_ws_and_comments(src: &[u8], mut i: usize) -> usize {
+    while i < src.len() {
+        if src[i].is_ascii_whitespace() {
+            i += 1;
+        } else if src[i] == b'#' {
+            i += 1;
+            while i < src.len() && src[i] != b'\n' {
+                i += 1;
+            }
+        } else if src.get(i..i + 2) == Some(b"//") {
+            i += 2;
+            while i < src.len() && src[i] != b'\n' {
+                i += 1;
+            }
+        } else if src.get(i..i + 2) == Some(b"/*") {
+            i += 2;
+            while i + 1 < src.len() && src.get(i..i + 2) != Some(b"*/") {
+                i += 1;
+            }
+            i = (i + 2).min(src.len());
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+fn cs_skip_string_or_char(src: &[u8], i: usize) -> Option<usize> {
+    if src.get(i..i + 2) == Some(b"@\"") {
+        let mut j = i + 2;
+        while j < src.len() {
+            if src[j] == b'"' {
+                if src.get(j + 1) == Some(&b'"') {
+                    j += 2;
+                } else {
+                    return Some(j + 1);
+                }
+            } else {
+                j += 1;
+            }
+        }
+        return Some(src.len());
+    }
+    let quote = src[i];
+    if quote == b'"' || quote == b'\'' {
+        let mut j = i + 1;
+        while j < src.len() {
+            if src[j] == b'\\' {
+                j += 2;
+            } else if src[j] == quote {
+                return Some(j + 1);
+            } else {
+                j += 1;
+            }
+        }
+        return Some(src.len());
+    }
+    None
+}
+
+fn cs_skip_balanced(src: &[u8], i: usize, open: u8, close: u8) -> Option<usize> {
+    if src.get(i) != Some(&open) {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut j = i + 1;
+    while j < src.len() {
+        if let Some(next) = cs_skip_string_or_char(src, j) {
+            j = next;
+            continue;
+        }
+        if src.get(j..j + 2) == Some(b"//") || src.get(j..j + 2) == Some(b"/*") {
+            j = cs_skip_ws_and_comments(src, j);
+            continue;
+        }
+        if src[j] == open {
+            depth += 1;
+        } else if src[j] == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(j + 1);
+            }
+        }
+        j += 1;
+    }
+    None
+}
+
+fn cs_is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_' || b == b'@'
+}
+
+fn cs_is_ident_cont(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn cs_strip_primary_constructors(src: &[u8]) -> Option<Vec<u8>> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    let mut prev_word: &[u8] = b"";
+
+    while i < src.len() {
+        if let Some(next) = cs_skip_string_or_char(src, i) {
+            i = next;
+            prev_word = b"";
+            continue;
+        }
+        if src[i] == b'#' || src.get(i..i + 2) == Some(b"//") || src.get(i..i + 2) == Some(b"/*") {
+            i = cs_skip_ws_and_comments(src, i);
+            continue;
