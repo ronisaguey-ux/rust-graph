@@ -230,6 +230,33 @@ loss rows across three languages. Two numbers matter when judging a change:
 files only fall when a file loses its *last* loss, so the row count is the honest
 progress bar, and a change that raises rows is a regression even if files fall.
 
+## Status and roadmap
+
+**Right now.** A three-language campaign: ruby, erlang and pascal each get up to
+25 built-and-measured attempts per run, strictly one language at a time, and a
+language leaves the queue only when it is under 120 files with a fallback.
+Round 4 cut 912 files and 6,411 loss rows across exactly those three; pascal is
+mid-run at 525 files / 2,860 rows with 17 of its 25 attempts still to go.
+
+**Next.**
+
+1. Finish pascal, then php (675) and dart (668), 25 attempts each.
+2. Then the queue in order: tcl 684, r 622, lua 551, C# 529, Haskell 507,
+   Shell 436, Go 432, AWK 284, PowerShell 262, Objective-C 246, Zig 198,
+   Solidity 139.
+3. Grow the measurement corpus to a **1,000-file floor per language** — 25 of
+   the 45 corpora are below it today, the smallest being Rust at 91 — using
+   SHA-256 dedupe, a 100-file cap per source repository, and dialect coverage
+   where it matters (Postgres/MySQL/SQLite/T-SQL for SQL, POSIX sh and bash
+   for Shell, modern and legacy headers for C++).
+4. Re-baseline every language after the corpus grows: a bigger corpus moves the
+   counts, and a stale baseline is how a phantom regression gets chased.
+
+**The rules the campaign runs on.** Measure before and after every change, track
+loss rows as well as files, revert any change that raises rows, and state the
+resume point when a run ends mid-language. A run is judged on attempts actually
+measured, not on how many languages it touched.
+
 ## How it works
 
 ```
