@@ -318,3 +318,323 @@ const JAVA_IMPORTS: &[&str] = &["import_declaration"];
 /// a container and a struct (no methods of its own in the grammar) is too.
 const RS_DEFS: &[Def] = &[
     Def { kind: "struct_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "union_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "trait_item", name: &["type_identifier", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "mod_item", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_item", name: &["identifier", "default", "raw", "auto", "safe", "union", "macro_rules"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+
+/// Rust calls. A macro invocation is not a call to the lexer — `assert_eq!(a)`
+/// is a merge of names — so it is read by [`Walker::rust_form`], not here.
+const RS_CALLS: &[&str] = &["call_expression"];
+
+/// Rust imports: `use` declarations. `mod` is a declaration, not an import.
+const RS_IMPORTS: &[&str] = &["use_declaration"];
+
+/// JSON is data: no definitions, no calls, no imports. The tables are empty on
+/// purpose and [`lang_for`] does not answer for `JSON`; the record is the
+/// module symbol, which is what a data file can honestly say.
+const JSON_DEFS: &[Def] = &[];
+const JSON_CALLS: &[&str] = &[];
+const JSON_IMPORTS: &[&str] = &[];
+
+// -- C and C++ (L4). The name of a C definition is inside its declarator, so
+// -- [`Walker::c_function`] reads it; these tables say which nodes are
+// -- definitions at all, and which nodes are calls and imports.
+
+/// C definitions the lexer files as symbols: a function with a body, in each
+/// of the shapes the grammar needs for a declared or macro-supplied return
+/// type. A prototype is not here — it has no body and the lexer opens nothing.
+const C_DEFS: &[Def] = &[
+    Def { kind: "function_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "user_function_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "bare_user_function_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "implicit_function", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+
+/// C calls: one call expression, with a name, a `->`/`.` member or an index as
+/// its callee; the walking of the callee is [`Walker::c_callee`].
+const C_CALLS: &[&str] = &["call_expression"];
+
+/// C imports: the preprocessor is trivia, so the only import node that could
+/// exist never does. The table names the token the grammar calls it, and
+/// [`Walker::c_includes`] reads the directive lines from the source.
+const C_IMPORTS: &[&str] = &["preprocessor"];
+
+/// C++ definitions: C's, plus the class, namespace, constructor, destructor and
+/// out-of-line method forms. `template_declaration` is not here: it wraps the
+/// item it declares, and the wrapped node opens the symbol.
+const CPP_DEFS: &[Def] = &[
+    Def { kind: "function_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "plain_user_function", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "specified_user_function", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "scoped_user_function", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "scoped_member_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "scoped_destructor_definition", name: &[], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "constructor_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "destructor_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "class_specifier", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "namespace_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+];
+
+/// C++ calls. `new` is a call to the type it constructs, which is what the
+/// lexer reads after the `new` keyword.
+const CPP_CALLS: &[&str] = &["call_expression", "new_expression"];
+
+/// C++ imports, as C's: `#include` is a directive line, not a node.
+const CPP_IMPORTS: &[&str] = &["preprocessor"];
+
+/// The visible declaration wrappers, each owning a declarator the plain
+/// `declaration_statement` does not: a user type (`bare_user_declaration`), a
+/// typedef name, a specifier-qualified one, or a C++ constructor declaration.
+const C_DECLARATIONS: &[&str] = &[
+    "bare_user_declaration",
+    "specified_user_declaration",
+    "typedef_user_declaration",
+    "constructor_declaration",
+];
+
+
+/// Everything the walk needs to know about one language.
+/// Python's soft keywords: `match x:` is a statement, `match.group` is an
+/// attribute of a name, and only the position tells them apart. This grammar
+/// lexes both as the keyword kind, so the mapping has to read the leaf.
+const PY_SOFT: &[&str] = &["match", "case", "type", "_"];
+
+/// JavaScript's contextual keywords. Each is an ordinary identifier in the
+/// grammar unless a statement claims it, so a leaf whose kind is `from` is a
+/// name (`g(from)`, `let from = 1`) and not punctuation. Reading them as layout
+/// dropped every argument or binding spelled that way.
+const JS_SOFT: &[&str] = &["from", "of", "get", "set", "module", "global", "type", "unique", "accessor", "namespace", "readonly"];
+
+/// Rust's contextual keywords: each is a name everywhere but where it starts
+/// its own item, and the grammar's `_name` rule accepts every one of them. The
+/// lexer reads them as names, so without this the CST dropped `raw` in
+/// `match raw[0]` as punctuation and lost the value it names.
+const RS_SOFT: &[&str] = &["union", "default", "raw", "auto", "safe", "macro_rules"];
+
+
+// -- Wave 1 language tables (Dart, Haskell, Solidity, Ruby, PHP, Lua, Crystal, F#, Tcl, R, PowerShell) --
+
+const DART_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "mixin_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "extension_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_declaration", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: true, receiver: false, container: false },
+];
+const DART_CALLS: &[&str] = &["call", "const_object_expression"];
+const DART_IMPORTS: &[&str] = &["import_directive"];
+
+const HS_DEFS: &[Def] = &[
+    Def { kind: "data_declaration", name: &["constructor"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "newtype_declaration", name: &["constructor"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "type_declaration", name: &["constructor"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "class_declaration", name: &["constructor"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_binding", name: &["variable"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const HS_IMPORTS: &[&str] = &["import_declaration"];
+
+const SOL_DEFS: &[Def] = &[
+    Def { kind: "contract_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "struct_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "free_function", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "constructor_definition", name: &["constructor"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "modifier_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const SOL_CALLS: &[&str] = &["call", "payable_call"];
+const SOL_IMPORTS: &[&str] = &["import_directive"];
+
+const RB_DEFS: &[Def] = &[
+    Def { kind: "class_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "module_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "method_definition", name: &["method_name", "identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const RB_CALLS: &[&str] = &["call", "command_call", "bare_call", "super_call", "defined_expression"];
+const RB_IMPORTS: &[&str] = &["require_statement"];
+
+const PHP_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["name"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "interface_declaration", name: &["name"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "trait_declaration", name: &["name"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["name"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "method_declaration", name: &["name"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "function_declaration", name: &["name"], params: Some("formal_parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const PHP_CALLS: &[&str] = &["function_call_expression", "new_expression"];
+const PHP_IMPORTS: &[&str] = &["use_declaration", "trait_use_declaration", "include_expression"];
+
+const LUA_DEFS: &[Def] = &[
+    Def { kind: "function_declaration", name: &["function_name", "identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "local_function", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const LUA_CALLS: &[&str] = &["call", "method_call"];
+
+const CR_DEFS: &[Def] = &[
+    Def { kind: "class_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "module_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "struct_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "lib_definition", name: &["constant", "scope"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "method_definition", name: &["method_name", "identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "fun_declaration", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const CR_CALLS: &[&str] = &["call", "command_call", "super_call"];
+const CR_IMPORTS: &[&str] = &["require_statement"];
+
+const FS_DEFS: &[Def] = &[
+    Def { kind: "module_declaration", name: &["qualified_name", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "namespace_declaration", name: &["qualified_name", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "type_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "let_binding", name: &["binding_pattern", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const FS_CALLS: &[&str] = &["application"];
+const FS_IMPORTS: &[&str] = &["open_declaration"];
+
+const TCL_DEFS: &[Def] = &[
+    Def { kind: "proc_command", name: &["word"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const TCL_CALLS: &[&str] = &["call_command"];
+
+const R_CALLS: &[&str] = &["call"];
+
+const PS1_DEFS: &[Def] = &[
+    Def { kind: "class_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_definition", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "function_definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const PS1_CALLS: &[&str] = &["command_expression"];
+
+
+const AWK_DEFS: &[Def] = &[
+    Def { kind: "function_definition", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const AWK_CALLS: &[&str] = &["call"];
+
+const PAS_DEFS: &[Def] = &[
+    Def { kind: "routine_declaration", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const PAS_CALLS: &[&str] = &["call"];
+const PAS_IMPORTS: &[&str] = &["uses_clause"];
+
+const SH_DEFS: &[Def] = &[
+    Def { kind: "function_definition", name: &["word", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "paren_function", name: &["word", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const SH_CALLS: &[&str] = &["simple_command"];
+
+const ZIG_DEFS: &[Def] = &[
+    Def { kind: "fn_declaration", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+];
+const ZIG_CALLS: &[&str] = &["call", "builtin_call"];
+
+const PS1_IMPORTS: &[&str] = &["using_statement"];
+
+fn kinds(lang: Lang) -> Kinds {
+    match lang {
+        Lang::Python => {
+            Kinds { definitions: PY_DEFS, calls: PY_CALLS, imports: PY_IMPORTS, soft: PY_SOFT, family: Family::Plain }
+        }
+        // Objective-C keeps the C tables: `@interface` / `@implementation`
+        // are the C reader's containers, and `[receiver selector]` is a
+        // postfix the shared walk reads like a call.
+        Lang::C | Lang::Cpp | Lang::ObjC => Kinds {
+            definitions: if lang == Lang::Cpp { CPP_DEFS } else { C_DEFS },
+            calls: if lang == Lang::Cpp { CPP_CALLS } else { C_CALLS },
+            imports: if lang == Lang::Cpp { CPP_IMPORTS } else { C_IMPORTS },
+            soft: &[],
+            family: Family::Plain,
+        },
+        Lang::Rust => {
+            Kinds { definitions: RS_DEFS, calls: RS_CALLS, imports: RS_IMPORTS, soft: RS_SOFT, family: Family::Rust }
+        }
+        Lang::Json => {
+            Kinds { definitions: JSON_DEFS, calls: JSON_CALLS, imports: JSON_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::JavaScript => {
+            Kinds { definitions: JS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: JS_SOFT, family: Family::Js }
+        }
+        Lang::TypeScript | Lang::Tsx => {
+            Kinds { definitions: TS_DEFS, calls: JS_CALLS, imports: JS_IMPORTS, soft: JS_SOFT, family: Family::Js }
+        }
+        // Go and Java write their statements and their calls themselves: the
+        // lexer's statement model is mirrored by `decl_value` rather than by
+        // `form`, so the generic arms below are not reached.
+        Lang::Go => Kinds { definitions: GO_DEFS, calls: &[], imports: GO_IMPORTS, soft: &[], family: Family::Go },
+        Lang::Java => Kinds { definitions: JAVA_DEFS, calls: &[], imports: JAVA_IMPORTS, soft: JAVA_SOFT, family: Family::Java },
+        Lang::CSharp => Kinds { definitions: CS_DEFS, calls: CS_CALLS, imports: CS_IMPORTS, soft: CS_SOFT, family: Family::Plain },
+        Lang::Kotlin => {
+            Kinds { definitions: KT_DEFS, calls: KT_CALLS, imports: KT_IMPORTS, soft: KT_SOFT, family: Family::Plain }
+        }
+        Lang::Scala => Kinds { definitions: SC_DEFS, calls: SC_CALLS, imports: SC_IMPORTS, soft: &[], family: Family::Plain },
+        Lang::Swift => Kinds { definitions: SW_DEFS, calls: SW_CALLS, imports: SW_IMPORTS, soft: &[], family: Family::Plain },
+        Lang::Erlang => {
+            Kinds { definitions: ERL_DEFS, calls: ERL_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::Dart => {
+            Kinds { definitions: DART_DEFS, calls: DART_CALLS, imports: DART_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Haskell => {
+            Kinds { definitions: HS_DEFS, calls: &[], imports: HS_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Solidity => {
+            Kinds { definitions: SOL_DEFS, calls: SOL_CALLS, imports: SOL_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Ruby => {
+            Kinds { definitions: RB_DEFS, calls: RB_CALLS, imports: RB_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Php => {
+            Kinds { definitions: PHP_DEFS, calls: PHP_CALLS, imports: PHP_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Lua => {
+            Kinds { definitions: LUA_DEFS, calls: LUA_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::Crystal => {
+            Kinds { definitions: CR_DEFS, calls: CR_CALLS, imports: CR_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::FSharp => {
+            Kinds { definitions: FS_DEFS, calls: FS_CALLS, imports: FS_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Tcl => {
+            Kinds { definitions: TCL_DEFS, calls: TCL_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::R => {
+            Kinds { definitions: &[], calls: R_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::PowerShell => {
+            Kinds { definitions: PS1_DEFS, calls: PS1_CALLS, imports: PS1_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Zig => {
+            Kinds { definitions: ZIG_DEFS, calls: ZIG_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::Awk => {
+            Kinds { definitions: AWK_DEFS, calls: AWK_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::Pascal => {
+            Kinds { definitions: PAS_DEFS, calls: PAS_CALLS, imports: PAS_IMPORTS, soft: &[], family: Family::Plain }
+        }
+        Lang::Shell => {
+            Kinds { definitions: SH_DEFS, calls: SH_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        // The other grammars have no definition table here yet; the walk still
+        // returns a record with the module symbol, which is what the caller
+        // falls back on. Named so a caller can tell "no facts" from "empty file".
+        _ => Kinds { definitions: &[], calls: &[], imports: &[], soft: &[], family: Family::Plain },
+    }
+}
+
+/// How many declaration kinds this language's table names. Zero means the walk
+/// has nothing to read for it, which is a missing table, not an empty file.
+pub fn definition_kinds(lang: Lang) -> usize {
+    kinds(lang).definitions.len()
+}
+
+/// The lexer's tag for a language, so both paths write the same `tag`.
+fn tag(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Json => "JSON",
+        Lang::Python => "PY",
+        Lang::Rust => "RS",
