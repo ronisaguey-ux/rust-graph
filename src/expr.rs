@@ -2005,6 +2005,7 @@ impl Emit<'_> {
     fn ident(&mut self, out: &mut String, close: u8) {
         let _probe = prof::on().then(|| prof::Probe::enter(8));
         let token = &self.toks[self.pos];
+        let ident_start = token.start as usize;
         let line = token.line;
         let word = lexeme(self.src, token, self.lang);
         if self.lang.call_words.contains(&word.as_str()) {
@@ -2323,7 +2324,7 @@ impl Emit<'_> {
         // Swift's `defer { … }` is a statement keyword, never a name: the CST
         // writes the block's calls and nothing for the word itself.
         let go_word = match word.as_str() {
-            "go" => self.lang.tag != "GO",
+            "go" => !matches!(self.lang.tag, "GO" | "SH"),
             "defer" => !matches!(self.lang.tag, "GO" | "SWIFT"),
             // `pub.X.Bytes()`: `pub` is Rust's visibility keyword and an ordinary
             // name in Go. Skipped, the first segment of the receiver vanished
@@ -2656,7 +2657,7 @@ impl Emit<'_> {
         }
         self.chain(out, String::new(), head, line);
         if self.lang.command_calls || self.lang.apply_calls {
-            self.juxtaposed(out, close, line);
+            self.juxtaposed(out, close, line, ident_start);
         }
     }
 
@@ -2885,12 +2886,49 @@ impl Emit<'_> {
     }
 
     /// `system "ls"` and `f x y`: the name just emitted was a call after all.
-    fn juxtaposed(&mut self, out: &mut String, close: u8, line: u32) {
+    fn juxtaposed(&mut self, out: &mut String, close: u8, line: u32, ident_start: usize) {
         let Some(next) = self.tok(0) else { return };
         let is_value = matches!(next.kind, Kind::Ident | Kind::Str | Kind::Num)
             || (self.lang.apply_calls && self.op_byte(0) == b'(');
         if !is_value || next.line != line || !out.ends_with("\"]") {
             return;
+        }
+        if self.lang.tag == "SH" {
+            // `<<EOF` heredoc bodies and `2>&1` / `2>/dev/null` file-descriptor
+            // redirections are shell I/O redirections, not command arguments.
+            if next.kind == Kind::Str
+                && self.src.get(next.start as usize..next.start as usize + 2) == Some(b"<<")
+            {
+                return;
+            }
+            if next.kind == Kind::Num
+                && matches!(self.src.get(next.end as usize), Some(b'>' | b'<'))
+            {
+                return;
+            }
+            // Top-level words of a `for` / `select` header (`for x in a b c; do`)
+            // are loop items; only nested `$(...)` groups (`close == b')'`) call.
+            if close == 0
+                && self.toks.first().is_some_and(|t| {
+                    t.kind == Kind::Ident
+                        && matches!(&self.src[t.start as usize..t.end as usize], b"for" | b"select")
+                })
+            {
+                return;
+            }
+            let ident_end = self.toks[self.pos - 1].end as usize;
+            // Slash-separated paths (`/usr/bin/env`, `./run.sh`, `>/dev/null`,
+            // `a/b`) and colon-joined words (`kube::util::read-array`, `a:b`) are
+            // composite shell words (`is_ident == false` in the CST reader, save
+            // `zsh/<mod>`), never bare command callees.
+            let after_zsh = ident_start >= 4 && &self.src[ident_start - 4..ident_start] == b"zsh/";
+            let prev_sep = ident_start > 0
+                && matches!(self.src[ident_start - 1], b'/' | b':')
+                && !after_zsh;
+            let next_sep = matches!(self.src.get(ident_end), Some(b'/' | b':'));
+            if prev_sep || next_sep {
+                return;
+            }
         }
         let noise_list: &[&str] = if matches!(self.lang.tag, "JS" | "TS" | "JSX" | "TSX") {
             &JS_NOISE
@@ -2904,6 +2942,9 @@ impl Emit<'_> {
         }
         let Some(open) = out.rfind("[\"n\",") else { return };
         let path = out[open + 6..out.len() - 2].to_string();
+        if self.lang.tag == "SH" && path.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+            return;
+        }
         out.truncate(open);
         let id = self.new_call(path, line);
         let mut args = String::new();
@@ -3192,8 +3233,8 @@ impl Emit<'_> {
                 // Java's `->` opens a lambda body; read as a member separator
                 // it named `key.new` and `key.key` where the source has a
                 // parameter and a body.
-                || (self.is_op(0, b"->") && !matches!(self.lang.tag, "KT" | "JAVA"))
-                || self.is_op(0, b"::")
+                || (self.is_op(0, b"->") && !matches!(self.lang.tag, "KT" | "JAVA" | "SH"))
+                || (self.is_op(0, b"::") && self.lang.tag != "SH")
                 || self.is_op(0, b"?.")
                 || (self.is_op(0, b":") && self.op_byte(2) == b'(' && self.lang.tag == "LUA");
             if separator {
