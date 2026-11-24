@@ -425,3 +425,10 @@ Cross-language regression check on the 4 original corpora: **0 movement** (`pyth
 - **erlang**: `1242 files / 1330 rows` -> `741 files / 893 rows` (`-501 files / -437 rows`, 25 attempts)
 - **pascal**: `778 files / 8056 rows` -> `525 files / 2860 rows` (`-253 files / -5196 rows`, 8 attempts; resume at pascal attempt 9)
 - **7-corpus guard**: `js 23/23`, `ts 28/36`, `py 23/25`, `rs 26/27`, `kt 84/90`, `sc 82/112`, `sw 68/90` (7/7 PASS); `rust-graph/src` self-parse `0/0`; `cargo test` `256 passed, 0 failed, 24 ignored`.
+
+## Round 5 Fallback-Reduction Progress (2026-11-23)
+
+- **pascal** (attempts 9–25, 25/25 complete): `525 files / 2860 rows` -> `350 files / 667 rows` (`-175 files / -2,193 rows`; cumulative R4+R5: `778/8056 -> 350/667`, `-428/-7389`)
+- **php** (9 attempts, **PASSED <120**): `675 files / 1330 rows` -> `100 files / 332 rows` (`-575 files / -998 rows`; 29/45 languages under 120)
+- **dart** (14/25 attempts; resume at dart attempt 15): `668 files / 1081 rows` -> `334 files / 500 rows` (`-334 files / -581 rows`)
+- **7-corpus guard**: `js 23/23`, `ts 28/36`, `py 23/25`, `rs 26/27`, `kt 84/90`, `sc 82/112`, `sw 68/90` (7/7 PASS); `rust-graph/src` self-parse `0/0`; `cargo test` `256 passed, 0 failed, 24 ignored`.
