@@ -2558,3 +2558,323 @@ impl<'a> Walker<'a> {
                     i += 1;
                 }
             }
+            if i > start {
+                cur.push((tok_line, text[start..i].to_string()));
+            } else {
+                i += 1;
+            }
+        }
+        if !cur.is_empty() {
+            cmds.push((cmd_line, cur));
+        }
+        cmds
+    }
+
+    fn tcl_eval_words(&mut self, words: &[(u32, String)], cmd_line: u32, depth: usize) -> String {
+        if words.is_empty() || depth > 24 {
+            return String::new();
+        }
+        // Handle nested `proc name args body`
+        if words[0].1 == "proc" && words.len() >= 2 {
+            let raw_name = words[1].1.trim_matches(|c| c == '{' || c == '}');
+            let sym_name = Self::tcl_clean_name(raw_name);
+            if !sym_name.is_empty() {
+                let sym = self.add_symbol(sym_name, String::new(), KIND_FUNCTION, cmd_line, Vec::new());
+                self.stack.push(Frame {
+                    node: 0,
+                    symbol: sym,
+                    class: String::new(),
+                    receiver: String::new(),
+                    container: false,
+                    defines: Some(sym),
+                });
+                if let Some((bline, body)) = words.last() {
+                    if words.len() >= 4 && body.starts_with('{') && body.ends_with('}') && body.len() >= 2 {
+                        let inner = &body[1..body.len() - 1];
+                        self.tcl_scan_script(inner, *bline, depth + 1);
+                    }
+                }
+                self.stack.pop();
+                return String::new();
+            }
+        }
+        // Scan braced_word bodies recursively
+        // Tuple: (wline, ident_opt, form_str, is_value_token)
+        // Only plain words, quoted strings, and $variables are value tokens that trigger juxtaposed command_calls
+        let mut word_forms: Vec<(u32, Option<String>, String, bool)> = Vec::new();
+        for (wline, w) in words {
+            if w.starts_with('{') && w.ends_with('}') && w.len() >= 2 {
+                let inner = &w[1..w.len() - 1];
+                self.tcl_scan_script(inner, *wline, depth + 1);
+                word_forms.push((*wline, None, "0".to_string(), false));
+            } else if w.starts_with('[') && w.ends_with(']') && w.len() >= 2 {
+                let inner = &w[1..w.len() - 1];
+                let sub_cmds = Self::tcl_tokenize_commands(inner, *wline);
+                let mut last_form = "0".to_string();
+                for (sline, swords) in sub_cmds {
+                    let f = self.tcl_eval_words(&swords, sline, depth + 1);
+                    if !f.is_empty() {
+                        last_form = f;
+                    }
+                }
+                word_forms.push((*wline, None, format!("[\"t\",[{last_form}]]"), false));
+            } else if w.starts_with('"') && w.ends_with('"') && w.len() >= 2 {
+                // Scan any [...] inside quoted string
+                let inner = &w[1..w.len() - 1];
+                let ib = inner.as_bytes();
+                let mut j = 0;
+                let mut cur_line = *wline;
+                while j < ib.len() {
+                    if ib[j] == b'\\' && j + 1 < ib.len() {
+                        if ib[j + 1] == b'\n' {
+                            cur_line += 1;
+                        }
+                        j += 2;
+                        continue;
+                    }
+                    if ib[j] == b'\n' {
+                        cur_line += 1;
+                    } else if ib[j] == b'[' {
+                        let bstart = j + 1;
+                        let bline = cur_line;
+                        let mut d = 1usize;
+                        j += 1;
+                        while j < ib.len() && d > 0 {
+                            if ib[j] == b'\\' && j + 1 < ib.len() {
+                                if ib[j + 1] == b'\n' {
+                                    cur_line += 1;
+                                }
+                                j += 2;
+                                continue;
+                            }
+                            if ib[j] == b'\n' {
+                                cur_line += 1;
+                            } else if ib[j] == b'[' {
+                                d += 1;
+                            } else if ib[j] == b']' {
+                                d -= 1;
+                                if d == 0 {
+                                    let sub = &inner[bstart..j];
+                                    for (sline, swords) in Self::tcl_tokenize_commands(sub, bline) {
+                                        let _ = self.tcl_eval_words(&swords, sline, depth + 1);
+                                    }
+                                }
+                            }
+                            j += 1;
+                        }
+                        continue;
+                    }
+                    j += 1;
+                }
+                // Also extract $var interpolations inside quoted_word
+                let mut qvars: Vec<String> = Vec::new();
+                let mut qj = 0;
+                while qj < ib.len() {
+                    if ib[qj] == b'\\' && qj + 1 < ib.len() {
+                        qj += 2;
+                        continue;
+                    }
+                    if ib[qj] == b'$' {
+                        let rest = &inner[qj..];
+                        if let Some(vn) = Self::tcl_var_name(rest) {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &vn);
+                            n.push(']');
+                            qvars.push(n);
+                        }
+                    }
+                    qj += 1;
+                }
+                let qform = if qvars.is_empty() {
+                    "0".to_string()
+                } else if qvars.len() == 1 {
+                    qvars.remove(0)
+                } else {
+                    format!("[\"m\",[{}]]", qvars.join(","))
+                };
+                word_forms.push((*wline, None, qform, true));
+            } else if let Some(vname) = Self::tcl_var_name(w) {
+                // If variable starts with $:: or follows ::, keep dotted name
+                let mut n = String::from("[\"n\",");
+                push_string(&mut n, &vname);
+                n.push(']');
+                word_forms.push((*wline, Some(vname), n, true));
+            } else if w.starts_with("::") {
+                let clean = Self::tcl_clean_name(w);
+                if Self::tcl_is_ident(&clean) {
+                    // Join leading ::name to previous identifier with '.' as reference lexer does
+                    if let Some(prev) = word_forms.last_mut() {
+                        if let Some(ref mut prev_id) = prev.1 {
+                            prev_id.push('.');
+                            prev_id.push_str(&clean);
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, prev_id);
+                            n.push(']');
+                            prev.2 = n;
+                            continue;
+                        }
+                    }
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &clean);
+                    n.push(']');
+                    word_forms.push((*wline, Some(clean), n, true));
+                } else {
+                    word_forms.push((*wline, None, "0".to_string(), false));
+                }
+            } else {
+                // Handle -flag and hyphenated words like build-info (lexer splits on '-')
+                let is_flag = w.starts_with('-') && w.len() > 1 && w.as_bytes()[1].is_ascii_alphabetic();
+                let raw_tail = w.rsplit('-').next().unwrap_or(w);
+                let clean = Self::tcl_clean_name(raw_tail);
+                if Self::tcl_is_ident(&clean) {
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &clean);
+                    n.push(']');
+                    // A -flag starts with '-', which is Op('-') so it does NOT trigger a call on the preceding word
+                    word_forms.push((*wline, Some(clean), n, !is_flag));
+                } else {
+                    let is_num = w.bytes().next().is_some_and(|b| b.is_ascii_digit());
+                    word_forms.push((*wline, None, "0".to_string(), is_num));
+                }
+            }
+        }
+        // Right-nest command calls on the same line ONLY when followed by a value token (not { or [)
+        let mut acc = String::new();
+        for idx in (0..word_forms.len()).rev() {
+            let (wline, ref ident_opt, ref form_str, _) = word_forms[idx];
+            let next_is_val = idx + 1 < word_forms.len() && word_forms[idx + 1].3;
+            if acc.is_empty() {
+                acc = form_str.clone();
+            } else if let Some(cname) = ident_opt {
+                if wline == cmd_line && next_is_val {
+                    let cid = self.push_call(cname.clone(), wline);
+                    acc = format!("[\"c\",{cid},0,[{acc}]]");
+                } else {
+                    acc = format!("[\"m\",[{form_str},{acc}]]");
+                }
+            } else {
+                acc = format!("[\"m\",[{form_str},{acc}]]");
+            }
+        }
+        acc
+    }
+
+    fn tcl_scan_script(&mut self, text: &str, start_line: u32, depth: usize) {
+        if depth > 24 {
+            return;
+        }
+        let cmds = Self::tcl_tokenize_commands(text, start_line);
+        for (cline, words) in cmds {
+            let val = self.tcl_eval_words(&words, cline, depth);
+            if !val.is_empty() && val != "0" {
+                self.lexer_event(b'x', cline, &[], &val, false);
+            }
+        }
+    }
+
+    fn tcl_proc_command(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let words: Vec<u32> = children
+            .into_iter()
+            .filter(|&c| !matches!(self.kind(c), "whitespace" | "comment" | "newline" | ";" | "command_end"))
+            .collect();
+        // words[0] is "proc", words[1] is name, last braced_word is body
+        let raw_name = words.get(1).map(|&c| self.text_string(c)).unwrap_or_default();
+        let sym_name = Self::tcl_clean_name(raw_name.trim_matches(|c| c == '{' || c == '}'));
+        if sym_name.is_empty() {
+            return;
+        }
+        let sym = self.add_symbol(sym_name, String::new(), KIND_FUNCTION, line, Vec::new());
+        self.stack.push(Frame {
+            node: id,
+            symbol: sym,
+            class: String::new(),
+            receiver: String::new(),
+            container: false,
+            defines: Some(sym),
+        });
+        if let Some(&body_node) = words.last() {
+            if words.len() >= 4 && self.kind(body_node) == "braced_word" {
+                let raw_body = self.text_string(body_node);
+                if raw_body.starts_with('{') && raw_body.ends_with('}') && raw_body.len() >= 2 {
+                    self.tcl_scan_script(&raw_body[1..raw_body.len() - 1], self.line(body_node), 1);
+                }
+            }
+        }
+        self.stack.pop();
+    }
+
+    fn tcl_call_command(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let mut words: Vec<(u32, String)> = Vec::new();
+        for c in children {
+            let ck = self.kind(c);
+            if matches!(ck, "whitespace" | "comment" | "newline" | ";" | "command_end") {
+                continue;
+            }
+            words.push((self.line(c), self.text_string(c)));
+        }
+        let val = self.tcl_eval_words(&words, line, 0);
+        if !val.is_empty() && val != "0" {
+            self.lexer_event(b'x', line, &[], &val, false);
+        }
+    }
+
+    pub(crate) fn enter(&mut self, id: u32) {
+        let kind = self.kind(id);
+        if self.is_rust() && self.enter_rust(id) {
+            return;
+        }
+        if self.facts.tag == "TCL" && kind == "proc_command" {
+            self.tcl_proc_command(id);
+            return;
+        }
+        // C, C++: the declared name lives inside a declarator, so the node
+        // cannot be read off a `Def` table. `enter_c` only claims the nodes it
+        // actually reads, and the generic walk keeps everything else.
+        if self.is_c() && self.enter_c(id) {
+            return;
+        }
+        // `public abstract T Create(Type objectType);` in an interface or an
+        // abstract class has no body: the grammar calls it a declaration and
+        // the lexer reads a call, so every abstract member of the corpus lost
+        // one. Read before the definition table claims the node. An
+        // expression-bodied method (`=>`) has a body and is read below instead.
+        // `public delegate object ObjectConstructor<T>(params object[] args);`:
+        // a delegate declaration is one header statement to the one-pass
+        // reader, and the definition table claims the node before any arm can
+        // read it, so every delegate declaration lost its line.
+        if (kind == "method_declaration"
+            && self.kinds.calls.contains(&"object_creation_expression")
+            && !self
+                .children(id)
+                .into_iter()
+                .any(|child| matches!(self.kind(child), "block" | "=>")))
+            || (kind == "delegate_declaration" && self.language.name == "csharp")
+        {
+            let children = self.children(id);
+            let named = children
+                .iter()
+                .copied()
+                .take_while(|&child| !matches!(self.kind(child), "parameter_list" | "formal_parameters" | "type_parameters"))
+                .filter(|&child| self.kind(child) == "identifier" || self.leaf_name(child).is_some())
+                .last();
+            if let Some(named) = named {
+                let name = self.text_string(named);
+                let call_line = self.line(named);
+                let index = self.push_call(name, call_line);
+                let mut line = self.line(id);
+                if self.language.name == "csharp" {
+                    if let Some(first) = children.iter().copied().find(|&child| {
+                        matches!(self.kind(child), "attributes" | "attribute_section" | "attribute_list")
+                    }) {
+                        line = self.line(first);
+                    }
+                }
+                let mut parts: Vec<String> = Vec::new();
+                let mut attributed = false;
+                // The header words run up to the parameter list, so the name and
+                // the generic parameters (`MapFrom<TMember>`) reach the value the
+                // way the lexer writes them; stopping at `type_parameters` lost
