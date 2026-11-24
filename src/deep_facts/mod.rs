@@ -470,6 +470,7 @@ const PHP_IMPORTS: &[&str] = &["use_declaration", "trait_use_declaration", "incl
 const LUA_DEFS: &[Def] = &[
     Def { kind: "function_declaration", name: &["function_name", "identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
     Def { kind: "local_function", name: &["identifier"], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "function_expression", name: &[], params: Some("parameters"), params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 const LUA_CALLS: &[&str] = &["call", "method_call"];
 
@@ -2694,7 +2695,9 @@ impl<'a> Walker<'a> {
                 };
                 word_forms.push((*wline, None, qform, true));
             } else if let Some(vname) = Self::tcl_var_name(w) {
-                // If variable starts with $:: or follows ::, keep dotted name
+                if w.contains('(') {
+                    let _ = self.push_call(vname.clone(), *wline);
+                }
                 let mut n = String::from("[\"n\",");
                 push_string(&mut n, &vname);
                 n.push(']');
@@ -2722,19 +2725,70 @@ impl<'a> Walker<'a> {
                     word_forms.push((*wline, None, "0".to_string(), false));
                 }
             } else {
-                // Handle -flag and hyphenated words like build-info (lexer splits on '-')
-                let is_flag = w.starts_with('-') && w.len() > 1 && w.as_bytes()[1].is_ascii_alphabetic();
-                let raw_tail = w.rsplit('-').next().unwrap_or(w);
-                let clean = Self::tcl_clean_name(raw_tail);
-                if Self::tcl_is_ident(&clean) {
-                    let mut n = String::from("[\"n\",");
-                    push_string(&mut n, &clean);
-                    n.push(']');
-                    // A -flag starts with '-', which is Op('-') so it does NOT trigger a call on the preceding word
-                    word_forms.push((*wline, Some(clean), n, !is_flag));
+                // Handle array element like env(FOO), RunTimes(command), hooks($curName)
+                if let Some((base, rest)) = w.split_once('(') {
+                    let clean = Self::tcl_clean_name(base);
+                    if Self::tcl_is_ident(&clean) {
+                        let cid = self.push_call(clean.clone(), *wline);
+                        let inner = rest.trim_end_matches(')');
+                        let arg_form = if let Some(vn) = Self::tcl_var_name(inner) {
+                            let mut an = String::from("[\"n\",");
+                            push_string(&mut an, &vn);
+                            an.push(']');
+                            an
+                        } else {
+                            let ic = Self::tcl_clean_name(inner);
+                            if Self::tcl_is_ident(&ic) {
+                                let mut an = String::from("[\"n\",");
+                                push_string(&mut an, &ic);
+                                an.push(']');
+                                an
+                            } else {
+                                "0".to_string()
+                            }
+                        };
+                        let form = format!("[\"c\",{cid},0,[{arg_form}]]");
+                        word_forms.push((*wline, Some(clean), form, true));
+                    } else {
+                        word_forms.push((*wline, None, "0".to_string(), false));
+                    }
                 } else {
-                    let is_num = w.bytes().next().is_some_and(|b| b.is_ascii_digit());
-                    word_forms.push((*wline, None, "0".to_string(), is_num));
+                    // Handle -flag, hyphenated words (amazon-s3), and slash/dot paths (tcl/httpd)
+                    let is_flag = w.starts_with('-') && w.len() > 1 && w.as_bytes()[1].is_ascii_alphabetic();
+                    let raw_tail = w.rsplit('-').next().unwrap_or(w);
+                    let clean = Self::tcl_clean_name(raw_tail);
+                    // Extract all identifier segments so hyphen/slash words never lose names
+                    let segs: Vec<String> = w
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    let seg_form = if segs.is_empty() {
+                        "0".to_string()
+                    } else if segs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, &segs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = segs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    if Self::tcl_is_ident(&clean) {
+                        // A -flag starts with '-', which is Op('-') so it does NOT trigger a call on the preceding word
+                        word_forms.push((*wline, Some(clean), seg_form, !is_flag));
+                    } else {
+                        let is_num = w.bytes().next().is_some_and(|b| b.is_ascii_digit());
+                        word_forms.push((*wline, None, seg_form, is_num));
+                    }
                 }
             }
         }
@@ -2800,6 +2854,8 @@ impl<'a> Walker<'a> {
                 if raw_body.starts_with('{') && raw_body.ends_with('}') && raw_body.len() >= 2 {
                     self.tcl_scan_script(&raw_body[1..raw_body.len() - 1], self.line(body_node), 1);
                 }
+            } else {
+                self.push_call("proc".to_string(), line);
             }
         }
         self.stack.pop();
@@ -3815,14 +3871,19 @@ impl<'a> Walker<'a> {
                 let children = self.children(id);
                 if let Some(atail) = children.iter().copied().find(|&c| self.kind(c) == "assignment_tail") {
                     let line = self.line(id);
-                    let lhs = children.iter().copied().find(|&c| !self.is_layout(c) && c != atail);
-                    let target = lhs
+                    let targets: Vec<String> = children
+                        .iter()
+                        .copied()
+                        .take_while(|&c| c != atail)
+                        .filter(|&c| !self.is_layout(c) && self.kind(c) != ",")
                         .map(|n| {
                             let p = self.path_of(n);
                             if p.is_empty() { self.text_string(n) } else { p }
                         })
-                        .filter(|s| !s.is_empty());
-                    if let Some(tname) = target {
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !targets.is_empty() {
+                        let tname = targets[0].clone();
                         let raw_tail = self.text_string(atail);
                         if let Some((_, rhs)) = raw_tail.split_once('=') {
                             let rhs_t = rhs.trim();
@@ -3868,6 +3929,19 @@ impl<'a> Walker<'a> {
                                 if self.is_layout(ec) || eck == "," {
                                     continue;
                                 }
+                                if eck == "function_expression" {
+                                    let lhs_is_index = children
+                                        .iter()
+                                        .copied()
+                                        .find(|&c| !self.is_layout(c) && c != atail)
+                                        .is_some_and(|n| self.kind(n) == "index");
+                                    if !lhs_is_index {
+                                        let sym = tname.rsplit(|c| c == '.' || c == ':').next().unwrap_or(&tname).to_string();
+                                        if !sym.is_empty() {
+                                            self.bound.push((ec, sym));
+                                        }
+                                    }
+                                }
                                 let f = self.form(ec);
                                 vals.push(if f.is_empty() { "0".to_string() } else { f });
                             }
@@ -3879,7 +3953,7 @@ impl<'a> Walker<'a> {
                         } else {
                             format!("[\"t\",[{}]]", vals.join(","))
                         };
-                        self.lexer_event(b'a', line, &[tname], &val, false);
+                        self.lexer_event(b'a', line, &targets, &val, false);
                     }
                 } else {
                     self.expression_statement(id);
@@ -4529,7 +4603,7 @@ impl<'a> Walker<'a> {
                     self.lexer_event(b'x', line, &[], &val, false);
                 }
             }
-            "fi" | "done" | "esac" if self.facts.tag == "SH" => {
+            "fi" | "done" | "esac" | "then" | "else" | "do" if self.facts.tag == "SH" => {
                 self.lexer_event(b'x', self.line(id), &[], &format!("[\"n\",\"{kind}\"]"), false);
             }
             "simple_command" if self.facts.tag == "SH" => {
@@ -4541,7 +4615,7 @@ impl<'a> Walker<'a> {
                 for c in children {
                     let ck = self.kind(c);
                     let cline = self.line(c);
-                    if matches!(ck, "whitespace" | "comment" | "redirect" | "heredoc_redirect") {
+                    if matches!(ck, "whitespace" | "comment" | "heredoc_redirect") {
                         continue;
                     }
                     let t = self.text_string(c);
@@ -4611,16 +4685,37 @@ impl<'a> Walker<'a> {
                     } else {
                         let is_flag = t.starts_with('-') && t.len() > 1 && t.as_bytes()[1].is_ascii_alphabetic();
                         let tail = t.rsplit('-').next().unwrap_or(&t);
-                        let is_ident = tail.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                        let is_ident = ck != "redirect"
+                            && tail.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
                             && tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-                        if is_ident {
+                        let segs: Vec<&str> = t
+                            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                            .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                            .collect();
+                        let seg_form = if segs.is_empty() {
+                            "0".to_string()
+                        } else if segs.len() == 1 {
                             let mut n = String::from("[\"n\",");
-                            push_string(&mut n, tail);
+                            push_string(&mut n, segs[0]);
                             n.push(']');
-                            items.push((cline, Some(tail.to_string()), n, !is_flag));
+                            n
                         } else {
-                            let is_num = t.bytes().next().is_some_and(|b| b.is_ascii_digit());
-                            items.push((cline, None, "0".to_string(), is_num));
+                            let parts: Vec<String> = segs
+                                .iter()
+                                .map(|s| {
+                                    let mut n = String::from("[\"n\",");
+                                    push_string(&mut n, s);
+                                    n.push(']');
+                                    n
+                                })
+                                .collect();
+                            format!("[\"m\",[{}]]", parts.join(","))
+                        };
+                        if is_ident {
+                            items.push((cline, Some(tail.to_string()), seg_form, !is_flag));
+                        } else {
+                            let is_num = ck != "redirect" && t.bytes().next().is_some_and(|b| b.is_ascii_digit());
+                            items.push((cline, None, seg_form, is_num));
                         }
                     }
                 }
@@ -4628,12 +4723,16 @@ impl<'a> Walker<'a> {
                     if matches!(first.as_str(), "source" | ".") {
                         if let Some(target) = raw_words.get(1) {
                             let module = target.trim_matches(|c| c == '"' || c == '\'').to_string();
-                            let alias = module.rsplit('/').next().unwrap_or(&module).to_string();
+                            let last = module.rsplit('/').next().unwrap_or(&module).to_string();
                             if !module.is_empty() {
-                                self.facts.imports.push(Import { line, module, alias, kind: IMPORT_STAR, ..Import::default() });
+                                self.facts.imports.push(Import { line, module: module.clone(), alias: last.clone(), kind: IMPORT_STAR, ..Import::default() });
+                                if let Some((_, ext)) = last.rsplit_once('.') {
+                                    if !ext.is_empty() {
+                                        self.facts.imports.push(Import { line, module, alias: ext.to_string(), kind: IMPORT_STAR, ..Import::default() });
+                                    }
+                                }
                             }
                         }
-                        return;
                     }
                 }
                 if !items.is_empty() {
@@ -6555,6 +6654,11 @@ impl<'a> Walker<'a> {
             }
             if self.facts.tag == "KT" && self.kind(node) == "function_head" {
                 if let Some((_, name)) = text.rsplit_once('.') {
+                    return Some(name.to_string());
+                }
+            }
+            if self.facts.tag == "LUA" && self.kind(node) == "function_name" {
+                if let Some((_, name)) = text.rsplit_once(|c| c == '.' || c == ':') {
                     return Some(name.to_string());
                 }
             }

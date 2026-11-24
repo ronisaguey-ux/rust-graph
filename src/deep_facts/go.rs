@@ -3584,6 +3584,11 @@ impl<'a> Walker<'a> {
                 if self.is_layout(ec) || eck == "," {
                     continue;
                 }
+                if eck == "function_expression" {
+                    if let Some(t) = targets.get(vals.len()) {
+                        self.bound.push((ec, t.clone()));
+                    }
+                }
                 let f = self.form(ec);
                 vals.push(if f.is_empty() { "0".to_string() } else { f });
             }
@@ -4407,6 +4412,37 @@ fn dotted_piece(text: &str) -> bool {
                 let args = arg_node.map(|a| self.arguments(a)).unwrap_or_else(|| "[]".to_string());
                 return format!("[\"c\",{idx},0,{args}]");
             }
+        }
+        if self.facts.tag == "LUA" && kind == "method_call" {
+            if let Some(cached) = self.call_texts.get(&id) {
+                return cached.clone();
+            }
+            let ch = self.children(id);
+            let recv = ch.first().copied();
+            let tail = ch.iter().copied().find(|&c| self.kind(c) == "method_call_tail");
+            let tail_ch = tail.map(|t| self.children(t)).unwrap_or_else(|| ch.clone());
+            let method = tail_ch
+                .iter()
+                .copied()
+                .skip_while(|&c| self.kind(c) != ":")
+                .find(|&c| self.kind(c) == "identifier")
+                .map(|n| self.text_string(n))
+                .unwrap_or_default();
+            let ca = tail_ch.iter().copied().find(|&c| self.kind(c) == "call_arguments");
+            let recv_form = recv.map(|r| self.form(r)).filter(|s| !s.is_empty()).unwrap_or_else(|| "0".to_string());
+            let recv_path = recv.map(|r| self.path_of(r)).unwrap_or_default();
+            let full_path = if method.is_empty() {
+                recv_path
+            } else if recv_path.is_empty() {
+                method
+            } else {
+                format!("{recv_path}.{method}")
+            };
+            let index = self.push_call(full_path, self.line(id));
+            let args = ca.map(|a| self.arguments(a)).unwrap_or_else(|| "[]".to_string());
+            let out = format!("[\"c\",{index},{recv_form},{args}]");
+            self.call_texts.insert(id, out.clone());
+            return out;
         }
         if self.kinds.calls.contains(&kind) {
             // `mod:f(Args)`: the grammar writes the module as the first child and
