@@ -4798,3 +4798,323 @@ impl<'a> Walker<'a> {
                                     } else {
                                         let mut parts: Vec<String> = Vec::new();
                                         let inner_body = inner.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(inner);
+                                        let is_named = inner.starts_with('{') && inner.ends_with('}');
+                                        for item in inner_body.split(',') {
+                                            let it = item.trim();
+                                            if it.is_empty() { continue; }
+                                            let norm = it.replace("this.", "self.");
+                                            let toks: Vec<&str> = norm.split_whitespace().collect();
+                                            if toks.len() == 1 {
+                                                let mut n = String::from(r#"["n","#);
+                                                push_string(&mut n, toks[0]);
+                                                n.push(']');
+                                                parts.push(n);
+                                            } else if !toks.is_empty() {
+                                                let mut sub = Vec::new();
+                                                for tk in toks {
+                                                    if tk == "=" { continue; }
+                                                    let mut n = String::from(r#"["n","#);
+                                                    push_string(&mut n, tk);
+                                                    n.push(']');
+                                                    sub.push(n);
+                                                }
+                                                parts.push(format!(r#"["m",[{}]]"#, sub.join(",")));
+                                            }
+                                        }
+                                        if is_named {
+                                            format!(r#"[["m",[{}]]]"#, parts.join(","))
+                                        } else {
+                                            format!("[{}]", parts.join(","))
+                                        }
+                                    };
+                                    self.lexer_event(b'x', cline, &[], &format!(r#"["c",{idx},0,{args}]"#), false);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let head_name = children
+                        .iter()
+                        .copied()
+                        .find(|&c| self.kind(c) == "member_head")
+                        .and_then(|mh| {
+                            self.children(mh)
+                                .into_iter()
+                                .rev()
+                                .find(|&c| self.kind(c) == "identifier")
+                        })
+                        .map(|c| {
+                            let t = self.text_string(c);
+                            t.rsplit('$').next().unwrap_or(&t).to_string()
+                        })
+                        .filter(|s| !s.is_empty());
+                    let has_eq = children.iter().any(|&c| self.kind(c) == "=");
+                    if !has_eq {
+                        if let Some(mh) = children.iter().copied().find(|&c| self.kind(c) == "member_head") {
+                            let toks: Vec<u32> = self.children(mh).into_iter().filter(|&c| !self.is_layout(c)).collect();
+                            if toks.len() == 2 {
+                                let t0 = self.text_string(toks[0]);
+                                let t1 = self.text_string(toks[1]);
+                                if !t0.is_empty() && !t1.is_empty() {
+                                    let mut val = String::from(r#"["m",[["n","#);
+                                    push_string(&mut val, &t0);
+                                    val.push_str(r#"],["n","#);
+                                    push_string(&mut val, &t1);
+                                    val.push_str("]]]");
+                                    let fline = self.line(toks[0]);
+                                    self.lexer_event(b'x', fline, &[], &val, false);
+                                }
+                            }
+                        }
+                    }
+                    let mut first_eq = true;
+                    for (i, &c) in children.iter().enumerate() {
+                        if self.kind(c) == "=" {
+                            let name_opt = if first_eq {
+                                first_eq = false;
+                                head_name.clone()
+                            } else {
+                                children[..i]
+                                    .iter()
+                                    .rev()
+                                    .copied()
+                                    .find(|&x| self.kind(x) == "identifier")
+                                    .map(|x| {
+                                        let t = self.text_string(x);
+                                        t.rsplit('$').next().unwrap_or(&t).to_string()
+                                    })
+                                    .filter(|s| !s.is_empty())
+                            };
+                            if let Some(name) = name_opt {
+                                let rhs = children[i + 1..].iter().copied().find(|&x| !self.is_layout(x));
+                                let val = rhs
+                                    .map(|x| {
+                                        let k = self.kind(x);
+                                        if matches!(k, "true" | "false" | "null") {
+                                            format!("[\"n\",\"{k}\"]")
+                                        } else {
+                                            let f = self.form(x);
+                                            if f.is_empty() { "0".to_string() } else { f }
+                                        }
+                                    })
+                                    .unwrap_or_else(|| "0".to_string());
+                                if let Some(rnode) = rhs {
+                                    if let Some(cls) = self.constructed(rnode) {
+                                        self.facts.vars.push((name.clone(), cls));
+                                    }
+                                }
+                                let eline = self.line(c);
+                                self.lexer_event(b'a', eline, &[name], &val, false);
+                            }
+                        }
+                    }
+                }
+            }
+            "library_directive" | "part_directive" | "export_directive" if self.facts.tag == "DART" => {
+                self.decl_statement(id);
+            }
+            "closure_use" | "isset_expression" | "unset_statement" | "empty_expression" | "array_expression" if self.facts.tag == "PHP" => {
+                let cname = match kind {
+                    "closure_use" => "use",
+                    "isset_expression" => "isset",
+                    "unset_statement" => "unset",
+                    "empty_expression" => "empty",
+                    "array_expression" => "array",
+                    _ => "",
+                };
+                if !cname.is_empty() {
+                    let line = self.line(id);
+                    self.push_call(cname.to_string(), line);
+                }
+            }
+            "namespace_declaration" if self.facts.tag == "PHP" => {
+                self.decl_statement(id);
+            }
+            "metadata" if self.facts.tag == "DART" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                let arg_list = children.iter().copied().find(|&c| self.kind(c) == "argument_list");
+                if let Some(&ident) = children.iter().find(|&&c| self.kind(c) == "identifier") {
+                    let name = self.text_string(ident);
+                    if !name.is_empty() {
+                        let meta_val = if let Some(al) = arg_list {
+                            let idx = self.push_call(name, line);
+                            let args = self.arguments(al);
+                            format!("[\"c\",{idx},0,{args}]")
+                        } else {
+                            self.push_call(name.clone(), line);
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &name);
+                            n.push(']');
+                            n
+                        };
+                        let mut sib = self.node(id).next_sibling;
+                        while sib != NONE && self.is_layout(sib) {
+                            sib = self.node(sib).next_sibling;
+                        }
+                        if sib != NONE && self.kind(sib) == "library_directive" {
+                            self.lexer_event(b'x', line, &[], &format!("[\"m\",[ {meta_val},[\"n\",\"library\"]]]"), false);
+                        } else if sib != NONE && self.kind(sib) == "class_declaration" {
+                            let cname = self
+                                .children(sib)
+                                .into_iter()
+                                .find(|&c| self.kind(c) == "identifier")
+                                .map(|c| self.text_string(c))
+                                .unwrap_or_default();
+                            if !cname.is_empty() {
+                                let mut cn = String::from("[\"n\",");
+                                push_string(&mut cn, &cname);
+                                cn.push(']');
+                                self.lexer_event(b'x', line, &[], &format!("[\"m\",[ {meta_val},[\"n\",\"class\"],{cn}]]"), false);
+                            }
+                        }
+                    }
+                }
+            }
+            "call_command" if self.facts.tag == "TCL" => {
+                self.tcl_call_command(id);
+            }
+            "command_expression" if self.facts.tag == "PS1" => {
+                let children = self.children(id);
+                if let Some(&first) = children.first() {
+                    let name = self.text_string(first).to_ascii_lowercase();
+                    if !name.is_empty() && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                        let line = self.line(id);
+                        self.push_call(name, line);
+                    }
+                }
+            }
+            "param_declaration" if self.facts.tag == "PS1" => {
+                let line = self.line(id);
+                self.push_call("param".to_string(), line);
+            }
+            "local_declaration" if self.facts.tag == "LUA" => {
+                self.lua_local_declaration(id);
+            }
+            "if_statement" | "elseif_clause" | "while_statement" if self.facts.tag == "LUA" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if matches!(ck, "then" | "do" | "block" | "elseif_clause" | "else_clause" | "end") {
+                        break;
+                    }
+                    if matches!(ck, "if" | "elseif" | "while") {
+                        continue;
+                    }
+                    if matches!(ck, "nil" | "true" | "false") {
+                        parts.push(format!("[\"n\",\"{ck}\"]"));
+                        continue;
+                    }
+                    if self.is_layout(ch) {
+                        continue;
+                    }
+                    let f = self.form(ch);
+                    if !f.is_empty() && f != "0" {
+                        parts.push(f);
+                    }
+                }
+                if parts.len() == 1 {
+                    self.lexer_event(b'x', line, &[], &parts[0], false);
+                } else if parts.len() > 1 {
+                    self.lexer_event(b'x', line, &[], &format!("[\"m\",[{}]]", parts.join(",")), false);
+                }
+            }
+            "repeat_statement" if self.facts.tag == "LUA" => {
+                let mut saw_until = false;
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if ck == "until" {
+                        saw_until = true;
+                        continue;
+                    }
+                    if saw_until && !self.is_layout(ch) {
+                        let f = if matches!(ck, "nil" | "true" | "false") {
+                            format!("[\"n\",\"{ck}\"]")
+                        } else {
+                            self.form(ch)
+                        };
+                        if !f.is_empty() && f != "0" {
+                            self.lexer_event(b'x', self.line(ch), &[], &f, false);
+                        }
+                        break;
+                    }
+                }
+            }
+            "for_numeric" if self.facts.tag == "LUA" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                for c in self.children(id) {
+                    let ck = self.kind(c);
+                    if matches!(ck, "for" | "do" | "end" | "block" | "=" | ",") || self.is_layout(c) {
+                        continue;
+                    }
+                    let f = self.form(c);
+                    parts.push(if f.is_empty() { "0".to_string() } else { f });
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 {
+                        parts.remove(0)
+                    } else {
+                        format!("[\"t\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "for_generic" if self.facts.tag == "LUA" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                for c in self.children(id) {
+                    let ck = self.kind(c);
+                    if ck == "namelist" {
+                        for nc in self.children(c) {
+                            if let Some(n) = self.leaf_name(nc) {
+                                parts.push(format!("[\"n\",\"{n}\"]"));
+                            }
+                        }
+                    } else if ck == "expression_list" {
+                        for ec in self.children(c) {
+                            let eck = self.kind(ec);
+                            if self.is_layout(ec) || eck == "," {
+                                continue;
+                            }
+                            let f = self.form(ec);
+                            parts.push(if f.is_empty() { "0".to_string() } else { f });
+                        }
+                    }
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 {
+                        parts.remove(0)
+                    } else {
+                        format!("[\"t\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "call" if self.facts.tag == "LUA" => {
+                let ch = self.children(id);
+                if ch.first().map(|&c| self.text(c)) == Some(b"require") {
+                    let line = self.line(id);
+                    if let Some(ca) = self.child_of_kind(id, "call_arguments") {
+                        let raw = self.text_string(ca);
+                        let bytes = raw.as_bytes();
+                        let mut i = 0;
+                        while i < bytes.len() {
+                            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                                let q = bytes[i];
+                                i += 1;
+                                let mut val = String::new();
+                                while i < bytes.len() && bytes[i] != q {
+                                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                        i += 1;
+                                    }
+                                    val.push(bytes[i] as char);
+                                    i += 1;
+                                }
+                                if !val.is_empty() {
+                                    let alias = val.rsplit('/').next().unwrap_or("").to_string();
+                                    if !self.facts.imports.iter().any(|imp| imp.line == line && imp.module == val && imp.kind == IMPORT_STAR) {
+                                        self.facts.imports.push(Import {
+                                            line,
+                                            module: val,
