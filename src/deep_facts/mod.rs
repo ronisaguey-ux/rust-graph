@@ -424,7 +424,7 @@ const DART_DEFS: &[Def] = &[
     Def { kind: "extension_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
     Def { kind: "function_declaration", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: true, receiver: false, container: false },
 ];
-const DART_CALLS: &[&str] = &["call"];
+const DART_CALLS: &[&str] = &["call", "const_object_expression"];
 const DART_IMPORTS: &[&str] = &["import_directive"];
 
 const HS_DEFS: &[Def] = &[
@@ -2767,6 +2767,139 @@ impl<'a> Walker<'a> {
                     self.java_header_event(id);
                 }
             }
+            "class_member" if self.facts.tag == "PHP" => {
+                let ch = self.children(id);
+                if let Some(md) = ch.iter().copied().find(|&c| self.kind(c) == "member_declaration") {
+                    if let Some(pd) = self.child_of_kind(md, "property_declaration") {
+                        let pchildren = self.children(pd);
+                        let has_eq = pchildren.iter().any(|&c| self.kind(c) == "=");
+                        let has_q = pchildren.iter().any(|&c| self.kind(c) == "?");
+                        if !has_eq || has_q {
+                            let line = self.line(id);
+                            let mut parts = Vec::new();
+                            for &c in &ch {
+                                if self.kind(c) == "modifiers" {
+                                    for mc in self.children(c) {
+                                        let t = self.text_string(mc);
+                                        if !t.is_empty() && t.bytes().next().is_some_and(|b| b.is_ascii_alphabetic()) {
+                                            let mut n = String::from("[\"n\",");
+                                            push_string(&mut n, &t);
+                                            n.push(']');
+                                            parts.push(n);
+                                        }
+                                    }
+                                }
+                            }
+                            for &c in &pchildren {
+                                let ck = self.kind(c);
+                                if matches!(ck, ";" | "," | "=" | "?" | "|") {
+                                    continue;
+                                }
+                                if matches!(ck, "variable" | "variable_name") {
+                                    let nm = self.text_string(c).trim_start_matches('$').to_string();
+                                    if !nm.is_empty() {
+                                        let mut n = String::from("[\"n\",");
+                                        push_string(&mut n, &nm);
+                                        n.push(']');
+                                        parts.push(n);
+                                    }
+                                } else if matches!(ck, "true" | "false" | "null") {
+                                    parts.push(format!("[\"n\",\"{ck}\"]"));
+                                } else if !self.is_layout(c) {
+                                    let f = self.form(c);
+                                    if !f.is_empty() && f != "0" {
+                                        parts.push(f);
+                                    } else {
+                                        let t = self.text_string(c);
+                                        if !t.is_empty() && t.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                                            let mut n = String::from("[\"n\",");
+                                            push_string(&mut n, &t);
+                                            n.push(']');
+                                            parts.push(n);
+                                        }
+                                    }
+                                } else {
+                                    let t = self.text_string(c);
+                                    if matches!(t.as_str(), "int" | "string" | "bool" | "float" | "array" | "object" | "mixed" | "callable" | "iterable" | "self" | "parent" | "static" | "void" | "never" | "null" | "true" | "false") {
+                                        let mut n = String::from("[\"n\",");
+                                        push_string(&mut n, &t);
+                                        n.push(']');
+                                        parts.push(n);
+                                    }
+                                }
+                            }
+                            if !parts.is_empty() {
+                                let val = if parts.len() == 1 {
+                                    parts.remove(0)
+                                } else {
+                                    format!("[\"m\",[{}]]", parts.join(","))
+                                };
+                                self.lexer_event(b'x', line, &[], &val, false);
+                                self.consumed.push(pd);
+                            }
+                        }
+                    }
+                }
+            }
+            "property_declaration" | "const_declaration" if self.facts.tag == "PHP" => {
+                if self.consumed.contains(&id) {
+                    return;
+                }
+                let children = self.children(id);
+                let line = self.line(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    let target = children[..eq]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&c| matches!(self.kind(c), "variable" | "variable_name" | "name" | "identifier"))
+                        .map(|c| self.text_string(c).trim_start_matches('$').to_string())
+                        .filter(|s| !s.is_empty());
+                    if let Some(name) = target {
+                        let rhs = children[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                        let val = rhs
+                            .map(|c| {
+                                let k = self.kind(c);
+                                if matches!(k, "true" | "false" | "null") {
+                                    format!("[\"n\",\"{k}\"]")
+                                } else {
+                                    let f = self.form(c);
+                                    if f.is_empty() { "0".to_string() } else { f }
+                                }
+                            })
+                            .unwrap_or_else(|| "0".to_string());
+                        self.lexer_event(b'a', line, &[name], &val, false);
+                    } else {
+                        self.decl_statement(id);
+                    }
+                } else {
+                    self.decl_statement(id);
+                }
+            }
+            "echo_statement" if self.facts.tag == "PHP" => {
+                let line = self.line(id);
+                let mut parts = vec!["[\"n\",\"echo\"]".to_string()];
+                for c in self.children(id) {
+                    let ck = self.kind(c);
+                    if matches!(ck, "echo" | ";" | "," | "?>" | "<?=" ) {
+                        continue;
+                    }
+                    if self.is_layout(c) && !matches!(ck, "string" | "encapsed_string" | "integer" | "float") {
+                        continue;
+                    }
+                    let f = self.form(c);
+                    parts.push(if f.is_empty() { "0".to_string() } else { f });
+                }
+                let val = if parts.len() == 1 {
+                    parts.remove(0)
+                } else {
+                    format!("[\"m\",[{}]]", parts.join(","))
+                };
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
+            "trait_adaptation" if self.facts.tag == "PHP" => {
+                self.decl_statement(id);
+            }
             "property_declaration" => {
                 if self.kinds.calls.contains(&"object_creation_expression") {
                     if !(self.language.name == "csharp" && self.cs_arrow_body(id, self.line(id))) {
@@ -3449,7 +3582,36 @@ impl<'a> Walker<'a> {
                     {
                         let mut parts = Vec::new();
                         for &c in &children[eq + 1..] {
-                            if !self.is_layout(c) && self.kind(c) != ";" {
+                            let ck = self.kind(c);
+                            if ck == "record" {
+                                parts.push("[\"n\",\"record\"]".to_string());
+                                continue;
+                            }
+                            if ck == "field_list" {
+                                for fc in self.children(c) {
+                                    let fck = self.kind(fc);
+                                    if fck == ";" { break; }
+                                    if self.is_layout(fc) || matches!(fck, ":" | ",") { continue; }
+                                    if fck == "identifier_list" {
+                                        for ic in self.children(fc) {
+                                            if self.kind(ic) == "identifier" {
+                                                let nm = self.text_string(ic).to_ascii_lowercase();
+                                                let mut n = String::from("[\"n\",");
+                                                push_string(&mut n, &nm);
+                                                n.push(']');
+                                                parts.push(n);
+                                            }
+                                        }
+                                    } else {
+                                        let f = self.form(fc);
+                                        if !f.is_empty() && f != "0" {
+                                            parts.push(f);
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            if !self.is_layout(c) && ck != ";" {
                                 let f = self.form(c);
                                 if !f.is_empty() && f != "0" {
                                     parts.push(f);
@@ -3469,13 +3631,72 @@ impl<'a> Walker<'a> {
                 }
                 self.decl_statement(id);
             }
+            "if_statement" | "while_statement" | "repeat_statement" | "case_statement" | "with_statement" if self.facts.tag == "PAS" => {
+                let children = self.children(id);
+                if kind == "repeat_statement" {
+                    if let Some(until_pos) = children.iter().position(|&c| self.kind(c) == "until") {
+                        if let Some(&cond) = children[until_pos + 1..].iter().find(|&&c| !self.is_layout(c)) {
+                            let val = self.form(cond);
+                            if !val.is_empty() && val != "0" {
+                                self.lexer_event(b'x', self.line(cond), &[], &val, false);
+                            }
+                        }
+                    }
+                } else {
+                    for c in children {
+                        let ck = self.kind(c);
+                        if self.is_layout(c) || matches!(ck, "if" | "while" | "case" | "with") {
+                            continue;
+                        }
+                        if matches!(ck, "then" | "do" | "of") {
+                            break;
+                        }
+                        let val = self.form(c);
+                        if !val.is_empty() && val != "0" {
+                            self.lexer_event(b'x', self.line(id), &[], &val, false);
+                        }
+                        break;
+                    }
+                }
+            }
+            "for_statement" if self.facts.tag == "PAS" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                if let Some(assign_pos) = children.iter().position(|&c| self.kind(c) == ":=") {
+                    if let Some(name) = children[..assign_pos]
+                        .iter()
+                        .copied()
+                        .find(|&c| self.kind(c) == "identifier")
+                        .map(|c| self.text_string(c).to_ascii_lowercase())
+                    {
+                        let mut parts = Vec::new();
+                        for &c in &children[assign_pos + 1..] {
+                            let ck = self.kind(c);
+                            if ck == "do" { break; }
+                            if self.is_layout(c) || matches!(ck, "to" | "downto") { continue; }
+                            let f = self.form(c);
+                            if !f.is_empty() && f != "0" {
+                                parts.push(f);
+                            }
+                        }
+                        let val = if parts.is_empty() {
+                            "0".to_string()
+                        } else if parts.len() == 1 {
+                            parts.into_iter().next().unwrap()
+                        } else {
+                            format!("[\"m\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'a', line, &[name], &val, false);
+                    }
+                }
+            }
             "section_marker" if self.facts.tag == "PAS" => {
                 if self.text_string(id).eq_ignore_ascii_case("implementation") {
                     let mut sib = self.node(id).next_sibling;
                     while sib != NONE && self.is_layout(sib) {
                         sib = self.node(sib).next_sibling;
                     }
-                    if sib != NONE && self.kind(sib) == "unit_end" {
+                    if sib != NONE {
                         let line = self.line(id);
                         self.lexer_event(b'x', line, &[], "[\"m\",[[\"n\",\"implementation\"],[\"n\",\"end\"]]]", false);
                     }
