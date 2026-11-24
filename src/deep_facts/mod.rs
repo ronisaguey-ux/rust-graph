@@ -3518,3 +3518,323 @@ impl<'a> Walker<'a> {
                         // `internal` is also a Kotlin modifier, so it arrives
                         // as a keyword leaf of its own instead of an
                         // identifier. Breaking there wrote the call `kotlin`
+                        // and lost the path the lexer files.
+                        _ if self.children(child).is_empty() => parts.push(self.text_string(child)),
+                        _ => break,
+                    }
+                }
+                if !parts.is_empty() {
+                    let name = parts.join(".");
+                    // The event names the call the way the lexer writes any
+                    // dotted call: the receiver in the path slot and the last
+                    // segment as the callee — `@kotlin.jvm.JvmName("y")` is
+                    // `c(n:kotlin.jvm;[0])`, not a call with an empty receiver.
+                    let receiver = if parts.len() > 1 {
+                        let mut text = "[\"n\",".to_string();
+                        push_string(&mut text, &parts[..parts.len() - 1].join("."));
+                        text.push(']');
+                        text
+                    } else {
+                        "0".to_string()
+                    };
+                    let line = self.line(id);
+                    let index = self.push_call(name.clone(), line);
+                    // The lexer files the annotation's own arguments as an
+                    // event holding the call's form, as it does for any other
+                    // call written as a statement.
+                    if let Some(list) = self.children(id).into_iter().find(|&child| self.kind(child) == "annotation_arguments") {
+                        let args = self.arguments(list);
+                        self.event(&format!("[\"x\",{line},[\"c\",{index},{receiver},{args}]]"));
+                    } else if self.language.name == "scala" {
+                        // `@tailrec`, `@InternalApi`, `@inline`: a bare Scala
+                        // annotation states just its name. The lexer files an
+                        // `x` event for it, and writing only the call above
+                        // left every such line with no value the guard could
+                        // pair (`n:tailrec` against no event).
+                        let mut value = "[\"n\",".to_string();
+                        push_string(&mut value, &name);
+                        value.push(']');
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
+                }
+            }
+            // `public string Key { get; set; }`: the lexer reads each accessor
+            // as an expression statement and names it `get` / `set`. Nothing
+            // read `accessor_declaration`, so a property lost one event per
+            // accessor — the largest single C# cluster left.
+            // `get;` / `set;`: the notifier token is the value — a keyword leaf
+            // carries no expression child, so the arm writes the name itself.
+            "accessor_declaration" => {
+                if self.language.name == "csharp" && self.cs_arrow_body(id, self.line(id)) {
+                    return;
+                }
+                let name = self
+                    .children(id)
+                    .into_iter()
+                    .map(|child| self.kind(child).to_string())
+                    .find(|kind| matches!(kind.as_str(), "get" | "set" | "init" | "add" | "remove"))
+                    .or_else(|| {
+                        self.children(id)
+                            .first()
+                            .map(|&child| self.kind(child).to_string())
+                    })
+                    .unwrap_or_default();
+                if !name.is_empty() {
+                    let line = self.line(id);
+                    // `get; private set;`: the accessor's own modifier words
+                    // are the first elements of the value, the keyword last.
+                    let mut parts: Vec<String> = Vec::new();
+                    for child in self.children(id) {
+                        if self.kind(child) == name {
+                            break;
+                        }
+                        for word in self.c_words_of(child) {
+                            let mut form = String::from("[\"n\",");
+                            push_string(&mut form, &word);
+                            form.push(']');
+                            parts.push(form);
+                        }
+                    }
+                    let mut keyword = String::from("[\"n\",");
+                    push_string(&mut keyword, &name);
+                    keyword.push(']');
+                    parts.push(keyword);
+                    let value = if parts.len() == 1 {
+                        parts.pop().unwrap()
+                    } else {
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                // `get => GetItem(index);`: an expression-bodied accessor's
+                // body is an expression statement to the lexer, and its calls
+                // were never read (C# corpus: 20 files).
+                if self.facts.tag == "CS" {
+                    if let Some(body) = self.cs_expression_body(id) {
+                        self.form(body);
+                    }
+                }
+            }
+            // `public string Key { get; set; }`: the header is a statement to
+            // the lexer, and the accessors are its own statements.
+            "property_declaration" => self.java_header_event(id),
+            // `enum E { A = 1, B }`: every member is an assignment statement to
+            // the lexer, and the tree wrote nothing for it, so an enum's own
+            // lines were the first loss on most enum-bearing files.
+            // `enum E { Binary = 0x00, Number = 1, … }`: the lexer unpacks the
+            // member list exactly as it unpacks a declarator list - one
+            // assignment to the first member whose value is a tuple of the
+            // rest (`t:[0,n:Number,m:[n:Text,0]]`) - so one assignment per
+            // member disagreed on every enum in the corpus.
+            "enum_body" => {
+                let members: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.kind(child) == "enum_member")
+                    .collect();
+                self.consumed.extend(members.iter().copied());
+                if let Some((first, rest)) = members.split_first() {
+                    let line = self.line(*first);
+                    let name = self.first_identifier(*first);
+                    if let Some(name) = name {
+                        let first_value = self.enum_member_value(*first);
+                        let parts: Vec<String> = if rest.is_empty() {
+                            vec![first_value]
+                        } else {
+                            let mut parts = vec![first_value];
+                            for member in rest {
+                                let attr_forms: Vec<String> = if self.language.name == "csharp" {
+                                    let mut forms = Vec::new();
+                                    let mut attributed = false;
+                                    self.csharp_attributes(*member, &mut attributed, &mut forms);
+                                    forms
+                                } else {
+                                    Vec::new()
+                                };
+                                let member_name = if self.language.name == "csharp" {
+                                    self.children(*member)
+                                        .into_iter()
+                                        .find(|&c| self.kind(c) == "identifier")
+                                        .map(|c| self.text_string(c))
+                                        .or_else(|| self.first_identifier(*member))
+                                } else {
+                                    self.first_identifier(*member)
+                                };
+                                match (member_name, self.enum_member_value(*member)) {
+                                    (Some(member_name), value) if value == "0" => {
+                                        let mut form = String::from("[\"n\",");
+                                        push_string(&mut form, &member_name);
+                                        form.push(']');
+                                        if attr_forms.is_empty() {
+                                            parts.push(form);
+                                        } else {
+                                            let mut items = attr_forms;
+                                            items.push(form);
+                                            parts.push(format!("[\"m\",[{}]]", items.join(",")));
+                                        }
+                                    }
+                                    (Some(member_name), value) => {
+                                        let mut key = String::from("[\"n\",");
+                                        push_string(&mut key, &member_name);
+                                        key.push(']');
+                                        let mut items = attr_forms;
+                                        items.push(key);
+                                        items.push(value);
+                                        parts.push(format!("[\"m\",[{}]]", items.join(",")));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            parts
+                        };
+                        let value = if parts.len() == 1 {
+                            parts[0].clone()
+                        } else {
+                            format!("[\"t\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'a', line, &[name], &value, false);
+                    }
+                }
+            }
+            "enum_member" => {
+                if self.consumed.contains(&id) {
+                    return;
+                }
+                let line = self.line(id);
+                let name = self.first_identifier(id);
+                if let Some(name) = name {
+                    let value = self
+                        .children(id)
+                        .into_iter()
+                        .filter(|&child| child != id)
+                        .rev()
+                        .find(|&child| {
+                            !matches!(self.kind(child), "identifier" | "=" | ",")
+                                && !self.is_layout(child)
+                        })
+                        .map(|child| self.decl_value(child))
+                        .unwrap_or_else(|| "0".to_string());
+                    let value = if value.is_empty() { "0".to_string() } else { value };
+                    let targets = vec![name];
+                    self.lexer_event(b'a', line, &targets, &value, false);
+                }
+            }
+            // `return (byte[])_obj.GetValue(value, n);`, `(DataTable)conv.
+            // ReadJson(...)`: the call sits inside a cast, and nothing
+            // descended into that node - every cast-and-call in the C# corpus
+            // lost its call.
+            "cast_expression" => {
+                let mut calls = Vec::new();
+                for child in self.children(id) {
+                    self.c_calls_in_pub(child, &mut calls);
+                }
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            // `Assert.Throws(null, () => G(1))` and `Export(def, () => part.Get())`:
+            // a lambda passed as an argument is the whole content of that
+            // argument, and the expression reader gives a lambda no form, so
+            // every call written inside one stayed in the tree and out of the
+            // call table. They are calls all the same — the cast arm below has
+            // the same shape of gap — so they are read here, and only the call
+            // table is written: a lambda has no value of its own to compare.
+            "lambda_expression" if self.language.name == "csharp" => {
+                self.cs_lambda_assignment_symbol(id);
+                let mut calls = Vec::new();
+                self.lambda_calls(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            // `new CVariation(t) { Attribute = new Variation("x") { Pri = 0 } }`:
+            // a creation inside an object initialiser is a call of its own, and
+            // the initialiser was read for its assignments alone, so every nested
+            // creation stayed in the tree and out of the call table.
+            // `yield return v;` hands `v` out of the body exactly as `return v;`
+            // does, so it is read by the return handler. It used to fall into the
+            // arm below, which forms only lambdas, so the yielded expression and
+            // every call in it (and every `new T[]` event) vanished from the
+            // CST: an iterator accessor such as `get { yield return f(); }` lost
+            // its whole body.
+            "yield_statement" if self.language.name == "csharp" => self.return_statement(id),
+            "object_initializer" | "array_initializer" | "anonymous_body"
+            | "using_statement"
+            | "fixed_statement"
+                if self.language.name == "csharp" =>
+            {
+                if matches!(kind, "object_initializer" | "array_initializer" | "anonymous_body") {
+                    self.cs_initializer_vars(id);
+                }
+                if kind == "object_initializer" {
+                    self.cs_initializer_first_member(id);
+                }
+                // `using (a.B()) stmt`: the C# grammar expects a declaration
+                // inside `using (...)`, so an expression resource puts `(` into
+                // an `ERROR` node and leaves `a.B` outside it as a type/name.
+                // Recover calls from the flattened header tokens when errored.
+                if kind == "using_statement" && self.cs_has_error(id) {
+                    let mut leaves = Vec::new();
+                    for child in self.children(id) {
+                        if self.kind(child) != "using" {
+                            self.cs_collect_leaves(child, &mut leaves);
+                        }
+                    }
+                    if let Some(open) = leaves.iter().position(|&n| self.kind(n) == "(") {
+                        let mut depth = 0i32;
+                        let mut close = leaves.len();
+                        for (i, &n) in leaves[open..].iter().enumerate() {
+                            match self.kind(n) {
+                                "(" => depth += 1,
+                                ")" => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        close = open + i;
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if close > open + 1 {
+                            self.cs_recovered_calls_tokens(&leaves[open + 1..close]);
+                        }
+                    }
+                }
+                let mut calls = Vec::new();
+                self.lambda_calls(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            "ERROR" if self.language.name == "csharp" => {
+                self.cs_recovered_calls(id);
+                self.cs_recovered_events(id);
+            }
+            "expression_statement" if self.facts.tag == "LUA" => {
+                let children = self.children(id);
+                if let Some(atail) = children.iter().copied().find(|&c| self.kind(c) == "assignment_tail") {
+                    let line = self.line(id);
+                    let lhs = children.iter().copied().find(|&c| !self.is_layout(c) && c != atail);
+                    let target = lhs
+                        .map(|n| {
+                            let p = self.path_of(n);
+                            if p.is_empty() { self.text_string(n) } else { p }
+                        })
+                        .filter(|s| !s.is_empty());
+                    if let Some(tname) = target {
+                        let raw_tail = self.text_string(atail);
+                        if let Some((_, rhs)) = raw_tail.split_once('=') {
+                            let rhs_t = rhs.trim();
+                            if rhs_t.starts_with("require") {
+                                let bytes = rhs_t.as_bytes();
+                                let mut i = 0;
+                                while i < bytes.len() {
+                                    if bytes[i] == b'"' || bytes[i] == b'\'' {
+                                        let q = bytes[i];
+                                        i += 1;
+                                        let mut val = String::new();
+                                        while i < bytes.len() && bytes[i] != q {
+                                            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                                i += 1;
+                                            }
