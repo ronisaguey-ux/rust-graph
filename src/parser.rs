@@ -186,6 +186,14 @@ pub fn parse(src: &[u8], lang: &'static Language) -> Facts {
     parser.run()
 }
 
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BraceContext {
+    Block,
+    StructLiteral,
+    TableConstructor,
+}
+
 impl<'a> Parser<'a> {
     fn text(&self, token: &Token) -> String {
         lexeme(self.src, token, self.lang)
@@ -1355,7 +1363,52 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether a `{` here starts statements rather than a value.
+    /// Fast-path brace-context classifier: checks the previous token kind first
+    /// to distinguish statement blocks from struct/composite literals and table
+    /// constructors across languages without per-statement ad-hoc guards.
+    fn classify_brace_context(&self) -> BraceContext {
+        if self.lang.tag == "LUA" {
+            return BraceContext::TableConstructor;
+        }
+        let Some(last) = self.stmt.last() else {
+            return BraceContext::Block;
+        };
+        if last.kind != Kind::Op {
+            return BraceContext::Block;
+        }
+        if self.lang.tag == "GO" && self.is_op(last, b"]") {
+            let first = self.word_at(&self.stmt, 0);
+            if !matches!(
+                first.as_deref(),
+                Some("if" | "for" | "switch" | "select" | "else" | "func" | "type" | "go" | "defer" | "case" | "default")
+            ) {
+                let mut depth = 0i32;
+                let mut open = None;
+                for j in (0..self.stmt.len()).rev() {
+                    if self.is_op(&self.stmt[j], b"]") {
+                        depth += 1;
+                    } else if self.is_op(&self.stmt[j], b"[") {
+                        depth -= 1;
+                        if depth == 0 {
+                            open = Some(j);
+                            break;
+                        }
+                    }
+                }
+                if let Some(open) = open {
+                    if open > 0 && self.stmt[open - 1].kind == Kind::Ident {
+                        return BraceContext::StructLiteral;
+                    }
+                }
+            }
+        }
+        BraceContext::Block
+    }
+
     fn is_block(&mut self) -> bool {
+        if self.classify_brace_context() != BraceContext::Block {
+            return false;
+        }
         // Go `return struct{}{}, nil`: the brace after a `struct{…}` or
         // `interface{…}` type is the composite literal's body, a value of the
         // statement. Read as a block, its `}` ended the statement and the
@@ -3714,7 +3767,12 @@ impl<'a> Parser<'a> {
             return (plain && !COBOL_HEADINGS.iter().any(|word| name.ends_with(word))).then(|| Head { name, ..Head::default() });
         }
         if self.lang.tag == "ERL" {
-            let name = first?;
+            let name = first.or_else(|| {
+                stmt.first()
+                    .filter(|t| t.kind == Kind::Str && self.raw(t).starts_with(b"'"))
+                    .map(|t| self.string_value(t))
+                    .filter(|v| !v.is_empty())
+            })?;
             let close = self.matching_close(stmt, 1)?;
             let params = self.params(&stmt[2..close]);
             let arrow = stmt.iter().position(|token| self.is_op(token, b"->"))?;
@@ -7097,5 +7155,19 @@ impl<'a> Parser<'a> {
         }
         text.push_str(&format!("],{expr},{}]", u8::from(weak)));
         self.event(&text);
+    }
+}
+
+#[cfg(test)]
+mod brace_context_tests {
+    use super::parse;
+
+    #[test]
+    fn brace_context_keeps_braced_initialiser_one_statement() {
+        let go_src = b"package p\nfunc f() []Pair[int, string] {\n    return []Pair[int, string]{\n        {a: 1},\n    }\n}\n";
+        let lang = crate::langs::by_content("go", go_src).unwrap();
+        let go_facts = parse(go_src, lang);
+        let f_sym = go_facts.symbols.iter().find(|sym| sym.key == "f").expect("f symbol");
+        assert!(f_sym.events.starts_with("[\"r\",3,") && !f_sym.events.contains("[\"x\","), "expected 1 return event in f, got {:?}", f_sym.events);
     }
 }

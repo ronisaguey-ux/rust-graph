@@ -3383,6 +3383,9 @@ impl<'a> Walker<'a> {
                 let line = self.line(id);
                 self.push_call("mapping".to_string(), line);
             }
+            "using_directive" | "event_definition" | "error_definition" if self.facts.tag == "SOL" => {
+                self.decl_statement(id);
+            }
             "returns_clause" if self.facts.tag == "SOL" => {
                 let line = self.line(id);
                 self.push_call("returns".to_string(), line);
@@ -3407,13 +3410,19 @@ impl<'a> Walker<'a> {
             "call_command" if self.facts.tag == "TCL" => {
                 let children = self.children(id);
                 let line = self.line(id);
-                for (idx, &ch) in children.iter().take(2).enumerate() {
+                for (idx, &ch) in children.iter().enumerate() {
+                    let ck = self.kind(ch);
+                    if matches!(ck, "command_end" | "braced" | "quoted") {
+                        continue;
+                    }
                     let name = self.text_string(ch);
                     let clean = name.trim_start_matches("::");
-                    if !clean.is_empty() && clean.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
-                        if idx == 0 || matches!(children.first().map(|&c| self.text_string(c)).as_deref(), Some("package" | "namespace" | "interp" | "string" | "dict" | "array" | "file" | "info" | "clock" | "chan" | "binary" | "encoding" | "oo::define" | "oo::objdefine")) {
-                            self.push_call(clean.to_string(), line);
-                        }
+                    if !clean.is_empty()
+                        && clean.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                        && clean.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':')
+                        && (idx == 0 || idx + 1 < children.len())
+                    {
+                        self.push_call(clean.replace("::", "."), line);
                     }
                 }
             }
