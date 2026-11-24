@@ -4216,6 +4216,14 @@ impl<'a> Parser<'a> {
                         && self.lang.tag == "SWIFT"
                         && matches!(self.text(token).as_str(), "var" | "let" | "func" | "class" | "struct" | "enum" | "protocol" | "typealias") =>
                 {}
+                Kind::Ident
+                    if self.lang.tag == "HS" && matches!(self.text(token).as_str(), "qualified" | "safe") =>
+                {}
+                Kind::Ident
+                    if self.lang.tag == "HS" && self.text(token) == "hiding" =>
+                {
+                    break;
+                }
                 Kind::Ident => module.push_str(&self.text(token)),
                 Kind::Op if self.is_op(token, b"{") => {
                     let prefix = module.trim_end_matches('.').to_string();

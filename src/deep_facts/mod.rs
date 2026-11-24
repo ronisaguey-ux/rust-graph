@@ -2581,6 +2581,11 @@ impl<'a> Walker<'a> {
         }
         // Handle nested `proc name args body`
         if words[0].1 == "proc" && words.len() >= 2 {
+            let args_braced = words.get(2).is_some_and(|w| w.1.starts_with('{'));
+            let body_braced = words.len() >= 4 && words.last().is_some_and(|w| w.1.starts_with('{'));
+            if !args_braced || !body_braced {
+                self.push_call("proc".to_string(), cmd_line);
+            }
             let raw_name = words[1].1.trim_matches(|c| c == '{' || c == '}');
             let sym_name = Self::tcl_clean_name(raw_name);
             if !sym_name.is_empty() {
@@ -2855,8 +2860,8 @@ impl<'a> Walker<'a> {
                         // A -flag starts with '-', which is Op('-') so it does NOT trigger a call on the preceding word
                         word_forms.push((*wline, Some(clean), seg_form, !is_flag));
                     } else {
-                        let is_num = w.bytes().next().is_some_and(|b| b.is_ascii_digit());
-                        word_forms.push((*wline, None, seg_form, is_num));
+                        let is_val = !is_flag && w.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+                        word_forms.push((*wline, None, seg_form, is_val));
                     }
                 }
             }
@@ -2873,6 +2878,12 @@ impl<'a> Walker<'a> {
                     let cid = self.push_call(cname.clone(), wline);
                     acc = format!("[\"c\",{cid},0,[{acc}]]");
                 } else {
+                    let next_is_bracket = idx + 1 < word_forms.len()
+                        && word_forms[idx + 1].0 == wline
+                        && word_forms[idx + 1].2.starts_with("[\"t\",");
+                    if next_is_bracket {
+                        let _ = self.push_call(cname.clone(), wline);
+                    }
                     acc = format!("[\"m\",[{form_str},{acc}]]");
                 }
             } else {
@@ -2915,6 +2926,11 @@ impl<'a> Walker<'a> {
         let sym_name = Self::tcl_clean_name(raw_name.trim_matches(|c| c == '{' || c == '}'));
         if sym_name.is_empty() {
             return;
+        }
+        let args_braced = words.get(2).is_some_and(|&c| self.kind(c) == "braced_word");
+        let body_braced = words.len() >= 4 && words.last().is_some_and(|&c| self.kind(c) == "braced_word");
+        if !args_braced || !body_braced {
+            self.push_call("proc".to_string(), line);
         }
         let sym = self.add_symbol(sym_name, String::new(), KIND_FUNCTION, line, Vec::new());
         self.stack.push(Frame {
@@ -4690,6 +4706,28 @@ impl<'a> Walker<'a> {
             }
             "case_word" | "test_expression" | "for_clause" if self.facts.tag == "SH" => {
                 let line = self.line(id);
+                let mut te_call_id: Option<usize> = None;
+                if kind == "test_expression" {
+                    let twords: Vec<(u32, String)> = self
+                        .children(id)
+                        .into_iter()
+                        .filter(|&c| !matches!(self.kind(c), "whitespace" | "comment" | "[[" | "]]"))
+                        .map(|c| (self.line(c), self.text_string(c)))
+                        .filter(|(_, s)| !s.is_empty())
+                        .collect();
+                    for idx in 0..twords.len() {
+                        let (wline, ref w) = twords[idx];
+                        if w.starts_with('-') && w.len() > 1 && w.as_bytes()[1].is_ascii_alphabetic() {
+                            let fname = w.trim_start_matches('-');
+                            if idx + 1 < twords.len() && twords[idx + 1].0 == wline {
+                                let cid = self.push_call(fname.to_string(), wline);
+                                if te_call_id.is_none() {
+                                    te_call_id = Some(cid);
+                                }
+                            }
+                        }
+                    }
+                }
                 let raw = if kind == "for_clause" {
                     // Only take header up to "do"
                     let mut h = String::new();
@@ -4732,11 +4770,85 @@ impl<'a> Walker<'a> {
                         format!("[\"m\",[{}]]", parts.join(","))
                     };
                     let val = if kind == "test_expression" {
-                        format!("[\"t\",[[\"t\",[{inner}]]]]")
+                        if let Some(cid) = te_call_id {
+                            format!("[\"t\",[[\"t\",[[\"c\",{cid},0,[{inner}]]]]]]")
+                        } else {
+                            format!("[\"t\",[[\"t\",[{inner}]]]]")
+                        }
                     } else {
                         inner
                     };
                     self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "heredoc_body" if self.facts.tag == "SH" => {
+                let start_line = self.line(id);
+                let raw = self.text_string(id);
+                for (offset, l) in raw.split('\n').enumerate() {
+                    let t = l.trim();
+                    if t.is_empty() || t.starts_with('#') {
+                        continue;
+                    }
+                    let line = start_line + offset as u32;
+                    if let Some((lhs_raw, rhs_raw)) = t.split_once('=') {
+                        let lhs = lhs_raw.trim();
+                        if !lhs.is_empty()
+                            && lhs.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                        {
+                            let segs: Vec<&str> = rhs_raw
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                                .map(|s| s.trim_start_matches('-'))
+                                .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                                .collect();
+                            let val = if segs.is_empty() {
+                                "0".to_string()
+                            } else if segs.len() == 1 {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, segs[0]);
+                                n.push(']');
+                                n
+                            } else {
+                                let parts: Vec<String> = segs
+                                    .iter()
+                                    .map(|s| {
+                                        let mut n = String::from("[\"n\",");
+                                        push_string(&mut n, s);
+                                        n.push(']');
+                                        n
+                                    })
+                                    .collect();
+                                format!("[\"m\",[{}]]", parts.join(","))
+                            };
+                            self.lexer_event(b'a', line, &[lhs.to_string()], &val, false);
+                            continue;
+                        }
+                    }
+                    let segs: Vec<&str> = t
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                        .map(|s| s.trim_start_matches('-'))
+                        .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                        .collect();
+                    if !segs.is_empty() {
+                        let val = if segs.len() == 1 {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, segs[0]);
+                            n.push(']');
+                            n
+                        } else {
+                            let parts: Vec<String> = segs
+                                .iter()
+                                .map(|s| {
+                                    let mut n = String::from("[\"n\",");
+                                    push_string(&mut n, s);
+                                    n.push(']');
+                                    n
+                                })
+                                .collect();
+                            format!("[\"m\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'x', line, &[], &val, false);
+                    }
                 }
             }
             "fi" | "done" | "esac" | "then" | "else" | "do" if self.facts.tag == "SH" => {
@@ -4788,8 +4900,12 @@ impl<'a> Walker<'a> {
                     if t.is_empty() {
                         continue;
                     }
+                    let only_decl_prefix = raw_words.iter().all(|w| {
+                        matches!(w.as_str(), "local" | "export" | "declare" | "readonly" | "typeset")
+                            || w.starts_with('-')
+                    });
                     if pending_assign.is_none()
-                        && raw_words.is_empty()
+                        && only_decl_prefix
                         && (ck == "assignment_word"
                             || (ck == "word"
                                 && t.contains('=')
@@ -4889,8 +5005,8 @@ impl<'a> Walker<'a> {
                         } else if is_ident {
                             items.push((cline, Some(clean.to_string()), seg_form, !is_flag));
                         } else {
-                            let is_num = ck != "redirect" && t.bytes().next().is_some_and(|b| b.is_ascii_digit());
-                            items.push((cline, None, seg_form, is_num));
+                            let is_val = !is_flag && ck != "redirect" && t.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+                            items.push((cline, None, seg_form, is_val));
                         }
                     }
                 }
@@ -4953,9 +5069,65 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            "indented_header" | "module_exports_and_where" if self.facts.tag == "HS" => {
+                let line = self.line(id);
+                let raw = self.text_string(id);
+                // Strip `-- ...` line comments before extracting exported names
+                let cleaned: String = raw
+                    .split('\n')
+                    .map(|l| l.split("--").next().unwrap_or(l))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let segs: Vec<&str> = cleaned
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                    .map(|s| s.trim_matches('.'))
+                    .filter(|s| {
+                        !s.is_empty()
+                            && !matches!(*s, "where" | "module" | "type" | "pattern")
+                            && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    })
+                    .collect();
+                if !segs.is_empty() {
+                    let parts: Vec<String> = segs
+                        .iter()
+                        .map(|s| {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, s);
+                            n.push(']');
+                            n
+                        })
+                        .collect();
+                    let val = format!("[\"m\",[[\"t\",[{}]],[\"n\",\"where\"]]]", parts.join(","));
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "deriving_clause" if self.facts.tag == "HS" => {
+                self.push_call("deriving".to_string(), self.line(id));
+            }
+            "module_header" if self.facts.tag == "HS" => {
+                self.push_call("module".to_string(), self.line(id));
+            }
             "type_signature" | "function_rhs" if self.facts.tag == "HS" => {
                 let line = self.line(id);
                 let raw = self.text_string(id);
+                if kind == "type_signature" {
+                    if let Some((lhs_raw, rhs_raw)) = raw.split_once("::") {
+                        let lhs = lhs_raw.trim();
+                        let rhs = rhs_raw.trim();
+                        if !lhs.is_empty()
+                            && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'')
+                            && rhs.contains('(')
+                        {
+                            let ty = rhs
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.')
+                                .find(|s| !s.is_empty())
+                                .unwrap_or("");
+                            if !ty.is_empty() {
+                                self.push_call(format!("{lhs}.{ty}"), line);
+                            }
+                        }
+                    }
+                }
                 let segs: Vec<&str> = raw
                     .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
                     .map(|s| s.trim_matches('.'))
