@@ -3233,6 +3233,52 @@ impl<'a> Walker<'a> {
 
     // -- imports ------------------------------------------------------------
 
+    pub(crate) fn nim_import(&mut self, id: u32) {
+        let line = self.line(id);
+        for child in self.children(id) {
+            if self.kind(child) != "import_target" {
+                continue;
+            }
+            let mut module = String::new();
+            let mut alias = String::new();
+            let mut leaves = Vec::new();
+            self.cs_collect_leaves(child, &mut leaves);
+            let mut i = 0;
+            while i < leaves.len() {
+                let tok = leaves[i];
+                let k = self.kind(tok);
+                let txt = self.text_string(tok);
+                if k == "[" || txt == "[" || txt == "except" {
+                    break;
+                }
+                if txt == "as" && i + 1 < leaves.len() {
+                    alias = self.text_string(leaves[i + 1]);
+                    break;
+                }
+                if matches!(txt.as_str(), "/" | "." | "..") {
+                    if txt == ".." {
+                        module.push_str("..");
+                    } else {
+                        module.push('.');
+                    }
+                } else if !self.is_layout(tok) && !matches!(txt.as_str(), "," | "\n" | "\r") {
+                    module.push_str(&txt);
+                }
+                i += 1;
+            }
+            let module = module.trim_end_matches('.').to_string();
+            if module.is_empty() {
+                continue;
+            }
+            let alias = if alias.is_empty() {
+                module.rsplit('.').next().unwrap_or("").to_string()
+            } else {
+                alias
+            };
+            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+        }
+    }
+
     pub(crate) fn import(&mut self, id: u32) {
         let kind = self.kind(id);
         match kind {
@@ -3271,7 +3317,9 @@ impl<'a> Walker<'a> {
                 self.generic_path_import(id);
             }
             "import_statement" | "import_from_statement" => {
-                if self.is_js() {
+                if self.facts.tag == "NIM" {
+                    self.nim_import(id);
+                } else if self.is_js() {
                     self.js_import(id);
                 } else {
                     self.python_import(id);
@@ -4458,10 +4506,30 @@ fn dotted_piece(text: &str) -> bool {
                 }
                 if let Some(module_call) = self.child_of_kind(id, "module_call") {
                     let children = self.children(module_call);
-                    let name = children
+                    for &child in &children {
+                        if self.kind(child) == "ERROR" {
+                            let _ = self.erl_recovered_calls(child);
+                            self.erl_recovered_events(child);
+                        }
+                    }
+                    let mut callee_node = children
                         .iter()
                         .copied()
-                        .find(|&child| matches!(self.kind(child), "atom" | "variable" | "quoted_atom" | "type" | "module" | "export" | "import" | "record" | "include" | "define" | "spec" | "behaviour"))
+                        .find(|&child| matches!(self.kind(child), "atom" | "variable" | "quoted_atom" | "type" | "module" | "export" | "import" | "record" | "include" | "define" | "spec" | "behaviour"));
+                    if callee_node.is_none() {
+                        // When recovery puts `throw:{...} -> filename:basename` inside ERROR right before `call_arguments`,
+                        // the last name leaf in that ERROR is the callee.
+                        for &child in &children {
+                            if self.kind(child) == "ERROR" {
+                                let mut leaves = Vec::new();
+                                self.cs_collect_leaves(child, &mut leaves);
+                                if let Some(&last_tok) = leaves.iter().rev().find(|&&t| self.erl_leaf_name(t).is_some()) {
+                                    callee_node = Some(last_tok);
+                                }
+                            }
+                        }
+                    }
+                    let name = callee_node
                         .map(|child| self.text_string(child).trim_matches('\'').to_string())
                         .unwrap_or_default();
                     if !name.is_empty() {
@@ -4471,7 +4539,7 @@ fn dotted_piece(text: &str) -> bool {
                             .find(|&child| self.kind(child) == "call_arguments")
                             .map(|list| self.arguments(list))
                             .unwrap_or_else(|| "[]".to_string());
-                        let line = self.line(id);
+                        let line = callee_node.map(|c| self.line(c)).unwrap_or_else(|| self.line(id));
                         let index = self.push_call(name, line);
                         return format!("[\"c\",{index},0,{args}]");
                     }
@@ -4842,18 +4910,30 @@ fn dotted_piece(text: &str) -> bool {
                     | "if_expression" | "begin_expression" | "receive_expression"
                     | "after_clause" | "try_expression" | "catch_clause" | "catch_clauses" | "catch_item" | "body"
                     | "map_literal" | "map_body" | "map_field" | "map_assoc"
-                    | "anonymous_clauses" | "anonymous_clause" | "paren_expression"
+                    | "anonymous_clauses" | "anonymous_clause" | "paren_expression" | "guard" | "guard_sequence" | "parameter_group" | "parameters"
                     | "send_expression" | "logical_expression" | "comparison" | "list_operation"
                     | "arithmetic" | "bitwise" | "match_expression" | "record_access" | "unary" | "argument"
             )
         {
             let mut parts = Vec::new();
-            for c in self.children(id) {
-                if !self.is_layout(c) {
-                    let v = self.form(c);
-                    if !v.is_empty() && v != "0" {
-                        parts.push(v);
+            let kids: Vec<u32> = self.children(id).into_iter().filter(|&c| !self.is_layout(c)).collect();
+            for (ki, &c) in kids.iter().enumerate() {
+                if self.kind(c) == "ERROR" {
+                    if let Some(&next) = kids.get(ki + 1) {
+                        if matches!(self.kind(next), "paren_expression" | "call_arguments" | "parameter_group" | "(") {
+                            let mut leaves = Vec::new();
+                            self.cs_collect_leaves(c, &mut leaves);
+                            if let Some(&last_tok) = leaves.iter().rev().find(|&&t| self.erl_leaf_name(t).is_some()) {
+                                if let Some(nm) = self.erl_leaf_name(last_tok) {
+                                    let _ = self.push_call(nm, self.line(last_tok));
+                                }
+                            }
+                        }
                     }
+                }
+                let v = self.form(c);
+                if !v.is_empty() && v != "0" {
+                    parts.push(v);
                 }
             }
             if parts.is_empty() {
@@ -7402,6 +7482,9 @@ fn dotted_piece(text: &str) -> bool {
     /// the source, and the region is only reached where the grammar failed to
     /// build a node for them.
     pub(crate) fn recovered_calls(&mut self, id: u32) -> Vec<usize> {
+        if self.facts.tag == "ERL" {
+            return self.erl_recovered_calls(id);
+        }
         let mut calls = Vec::new();
         let tokens: Vec<u32> = self.children(id);
         let mut at = 0;

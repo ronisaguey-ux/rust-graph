@@ -2309,6 +2309,157 @@ impl<'a> Walker<'a> {
         }
     }
 
+    pub(crate) fn erl_recovered_calls(&mut self, id: u32) -> Vec<usize> {
+        let mut leaves = Vec::new();
+        self.cs_collect_leaves(id, &mut leaves);
+        let mut calls = Vec::new();
+        let mut i = 0;
+        while i + 1 < leaves.len() {
+            let tok = leaves[i];
+            let k = self.kind(tok);
+            let is_name = matches!(
+                k,
+                "atom" | "variable" | "quoted_atom" | "name"
+                    | "module" | "export" | "import" | "behaviour" | "include"
+                    | "define" | "ifdef" | "endif" | "spec" | "type" | "record"
+            );
+            if is_name && self.kind(leaves[i + 1]) == "(" {
+                let raw = self.text_string(tok);
+                let name = if k == "quoted_atom" {
+                    raw.trim_matches('\'').to_string()
+                } else {
+                    raw
+                };
+                if !name.is_empty() {
+                    let line = self.line(tok);
+                    calls.push(self.push_call(name, line));
+                }
+            }
+            i += 1;
+        }
+        calls
+    }
+
+    pub(crate) fn erl_leaf_name(&self, tok: u32) -> Option<String> {
+        let k = self.kind(tok);
+        if matches!(
+            k,
+            "atom" | "variable" | "quoted_atom" | "name"
+                | "module" | "export" | "import" | "behaviour" | "include"
+                | "define" | "ifdef" | "endif" | "spec" | "type" | "record"
+                | "true" | "false"
+        ) {
+            let raw = self.text_string(tok);
+            let name = if k == "quoted_atom" {
+                raw.trim_matches('\'').to_string()
+            } else {
+                raw
+            };
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    fn erl_chunk_form(&mut self, chunk: &[u32]) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < chunk.len() {
+            let tok = chunk[i];
+            if let Some(name) = self.erl_leaf_name(tok) {
+                if i + 1 < chunk.len() && self.kind(chunk[i + 1]) == "(" {
+                    let line = self.line(tok);
+                    let idx = self.push_call(name.clone(), line);
+                    parts.push(format!("[\"c\",{idx},0,[0]]"));
+                }
+                let mut f = String::from("[\"n\",");
+                push_string(&mut f, &name);
+                f.push(']');
+                parts.push(f);
+            }
+            i += 1;
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.remove(0),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
+    fn erl_emit_recovered_chunk(&mut self, chunk: &[u32]) {
+        if chunk.is_empty() {
+            return;
+        }
+        let line = self.line(chunk[0]);
+        let mut depth = 0i32;
+        let mut eq_at = None;
+        for (i, &tok) in chunk.iter().enumerate() {
+            match self.kind(tok) {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth = (depth - 1).max(0),
+                "=" | "=:=" if depth == 0 => {
+                    eq_at = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if let Some(pos) = eq_at {
+            let lhs = &chunk[..pos];
+            let rhs = &chunk[pos + 1..];
+            let mut targets: Vec<String> = Vec::new();
+            for &tok in lhs {
+                if let Some(name) = self.erl_leaf_name(tok) {
+                    if !targets.contains(&name) {
+                        targets.push(name);
+                    }
+                }
+            }
+            let rhs_val = self.erl_chunk_form(rhs);
+            if !targets.is_empty() {
+                self.lexer_event(b'a', line, &targets, &rhs_val, false);
+            }
+            let full_val = self.erl_chunk_form(chunk);
+            if full_val != "0" {
+                self.lexer_event(b'x', line, &[], &full_val, false);
+            }
+        } else {
+            let full_val = self.erl_chunk_form(chunk);
+            if full_val != "0" {
+                self.lexer_event(b'x', line, &[], &full_val, false);
+            }
+        }
+    }
+
+    pub(crate) fn erl_recovered_events(&mut self, id: u32) {
+        let mut leaves = Vec::new();
+        self.cs_collect_leaves(id, &mut leaves);
+        let mut chunk: Vec<u32> = Vec::new();
+        let mut depth = 0i32;
+        for tok in leaves {
+            let k = self.kind(tok);
+            match k {
+                "(" | "[" | "{" => {
+                    depth += 1;
+                    chunk.push(tok);
+                }
+                ")" | "]" | "}" => {
+                    depth = (depth - 1).max(0);
+                    chunk.push(tok);
+                }
+                "," | ";" | "." | "->" if depth == 0 => {
+                    self.erl_emit_recovered_chunk(&chunk);
+                    chunk.clear();
+                }
+                _ => {
+                    chunk.push(tok);
+                }
+            }
+        }
+        self.erl_emit_recovered_chunk(&chunk);
+    }
+
     pub(crate) fn cs_has_error(&self, id: u32) -> bool {
         if self.kind(id) == "ERROR" {
             return true;
@@ -4669,6 +4820,10 @@ impl<'a> Walker<'a> {
                 self.cs_recovered_calls(id);
                 self.cs_recovered_events(id);
             }
+            "ERROR" if self.facts.tag == "ERL" => {
+                let _ = self.erl_recovered_calls(id);
+                self.erl_recovered_events(id);
+            }
             "expression_statement" if self.facts.tag == "LUA" => {
                 let children = self.children(id);
                 if let Some(atail) = children.iter().copied().find(|&c| self.kind(c) == "assignment_tail") {
@@ -4826,6 +4981,9 @@ impl<'a> Walker<'a> {
                         self.lexer_event(b'a', line, &targets, &val, false);
                     }
                 }
+            }
+            "import_statement" | "include_statement" if self.facts.tag == "NIM" => {
+                self.nim_import(id);
             }
             "include_statement" if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
                 let line = self.line(id);
@@ -8151,9 +8309,20 @@ impl<'a> Walker<'a> {
             // by commas. Reading only the first left every later call out of the
             // record (`A = f(), B:g().` recorded `f` and neither remote call).
             "body" if self.facts.tag == "ERL" => {
-                for child in self.children(id) {
-                    if self.is_layout(child) || matches!(self.kind(child), "," | ".") {
-                        continue;
+                let kids: Vec<u32> = self.children(id).into_iter().filter(|&c| !self.is_layout(c) && !matches!(self.kind(c), "," | ".")).collect();
+                for (ki, &child) in kids.iter().enumerate() {
+                    if self.kind(child) == "ERROR" {
+                        if let Some(&next) = kids.get(ki + 1) {
+                            if matches!(self.kind(next), "paren_expression" | "call_arguments" | "parameter_group" | "(") {
+                                let mut leaves = Vec::new();
+                                self.cs_collect_leaves(child, &mut leaves);
+                                if let Some(&last_tok) = leaves.iter().rev().find(|&&t| self.erl_leaf_name(t).is_some()) {
+                                    if let Some(nm) = self.erl_leaf_name(last_tok) {
+                                        let _ = self.push_call(nm, self.line(last_tok));
+                                    }
+                                }
+                            }
+                        }
                     }
                     self.statement_node(child, child);
                 }
@@ -8178,18 +8347,50 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            // After a parse error inside an Erlang function body, recovery pops back to `forms`
+            // and parses the next call `foo(Args);` as a `function_head` with `function_name`
+            // and `parameter_group` followed by `ERROR MISSING` for `->` and `body`. When there
+            // is no `->` / `body`, it is a call, not a function clause header.
+            "function_head" if self.facts.tag == "ERL" => {
+                let has_arrow = self.children(id).into_iter().any(|c| matches!(self.kind(c), "->" | "body"));
+                if !has_arrow {
+                    if let (Some(fname), Some(_pg)) = (
+                        self.child_of_kind(id, "function_name"),
+                        self.child_of_kind(id, "parameter_group"),
+                    ) {
+                        let name = self.text_string(fname).trim_matches('\'').to_string();
+                        if !name.is_empty() {
+                            self.push_call(name, self.line(fname));
+                        }
+                    }
+                }
+            }
             "parameter_group" if self.facts.tag == "ERL" => {
+                let pline = self.line(id);
+                let mut parts = Vec::new();
                 if let Some(params) = self.child_of_kind(id, "parameters") {
                     for expr in self.children(params) {
                         if !self.is_layout(expr) && self.kind(expr) != "," {
-                            let _ = self.form(expr);
+                            let v = self.form(expr);
+                            if !v.is_empty() && v != "0" {
+                                parts.push(v);
+                            }
                         }
                     }
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 {
+                        parts.remove(0)
+                    } else {
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', pline, &[], &val, false);
                 }
             }
             "guard" if self.facts.tag == "ERL" => {
                 let gline = self.line(id);
                 let mut first_checked = false;
+                let mut parts = vec!["[\"n\",\"when\"]".to_string()];
                 for child in self.children(id) {
                     if self.kind(child) == "guard_sequence" {
                         for expr in self.children(child) {
@@ -8200,10 +8401,30 @@ impl<'a> Walker<'a> {
                                         self.push_call("when".to_string(), gline);
                                     }
                                 }
-                                let _ = self.form(expr);
+                                let eline = self.line(expr);
+                                let v = self.form(expr);
+                                if !v.is_empty() && v != "0" {
+                                    parts.push(v.clone());
+                                    self.lexer_event(b'x', eline, &[], &v, false);
+                                }
+                                // Erlang guards with `=:=` or `=` can be read by the one-pass
+                                // lexer as assignment events (`Alt =:= alt` -> target `Alt`).
+                                if self.kind(expr) == "comparison" {
+                                    let kids: Vec<u32> = self.children(expr).into_iter().filter(|&c| !self.is_layout(c)).collect();
+                                    if kids.len() >= 3 && matches!(self.kind(kids[1]), "=:=" | "=/=" | "==" | "/=" | "=<") {
+                                        if let Some(lhs_name) = self.leaf_name(kids[0]) {
+                                            let rhs_v = self.form(kids[2]);
+                                            self.lexer_event(b'a', eline, &[lhs_name], &rhs_v, false);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
+                }
+                if parts.len() > 1 {
+                    let val = format!("[\"m\",[{}]]", parts.join(","));
+                    self.lexer_event(b'x', gline, &[], &val, false);
                 }
             }
             // `companion object { … }`: the one-pass lexer files the introducer
