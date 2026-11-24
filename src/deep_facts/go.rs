@@ -3576,7 +3576,12 @@ impl<'a> Walker<'a> {
                 .collect();
             let mut vals: Vec<String> = Vec::new();
             for ec in self.children(el) {
-                if self.is_layout(ec) || self.kind(ec) == "," {
+                let eck = self.kind(ec);
+                if matches!(eck, "nil" | "true" | "false") {
+                    vals.push(format!("[\"n\",\"{eck}\"]"));
+                    continue;
+                }
+                if self.is_layout(ec) || eck == "," {
                     continue;
                 }
                 let f = self.form(ec);
@@ -3589,6 +3594,27 @@ impl<'a> Walker<'a> {
                     format!("[\"t\",[{}]]", vals.join(","))
                 };
                 self.lexer_event(b'a', line, &targets, &val, false);
+                return;
+            }
+        } else if let Some(nl) = namelist {
+            let names: Vec<String> = self
+                .children(nl)
+                .into_iter()
+                .filter_map(|c| self.leaf_name(c))
+                .map(|nm| {
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &nm);
+                    n.push(']');
+                    n
+                })
+                .collect();
+            if !names.is_empty() {
+                let val = if names.len() == 1 {
+                    names.into_iter().next().unwrap()
+                } else {
+                    format!("[\"t\",[{}]]", names.join(","))
+                };
+                self.lexer_event(b'x', line, &[], &val, false);
                 return;
             }
         }
@@ -5010,43 +5036,133 @@ fn dotted_piece(text: &str) -> bool {
             }
             return "0".to_string();
         }
-        if matches!(self.facts.tag.as_str(), "RB" | "CR") && matches!(kind, "true" | "false" | "nil") {
+        if matches!(self.facts.tag.as_str(), "RB" | "CR" | "LUA") && matches!(kind, "true" | "false" | "nil") {
             return format!("[\"n\",\"{kind}\"]");
+        }
+        if self.facts.tag == "LUA"
+            && matches!(
+                kind,
+                "concatenation" | "arithmetic" | "comparison" | "binary_expression" | "unary_expression" | "paren_expression"
+            )
+        {
+            let mut parts = Vec::new();
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if matches!(ck, "nil" | "true" | "false") {
+                    parts.push(format!("[\"n\",\"{ck}\"]"));
+                    continue;
+                }
+                if matches!(ck, "string" | "number") {
+                    parts.push("0".to_string());
+                    continue;
+                }
+                if self.is_layout(c)
+                    || matches!(
+                        ck,
+                        "+" | "-" | "*" | "/" | "//" | "%" | "^" | ".." | "==" | "~=" | "<" | ">" | "<=" | ">=" | "&" | "|" | "~" | "<<" | ">>" | "#" | "and" | "or" | "not" | "(" | ")"
+                    )
+                {
+                    continue;
+                }
+                let v = self.form(c);
+                if !v.is_empty() {
+                    parts.push(v);
+                }
+            }
+            if parts.is_empty() {
+                return "0".to_string();
+            }
+            if parts.len() == 1 {
+                return parts.into_iter().next().unwrap();
+            }
+            return format!("[\"m\",[{}]]", parts.join(","));
+        }
+        if self.facts.tag == "LUA" && kind == "index" {
+            let mut parts = Vec::new();
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if ck == "index_expression" {
+                    for ic in self.children(c) {
+                        let ick = self.kind(ic);
+                        if matches!(ick, "nil" | "true" | "false") {
+                            parts.push(format!("[\"n\",\"{ick}\"]"));
+                        } else if !self.is_layout(ic) && !matches!(ick, "[" | "]") {
+                            let f = self.form(ic);
+                            if !f.is_empty() && f != "0" {
+                                parts.push(f);
+                            }
+                        }
+                    }
+                } else if !self.is_layout(c) {
+                    let f = self.form(c);
+                    if !f.is_empty() && f != "0" {
+                        parts.push(f);
+                    }
+                }
+            }
+            if parts.is_empty() {
+                return "0".to_string();
+            }
+            if parts.len() == 1 {
+                return parts.into_iter().next().unwrap();
+            }
+            return format!("[\"m\",[{}]]", parts.join(","));
         }
         if self.facts.tag == "LUA" && kind == "table_constructor" {
             let mut parts = Vec::new();
             for child in self.children(id) {
                 let ck = self.kind(child);
+                if matches!(ck, "nil" | "true" | "false") {
+                    parts.push(format!("[\"n\",\"{ck}\"]"));
+                    continue;
+                }
+                if matches!(ck, "string" | "number") {
+                    parts.push("0".to_string());
+                    continue;
+                }
                 if self.is_layout(child) || matches!(ck, "{" | "}" | "," | ";") {
                     continue;
                 }
                 if ck == "named_field" {
                     let fch = self.children(child);
                     let key = fch.first().map(|&n| self.text_string(n)).unwrap_or_default();
-                    let rhs = fch.iter().rev().copied().find(|&n| !self.is_layout(n) && Some(n) != fch.first().copied());
-                    let val = rhs.map(|n| self.form(n)).filter(|v| !v.is_empty()).unwrap_or_else(|| "0".to_string());
+                    let rhs = fch.iter().rev().copied().find(|&n| {
+                        let nk = self.kind(n);
+                        Some(n) != fch.first().copied() && (matches!(nk, "nil" | "true" | "false" | "string" | "number") || (!self.is_layout(n) && nk != "="))
+                    });
+                    let val = rhs
+                        .map(|n| {
+                            let nk = self.kind(n);
+                            if matches!(nk, "nil" | "true" | "false") {
+                                format!("[\"n\",\"{nk}\"]")
+                            } else if matches!(nk, "string" | "number") {
+                                "0".to_string()
+                            } else {
+                                let f = self.form(n);
+                                if f.is_empty() { "0".to_string() } else { f }
+                            }
+                        })
+                        .unwrap_or_else(|| "0".to_string());
                     if !key.is_empty() {
                         let mut kf = String::from("[\"n\",");
                         push_string(&mut kf, &key);
                         kf.push(']');
-                        if val == "0" {
-                            parts.push(kf);
-                        } else {
-                            parts.push(format!("[\"m\",[{kf},{val}]]"));
-                        }
-                    } else if val != "0" {
+                        parts.push(format!("[\"m\",[{}]]", format!("{kf},{val}")));
+                    } else {
                         parts.push(val);
                     }
                 } else if ck == "keyed_field" {
                     let fch = self.children(child);
                     let mut fparts = Vec::new();
                     for fc in fch {
-                        if self.is_layout(fc) || matches!(self.kind(fc), "=" | "[" | "]") {
-                            continue;
-                        }
-                        let v = self.form(fc);
-                        if !v.is_empty() && v != "0" {
-                            fparts.push(v);
+                        let fck = self.kind(fc);
+                        if matches!(fck, "nil" | "true" | "false") {
+                            fparts.push(format!("[\"n\",\"{fck}\"]"));
+                        } else if matches!(fck, "string" | "number") {
+                            fparts.push("0".to_string());
+                        } else if !self.is_layout(fc) && !matches!(fck, "=" | "[" | "]") {
+                            let v = self.form(fc);
+                            fparts.push(if v.is_empty() { "0".to_string() } else { v });
                         }
                     }
                     if fparts.len() == 1 {
@@ -5056,17 +5172,13 @@ fn dotted_piece(text: &str) -> bool {
                     }
                 } else {
                     let v = self.form(child);
-                    if !v.is_empty() && v != "0" {
-                        parts.push(v);
-                    }
+                    parts.push(if v.is_empty() { "0".to_string() } else { v });
                 }
             }
             return if parts.is_empty() {
                 "0".to_string()
-            } else if parts.len() == 1 {
-                parts.remove(0)
             } else {
-                format!("[\"t\",[{}]]", parts.join(","))
+                format!("[\"m\",[{}]]", parts.join(","))
             };
         }
         if matches!(
@@ -8149,6 +8261,36 @@ fn dotted_piece(text: &str) -> bool {
     }
 
     pub(crate) fn arguments(&mut self, list: u32) -> String {
+        if self.facts.tag == "LUA" && self.kind(list) == "call_arguments" {
+            self.delim_depth += 1;
+            let mut items: Vec<String> = Vec::new();
+            let ch = self.children(list);
+            if let Some(&first_c) = ch.first() {
+                let fk = self.kind(first_c);
+                if fk == "paren_arguments" {
+                    if let Some(el) = self.children(first_c).into_iter().find(|&c| self.kind(c) == "expression_list") {
+                        for ec in self.children(el) {
+                            let eck = self.kind(ec);
+                            if matches!(eck, "nil" | "true" | "false") {
+                                items.push(format!("[\"n\",\"{eck}\"]"));
+                            } else if matches!(eck, "string" | "number" | "...") {
+                                items.push("0".to_string());
+                            } else if !self.is_layout(ec) && eck != "," {
+                                let f = self.form(ec);
+                                items.push(if f.is_empty() { "0".to_string() } else { f });
+                            }
+                        }
+                    }
+                } else if fk == "string" {
+                    items.push("0".to_string());
+                } else {
+                    let f = self.form(first_c);
+                    items.push(if f.is_empty() { "0".to_string() } else { f });
+                }
+            }
+            self.delim_depth -= 1;
+            return format!("[{}]", items.join(","));
+        }
         self.delim_depth += 1;
         let mut out = "[".to_string();
         let mut first = true;
@@ -8352,7 +8494,7 @@ fn dotted_piece(text: &str) -> bool {
                     format!("{base}.{name}")
                 }
             }
-            "index" if self.facts.tag == "PAS" => {
+            "index" if matches!(self.facts.tag.as_str(), "PAS" | "LUA") => {
                 self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default()
             }
             // `.macOS("10.10")` — an implicit member: the name is the member,
