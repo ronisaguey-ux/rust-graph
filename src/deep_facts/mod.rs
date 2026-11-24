@@ -522,8 +522,8 @@ const PAS_CALLS: &[&str] = &["call"];
 const PAS_IMPORTS: &[&str] = &["uses_clause"];
 
 const SH_DEFS: &[Def] = &[
-    Def { kind: "function_definition", name: &["word", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
-    Def { kind: "paren_function", name: &["word", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "function_definition", name: &["function_name", "word", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
+    Def { kind: "paren_function", name: &["function_name", "word", "identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: false },
 ];
 const SH_CALLS: &[&str] = &["simple_command"];
 
@@ -2431,7 +2431,11 @@ impl<'a> Walker<'a> {
 
     fn tcl_var_name(s: &str) -> Option<String> {
         let rest = s.strip_prefix('$')?;
-        let rest = rest.strip_prefix('{').and_then(|r| r.strip_suffix('}')).unwrap_or(rest);
+        let rest = if let Some(after) = rest.strip_prefix('{') {
+            after.split('}').next().unwrap_or(after)
+        } else {
+            rest
+        };
         let rest = rest.trim_start_matches("::");
         let base = rest.split('(').next().unwrap_or(rest);
         let name: String = base.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':').collect();
@@ -2548,7 +2552,7 @@ impl<'a> Walker<'a> {
                     i += 1;
                 }
             } else {
-                while i < n && !matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n' | b';') {
+                while i < n && !matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n' | b';' | b'[') {
                     if bytes[i] == b'\\' && i + 1 < n {
                         if bytes[i + 1] == b'\n' {
                             break;
@@ -2607,7 +2611,35 @@ impl<'a> Walker<'a> {
             if w.starts_with('{') && w.ends_with('}') && w.len() >= 2 {
                 let inner = &w[1..w.len() - 1];
                 self.tcl_scan_script(inner, *wline, depth + 1);
-                word_forms.push((*wline, None, "0".to_string(), false));
+                let bform = if !inner.contains('\n') {
+                    let bsegs: Vec<String> = inner
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    if bsegs.is_empty() {
+                        "0".to_string()
+                    } else if bsegs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, &bsegs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = bsegs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    }
+                } else {
+                    "0".to_string()
+                };
+                word_forms.push((*wline, None, bform, false));
             } else if w.starts_with('[') && w.ends_with(']') && w.len() >= 2 {
                 let inner = &w[1..w.len() - 1];
                 let sub_cmds = Self::tcl_tokenize_commands(inner, *wline);
@@ -2695,13 +2727,41 @@ impl<'a> Walker<'a> {
                 };
                 word_forms.push((*wline, None, qform, true));
             } else if let Some(vname) = Self::tcl_var_name(w) {
-                if w.contains('(') {
-                    let _ = self.push_call(vname.clone(), *wline);
+                if let Some((_, rest)) = w.split_once('(') {
+                    let cid = self.push_call(vname.clone(), *wline);
+                    let inner = rest.trim_end_matches(')');
+                    let isegs: Vec<String> = inner
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    let arg_form = if isegs.is_empty() {
+                        "0".to_string()
+                    } else if isegs.len() == 1 {
+                        let mut an = String::from("[\"n\",");
+                        push_string(&mut an, &isegs[0]);
+                        an.push(']');
+                        an
+                    } else {
+                        let parts: Vec<String> = isegs
+                            .iter()
+                            .map(|s| {
+                                let mut an = String::from("[\"n\",");
+                                push_string(&mut an, s);
+                                an.push(']');
+                                an
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    let form = format!("[\"c\",{cid},0,[{arg_form}]]");
+                    word_forms.push((*wline, Some(vname), form, true));
+                } else {
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &vname);
+                    n.push(']');
+                    word_forms.push((*wline, Some(vname), n, true));
                 }
-                let mut n = String::from("[\"n\",");
-                push_string(&mut n, &vname);
-                n.push(']');
-                word_forms.push((*wline, Some(vname), n, true));
             } else if w.starts_with("::") {
                 let clean = Self::tcl_clean_name(w);
                 if Self::tcl_is_ident(&clean) {
@@ -2782,7 +2842,16 @@ impl<'a> Walker<'a> {
                             .collect();
                         format!("[\"m\",[{}]]", parts.join(","))
                     };
-                    if Self::tcl_is_ident(&clean) {
+                    const TCL_NOISE: &[&str] = &[
+                        "await", "yield", "new", "not", "typeof", "delete", "void", "throw", "raise", "async",
+                        "lambda", "in", "is", "and", "or", "if", "else", "for", "of", "as", "then", "do",
+                        "instanceof", "sizeof", "return", "my", "local", "let", "var", "const", "final",
+                        "mut", "ref", "unsafe", "defer", "go", "our", "pub",
+                    ];
+                    if !is_flag && TCL_NOISE.contains(&clean.as_str()) {
+                        // Reference lexer skips NOISE words and does not trigger juxtaposed calls on preceding words
+                        word_forms.push((*wline, None, "0".to_string(), false));
+                    } else if Self::tcl_is_ident(&clean) {
                         // A -flag starts with '-', which is Op('-') so it does NOT trigger a call on the preceding word
                         word_forms.push((*wline, Some(clean), seg_form, !is_flag));
                     } else {
@@ -2796,11 +2865,11 @@ impl<'a> Walker<'a> {
         let mut acc = String::new();
         for idx in (0..word_forms.len()).rev() {
             let (wline, ref ident_opt, ref form_str, _) = word_forms[idx];
-            let next_is_val = idx + 1 < word_forms.len() && word_forms[idx + 1].3;
+            let next_is_val = idx + 1 < word_forms.len() && word_forms[idx + 1].3 && word_forms[idx + 1].0 == wline;
             if acc.is_empty() {
                 acc = form_str.clone();
             } else if let Some(cname) = ident_opt {
-                if wline == cmd_line && next_is_val {
+                if next_is_val {
                     let cid = self.push_call(cname.clone(), wline);
                     acc = format!("[\"c\",{cid},0,[{acc}]]");
                 } else {
@@ -2819,8 +2888,16 @@ impl<'a> Walker<'a> {
         }
         let cmds = Self::tcl_tokenize_commands(text, start_line);
         for (cline, words) in cmds {
-            let val = self.tcl_eval_words(&words, cline, depth);
-            if !val.is_empty() && val != "0" {
+            let is_ret = words.first().is_some_and(|w| w.1 == "return");
+            let val = if is_ret && words.len() > 1 {
+                self.tcl_eval_words(&words[1..], cline, depth)
+            } else {
+                self.tcl_eval_words(&words, cline, depth)
+            };
+            if is_ret {
+                let rv = if val.is_empty() { "0".to_string() } else { val };
+                self.lexer_event(b'r', cline, &[], &rv, false);
+            } else if !val.is_empty() && val != "0" {
                 self.lexer_event(b'x', cline, &[], &val, false);
             }
         }
@@ -2872,8 +2949,16 @@ impl<'a> Walker<'a> {
             }
             words.push((self.line(c), self.text_string(c)));
         }
-        let val = self.tcl_eval_words(&words, line, 0);
-        if !val.is_empty() && val != "0" {
+        let is_ret = words.first().is_some_and(|w| w.1 == "return");
+        let val = if is_ret && words.len() > 1 {
+            self.tcl_eval_words(&words[1..], line, 0)
+        } else {
+            self.tcl_eval_words(&words, line, 0)
+        };
+        if is_ret {
+            let rv = if val.is_empty() { "0".to_string() } else { val };
+            self.lexer_event(b'r', line, &[], &rv, false);
+        } else if !val.is_empty() && val != "0" {
             self.lexer_event(b'x', line, &[], &val, false);
         }
     }
@@ -4603,15 +4688,96 @@ impl<'a> Walker<'a> {
                     self.lexer_event(b'x', line, &[], &val, false);
                 }
             }
+            "case_word" | "test_expression" | "for_clause" if self.facts.tag == "SH" => {
+                let line = self.line(id);
+                let raw = if kind == "for_clause" {
+                    // Only take header up to "do"
+                    let mut h = String::new();
+                    for ch in self.children(id) {
+                        if self.kind(ch) == "do" {
+                            break;
+                        }
+                        h.push(' ');
+                        h.push_str(&self.text_string(ch));
+                    }
+                    h
+                } else {
+                    self.text_string(id)
+                };
+                let segs: Vec<&str> = raw
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                    .map(|s| s.trim_start_matches('-'))
+                    .filter(|s| {
+                        !s.is_empty()
+                            && !matches!(*s, "for" | "select" | "in" | "do" | "done")
+                            && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    })
+                    .collect();
+                if !segs.is_empty() {
+                    let inner = if segs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, segs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = segs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    let val = if kind == "test_expression" {
+                        format!("[\"t\",[[\"t\",[{inner}]]]]")
+                    } else {
+                        inner
+                    };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
             "fi" | "done" | "esac" | "then" | "else" | "do" if self.facts.tag == "SH" => {
                 self.lexer_event(b'x', self.line(id), &[], &format!("[\"n\",\"{kind}\"]"), false);
             }
             "simple_command" if self.facts.tag == "SH" => {
                 let children = self.children(id);
                 let line = self.line(id);
-                // Tuple: (cline, ident_opt, form_str, is_value_token)
+                // Helper closure to extract Bash identifier segments (preserving internal '-')
+                let sh_segs = |text: &str| -> String {
+                    let segs: Vec<&str> = text
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                        .map(|s| s.trim_start_matches('-'))
+                        .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                        .collect();
+                    if segs.is_empty() {
+                        "0".to_string()
+                    } else if segs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, segs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = segs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    }
+                };
+
+                // Check if this simple_command is a pure assignment (`VAR=val`, `VAR=(...)`, `emoji[k]=v`)
                 let mut items: Vec<(u32, Option<String>, String, bool)> = Vec::new();
                 let mut raw_words: Vec<String> = Vec::new();
+                let mut pending_assign: Option<(u32, String, Vec<String>)> = None;
+
                 for c in children {
                     let ck = self.kind(c);
                     let cline = self.line(c);
@@ -4622,23 +4788,40 @@ impl<'a> Walker<'a> {
                     if t.is_empty() {
                         continue;
                     }
-                    if ck == "assignment_word" {
+                    if pending_assign.is_none()
+                        && raw_words.is_empty()
+                        && (ck == "assignment_word"
+                            || (ck == "word"
+                                && t.contains('=')
+                                && t.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')))
+                    {
                         if let Some((lhs_raw, rhs_raw)) = t.split_once('=') {
-                            let lhs = lhs_raw.trim_end_matches('+').trim().to_string();
+                            let lhs_base = lhs_raw.split('[').next().unwrap_or(lhs_raw);
+                            let lhs = lhs_base.trim_end_matches('+').trim().to_string();
                             if !lhs.is_empty() {
+                                let mut rhs_parts = Vec::new();
                                 let rhs_t = rhs_raw.trim();
-                                let rhs_form = if let Some(vn) = Self::tcl_var_name(rhs_t.trim_matches(|ch| ch == '"' || ch == '\'')) {
-                                    let mut n = String::from("[\"n\",");
-                                    push_string(&mut n, &vn);
-                                    n.push(']');
-                                    n
-                                } else {
-                                    "0".to_string()
-                                };
-                                self.lexer_event(b'a', cline, &[lhs], &rhs_form, false);
+                                if !rhs_t.is_empty() && !rhs_t.starts_with("$'") {
+                                    let f = sh_segs(rhs_t);
+                                    if f != "0" {
+                                        rhs_parts.push(f);
+                                    }
+                                }
+                                pending_assign = Some((cline, lhs, rhs_parts));
+                                continue;
                             }
                         }
-                        continue;
+                    }
+                    if let Some((aline, ref _lhs, ref mut rhs_parts)) = pending_assign {
+                        if cline == aline && !t.starts_with("$'") {
+                            let f = sh_segs(&t);
+                            if matches!(ck, "command_substitution" | "backtick_substitution") {
+                                rhs_parts.push(format!("[\"c\",0,0,[{f}]]"));
+                            } else if f != "0" {
+                                rhs_parts.push(f);
+                            }
+                            continue;
+                        }
                     }
                     raw_words.push(t.clone());
                     if matches!(ck, "variable" | "parameter_expansion") {
@@ -4681,43 +4864,45 @@ impl<'a> Walker<'a> {
                         };
                         items.push((cline, None, qform, true));
                     } else if matches!(ck, "command_substitution" | "backtick_substitution" | "process_substitution" | "arithmetic") {
-                        items.push((cline, None, "0".to_string(), false));
+                        let f = sh_segs(&t);
+                        let cf = if matches!(ck, "command_substitution" | "backtick_substitution") {
+                            format!("[\"c\",0,0,[{f}]]")
+                        } else {
+                            f
+                        };
+                        items.push((cline, None, cf, false));
                     } else {
                         let is_flag = t.starts_with('-') && t.len() > 1 && t.as_bytes()[1].is_ascii_alphabetic();
-                        let tail = t.rsplit('-').next().unwrap_or(&t);
+                        let clean = t.trim_start_matches('-');
                         let is_ident = ck != "redirect"
-                            && tail.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-                            && tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-                        let segs: Vec<&str> = t
-                            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                            .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
-                            .collect();
-                        let seg_form = if segs.is_empty() {
-                            "0".to_string()
-                        } else if segs.len() == 1 {
-                            let mut n = String::from("[\"n\",");
-                            push_string(&mut n, segs[0]);
-                            n.push(']');
-                            n
-                        } else {
-                            let parts: Vec<String> = segs
-                                .iter()
-                                .map(|s| {
-                                    let mut n = String::from("[\"n\",");
-                                    push_string(&mut n, s);
-                                    n.push(']');
-                                    n
-                                })
-                                .collect();
-                            format!("[\"m\",[{}]]", parts.join(","))
-                        };
-                        if is_ident {
-                            items.push((cline, Some(tail.to_string()), seg_form, !is_flag));
+                            && clean.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && clean.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+                        let seg_form = sh_segs(&t);
+                        const SH_NOISE: &[&str] = &[
+                            "await", "yield", "new", "not", "typeof", "delete", "void", "throw", "raise", "async",
+                            "lambda", "in", "is", "and", "or", "if", "else", "for", "of", "as", "then", "do",
+                            "instanceof", "sizeof", "return", "my", "local", "let", "var", "const", "final",
+                            "mut", "ref", "unsafe", "defer", "go", "our", "pub",
+                        ];
+                        if !is_flag && SH_NOISE.contains(&clean) {
+                            items.push((cline, None, "0".to_string(), false));
+                        } else if is_ident {
+                            items.push((cline, Some(clean.to_string()), seg_form, !is_flag));
                         } else {
                             let is_num = ck != "redirect" && t.bytes().next().is_some_and(|b| b.is_ascii_digit());
                             items.push((cline, None, seg_form, is_num));
                         }
                     }
+                }
+                if let Some((aline, lhs, mut rhs_parts)) = pending_assign {
+                    let rhs_form = if rhs_parts.is_empty() {
+                        "0".to_string()
+                    } else if rhs_parts.len() == 1 {
+                        rhs_parts.remove(0)
+                    } else {
+                        format!("[\"m\",[{}]]", rhs_parts.join(","))
+                    };
+                    self.lexer_event(b'a', aline, &[lhs], &rhs_form, false);
                 }
                 if let Some(first) = raw_words.first() {
                     if matches!(first.as_str(), "source" | ".") {
@@ -4743,15 +4928,12 @@ impl<'a> Walker<'a> {
                         if acc.is_empty() {
                             acc = form_str.clone();
                         } else if let Some(cname) = ident_opt {
-                            if idx == 0 {
+                            if next_is_val {
                                 let cid = self.push_call(cname.clone(), wline);
-                                if next_is_val {
-                                    acc = format!("[\"c\",{cid},0,[{acc}]]");
-                                } else {
-                                    acc = format!("[\"m\",[{form_str},{acc}]]");
-                                }
-                            } else if next_is_val {
-                                acc = format!("[\"c\",0,0,[{acc}]]");
+                                acc = format!("[\"c\",{cid},0,[{acc}]]");
+                            } else if idx == 0 {
+                                let _ = self.push_call(cname.clone(), wline);
+                                acc = format!("[\"m\",[{form_str},{acc}]]");
                             } else {
                                 acc = format!("[\"m\",[{form_str},{acc}]]");
                             }
@@ -4764,9 +4946,48 @@ impl<'a> Walker<'a> {
                             self.push_call(cname.clone(), items[0].0);
                         }
                     }
-                    if !acc.is_empty() && acc != "0" {
+                    if raw_words.first().is_some_and(|w| w == "return") {
+                        self.lexer_event(b'r', line, &[], "0", false);
+                    } else if !acc.is_empty() && acc != "0" {
                         self.lexer_event(b'x', line, &[], &acc, false);
                     }
+                }
+            }
+            "type_signature" | "function_rhs" if self.facts.tag == "HS" => {
+                let line = self.line(id);
+                let raw = self.text_string(id);
+                let segs: Vec<&str> = raw
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                    .map(|s| s.trim_matches('.'))
+                    .filter(|s| {
+                        !s.is_empty()
+                            && !matches!(*s, "let" | "in" | "where" | "do" | "of" | "case" | "if" | "then" | "else" | "forall")
+                            && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    })
+                    .collect();
+                let val = if segs.is_empty() {
+                    "0".to_string()
+                } else if segs.len() == 1 {
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, segs[0]);
+                    n.push(']');
+                    n
+                } else {
+                    let parts: Vec<String> = segs
+                        .iter()
+                        .map(|s| {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, s);
+                            n.push(']');
+                            n
+                        })
+                        .collect();
+                    format!("[\"m\",[{}]]", parts.join(","))
+                };
+                if kind == "function_rhs" {
+                    self.lexer_event(b'r', line, &[], &val, false);
+                } else if val != "0" {
+                    self.lexer_event(b'x', line, &[], &val, false);
                 }
             }
             "builtin_call" if self.facts.tag == "ZIG" => {
