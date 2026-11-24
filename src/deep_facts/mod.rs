@@ -3263,15 +3263,10 @@ impl<'a> Walker<'a> {
             }
             "expression_statement" => self.expression_statement(id),
             "command_call" if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
-                let children = self.children(id);
-                if let Some(&first) = children.first() {
-                    let name = self.text_string(first);
-                    if !name.is_empty() && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
-                        let line = self.line(id);
-                        self.push_call(name, line);
-                    }
+                let val = self.form(id);
+                if !val.is_empty() && val != "0" {
+                    self.lexer_event(b'x', self.line(id), &[], &val, false);
                 }
-                self.expression_statement(id);
             }
             "include_statement" if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
                 let line = self.line(id);
@@ -3383,7 +3378,7 @@ impl<'a> Walker<'a> {
                 let line = self.line(id);
                 self.push_call("mapping".to_string(), line);
             }
-            "using_directive" | "event_definition" | "error_definition" if self.facts.tag == "SOL" => {
+            "using_directive" | "event_definition" | "error_definition" | "struct_field" if self.facts.tag == "SOL" => {
                 self.decl_statement(id);
             }
             "returns_clause" if self.facts.tag == "SOL" => {
@@ -3393,6 +3388,44 @@ impl<'a> Walker<'a> {
             "state_variable" if self.facts.tag == "SOL" => {
                 if self.children(id).iter().any(|&c| self.kind(c) == "=") {
                     self.expression_statement(id);
+                } else {
+                    self.decl_statement(id);
+                }
+            }
+            "library_directive" | "part_directive" | "export_directive" if self.facts.tag == "DART" => {
+                self.decl_statement(id);
+            }
+            "namespace_declaration" if self.facts.tag == "PHP" => {
+                self.decl_statement(id);
+            }
+            "property_declaration" | "const_declaration" if self.facts.tag == "PHP" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    let target = children[..eq]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&c| matches!(self.kind(c), "variable_name" | "name" | "identifier"))
+                        .map(|c| self.text_string(c).trim_start_matches('$').to_string())
+                        .filter(|s| !s.is_empty());
+                    if let Some(name) = target {
+                        let rhs = children[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                        let val = rhs
+                            .map(|c| {
+                                let k = self.kind(c);
+                                if matches!(k, "true" | "false" | "null") {
+                                    format!("[\"n\",\"{k}\"]")
+                                } else {
+                                    let f = self.form(c);
+                                    if f.is_empty() { "0".to_string() } else { f }
+                                }
+                            })
+                            .unwrap_or_else(|| "0".to_string());
+                        self.lexer_event(b'a', line, &[name], &val, false);
+                    } else {
+                        self.decl_statement(id);
+                    }
                 } else {
                     self.decl_statement(id);
                 }
@@ -3410,19 +3443,13 @@ impl<'a> Walker<'a> {
             "call_command" if self.facts.tag == "TCL" => {
                 let children = self.children(id);
                 let line = self.line(id);
-                for (idx, &ch) in children.iter().enumerate() {
-                    let ck = self.kind(ch);
-                    if matches!(ck, "command_end" | "braced" | "quoted") {
-                        continue;
-                    }
+                for (idx, &ch) in children.iter().take(2).enumerate() {
                     let name = self.text_string(ch);
                     let clean = name.trim_start_matches("::");
-                    if !clean.is_empty()
-                        && clean.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-                        && clean.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':')
-                        && (idx == 0 || idx + 1 < children.len())
-                    {
-                        self.push_call(clean.replace("::", "."), line);
+                    if !clean.is_empty() && clean.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                        if idx == 0 || matches!(children.first().map(|&c| self.text_string(c)).as_deref(), Some("package" | "namespace" | "interp" | "string" | "dict" | "array" | "file" | "info" | "clock" | "chan" | "binary" | "encoding" | "oo::define" | "oo::objdefine")) {
+                            self.push_call(clean.to_string(), line);
+                        }
                     }
                 }
             }
