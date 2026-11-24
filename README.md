@@ -188,6 +188,48 @@ Adding a language means adding rows to one table (`src/langs.rs`) — extension,
 tag, keyword sets, comment style, definition patterns. There is no grammar to
 generate and no build step.
 
+## Corpus progress
+
+The engine is measured on a 45-language corpus of **91,953 files**. A file counts
+as a *fallback* when the deep reader cannot pair its events and the lexer's
+record is kept instead; the goal is every language under **120 files with a
+fallback**.
+
+**28 of 45 languages are under 120.** The seventeen still over, measured
+2026-11-24 with `RG_LOSSES=1 RG_AUDIT=1`:
+
+| Language | Files with fallback | Loss rows |
+|:--|--:|--:|
+| Ruby | 1,143 | 1,485 |
+| Erlang | 741 | 893 |
+| Tcl | 684 | 684 |
+| PHP | 675 | 1,330 |
+| Dart | 668 | 1,081 |
+| R | 622 | 7,194 |
+| Lua | 551 | 795 |
+| C# | 529 | 869 |
+| Pascal | 525 | 2,860 |
+| Haskell | 507 | 508 |
+| Shell | 436 | 468 |
+| Go | 432 | 514 |
+| AWK | 284 | 883 |
+| PowerShell | 262 | 263 |
+| Objective-C | 246 | 358 |
+| Zig | 198 | 9,159 |
+| Solidity | 139 | 184 |
+
+The other twenty-eight are already under the line: Crystal 118, F# 114, Nim 112,
+Clojure 106, Java 93, Kotlin 84, Scala 82, Groovy 80, COBOL 70, Swift 68,
+Elixir 63, Fortran 45, SQL 40, D 28, TypeScript 28, Rust 26, JavaScript 23,
+Python 23, OCaml 20, C 16, VB.NET 12, Perl 9, C++ 7, Julia 7, Visual Basic 1,
+Assembly 0, Elm 0, MATLAB 0.
+
+Across the campaign so far, files with a fallback fell from **12,946 to 9,917**
+— a reduction of 3,029 — with the last round alone cutting 912 files and 6,411
+loss rows across three languages. Two numbers matter when judging a change:
+files only fall when a file loses its *last* loss, so the row count is the honest
+progress bar, and a change that raises rows is a regression even if files fall.
+
 ## How it works
 
 ```
