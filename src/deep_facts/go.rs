@@ -1993,7 +1993,7 @@ impl<'a> Walker<'a> {
                         walk.push(first);
                     }
                 }
-                "member_expression" | "attribute" | "member" | "safe_member" | "member_access_expression" | "scoped_property_access_expression" => {
+                "member_expression" | "attribute" | "member" | "safe_member" | "member_access_expression" | "scoped_property_access_expression" | "instance_variable" | "class_variable" | "global_variable" | "absolute_constant" => {
                     let path = self.path_of(node);
                     if !path.is_empty() {
                         out.push(path);
@@ -2615,7 +2615,7 @@ impl<'a> Walker<'a> {
 
     pub(crate) fn assignment_targets(&self, id: u32) -> Vec<String> {
         match self.kind(id) {
-            "subscript" | "subscript_expression" | "index_expression" | "element_access" => {
+            "subscript" | "subscript_expression" | "index_expression" | "element_access" | "element_reference" => {
                 let base = self.children(id).first().copied().unwrap_or(id);
                 self.assignment_targets(base)
             }
@@ -3246,7 +3246,19 @@ impl<'a> Walker<'a> {
             // scala corpus lost every import.
             "import_declaration" if self.facts.tag == "HS" => self.hs_import(id),
             "import_declaration" if self.kinds.family == Family::Plain => self.scala_import(id),
-            "import_directive" | "require_statement" | "use_declaration" | "trait_use_declaration" | "include_expression" | "open_declaration" | "using_statement" | "uses_clause" => {
+            "uses_clause" if self.facts.tag == "PAS" => {
+                for child in self.children(id) {
+                    if self.kind(child) == "dotted_name" {
+                        let module = self.text_string(child).to_ascii_lowercase();
+                        if !module.is_empty() {
+                            let alias = module.rsplit('.').next().unwrap_or(&module).to_string();
+                            let line = self.line(child);
+                            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_STAR, ..Import::default() });
+                        }
+                    }
+                }
+            }
+            "import_directive" | "require_statement" | "use_declaration" | "trait_use_declaration" | "include_expression" | "open_declaration" | "using_statement" => {
                 self.generic_path_import(id);
             }
             "import_statement" | "import_from_statement" => {
@@ -4331,13 +4343,18 @@ fn dotted_piece(text: &str) -> bool {
             // disagreed with the one-pass lexer's `start_link` and 1,727 rows of
             // the erlang corpus stopped there.
             if self.facts.tag == "ERL" && kind == "remote_call" {
+                if let Some(&recv) = self.children(id).first() {
+                    if !matches!(self.kind(recv), "atom" | "variable" | "quoted_atom" | "macro_reference") {
+                        let _ = self.form(recv);
+                    }
+                }
                 if let Some(module_call) = self.child_of_kind(id, "module_call") {
                     let children = self.children(module_call);
                     let name = children
                         .iter()
                         .copied()
-                        .find(|&child| self.kind(child) == "atom")
-                        .map(|child| self.text_string(child))
+                        .find(|&child| matches!(self.kind(child), "atom" | "variable" | "quoted_atom" | "type" | "module" | "export" | "import" | "record" | "include" | "define" | "spec" | "behaviour"))
+                        .map(|child| self.text_string(child).trim_matches('\'').to_string())
                         .unwrap_or_default();
                     if !name.is_empty() {
                         let args = children
@@ -4468,7 +4485,323 @@ fn dotted_piece(text: &str) -> bool {
             out.push(']');
             return out;
         }
-                if matches!(self.facts.tag.as_str(), "RB" | "CR") && matches!(kind, "true" | "false" | "nil") {
+        if self.facts.tag == "PAS"
+            && matches!(
+                kind,
+                "additive" | "multiplicative" | "logical" | "comparison" | "unary"
+                    | "index" | "member" | "dereference" | "parenthesized_expression"
+            )
+        {
+            let mut parts = Vec::new();
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if self.is_layout(c) && !matches!(ck, "string" | "number") {
+                    continue;
+                }
+                if matches!(ck, "+" | "-" | "*" | "/" | "div" | "mod" | "shl" | "shr" | "and" | "or" | "not" | "=" | "<>" | "<" | ">" | "<=" | ">=" | "in" | "@" | "^" | "." | "(" | ")") {
+                    continue;
+                }
+                let v = if matches!(ck, "string" | "number") {
+                    "0".to_string()
+                } else {
+                    self.form(c)
+                };
+                if !v.is_empty() {
+                    parts.push(v);
+                }
+            }
+            if parts.is_empty() {
+                return "0".to_string();
+            }
+            if parts.len() == 1 {
+                return parts.into_iter().next().unwrap();
+            }
+            return format!("[\"m\",[{}]]", parts.join(","));
+        }
+        if self.facts.tag == "ERL" && kind == "unary" {
+            let children = self.children(id);
+            let mut saw_catch = false;
+            for c in children {
+                if self.is_layout(c) { continue; }
+                let ck = self.kind(c);
+                if ck == "catch" {
+                    saw_catch = true;
+                } else if saw_catch {
+                    if ck == "paren_expression" {
+                        let line = self.line(id);
+                        self.push_call("catch".to_string(), line);
+                    }
+                    break;
+                }
+            }
+        }
+        if self.facts.tag == "ERL" && kind == "bitwise" {
+            let children = self.children(id);
+            let mut prev_op: Option<(String, u32)> = None;
+            for c in children {
+                if self.is_layout(c) { continue; }
+                let ck = self.kind(c);
+                if matches!(ck, "bor" | "band" | "bxor" | "bsl" | "bsr") {
+                    prev_op = Some((ck.to_string(), self.line(c)));
+                } else if let Some((op, oline)) = prev_op.take() {
+                    if ck == "paren_expression" {
+                        self.push_call(op, oline);
+                    }
+                }
+            }
+        }
+        if self.facts.tag == "ERL" && kind == "case_expression" {
+            let children = self.children(id);
+            let first_expr = children
+                .iter()
+                .copied()
+                .find(|&c| !self.is_layout(c) && self.kind(c) != "case");
+            if let Some(expr) = first_expr {
+                if self.kind(expr) == "paren_expression" {
+                    let line = self.line(id);
+                    self.push_call("case".to_string(), line);
+                }
+            }
+        }
+        if self.facts.tag == "ERL"
+            && matches!(
+                kind,
+                "tuple_literal" | "list_literal" | "list_item" | "list_tail" | "list_comp_tail"
+                    | "qualifier" | "case_expression" | "case_clauses" | "case_clause"
+                    | "if_expression" | "begin_expression" | "receive_expression"
+                    | "after_clause" | "try_expression" | "catch_clause" | "catch_clauses" | "catch_item" | "body"
+                    | "map_literal" | "map_body" | "map_field" | "map_assoc"
+                    | "anonymous_clauses" | "anonymous_clause" | "paren_expression"
+                    | "send_expression" | "logical_expression" | "comparison" | "list_operation"
+                    | "arithmetic" | "bitwise" | "match_expression" | "record_access" | "unary" | "argument"
+            )
+        {
+            let mut parts = Vec::new();
+            for c in self.children(id) {
+                if !self.is_layout(c) {
+                    let v = self.form(c);
+                    if !v.is_empty() && v != "0" {
+                        parts.push(v);
+                    }
+                }
+            }
+            if parts.is_empty() {
+                return "0".to_string();
+            }
+            if matches!(kind, "tuple_literal" | "list_literal") {
+                return format!("[\"t\",[{}]]", parts.join(","));
+            }
+            if parts.len() == 1 {
+                return parts.into_iter().next().unwrap();
+            }
+            return format!("[\"m\",[{}]]", parts.join(","));
+        }
+        if self.facts.tag == "ERL" && kind == "fun_expression" {
+            let line = self.line(id);
+            let idx = self.push_call("fun".to_string(), line);
+            let mut parts = Vec::new();
+            for c in self.children(id) {
+                if !self.is_layout(c) && !matches!(self.kind(c), "fun" | "end") {
+                    let v = self.form(c);
+                    if !v.is_empty() && v != "0" {
+                        parts.push(v);
+                    }
+                }
+            }
+            return format!("[\"c\",{idx},0,[{}]]", parts.join(","));
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR")
+            && matches!(
+                kind,
+                "if_modifier" | "unless_modifier" | "while_modifier" | "until_modifier" | "rescue_modifier"
+            )
+        {
+            let exprs: Vec<u32> = self
+                .children(id)
+                .into_iter()
+                .filter(|&c| {
+                    !self.is_layout(c)
+                        && !matches!(
+                            self.kind(c),
+                            "if_modifier" | "unless_modifier" | "while_modifier" | "until_modifier" | "rescue_modifier"
+                                | "if" | "unless" | "while" | "until" | "rescue"
+                        )
+                })
+                .collect();
+            if let Some(&expr) = exprs.first() {
+                return self.form(expr);
+            }
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR")
+            && matches!(kind, "instance_variable" | "class_variable" | "global_variable")
+        {
+            let raw = self.text_string(id);
+            let stripped = raw.trim_start_matches('@').trim_start_matches('$');
+            if !stripped.is_empty() {
+                let name = if kind == "instance_variable" {
+                    format!("self.{stripped}")
+                } else {
+                    stripped.to_string()
+                };
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &name);
+                out.push(']');
+                return out;
+            }
+            return "0".to_string();
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR")
+            && matches!(kind, "block_argument" | "splat_argument" | "double_splat_argument")
+        {
+            if let Some(inner) = self.children(id).into_iter().rev().find(|&c| !self.is_layout(c) && !matches!(self.kind(c), "&" | "*" | "**")) {
+                return self.form(inner);
+            }
+            return "0".to_string();
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR") && kind == "absolute_constant" {
+            let clean = self.text_string(id).trim_start_matches("::").replace("::", ".");
+            if !clean.is_empty() {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &clean);
+                out.push(']');
+                return out;
+            }
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR") && kind == "interpolated_string" {
+            let mut parts = Vec::new();
+            for ch in self.children(id) {
+                if self.kind(ch) == "interpolation" {
+                    for ic in self.children(ch) {
+                        if self.is_layout(ic) || matches!(self.kind(ic), "#{" | "}") {
+                            continue;
+                        }
+                        let f = self.form(ic);
+                        if !f.is_empty() && f != "0" {
+                            parts.push(f);
+                        }
+                    }
+                }
+            }
+            return if parts.is_empty() {
+                "0".to_string()
+            } else if parts.len() == 1 {
+                parts.remove(0)
+            } else {
+                format!("[\"m\",[{}]]", parts.join(","))
+            };
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR") && kind == "call_with_block" {
+            let mut parts = Vec::new();
+            for ch in self.children(id) {
+                let ck = self.kind(ch);
+                if ck == "brace_block" {
+                    let mut bparts = Vec::new();
+                    for bc in self.children(ch) {
+                        let bck = self.kind(bc);
+                        if self.is_layout(bc) || matches!(bck, "{" | "}" | "block_parameters") {
+                            continue;
+                        }
+                        let bf = self.form(bc);
+                        if !bf.is_empty() && bf != "0" {
+                            bparts.push(bf);
+                        }
+                    }
+                    if bparts.len() == 1 {
+                        parts.push(bparts.remove(0));
+                    } else if bparts.len() > 1 {
+                        parts.push(format!("[\"m\",[{}]]", bparts.join(",")));
+                    }
+                } else if ck != "do_block" && !self.is_layout(ch) {
+                    let f = self.form(ch);
+                    if !f.is_empty() && f != "0" {
+                        parts.push(f);
+                    }
+                }
+            }
+            if parts.len() == 1 {
+                return parts.remove(0);
+            } else if parts.len() > 1 {
+                return format!("[\"m\",[{}]]", parts.join(","));
+            }
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR") && kind == "label_argument" {
+            let lch = self.children(id);
+            let key = lch.first().map(|&n| self.text_string(n).trim_end_matches(':').to_string()).unwrap_or_default();
+            let val = lch
+                .iter()
+                .rev()
+                .copied()
+                .find(|&n| (!self.is_layout(n) || matches!(self.kind(n), "simple_symbol" | "symbol")) && Some(n) != lch.first().copied())
+                .map(|n| self.form(n))
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "0".to_string());
+            if !key.is_empty() {
+                let mut out = String::from("[\"k\",");
+                push_string(&mut out, &key);
+                out.push(',');
+                out.push_str(&val);
+                out.push(']');
+                return out;
+            }
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR") && matches!(kind, "array" | "hash") {
+            let mut items = Vec::new();
+            for ch in self.children(id) {
+                let ck = self.kind(ch);
+                if self.is_layout(ch) || matches!(ck, "[" | "]" | "{" | "}" | ",") {
+                    continue;
+                }
+                if matches!(ck, "label_pair" | "arrow_pair") {
+                    let pch = self.children(ch);
+                    let mut pparts = Vec::new();
+                    for pc in pch {
+                        if self.is_layout(pc) || matches!(self.kind(pc), "=>" | ":") {
+                            continue;
+                        }
+                        let pv = if self.kind(pc) == "label" {
+                            let k = self.text_string(pc).trim_end_matches(':').to_string();
+                            let mut s = String::from("[\"n\",");
+                            push_string(&mut s, &k);
+                            s.push(']');
+                            s
+                        } else {
+                            self.form(pc)
+                        };
+                        if !pv.is_empty() && pv != "0" {
+                            pparts.push(pv);
+                        }
+                    }
+                    if pparts.len() == 1 {
+                        items.push(pparts.remove(0));
+                    } else if pparts.len() > 1 {
+                        items.push(format!("[\"m\",[{}]]", pparts.join(",")));
+                    }
+                } else {
+                    let v = self.form(ch);
+                    if !v.is_empty() && v != "0" {
+                        items.push(v);
+                    }
+                }
+            }
+            return if items.is_empty() {
+                "0".to_string()
+            } else if items.len() == 1 {
+                items.remove(0)
+            } else {
+                format!("[\"t\",[{}]]", items.join(","))
+            };
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR") && matches!(kind, "simple_symbol" | "symbol") {
+            let sym = self.text_string(id).trim_start_matches(':').to_string();
+            if !sym.is_empty() {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &sym);
+                out.push(']');
+                return out;
+            }
+            return "0".to_string();
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR") && matches!(kind, "true" | "false" | "nil") {
             return format!("[\"n\",\"{kind}\"]");
         }
         if self.facts.tag == "LUA" && kind == "table_constructor" {
@@ -4532,11 +4865,17 @@ fn dotted_piece(text: &str) -> bool {
             "member" | "safe_member" | "scope" | "member_access_expression" | "scoped_property_access_expression"
         ) && matches!(self.facts.tag.as_str(), "RB" | "CR" | "PHP" | "LUA" | "DART" | "SOL" | "R") {
             let p = self.path_of(id);
-            if !p.is_empty() {
+            if !p.is_empty() && !p.starts_with('.') {
                 let mut out = String::from("[\"n\",");
                 push_string(&mut out, &p);
                 out.push(']');
                 return out;
+            }
+            if let Some(&obj) = self.children(id).first() {
+                let inner = self.form(obj);
+                if !inner.is_empty() && inner != "0" {
+                    return inner;
+                }
             }
         }
         match kind {
@@ -7100,7 +7439,7 @@ fn dotted_piece(text: &str) -> bool {
         // Scala's `select` is `object.name`: `s"...$x".format(y)` has the
         // interpolated string as its receiver, and that receiver is a value.
         let scala_select = self.language.name == "scala" && self.kind(callee) == "select";
-        if scala_select || matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access" | "conditional_member_access" | "navigation_expression") {
+        if scala_select || matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "member_access" | "conditional_member_access" | "navigation_expression" | "member" | "safe_member" | "scope" | "scoped_property_access_expression") {
             if let Some(&object) = self.children(callee).first() {
                 if self.named_call(object) {
                     // `new URL(x).toString()`, `A().b()`, `A().b().c()`: a
@@ -7188,13 +7527,13 @@ fn dotted_piece(text: &str) -> bool {
                         continue;
                     }
                     let ck = self.kind(child);
-                    if self.is_layout(child) || matches!(ck, "do_block" | "brace_block" | "block" | ",") {
+                    if (self.is_layout(child) && !matches!(ck, "simple_symbol" | "symbol")) || matches!(ck, "do_block" | "brace_block" | "block" | ",") {
                         continue;
                     }
                     if ck == "label_argument" {
                         let lch = self.children(child);
                         let key = lch.first().map(|&n| self.text_string(n).trim_end_matches(':').to_string()).unwrap_or_default();
-                        let val = lch.iter().rev().copied().find(|&n| !self.is_layout(n) && Some(n) != lch.first().copied()).map(|n| self.form(n)).unwrap_or_else(|| "0".to_string());
+                        let val = lch.iter().rev().copied().find(|&n| (!self.is_layout(n) || matches!(self.kind(n), "simple_symbol" | "symbol")) && Some(n) != lch.first().copied()).map(|n| self.form(n)).unwrap_or_else(|| "0".to_string());
                         if !key.is_empty() {
                             let mut k = String::from("[\"k\",");
                             push_string(&mut k, &key);
@@ -7382,7 +7721,8 @@ fn dotted_piece(text: &str) -> bool {
             // kept the dotted path and dropped the owner from the receiver slot.
             "attribute" | "member_expression" | "member_access_expression" | "member_access"
             | "conditional_member_access" | "navigation_expression" | "optional_chaining_expression"
-            | "field_expression" | "select" | "qualified_type" => {
+            | "field_expression" | "select" | "qualified_type"
+            | "member" | "safe_member" | "scope" | "scoped_property_access_expression" => {
                 let children = self.children(callee);
                 let name = self.member_name(callee);
                 let object = children.first().copied();
@@ -7750,19 +8090,29 @@ fn dotted_piece(text: &str) -> bool {
         match self.kind(id) {
             "identifier" | "property_identifier" | "private_property_identifier" | "type_identifier"
             | "shorthand_property_identifier" | "this" | "super"
-            | "constant" | "name" | "variable_name" | "self" | "parent" => {
+            | "constant" | "name" | "variable_name" | "self" | "parent" | "instance_variable" | "class_variable" | "global_variable" => {
                 let text = self.text_string(id);
                 if text == "this" || text == "$this" {
                     "self".to_string()
                 } else if self.facts.tag == "PHP" && text.starts_with('$') && text.len() > 1 {
                     text[1..].to_string()
+                } else if matches!(self.facts.tag.as_str(), "RB" | "CR") && (text.starts_with('@') || text.starts_with('$') || text.starts_with("::")) {
+                    text.trim_start_matches("::").trim_start_matches('@').trim_start_matches('$').to_string()
                 } else if self.language.name == "csharp" && text.starts_with('@') && text.len() > 1 {
                     text[1..].to_string()
+                } else if self.facts.tag == "PAS" {
+                    text.to_ascii_lowercase()
                 } else {
                     text.trim_start_matches('#').to_string()
                 }
             }
             "labeled_this" if self.is_kotlin() => "self".to_string(),
+            "quoted_atom" if self.facts.tag == "ERL" => {
+                self.text_string(id).trim_matches('\'').to_string()
+            }
+            "macro_reference" if self.facts.tag == "ERL" => {
+                self.text_string(id).trim_start_matches('?').to_string()
+            }
             // `JObject.Parse`: the C# grammar spells a member access with two
             // name leaves, and read as a leaf the whole receiver vanished -
             // every call through a type in the corpus lost its dotted name.
