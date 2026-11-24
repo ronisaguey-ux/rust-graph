@@ -4478,3 +4478,323 @@ impl<'a> Walker<'a> {
                 let mut names: Vec<String> = Vec::new();
                 let mut tparts: Vec<String> = Vec::new();
                 let mut seen_colon = false;
+                for c in children {
+                    let ck = self.kind(c);
+                    if ck == ":" {
+                        seen_colon = true;
+                        continue;
+                    }
+                    if self.is_layout(c) || matches!(ck, ";" | ",") {
+                        continue;
+                    }
+                    if !seen_colon {
+                        if ck == "identifier_list" {
+                            for ic in self.children(c) {
+                                if self.kind(ic) == "identifier" {
+                                    names.push(self.text_string(ic).to_ascii_lowercase());
+                                }
+                            }
+                        } else if ck == "identifier" {
+                            names.push(self.text_string(c).to_ascii_lowercase());
+                        }
+                    } else {
+                        let f = self.form(c);
+                        if !f.is_empty() && f != "0" {
+                            tparts.push(f);
+                        }
+                    }
+                }
+                if !names.is_empty() && !tparts.is_empty() {
+                    let last = names.pop().unwrap();
+                    let mut last_m = vec![{
+                        let mut n = String::from(r#"["n","#);
+                        push_string(&mut n, &last);
+                        n.push(']');
+                        n
+                    }];
+                    last_m.extend(tparts);
+                    let tail = format!(r#"["m",[{}]]"#, last_m.join(","));
+                    let val = if names.is_empty() {
+                        tail
+                    } else {
+                        let mut tup: Vec<String> = names.into_iter().map(|nm| {
+                            let mut n = String::from(r#"["n","#);
+                            push_string(&mut n, &nm);
+                            n.push(']');
+                            n
+                        }).collect();
+                        tup.push(tail);
+                        format!(r#"["t",[{}]]"#, tup.join(","))
+                    };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "fi" | "done" | "esac" if self.facts.tag == "SH" => {
+                self.lexer_event(b'x', self.line(id), &[], &format!("[\"n\",\"{kind}\"]"), false);
+            }
+            "simple_command" if self.facts.tag == "SH" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                // Tuple: (cline, ident_opt, form_str, is_value_token)
+                let mut items: Vec<(u32, Option<String>, String, bool)> = Vec::new();
+                let mut raw_words: Vec<String> = Vec::new();
+                for c in children {
+                    let ck = self.kind(c);
+                    let cline = self.line(c);
+                    if matches!(ck, "whitespace" | "comment" | "redirect" | "heredoc_redirect") {
+                        continue;
+                    }
+                    let t = self.text_string(c);
+                    if t.is_empty() {
+                        continue;
+                    }
+                    if ck == "assignment_word" {
+                        if let Some((lhs_raw, rhs_raw)) = t.split_once('=') {
+                            let lhs = lhs_raw.trim_end_matches('+').trim().to_string();
+                            if !lhs.is_empty() {
+                                let rhs_t = rhs_raw.trim();
+                                let rhs_form = if let Some(vn) = Self::tcl_var_name(rhs_t.trim_matches(|ch| ch == '"' || ch == '\'')) {
+                                    let mut n = String::from("[\"n\",");
+                                    push_string(&mut n, &vn);
+                                    n.push(']');
+                                    n
+                                } else {
+                                    "0".to_string()
+                                };
+                                self.lexer_event(b'a', cline, &[lhs], &rhs_form, false);
+                            }
+                        }
+                        continue;
+                    }
+                    raw_words.push(t.clone());
+                    if matches!(ck, "variable" | "parameter_expansion") {
+                        if let Some(vn) = Self::tcl_var_name(&t) {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &vn);
+                            n.push(']');
+                            items.push((cline, Some(vn), n, true));
+                        } else {
+                            items.push((cline, None, "0".to_string(), true));
+                        }
+                    } else if ck == "string_literal" {
+                        let inner = t.trim_matches(|ch| ch == '"' || ch == '\'');
+                        let ib = inner.as_bytes();
+                        let mut qvars: Vec<String> = Vec::new();
+                        if t.starts_with('"') {
+                            let mut qj = 0;
+                            while qj < ib.len() {
+                                if ib[qj] == b'\\' && qj + 1 < ib.len() {
+                                    qj += 2;
+                                    continue;
+                                }
+                                if ib[qj] == b'$' {
+                                    if let Some(vn) = Self::tcl_var_name(&inner[qj..]) {
+                                        let mut n = String::from("[\"n\",");
+                                        push_string(&mut n, &vn);
+                                        n.push(']');
+                                        qvars.push(n);
+                                    }
+                                }
+                                qj += 1;
+                            }
+                        }
+                        let qform = if qvars.is_empty() {
+                            "0".to_string()
+                        } else if qvars.len() == 1 {
+                            qvars.remove(0)
+                        } else {
+                            format!("[\"m\",[{}]]", qvars.join(","))
+                        };
+                        items.push((cline, None, qform, true));
+                    } else if matches!(ck, "command_substitution" | "backtick_substitution" | "process_substitution" | "arithmetic") {
+                        items.push((cline, None, "0".to_string(), false));
+                    } else {
+                        let is_flag = t.starts_with('-') && t.len() > 1 && t.as_bytes()[1].is_ascii_alphabetic();
+                        let tail = t.rsplit('-').next().unwrap_or(&t);
+                        let is_ident = tail.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+                        if is_ident {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, tail);
+                            n.push(']');
+                            items.push((cline, Some(tail.to_string()), n, !is_flag));
+                        } else {
+                            let is_num = t.bytes().next().is_some_and(|b| b.is_ascii_digit());
+                            items.push((cline, None, "0".to_string(), is_num));
+                        }
+                    }
+                }
+                if let Some(first) = raw_words.first() {
+                    if matches!(first.as_str(), "source" | ".") {
+                        if let Some(target) = raw_words.get(1) {
+                            let module = target.trim_matches(|c| c == '"' || c == '\'').to_string();
+                            let alias = module.rsplit('/').next().unwrap_or(&module).to_string();
+                            if !module.is_empty() {
+                                self.facts.imports.push(Import { line, module, alias, kind: IMPORT_STAR, ..Import::default() });
+                            }
+                        }
+                        return;
+                    }
+                }
+                if !items.is_empty() {
+                    let mut acc = String::new();
+                    for idx in (0..items.len()).rev() {
+                        let (wline, ref ident_opt, ref form_str, _) = items[idx];
+                        let next_is_val = idx + 1 < items.len() && items[idx + 1].3 && items[idx + 1].0 == wline;
+                        if acc.is_empty() {
+                            acc = form_str.clone();
+                        } else if let Some(cname) = ident_opt {
+                            if idx == 0 {
+                                let cid = self.push_call(cname.clone(), wline);
+                                if next_is_val {
+                                    acc = format!("[\"c\",{cid},0,[{acc}]]");
+                                } else {
+                                    acc = format!("[\"m\",[{form_str},{acc}]]");
+                                }
+                            } else if next_is_val {
+                                acc = format!("[\"c\",0,0,[{acc}]]");
+                            } else {
+                                acc = format!("[\"m\",[{form_str},{acc}]]");
+                            }
+                        } else {
+                            acc = format!("[\"m\",[{form_str},{acc}]]");
+                        }
+                    }
+                    if items.len() == 1 {
+                        if let Some(ref cname) = items[0].1 {
+                            self.push_call(cname.clone(), items[0].0);
+                        }
+                    }
+                    if !acc.is_empty() && acc != "0" {
+                        self.lexer_event(b'x', line, &[], &acc, false);
+                    }
+                }
+            }
+            "builtin_call" if self.facts.tag == "ZIG" => {
+                if let Some(bn) = self.child_of_kind(id, "builtin_name") {
+                    let raw = self.text_string(bn);
+                    let name = raw.trim_start_matches('@').to_string();
+                    if !name.is_empty() {
+                        let line = self.line(id);
+                        self.push_call(name, line);
+                    }
+                }
+            }
+            "mapping_type" if self.facts.tag == "SOL" => {
+                let line = self.line(id);
+                self.push_call("mapping".to_string(), line);
+            }
+            "using_directive" | "event_definition" | "error_definition" | "struct_field" if self.facts.tag == "SOL" => {
+                self.decl_statement(id);
+            }
+            "returns_clause" if self.facts.tag == "SOL" => {
+                let line = self.line(id);
+                self.push_call("returns".to_string(), line);
+            }
+            "state_variable" if self.facts.tag == "SOL" => {
+                if self.children(id).iter().any(|&c| self.kind(c) == "=") {
+                    self.expression_statement(id);
+                } else {
+                    self.decl_statement(id);
+                }
+            }
+            "variable_declaration" | "local_declaration" if self.facts.tag == "DART" => {
+                let line = self.line(id);
+                let children = self.children(id);
+                let decls: Vec<u32> = children
+                    .iter()
+                    .copied()
+                    .filter(|&c| self.kind(c) == "declarator")
+                    .collect();
+                if !decls.is_empty() {
+                    for d in decls {
+                        let dch = self.children(d);
+                        let dline = self.line(d);
+                        if let Some(eq) = dch.iter().position(|&c| self.kind(c) == "=") {
+                            if let Some(name) = dch[..eq]
+                                .iter()
+                                .rev()
+                                .copied()
+                                .find(|&c| !self.is_layout(c))
+                                .map(|c| {
+                                    let t = self.text_string(c);
+                                    t.rsplit('$').next().unwrap_or(&t).to_string()
+                                })
+                                .filter(|s| !s.is_empty())
+                            {
+                                let rhs = dch[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                                let val = rhs
+                                    .map(|c| {
+                                        let k = self.kind(c);
+                                        if matches!(k, "true" | "false" | "null") {
+                                            format!("[\"n\",\"{k}\"]")
+                                        } else {
+                                            let f = self.form(c);
+                                            if f.is_empty() { "0".to_string() } else { f }
+                                        }
+                                    })
+                                    .unwrap_or_else(|| "0".to_string());
+                                if let Some(rnode) = rhs {
+                                    if let Some(cls) = self.constructed(rnode) {
+                                        self.facts.vars.push((name.clone(), cls));
+                                    }
+                                }
+                                self.lexer_event(b'a', dline, &[name], &val, false);
+                            }
+                        }
+                    }
+                } else if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(name) = children[..eq]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&c| self.kind(c) == "identifier")
+                        .map(|c| {
+                            let t = self.text_string(c);
+                            t.rsplit('$').next().unwrap_or(&t).to_string()
+                        })
+                        .filter(|s| !s.is_empty())
+                    {
+                        let rhs = children[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                        let val = rhs
+                            .map(|c| {
+                                let k = self.kind(c);
+                                if matches!(k, "true" | "false" | "null") {
+                                    format!("[\"n\",\"{k}\"]")
+                                } else {
+                                    let f = self.form(c);
+                                    if f.is_empty() { "0".to_string() } else { f }
+                                }
+                            })
+                            .unwrap_or_else(|| "0".to_string());
+                        if let Some(rnode) = rhs {
+                            if let Some(cls) = self.constructed(rnode) {
+                                self.facts.vars.push((name.clone(), cls));
+                            }
+                        }
+                        self.lexer_event(b'a', line, &[name], &val, false);
+                    }
+                }
+            }
+            "member_declaration" if self.facts.tag == "DART" => {
+                let children = self.children(id);
+                let pl_opt = children.iter().copied().find(|&c| self.kind(c) == "parameter_list");
+                if let Some(pl) = pl_opt {
+                    let has_const = children.iter().any(|&c| self.kind(c) == "member_modifier" && self.text(c) == b"const");
+                    if has_const {
+                        if let Some(mh) = children.iter().copied().find(|&c| self.kind(c) == "member_head") {
+                            let idents: Vec<u32> = self.children(mh).into_iter().filter(|&c| self.kind(c) == "identifier").collect();
+                            if idents.len() == 1 {
+                                let name = self.text_string(idents[0]);
+                                if !name.is_empty() {
+                                    let cline = self.line(idents[0]);
+                                    let idx = self.push_call(name, cline);
+                                    let raw_pl = self.text_string(pl);
+                                    let inner = raw_pl.trim().strip_prefix('(').and_then(|s| s.strip_suffix(')')).unwrap_or("").trim();
+                                    let args = if inner.is_empty() {
+                                        "[]".to_string()
+                                    } else if inner == "{super.key}" || inner == "{super.key,}" {
+                                        r#"[["m",[["n","super.key"]]]]"#.to_string()
+                                    } else {
+                                        let mut parts: Vec<String> = Vec::new();
+                                        let inner_body = inner.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(inner);
