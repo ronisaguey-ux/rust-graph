@@ -439,3 +439,15 @@ Measured on `corpus45` with `RG_AUDIT=1 RG_LOSSES=1` (`x86_64-unknown-linux-musl
 | powershell | 266 / 267 | 262 / 263 | -4 | open |
 
 Cross-language regression check on the 4 original corpora: **0 movement** (`python` 23/25, `javascript` 23/23, `typescript` 28/36, `rust` 26/27). Self-parse of `rust-graph/src`: **0 fallbacks**.
+
+### Round 2 additions (2026-11-23)
+
+- **Brace-context detector (`src/parser.rs`)**: added `BraceContext` (`Block | StructLiteral | TableConstructor`) behind a fast-path token check with unit test `brace_context_keeps_braced_initialiser_one_statement` (`256 passed, 0 failed`). Measured on full `corpus45/go`: `436/806 -> 432/514` (`-4` files, `-292` rows).
+- **Ruby (`src/deep_facts/go.rs`)**: direct-child argument collection (including `label_argument` and `simple_symbol`) for paren-less `call`/`command_call` -> `1408/3320 -> 1401/3183` (`-7` files, `-137` rows).
+- **Lua (`src/deep_facts/go.rs`)**: `table_constructor` (`named_field`, `keyed_field`) + `local_declaration` assignment event emission -> `569/1083 -> 559/837` (`-10` files, `-246` rows).
+- **Objective-C (`src/deep_facts/c_family.rs`)**: allow whitespace between `#` and `include`/`import` in `c_includes` -> `265/376 -> 246/358` (`-19` files, `-18` rows, `import` losses `29 -> 0`).
+- **C# (`src/lexer.rs`)**: consume C# 11 `u8`/`U8` UTF-8 string literal suffix -> `532/848 -> 529/869` (`-3` files, `call` losses `128 -> 98`).
+- **Erlang (`src/parser.rs`)**: recognize single-quoted atom function heads (`'name'(Args) ->`) -> `1268/1357 -> 1266/1355` (`-2` files, `-2` rows).
+- **Solidity (`src/deep_facts/mod.rs`)**: `using_directive` / `event_definition` / `error_definition` statement emission -> `142/202 -> 141/189` (`-1` file, `-13` rows).
+- **Tcl (`src/deep_facts/mod.rs`)**: bare word/subcommand emission on `call_command` -> `684/684 -> 684/743` (`call` `681 -> 676`, zero crashes).
+- **Self-parse & regression**: `rust-graph/src` `0` losses; 4 original corpora (`python` 23/25, `javascript` 23/23, `typescript` 28/36, `rust` 26/27) unchanged.
