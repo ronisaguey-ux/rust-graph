@@ -3611,7 +3611,9 @@ impl<'a> Walker<'a> {
                                 }
                                 continue;
                             }
-                            if !self.is_layout(c) && ck != ";" {
+                            if matches!(ck, "nil" | "true" | "false") {
+                                parts.push(format!("[\"n\",\"{ck}\"]"));
+                            } else if !self.is_layout(c) && ck != ";" {
                                 let f = self.form(c);
                                 if !f.is_empty() && f != "0" {
                                     parts.push(f);
@@ -3651,11 +3653,132 @@ impl<'a> Walker<'a> {
                         if matches!(ck, "then" | "do" | "of") {
                             break;
                         }
-                        let val = self.form(c);
-                        if !val.is_empty() && val != "0" {
+                        let cond_val = self.form(c);
+                        if !cond_val.is_empty() && cond_val != "0" {
+                            let mut items = Vec::new();
+                            if kind == "while_statement" {
+                                items.push("[\"n\",\"while\"]".to_string());
+                            }
+                            items.push(cond_val);
+                            if kind == "if_statement" || kind == "while_statement" {
+                                let ch_all = self.children(id);
+                                let kw_sep = if kind == "if_statement" { "then" } else { "do" };
+                                if let Some(sp) = ch_all.iter().position(|&x| self.kind(x) == kw_sep) {
+                                    if let Some(&br) = ch_all[sp + 1..].iter().find(|&&x| !self.is_layout(x)) {
+                                        let is_blk = self.kind(br) == "block";
+                                        let first_st = if is_blk {
+                                            self.children(br).into_iter().find(|&x| {
+                                                let xk = self.kind(x);
+                                                !self.is_layout(x) && !matches!(xk, "begin" | "end" | ";")
+                                            })
+                                        } else {
+                                            Some(br)
+                                        };
+                                        if let Some(st) = first_st {
+                                            let is_assign = self.kind(st) == "assignment"
+                                                || (self.kind(st) == "expression_statement"
+                                                    && self.children(st).into_iter().any(|x| self.kind(x) == "assignment"));
+                                            if !is_assign {
+                                                let sf = self.form(st);
+                                                if !sf.is_empty() && sf != "0" {
+                                                    if is_blk {
+                                                        items.push("[\"n\",\"begin\"]".to_string());
+                                                    }
+                                                    items.push(sf);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let val = if items.len() == 1 {
+                                items.into_iter().next().unwrap()
+                            } else {
+                                format!("[\"m\",[{}]]", items.join(","))
+                            };
                             self.lexer_event(b'x', self.line(id), &[], &val, false);
                         }
                         break;
+                    }
+                    if kind == "if_statement" {
+                        let ch2 = self.children(id);
+                        let mut anchors: Vec<(u32, u32)> = Vec::new();
+                        if let Some(tp) = ch2.iter().position(|&c| self.kind(c) == "then") {
+                            if let Some(&br) = ch2[tp + 1..].iter().find(|&&c| !self.is_layout(c)) {
+                                anchors.push((self.line(id), br));
+                            }
+                        }
+                        if let Some(ep) = ch2.iter().position(|&c| self.kind(c) == "else") {
+                            if let Some(&br) = ch2[ep + 1..].iter().find(|&&c| !self.is_layout(c)) {
+                                anchors.push((self.line(ch2[ep]), br));
+                            }
+                        }
+                        for (aline, br) in anchors {
+                            let first_stmt = if self.kind(br) == "block" {
+                                self.children(br).into_iter().find(|&c| {
+                                    let ck = self.kind(c);
+                                    !self.is_layout(c) && !matches!(ck, "begin" | "end" | ";")
+                                })
+                            } else {
+                                Some(br)
+                            };
+                            if let Some(st) = first_stmt {
+                                let assign_opt = if self.kind(st) == "expression_statement" {
+                                    self.children(st).into_iter().find(|&c| self.kind(c) == "assignment")
+                                } else if self.kind(st) == "assignment" {
+                                    Some(st)
+                                } else {
+                                    None
+                                };
+                                if let Some(asg) = assign_opt {
+                                    let is_then_near = aline == self.line(id) && self.line(asg) <= aline + 1;
+                                    if self.line(asg) > aline + 1 || is_then_near {
+                                        let ach = self.children(asg);
+                                        if let Some(ap) = ach.iter().position(|&c| self.kind(c) == ":=") {
+                                            if let Some(&lhs) = ach[..ap].iter().find(|&&c| !self.is_layout(c)) {
+                                                let tname = self.path_of(lhs).to_ascii_lowercase();
+                                                let tname = if tname.is_empty() {
+                                                    self.text_string(lhs).to_ascii_lowercase()
+                                                } else {
+                                                    tname
+                                                };
+                                                if !tname.is_empty() {
+                                                    let val = ach[ap + 1..]
+                                                        .iter()
+                                                        .copied()
+                                                        .find(|&c| !self.is_layout(c))
+                                                        .map(|c| {
+                                                            let f = self.form(c);
+                                                            if f.is_empty() { "0".to_string() } else { f }
+                                                        })
+                                                        .unwrap_or_else(|| "0".to_string());
+                                                    let final_val = if is_then_near {
+                                                        let cform = ch2.iter().copied()
+                                                            .find(|&x| !self.is_layout(x) && !matches!(self.kind(x), "if" | "then" | "else"))
+                                                            .map(|x| self.form(x))
+                                                            .unwrap_or_default();
+                                                        if !cform.is_empty() && cform != "0" {
+                                                            if val == "0" { cform } else { format!("[\"m\",[{}]]", format!("{cform},{val}")) }
+                                                        } else {
+                                                            val
+                                                        }
+                                                    } else {
+                                                        val
+                                                    };
+                                                    self.lexer_event(b'a', aline, &[tname], &final_val, false);
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if self.kind(br) == "block" && self.line(st) > aline + 1 {
+                                    let sf = self.form(st);
+                                    if !sf.is_empty() && sf != "0" {
+                                        let val = format!("[\"m\",[[\"n\",\"begin\"],{sf}]]");
+                                        self.lexer_event(b'x', aline, &[], &val, false);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3673,7 +3796,11 @@ impl<'a> Walker<'a> {
                         for &c in &children[assign_pos + 1..] {
                             let ck = self.kind(c);
                             if ck == "do" { break; }
-                            if self.is_layout(c) || matches!(ck, "to" | "downto") { continue; }
+                            if matches!(ck, "to" | "downto") {
+                                parts.push(format!("[\"n\",\"{ck}\"]"));
+                                continue;
+                            }
+                            if self.is_layout(c) { continue; }
                             let f = self.form(c);
                             if !f.is_empty() && f != "0" {
                                 parts.push(f);
@@ -3691,7 +3818,8 @@ impl<'a> Walker<'a> {
                 }
             }
             "section_marker" if self.facts.tag == "PAS" => {
-                if self.text_string(id).eq_ignore_ascii_case("implementation") {
+                let sec = self.text_string(id).to_ascii_lowercase();
+                if sec == "implementation" || sec == "interface" {
                     let mut sib = self.node(id).next_sibling;
                     while sib != NONE && self.is_layout(sib) {
                         sib = self.node(sib).next_sibling;
@@ -3699,10 +3827,37 @@ impl<'a> Walker<'a> {
                     if sib != NONE {
                         let line = self.line(id);
                         match self.kind(sib) {
-                            "unit_end" => {
+                            "uses_clause" => {
+                                let units: Vec<String> = self
+                                    .children(sib)
+                                    .into_iter()
+                                    .filter(|&c| self.kind(c) == "dotted_name")
+                                    .map(|c| self.text_string(c).to_ascii_lowercase())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                                if !units.is_empty() {
+                                    let mut head = format!(r#"["m",[["n","{sec}"],["n","uses"],["n","#);
+                                    push_string(&mut head, &units[0]);
+                                    head.push_str("]]]");
+                                    let val = if units.len() == 1 {
+                                        head
+                                    } else {
+                                        let mut items = vec![head];
+                                        for u in &units[1..] {
+                                            let mut n = String::from(r#"["n","#);
+                                            push_string(&mut n, u);
+                                            n.push(']');
+                                            items.push(n);
+                                        }
+                                        format!(r#"["t",[{}]]"#, items.join(","))
+                                    };
+                                    self.lexer_event(b'x', line, &[], &val, false);
+                                }
+                            }
+                            "unit_end" if sec == "implementation" => {
                                 self.lexer_event(b'x', line, &[], "[\"m\",[[\"n\",\"implementation\"],[\"n\",\"end\"]]]", false);
                             }
-                            "routine_declaration" => {
+                            "routine_declaration" if sec == "implementation" => {
                                 let rch = self.children(sib);
                                 let kw = rch.first().map(|&c| self.text_string(c).to_ascii_lowercase()).unwrap_or_default();
                                 let rname = rch.iter().copied().find(|&c| self.kind(c) == "identifier").map(|c| self.text_string(c).to_ascii_lowercase()).unwrap_or_default();
@@ -3816,7 +3971,10 @@ impl<'a> Walker<'a> {
                     if !name.is_empty() {
                         let mut parts = Vec::new();
                         for &c in &children[eq + 1..] {
-                            if !self.is_layout(c) && self.kind(c) != ";" {
+                            let ck = self.kind(c);
+                            if matches!(ck, "nil" | "true" | "false") {
+                                parts.push(format!("[\"n\",\"{ck}\"]"));
+                            } else if !self.is_layout(c) && ck != ";" {
                                 let f = self.form(c);
                                 if !f.is_empty() && f != "0" {
                                     parts.push(f);
@@ -3834,34 +3992,56 @@ impl<'a> Walker<'a> {
                         return;
                     }
                 }
-                let mut parts = Vec::new();
+                let mut names: Vec<String> = Vec::new();
+                let mut tparts: Vec<String> = Vec::new();
+                let mut seen_colon = false;
                 for c in children {
                     let ck = self.kind(c);
-                    if self.is_layout(c) || matches!(ck, ":" | ";" | ",") {
+                    if ck == ":" {
+                        seen_colon = true;
                         continue;
                     }
-                    if ck == "identifier_list" {
-                        for ic in self.children(c) {
-                            if self.kind(ic) == "identifier" {
-                                let nm = self.text_string(ic).to_ascii_lowercase();
-                                let mut n = String::from("[\"n\",");
-                                push_string(&mut n, &nm);
-                                n.push(']');
-                                parts.push(n);
+                    if self.is_layout(c) || matches!(ck, ";" | ",") {
+                        continue;
+                    }
+                    if !seen_colon {
+                        if ck == "identifier_list" {
+                            for ic in self.children(c) {
+                                if self.kind(ic) == "identifier" {
+                                    names.push(self.text_string(ic).to_ascii_lowercase());
+                                }
                             }
+                        } else if ck == "identifier" {
+                            names.push(self.text_string(c).to_ascii_lowercase());
                         }
                     } else {
                         let f = self.form(c);
                         if !f.is_empty() && f != "0" {
-                            parts.push(f);
+                            tparts.push(f);
                         }
                     }
                 }
-                if !parts.is_empty() {
-                    let val = if parts.len() == 1 {
-                        parts.into_iter().next().unwrap()
+                if !names.is_empty() && !tparts.is_empty() {
+                    let last = names.pop().unwrap();
+                    let mut last_m = vec![{
+                        let mut n = String::from(r#"["n","#);
+                        push_string(&mut n, &last);
+                        n.push(']');
+                        n
+                    }];
+                    last_m.extend(tparts);
+                    let tail = format!(r#"["m",[{}]]"#, last_m.join(","));
+                    let val = if names.is_empty() {
+                        tail
                     } else {
-                        format!("[\"m\",[{}]]", parts.join(","))
+                        let mut tup: Vec<String> = names.into_iter().map(|nm| {
+                            let mut n = String::from(r#"["n","#);
+                            push_string(&mut n, &nm);
+                            n.push(']');
+                            n
+                        }).collect();
+                        tup.push(tail);
+                        format!(r#"["t",[{}]]"#, tup.join(","))
                     };
                     self.lexer_event(b'x', line, &[], &val, false);
                 }
@@ -3996,6 +4176,140 @@ impl<'a> Walker<'a> {
                             }
                         }
                         self.lexer_event(b'a', line, &[name], &val, false);
+                    }
+                }
+            }
+            "member_declaration" if self.facts.tag == "DART" => {
+                let children = self.children(id);
+                let pl_opt = children.iter().copied().find(|&c| self.kind(c) == "parameter_list");
+                if let Some(pl) = pl_opt {
+                    let has_const = children.iter().any(|&c| self.kind(c) == "member_modifier" && self.text(c) == b"const");
+                    if has_const {
+                        if let Some(mh) = children.iter().copied().find(|&c| self.kind(c) == "member_head") {
+                            let idents: Vec<u32> = self.children(mh).into_iter().filter(|&c| self.kind(c) == "identifier").collect();
+                            if idents.len() == 1 {
+                                let name = self.text_string(idents[0]);
+                                if !name.is_empty() {
+                                    let cline = self.line(idents[0]);
+                                    let idx = self.push_call(name, cline);
+                                    let raw_pl = self.text_string(pl);
+                                    let inner = raw_pl.trim().strip_prefix('(').and_then(|s| s.strip_suffix(')')).unwrap_or("").trim();
+                                    let args = if inner.is_empty() {
+                                        "[]".to_string()
+                                    } else if inner == "{super.key}" || inner == "{super.key,}" {
+                                        r#"[["m",[["n","super.key"]]]]"#.to_string()
+                                    } else {
+                                        let mut parts: Vec<String> = Vec::new();
+                                        let inner_body = inner.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(inner);
+                                        let is_named = inner.starts_with('{') && inner.ends_with('}');
+                                        for item in inner_body.split(',') {
+                                            let it = item.trim();
+                                            if it.is_empty() { continue; }
+                                            let norm = it.replace("this.", "self.");
+                                            let toks: Vec<&str> = norm.split_whitespace().collect();
+                                            if toks.len() == 1 {
+                                                let mut n = String::from(r#"["n","#);
+                                                push_string(&mut n, toks[0]);
+                                                n.push(']');
+                                                parts.push(n);
+                                            } else if !toks.is_empty() {
+                                                let mut sub = Vec::new();
+                                                for tk in toks {
+                                                    if tk == "=" { continue; }
+                                                    let mut n = String::from(r#"["n","#);
+                                                    push_string(&mut n, tk);
+                                                    n.push(']');
+                                                    sub.push(n);
+                                                }
+                                                parts.push(format!(r#"["m",[{}]]"#, sub.join(",")));
+                                            }
+                                        }
+                                        if is_named {
+                                            format!(r#"[["m",[{}]]]"#, parts.join(","))
+                                        } else {
+                                            format!("[{}]", parts.join(","))
+                                        }
+                                    };
+                                    self.lexer_event(b'x', cline, &[], &format!(r#"["c",{idx},0,{args}]"#), false);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let head_name = children
+                        .iter()
+                        .copied()
+                        .find(|&c| self.kind(c) == "member_head")
+                        .and_then(|mh| {
+                            self.children(mh)
+                                .into_iter()
+                                .rev()
+                                .find(|&c| self.kind(c) == "identifier")
+                        })
+                        .map(|c| {
+                            let t = self.text_string(c);
+                            t.rsplit('$').next().unwrap_or(&t).to_string()
+                        })
+                        .filter(|s| !s.is_empty());
+                    let has_eq = children.iter().any(|&c| self.kind(c) == "=");
+                    if !has_eq {
+                        if let Some(mh) = children.iter().copied().find(|&c| self.kind(c) == "member_head") {
+                            let toks: Vec<u32> = self.children(mh).into_iter().filter(|&c| !self.is_layout(c)).collect();
+                            if toks.len() == 2 {
+                                let t0 = self.text_string(toks[0]);
+                                let t1 = self.text_string(toks[1]);
+                                if !t0.is_empty() && !t1.is_empty() {
+                                    let mut val = String::from(r#"["m",[["n","#);
+                                    push_string(&mut val, &t0);
+                                    val.push_str(r#"],["n","#);
+                                    push_string(&mut val, &t1);
+                                    val.push_str("]]]");
+                                    let fline = self.line(toks[0]);
+                                    self.lexer_event(b'x', fline, &[], &val, false);
+                                }
+                            }
+                        }
+                    }
+                    let mut first_eq = true;
+                    for (i, &c) in children.iter().enumerate() {
+                        if self.kind(c) == "=" {
+                            let name_opt = if first_eq {
+                                first_eq = false;
+                                head_name.clone()
+                            } else {
+                                children[..i]
+                                    .iter()
+                                    .rev()
+                                    .copied()
+                                    .find(|&x| self.kind(x) == "identifier")
+                                    .map(|x| {
+                                        let t = self.text_string(x);
+                                        t.rsplit('$').next().unwrap_or(&t).to_string()
+                                    })
+                                    .filter(|s| !s.is_empty())
+                            };
+                            if let Some(name) = name_opt {
+                                let rhs = children[i + 1..].iter().copied().find(|&x| !self.is_layout(x));
+                                let val = rhs
+                                    .map(|x| {
+                                        let k = self.kind(x);
+                                        if matches!(k, "true" | "false" | "null") {
+                                            format!("[\"n\",\"{k}\"]")
+                                        } else {
+                                            let f = self.form(x);
+                                            if f.is_empty() { "0".to_string() } else { f }
+                                        }
+                                    })
+                                    .unwrap_or_else(|| "0".to_string());
+                                if let Some(rnode) = rhs {
+                                    if let Some(cls) = self.constructed(rnode) {
+                                        self.facts.vars.push((name.clone(), cls));
+                                    }
+                                }
+                                let eline = self.line(c);
+                                self.lexer_event(b'a', eline, &[name], &val, false);
+                            }
+                        }
                     }
                 }
             }
