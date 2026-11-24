@@ -134,7 +134,7 @@ rust_graph_deep::grammar! { LUA {
     goto_statement: "goto" NAME,
     label_statement: "::" NAME "::",
 
-    expression_statement: _expression [assignment_tail],
+    expression_statement: _expression ("," _expression)* [assignment_tail],
     assignment_tail: "=" expression_list,
     expression_list: _expression ("," _expression)*,
 
