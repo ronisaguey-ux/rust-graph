@@ -2909,6 +2909,7 @@ impl<'a> Walker<'a> {
                 {
                     return self.root_callee(object);
                 }
+                let path = if self.facts.tag == "PAS" { path.to_ascii_lowercase() } else { path };
                 (!path.is_empty()).then_some(path)
             }
             _ => {
@@ -4619,11 +4620,24 @@ fn dotted_piece(text: &str) -> bool {
         }
         if self.facts.tag == "PAS" && kind == "member" {
             let path = self.path_of(id).to_ascii_lowercase();
-            if !path.is_empty() {
+            if !path.is_empty() && !path.starts_with('.') {
                 let mut out = String::from("[\"n\",");
                 push_string(&mut out, &path);
                 out.push(']');
                 return out;
+            }
+            if path.starts_with('.') {
+                let ch = self.children(id);
+                if let Some(&base) = ch.first() {
+                    let bf = self.form(base);
+                    let mname = self.member_name(id).to_ascii_lowercase();
+                    if !bf.is_empty() && bf != "0" && !mname.is_empty() {
+                        let mut mn = String::from("[\"n\",");
+                        push_string(&mut mn, &mname);
+                        mn.push(']');
+                        return format!("[\"m\",[{}]]", format!("{bf},{mn}"));
+                    }
+                }
             }
         }
         if self.facts.tag == "PAS" && kind == "number" {
@@ -4640,6 +4654,20 @@ fn dotted_piece(text: &str) -> bool {
         }
         if self.facts.tag == "PAS" && kind == "nil" {
             return "[\"n\",\"nil\"]".to_string();
+        }
+        if self.facts.tag == "PAS" && kind == "array_type" {
+            let mut items = vec!["[\"n\",\"array\"]".to_string()];
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if self.is_layout(c) || matches!(ck, "array" | "of" | "[" | "]") {
+                    continue;
+                }
+                let f = self.form(c);
+                if !f.is_empty() && f != "0" {
+                    items.push(f);
+                }
+            }
+            return format!("[\"m\",[{}]]", items.join(","));
         }
         if self.facts.tag == "PAS" && kind == "enumeration_type" {
             let mut items = Vec::new();
@@ -4669,10 +4697,14 @@ fn dotted_piece(text: &str) -> bool {
             let mut parts = Vec::new();
             for c in self.children(id) {
                 let ck = self.kind(c);
+                if matches!(ck, "div" | "mod" | "shl" | "shr") {
+                    parts.push(format!("[\"n\",\"{ck}\"]"));
+                    continue;
+                }
                 if self.is_layout(c) && !matches!(ck, "string" | "number") {
                     continue;
                 }
-                if matches!(ck, "+" | "-" | "*" | "/" | "div" | "mod" | "shl" | "shr" | "and" | "or" | "not" | "=" | "<>" | "<" | ">" | "<=" | ">=" | "in" | "@" | "^" | "." | "(" | ")") {
+                if matches!(ck, "+" | "-" | "*" | "/" | "and" | "or" | "not" | "=" | "<>" | "<" | ">" | "<=" | ">=" | "in" | "@" | "^" | "." | "(" | ")") {
                     continue;
                 }
                 let v = if ck == "string" {
@@ -8309,13 +8341,19 @@ fn dotted_piece(text: &str) -> bool {
             | "optional_chaining_expression"
             | "qualified_type" => {
                 let children = self.children(id);
-                let name = self.member_name(id);
+                let mut name = self.member_name(id);
+                if self.facts.tag == "PAS" {
+                    name.make_ascii_lowercase();
+                }
                 let base = children.first().map(|&child| self.path_of(child)).unwrap_or_default();
                 if base.is_empty() {
                     format!(".{name}")
                 } else {
                     format!("{base}.{name}")
                 }
+            }
+            "index" if self.facts.tag == "PAS" => {
+                self.children(id).first().map(|&child| self.path_of(child)).unwrap_or_default()
             }
             // `.macOS("10.10")` — an implicit member: the name is the member,
             // with no receiver. Read as a leaf the call lost its name entirely.
