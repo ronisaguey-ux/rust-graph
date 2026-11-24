@@ -6398,3 +6398,323 @@ impl<'a> Walker<'a> {
                     } else {
                         format!("[\"t\",[{}]]", parts.join(","))
                     };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "call" if self.facts.tag == "LUA" => {
+                let ch = self.children(id);
+                if ch.first().map(|&c| self.text(c)) == Some(b"require") {
+                    let line = self.line(id);
+                    if let Some(ca) = self.child_of_kind(id, "call_arguments") {
+                        let raw = self.text_string(ca);
+                        let bytes = raw.as_bytes();
+                        let mut i = 0;
+                        while i < bytes.len() {
+                            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                                let q = bytes[i];
+                                i += 1;
+                                let mut val = String::new();
+                                while i < bytes.len() && bytes[i] != q {
+                                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                        i += 1;
+                                    }
+                                    val.push(bytes[i] as char);
+                                    i += 1;
+                                }
+                                if !val.is_empty() {
+                                    let alias = val.rsplit('/').next().unwrap_or("").to_string();
+                                    if !self.facts.imports.iter().any(|imp| imp.line == line && imp.module == val && imp.kind == IMPORT_STAR) {
+                                        self.facts.imports.push(Import {
+                                            line,
+                                            module: val,
+                                            alias,
+                                            kind: IMPORT_STAR,
+                                            ..Import::default()
+                                        });
+                                    }
+                                }
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                }
+                if !self.call_texts.contains_key(&id) {
+                    let _ = self.form(id);
+                }
+            }
+            _ if matches!(self.facts.tag.as_str(), "R" | "SOL" | "DART" | "RB" | "PHP" | "LUA" | "CR" | "PS1" | "FS" | "ZIG" | "AWK" | "PAS")
+                && self.kinds.calls.contains(&kind)
+                && !self.call_texts.contains_key(&id) =>
+            {
+                let _ = self.form(id);
+            }
+            // `val x = f()`: a Scala val/var is not a definition node the walk
+            // opens, so nothing formed the initializer and every call written
+            // there (`new Array[T](n)`) was missing from the call table. Form
+            // only the value after `=` - the type and modifiers are not calls.
+            "val_definition" if self.language.name == "scala" => {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.text_string(child) == "=") {
+                    if let Some(&value) = children.get(at + 1) {
+                        let form = self.form(value);
+                        // The one-pass reader files a `val`/`var` with an
+                        // initialiser as an `a` event naming the bound
+                        // identifier. Reading only the value left every member
+                        // of a trait/object body without that event: the CST
+                        // folded the whole body into one `x` on the header
+                        // line, so every binding lost its line (21 rows in
+                        // AnsiColor.scala alone).
+                        // The binders are the identifiers before the type
+                        // annotation: `var a, b: T = …` declares both, and a
+                        // type annotation (`val A: RecordType = …`) puts
+                        // another identifier after the colon, which is not a
+                        // binder (21 rows in RecordType.scala). Only the first
+                        // was read, so `b` was missing from every such line.
+                        let colon = children[..at].iter().position(|&child| self.text_string(child) == ":").unwrap_or(at);
+                        let names: Vec<String> = children[..colon]
+                            .iter()
+                            .filter(|&&child| self.kind(child) == "identifier")
+                            .map(|&child| self.text_string(child))
+                            .collect();
+                        if !names.is_empty() {
+                            let line = self.line(id);
+                            // The lexer also binds a val whose initialiser is a
+                            // constructor call to the class it builds
+                            // (`val bldr = new JLSBuilder(..)` binds `bldr` to
+                            // `JLSBuilder`). Reading only the event left every
+                            // such typed member as a variable the CST missed.
+                            if let Some(class) = self.constructed(value) {
+                                for name in &names {
+                                    self.facts.vars.push((name.clone(), class.clone()));
+                                }
+                            }
+                            self.lexer_event(b'a', line, &names, &form, false);
+                        }
+                    }
+                }
+            }
+            // `(x: T) => self.apply(x)`: Scala's lambda body is an expression,
+            // and nothing formed it, so every call written there was missing
+            // from the call table. A nested lambda is visited on its own.
+            "lambda_expression" if self.language.name == "scala" => {
+                let mut calls = Vec::new();
+                self.scala_calls_in_lambda(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            // `Assert.Throws<X>(() => new Foo());`: a lambda's expression body
+            // holds a call, and no arm read the node, so every call written in
+            // a lambda passed as an argument was missing from the CST's record
+            // (C# corpus: the largest remaining call cluster, 44 files). A
+            // block body is walked by the generic walk and needs nothing here.
+            "lambda_expression" if self.facts.tag == "CS" => {
+                if let Some(body) = self.cs_expression_body(id) {
+                    self.form(body);
+                }
+            }
+            // Scala's `def f(): T = expr` writes the body as a `def_body` whose
+            // child is the expression itself. Nothing read that node, so a call
+            // in an expression-bodied def never reached the record.
+            "def_body" => self.expression_statement(id),
+            // Erlang writes a function's expressions under one `body`, separated
+            // by commas. Reading only the first left every later call out of the
+            // record (`A = f(), B:g().` recorded `f` and neither remote call).
+            "body" if self.facts.tag == "ERL" => {
+                for child in self.children(id) {
+                    if self.is_layout(child) || matches!(self.kind(child), "," | ".") {
+                        continue;
+                    }
+                    self.statement_node(child, child);
+                }
+            }
+            "attribute" if self.facts.tag == "ERL" => {
+                let attr_name = self
+                    .child_of_kind(id, "attribute_name")
+                    .map(|c| self.text_string(c))
+                    .unwrap_or_default();
+                if matches!(attr_name.as_str(), "define" | "if" | "elif" | "record") {
+                    if let Some(grp) = self.child_of_kind(id, "attribute_group") {
+                        if let Some(args) = self.child_of_kind(grp, "attribute_arguments") {
+                            let exprs: Vec<u32> = self
+                                .children(args)
+                                .into_iter()
+                                .filter(|&c| !self.is_layout(c) && self.kind(c) != ",")
+                                .collect();
+                            for &expr in &exprs {
+                                let _ = self.form(expr);
+                            }
+                        }
+                    }
+                }
+            }
+            "parameter_group" if self.facts.tag == "ERL" => {
+                if let Some(params) = self.child_of_kind(id, "parameters") {
+                    for expr in self.children(params) {
+                        if !self.is_layout(expr) && self.kind(expr) != "," {
+                            let _ = self.form(expr);
+                        }
+                    }
+                }
+            }
+            "guard" if self.facts.tag == "ERL" => {
+                let gline = self.line(id);
+                let mut first_checked = false;
+                for child in self.children(id) {
+                    if self.kind(child) == "guard_sequence" {
+                        for expr in self.children(child) {
+                            if !self.is_layout(expr) && !matches!(self.kind(expr), ";" | ",") {
+                                if !first_checked {
+                                    first_checked = true;
+                                    if self.kind(expr) == "paren_expression" {
+                                        self.push_call("when".to_string(), gline);
+                                    }
+                                }
+                                let _ = self.form(expr);
+                            }
+                        }
+                    }
+                }
+            }
+            // `companion object { … }`: the one-pass lexer files the introducer
+            // as a header statement (`m:[n:companion,n:object,n:Name]`), and no
+            // arm wrote an event for the tree's `companion_object`, so every
+            // class that declares one lost that line.
+            "companion_object" if self.is_kotlin() => self.java_header_event(id),
+            // `val x = object : B() { }`: a supertype constructor is not a
+            // `call_expression`, so no arm recorded the call the lexer reads
+            // from `B()` when the object is written as an expression. A class
+            // header already reads its supertypes through `decl_value`, which
+            // is why only the expression form lost them.
+            "superclass_constructor" if self.is_kotlin() => {
+                let children = self.children(id);
+                if let Some(&ty) = children.first() {
+                    let path = self.path_of(ty);
+                    if !path.is_empty() {
+                        let line = self.line(ty);
+                        self.push_call(path, line);
+                    }
+                }
+                if let Some(list) = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                {
+                    self.arguments(list);
+                }
+            }
+            // `constructor(x: Int) : this(x)` / `: super(x)`: a secondary
+            // constructor's delegation is a call to `self` or `super` with its
+            // arguments, not a `call_expression`, so no arm recorded the call.
+            "constructor_delegation" if self.is_kotlin() => {
+                let children = self.children(id);
+                if let Some(&target) = children.iter().find(|&&child| !self.is_layout(child)) {
+                    let kind = self.kind(target);
+                    if matches!(kind, "this" | "super") {
+                        let path = if kind == "this" { "self" } else { kind };
+                        self.push_call(path.to_string(), self.line(target));
+                    }
+                }
+                if let Some(list) = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                {
+                    self.arguments(list);
+                }
+            }
+            // `fun f(): T = expr` writes the body as a `function_body` whose
+            // child is the expression itself; a block body is the other
+            // alternative. The lexer writes the expression's value as the
+            // function's `r` event, so the arm does too, and a call in the
+            // expression reaches the record with it. Two lanes fixed this at
+            // once; the arm that states the return wins.
+            "function_body" if self.is_kotlin() => self.function_body(id),
+            // `get() = foo()` writes the same expression straight onto the
+            // accessor, with no `function_body` between them.
+            "accessor" if self.is_kotlin() => {
+                let children = self.children(id);
+                let body = children
+                    .iter()
+                    .position(|&child| self.kind(child) == "=")
+                    .and_then(|at| children.get(at + 1).copied())
+                    .filter(|&child| !self.is_layout(child));
+                if let Some(body) = body {
+                    let line = self.line(body);
+                    let was = self.in_kotlin_expr_body;
+                    self.in_kotlin_expr_body = true;
+                    let value = self.form(body);
+                    self.in_kotlin_expr_body = was;
+                    // A property's accessor is an assignment to the lexer — it
+                    // files the body on that line as an `x` event — while a
+                    // function's expression body is its `r` value. Written as
+                    // `r` the getter's line found no partner, so every property
+                    // whose getter stood before another member lost its value
+                    // (`get() = keys.length` in a class with more members).
+                    self.event(&format!("[\"x\",{line},{value}]"));
+                } else {
+                    // `override var size: Int = 0` / `private set`: a bare
+                    // accessor writes its modifiers and keyword as one value on
+                    // its own line (`m:[n:private,n:set]`), and nothing was read
+                    // for it, so every such property lost a statement
+                    // (ArrayDeque.kt, SlidingWindow.kt, SequenceTest.kt).
+                    let line = self.line(id);
+                    let mut parts: Vec<String> = Vec::new();
+                    for child in self.children(id) {
+                        match self.kind(child) {
+                            "modifiers" => {
+                                for modifier in self.children(child) {
+                                    let word = self.text_string(modifier);
+                                    if !word.is_empty() {
+                                        let mut atom = String::from("[\"n\",");
+                                        push_string(&mut atom, &word);
+                                        atom.push(']');
+                                        parts.push(atom);
+                                    }
+                                }
+                            }
+                            "get" | "set" => {
+                                let mut atom = String::from("[\"n\",");
+                                push_string(&mut atom, &self.text_string(child));
+                                atom.push(']');
+                                parts.push(atom);
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !parts.is_empty() {
+                        self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                    }
+                }
+            }
+            "return_statement" if self.facts.tag == "LUA" => {
+                let line = self.line(id);
+                let mut vals: Vec<String> = Vec::new();
+                if let Some(el) = self.children(id).into_iter().find(|&c| self.kind(c) == "expression_list") {
+                    for ec in self.children(el) {
+                        let eck = self.kind(ec);
+                        if matches!(eck, "nil" | "true" | "false") {
+                            vals.push(format!("[\"n\",\"{eck}\"]"));
+                        } else if matches!(eck, "string" | "number" | "...") {
+                            vals.push("0".to_string());
+                        } else if !self.is_layout(ec) && eck != "," {
+                            let f = self.form(ec);
+                            vals.push(if f.is_empty() { "0".to_string() } else { f });
+                        }
+                    }
+                }
+                if !vals.is_empty() {
+                    let val = if vals.len() == 1 {
+                        vals.remove(0)
+                    } else {
+                        format!("[\"t\",[{}]]", vals.join(","))
+                    };
+                    self.lexer_event(b'r', line, &[], &val, false);
+                }
+            }
+            "return_statement" => self.return_statement(id),
+            "variable_declarator" if self.is_js() => self.declarator(id),
+            "assignment_expression" if self.is_js() => self.assignment_definition(id),
+            "public_field_definition" | "field_definition" | "property_signature" if self.is_js() => {
+                self.field(id)
