@@ -3617,11 +3617,28 @@ impl<'a> Parser<'a> {
             token.kind == Kind::Ident && self.lang.inline_openers.iter().any(|word| word.as_bytes() == self.raw(token))
         });
         if let Some(at) = opener {
+            let balanced_in_stmt = self.lang.tag == "LUA" && {
+                let opens = stmt[at..]
+                    .iter()
+                    .filter(|t| {
+                        t.kind == Kind::Ident
+                            && (self.lang.openers.iter().any(|w| w.as_bytes() == self.raw(t))
+                                || self.lang.inline_openers.iter().any(|w| w.as_bytes() == self.raw(t)))
+                    })
+                    .count();
+                let closes = stmt[at..]
+                    .iter()
+                    .filter(|t| t.kind == Kind::Ident && self.lang.closers.iter().any(|w| w.as_bytes() == self.raw(t)))
+                    .count();
+                closes >= opens
+            };
             self.simple_statement(&stmt[..at]);
-            let symbol = self.top().symbol;
-            let class = self.top().class.clone();
-            let receiver = self.top().receiver.clone();
-            self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col, saved: None, defines: None, type_only: false, initialiser: false });
+            if !balanced_in_stmt {
+                let symbol = self.top().symbol;
+                let class = self.top().class.clone();
+                let receiver = self.top().receiver.clone();
+                self.frames.push(Frame { kind: FrameKind::Plain, symbol, class, receiver, col, saved: None, defines: None, type_only: false, initialiser: false });
+            }
             return;
         }
         self.simple_statement(stmt);
@@ -4152,6 +4169,9 @@ impl<'a> Parser<'a> {
                 let alias = if named { self.text(&rest[index - 1]) } else { last };
                 let kind = if self.lang.tag == "GO" || named { IMPORT_MODULE } else { IMPORT_STAR };
                 self.facts.imports.push(Import { line, module, alias, kind, ..Import::default() });
+                if self.lang.tag == "LUA" {
+                    break;
+                }
             }
             return true;
         }
