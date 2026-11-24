@@ -7038,3 +7038,323 @@ impl<'a> Walker<'a> {
                         }
                         for &child in &inner[semi + 1..] {
                             if !self.is_layout(child) {
+                                let value = self.form(child);
+                                if value != "0" {
+                                    let line = self.line(child);
+                                    self.event(&format!("[\"x\",{line},{value}]"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "while_statement" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
+            // `lock (obj) stmt`: evaluates the lock expression and opens a
+            // block, like `while`, rather than walking the body via `lambda_calls`.
+            "lock_statement" if self.language.name == "csharp" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
+            "try_statement" | "match_statement" | "do_statement" => self.event("[\"b\"]"),
+            // `switch (x)` carries a condition the one-pass reader writes as an
+            // expression on the header line; the clause events below are the
+            // body. Reading the body alone dropped the scrutinee, which is a
+            // fact the resolver keeps (a call in the test is a call).
+            "switch_statement" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
+            // Scala's `try f() finally g()`: the clause's body is an expression,
+            // not a block, so no statement walk reads it and `g()` was lost (the
+            // try statement's value reads only its first child). A block body is
+            // walked statement by statement and needs nothing here.
+            "finally_clause" if self.language.name == "scala" => {
+                let body = self.children(id).into_iter().find(|&child| self.kind(child) == "try_body");
+                if let Some(inner) = body.and_then(|body| self.children(body).into_iter().find(|&child| !self.is_layout(child))) {
+                    if self.kind(inner) != "block" {
+                        self.form(inner);
+                    }
+                }
+                self.event("[\"e\"]");
+            }
+            "catch_clause" | "finally_clause" | "except_clause" | "switch_case" | "case_clause" => {
+                // `except ValueError:` names a type the one-pass reader files
+                // as a value on the clause's line; the clause emits only its
+                // terminator, so that name had no counterpart at all.
+                // `except OSError as error:` binds a name, and the lexer
+                // reads the clause as an assignment of the type to it.
+                if kind == "catch_clause" {
+                    if self.language.name == "csharp" {
+                        let mut calls = Vec::new();
+                        for child in self.children(id) {
+                            if self.kind(child) != "block" {
+                                self.lambda_calls(child, &mut calls);
+                            }
+                        }
+                        for call in calls {
+                            self.form(call);
+                        }
+                    }
+                    // `catch (e)`: the lexer reads the caught binding as the
+                    // clause's value. The binding sits inside a
+                    // `catch_parameter`, so the name is one level down.
+                    let mut names = Vec::new();
+                    for child in self.children(id) {
+                        names.extend(self.pattern_names(child));
+                    }
+                    if let Some(name) = names.into_iter().next() {
+                        let line = self.line(id);
+                        let mut text = format!("[\"x\",{line},[\"n\",");
+                        push_string(&mut text, &name);
+                        text.push_str("]]");
+                        self.event(&text);
+                    }
+                }
+                // `finally close()`: Scala's finally takes one expression, and
+                // the grammar wraps it in a `try_body` that no arm forms, so the
+                // call and its line were lost (akka: 3 call losses). A braced
+                // body is a block the walk already reads.
+                if kind == "finally_clause" && self.language.name == "scala" {
+                    let body = self.children(id).into_iter().find(|&c| self.kind(c) == "try_body");
+                    let expr = body.and_then(|body| self.children(body).into_iter().find(|&c| !self.is_layout(c)));
+                    if let Some(expr) = expr.filter(|&c| !matches!(self.kind(c), "block" | "statement_block")) {
+                        let form = self.form(expr);
+                        if form != "0" {
+                            let line = self.line(expr);
+                            self.event(&format!("[\"x\",{line},{form}]"));
+                        }
+                    }
+                }
+                if kind == "except_clause" {
+                    if let Some((targets, value)) = self.loop_binding(id) {
+                        self.assignment_event(targets, value, self.line(id), false);
+                        self.event("[\"e\"]");
+                        return;
+                    }
+                    let mut parts = Vec::new();
+                    for child in self.children(id) {
+                        if self.is_layout(child) || matches!(self.kind(child), "except" | ":") {
+                            continue;
+                        }
+                        if matches!(self.kind(child), "block" | "statement_block") {
+                            break;
+                        }
+                        let form = self.form(child);
+                        if form != "0" {
+                            parts.push(form);
+                        }
+                    }
+                    if !parts.is_empty() {
+                        let line = self.line(id);
+                        self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                    }
+                }
+                self.event("[\"e\"]")
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn leave(&mut self, id: u32) {
+        let kind = self.kind(id);
+        if matches!(self.kinds.family, Family::Go | Family::Java) {
+            if self.frame().node == id {
+                let frame = self.stack.pop().expect("a frame to pop");
+                if let Some(index) = frame.defines {
+                    self.facts.symbols[index].end_line = self.end_line(id);
+                }
+            }
+            return;
+        }
+        // `(a) => f(a)`: the body is an expression, not a block, so nothing in
+        // the walk below would read it. It is this function's return value.
+        if kind == "arrow_function" && self.frame().node == id {
+            if let Some(&body) = self.children(id).last() {
+                if !matches!(self.kind(body), "statement_block" | "block") {
+                    let line = self.line(id);
+                    let value = self.form(body);
+                    self.event(&format!("[\"r\",{line},{value}]"));
+                }
+            }
+        }
+        if self.is_rust() {
+            self.leave_rust(id);
+        }
+        if matches!(
+            kind,
+            "if_statement"
+                | "guard_statement"
+                | "for_statement"
+                | "for_in_statement"
+                | "foreach_statement"
+                | "while_statement"
+                | "lock_statement"
+                | "do_statement"
+                | "try_statement"
+                | "switch_statement"
+                | "match_statement"
+                | "with_statement"
+        ) {
+            self.event("[\"j\"]");
+            if kind == "do_statement" {
+                if let Some(cond) = self
+                    .children(id)
+                    .into_iter()
+                    .rev()
+                    .find(|&c| !self.is_layout(c) && !matches!(self.kind(c), "statement_block" | "block"))
+                {
+                    let value = self.form(cond);
+                    if value != "0" {
+                        let line = self.line(cond);
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
+                }
+            }
+        }
+        if self.frame().node != id {
+            return;
+        }
+        let frame = self.stack.pop().expect("a frame to pop");
+        if let Some(index) = frame.defines {
+            self.facts.symbols[index].end_line = self.end_line(id);
+        }
+    }
+
+    pub(crate) fn is_js(&self) -> bool {
+        self.kinds.family == Family::Js
+    }
+
+    /// `true` for Kotlin: it is the only grammar here whose imports table
+    /// carries the package clause, and the walk needs to know before it reads
+    /// `property_declaration`, which Swift also uses.
+    /// The ObjC method declarations the CST could not hold: a line that opens
+    /// with `-` or `+` and is a declaration (no body) is read as `x` with its
+    /// words, and only where no other reader wrote an event.
+    /// The tree-sitter Scala grammar gives a nested import no node: `import`
+    /// inside a class or object body comes back as an ERROR whose `import`
+    /// child has no children, and the rest of the line is read as expressions.
+    /// The one-pass reader still files the import, so every file with one lost
+    /// its line (76 files, one row each, in the scala corpus). Read those
+    /// imports off the source, the way the Objective-C declarations are, and
+    /// spell them exactly as the lexer does.
+    fn scala_import_lines(&mut self) {
+        let taken: std::collections::HashSet<u32> = self.facts.imports.iter().map(|imp| imp.line).collect();
+        let count = self.line_starts.len();
+        for index in 0..count {
+            let start = self.line_starts[index] as usize;
+            let end = self.line_starts.get(index + 1).map(|&at| at as usize).unwrap_or(self.src.len());
+            let line = index as u32 + 1;
+            if taken.contains(&line) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&self.src[start..end]);
+            let trimmed = text.trim();
+            let Some(rest) = trimmed.strip_prefix("import ").map(str::trim) else { continue };
+            if let Some(open) = rest.find('{') {
+                let prefix = rest[..open].trim_end_matches('.').trim().to_string();
+                let Some(close) = rest[open..].find('}').map(|at| open + at) else { continue };
+                for selector in rest[open + 1..close].split(',') {
+                    let selector = selector.trim();
+                    if selector.is_empty() {
+                        continue;
+                    }
+                    let (name, alias) = match selector.split_once("=>") {
+                        Some((name, alias)) => (name.trim().to_string(), alias.trim().to_string()),
+                        None => (selector.to_string(), selector.to_string()),
+                    };
+                    self.facts.imports.push(Import {
+                        line,
+                        module: prefix.clone(),
+                        name,
+                        alias,
+                        kind: IMPORT_MODULE,
+                        ..Import::default()
+                    });
+                }
+            } else {
+                let module = rest.trim_end_matches(';').trim().to_string();
+                let alias = module.rsplit('.').next().unwrap_or("").to_string();
+                self.facts.imports.push(Import {
+                    line,
+                    module,
+                    name: String::new(),
+                    alias,
+                    kind: IMPORT_MODULE,
+                    ..Import::default()
+                });
+            }
+        }
+    }
+
+    fn objc_method_lines(&mut self) {
+        // A tree with an unbalanced end can leave the walk with no frame, and
+        // an event needs one to belong to: the module's own frame is restored
+        // for the pass and dropped again after it.
+        let restored = self.stack.is_empty();
+        if restored {
+            self.stack.push(Frame {
+                node: 0,
+                symbol: 0,
+                class: String::new(),
+                receiver: String::new(),
+                container: false,
+                defines: None,
+            });
+        }
+        let mut taken: Vec<u32> = Vec::new();
+        for symbol in &self.facts.symbols {
+            let text = &symbol.events;
+            for marker in ["[\"x\",", "[\"a\","] {
+                let mut at = 0;
+                while let Some(found) = text[at..].find(marker) {
+                    let start = at + found + marker.len();
+                    let digits: String = text[start..].chars().take_while(|ch| ch.is_ascii_digit()).collect();
+                    if let Ok(line) = digits.parse::<u32>() {
+                        taken.push(line);
+                    }
+                    at = start;
+                }
+            }
+        }
+        let count = self.line_starts.len();
+        for index in 0..count {
+            let start = self.line_starts[index] as usize;
+            let end = self.line_starts.get(index + 1).map(|&at| at as usize).unwrap_or(self.src.len());
+            let line = index as u32 + 1;
+            if taken.contains(&line) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&self.src[start..end]);
+            let trimmed = text.trim();
+            // `@import Foundation;`: a module import is one statement to the
+            // lexer - the keyword and the module - and the grammar gives it no
+            // node at all, so every one in every header was a loss.
+            if let Some(rest) = trimmed.strip_prefix("@import") {
+                let module = rest.trim().trim_end_matches(';').trim();
+                if !module.is_empty() {
+                    let mut value = String::from("[\"m\",[[\"n\",\"import\"],[\"n\",");
+                    push_string(&mut value, module);
+                    value.push_str("]]]");
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                continue;
+            }
+            // `@class A, B;` / `@synthesize window = _window;`: forward and
+            // synthesized declarations are one statement to the lexer, and the
+            // grammar has no node for either.
+            for (prefix, keyword) in [("@class", "class"), ("@synthesize", "synthesize")] {
+                let Some(rest) = trimmed.strip_prefix(prefix) else { continue };
+                let names: Vec<String> = rest
+                    .trim()
+                    .trim_end_matches(';')
+                    .split(',')
+                    .map(|part| part.split('=').next().unwrap_or("").trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    // `RACSequence<__covariant ValueType>` is a class name and
+                    // the type parameters it forwards, which the one-pass reader
+                    // files as three names in a row. Kept whole, the recorded
+                    // name held the angle brackets and no row matched.
+                    .flat_map(|name| {
