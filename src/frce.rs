@@ -318,3 +318,323 @@ pub fn lang_id(path: &str) -> u16 {
         "cs" => "csharp",
         "d" => "d",
         "dart" => "dart",
+        "ex" | "exs" => "elixir",
+        "elm" => "elm",
+        "erl" | "hrl" => "erlang",
+        "f" | "f90" | "f95" => "fortran",
+        "fs" | "fsi" | "fsx" => "fsharp",
+        "go" => "go",
+        "groovy" | "gradle" => "groovy",
+        "hs" | "lhs" => "haskell",
+        "java" => "java",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jl" => "julia",
+        "kt" | "kts" => "kotlin",
+        "lua" => "lua",
+        "m" => "matlab",
+        "nim" => "nim",
+        "mm" => "objective-c",
+        "ml" | "mli" => "ocaml",
+        "pas" | "pp" => "pascal",
+        "pl" | "pm" => "perl",
+        "php" => "php",
+        "ps1" | "psm1" | "psd1" => "powershell",
+        "py" => "python",
+        "r" => "r",
+        "rb" => "ruby",
+        "rs" => "rust",
+        "scala" | "sc" => "scala",
+        "sol" => "solidity",
+        "sql" => "sql",
+        "swift" => "swift",
+        "tcl" => "tcl",
+        "ts" | "tsx" => "typescript",
+        "vb" | "vbs" => "vbnet",
+        "bas" => "visual-basic",
+        "zig" => "zig",
+        _ => return 0,
+    };
+    LANG_NAMES
+        .iter()
+        .position(|candidate| *candidate == name)
+        .map(|index| index as u16 + 1)
+        .unwrap_or(0)
+}
+
+pub fn lang_name(id: u16) -> &'static str {
+    LANG_NAMES.get(id as usize - 1).copied().unwrap_or("unknown")
+}
+
+/// Which part of a record the disagreement was about. The reason says what the
+/// mechanism is; the channel says which fact kind to open first.
+pub const CHANNELS: [&str; 8] = [
+    "event",
+    "call",
+    "import",
+    "symbol",
+    "var",
+    "values",
+    "recovery",
+    "other",
+];
+
+fn channel_index(kind: &str) -> usize {
+    match kind {
+        "event" => 0,
+        "call" => 1,
+        "import" => 2,
+        "symbol" => 3,
+        "var" => 4,
+        "values" => 5,
+        "recovery" => 6,
+        _ => 7,
+    }
+}
+
+/// Classify one guard refusal.
+///
+/// Deterministic and cheap: a handful of substring tests on a string that was
+/// already built for the refusal message. Anything unrecognised is `Unclassified`
+/// on purpose — that bucket is the signal to add a rule.
+pub fn classify(kind: &str, detail: &str) -> FallbackReason {
+    // Differential classes first: these strings come from the guard's own arms.
+    if detail.contains("no event on a line both readers can mean") {
+        return FallbackReason::MissingStatementTerminator;
+    }
+    if detail.contains("a name the lexer read is not in the CST's value") {
+        return FallbackReason::DifferentialNameValue;
+    }
+    if detail.contains("a call or constant the lexer read is not in the CST's value") {
+        return FallbackReason::DifferentialCallValue;
+    }
+    if detail.contains("the CST wrote the value as the constant 0") {
+        return FallbackReason::DifferentialConstantZero;
+    }
+    if detail.contains("the statement's target list differs") {
+        return FallbackReason::DifferentialTargetsDiffer;
+    }
+    if detail.contains("more than 1% is recovery noise") {
+        return FallbackReason::UnclassifiedSyntaxBailout;
+    }
+    // A plain "the CST lost a <kind>" refusal is a missing fact.
+    match kind {
+        "call" | "import" | "symbol" | "var" | "event" => FallbackReason::DifferentialMissingFact,
+        _ => FallbackReason::UnclassifiedSyntaxBailout,
+    }
+}
+
+/// One captured fallback, small enough to keep three of.
+#[derive(Clone, Copy, Default)]
+pub struct Sample {
+    pub line: u32,
+    pub col: u16,
+    pub loc: u32,
+    /// Index into the thread-local path table.
+    pub path: u16,
+    pub channel: u8,
+}
+
+#[derive(Clone, Copy)]
+struct ReasonStats {
+    files: u64,
+    loc: u64,
+    channels: [u32; CHANNELS.len()],
+    samples: [Sample; 3],
+    kept: u8,
+}
+
+impl Default for ReasonStats {
+    fn default() -> Self {
+        ReasonStats {
+            files: 0,
+            loc: 0,
+            channels: [0; CHANNELS.len()],
+            samples: [Sample::default(); 3],
+            kept: 0,
+        }
+    }
+}
+
+thread_local! {
+    static STATS: RefCell<[ReasonStats; FallbackReason::COUNT]> =
+        const { RefCell::new([ReasonStats { files: 0, loc: 0, channels: [0; CHANNELS.len()], samples: [Sample { line: 0, col: 0, loc: 0, path: 0, channel: 0 }; 3], kept: 0 }; FallbackReason::COUNT]) };
+    /// Per-language counts: language id (stable, 0 = unknown) then reason.
+    static LANGS: RefCell<HashMap<u16, [u64; FallbackReason::COUNT]>> = RefCell::new(HashMap::new());
+    static PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static PATH_IDS: RefCell<HashMap<String, u16>> = RefCell::new(HashMap::new());
+}
+
+fn python_like_line(detail: &str) -> (u32, u16) {
+    // The guard writes "line 12" into every detail; take the first one.
+    let mut line = 0u32;
+    let mut col = 0u16;
+    let bytes = detail.as_bytes();
+    let mut i = 0;
+    while i + 5 <= bytes.len() {
+        if bytes[i..i + 5] == *b"line " {
+            let mut n = 0u32;
+            let mut j = i + 5;
+            let mut any = false;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                n = n.saturating_mul(10).saturating_add((bytes[j] - b'0') as u32);
+                j += 1;
+                any = true;
+            }
+            if any {
+                line = n;
+                // "line 12 col 7" is the guard's column form when it has one.
+                if j + 5 <= bytes.len() && bytes[j..j + 5] == *b" col " {
+                    let mut c = 0u16;
+                    let mut k = j + 5;
+                    while k < bytes.len() && bytes[k].is_ascii_digit() {
+                        c = c.saturating_mul(10).saturating_add((bytes[k] - b'0') as u16);
+                        k += 1;
+                    }
+                    col = c;
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    (line, col)
+}
+
+fn path_id(path: &str) -> u16 {
+    if path.is_empty() {
+        return u16::MAX;
+    }
+    if let Some(id) = PATH_IDS.with(|ids| ids.borrow().get(path).copied()) {
+        return id;
+    }
+    PATHS.with(|paths| {
+        let mut paths = paths.borrow_mut();
+        if paths.len() >= u16::MAX as usize {
+            return u16::MAX;
+        }
+        let id = paths.len() as u16;
+        paths.push(path.to_string());
+        PATH_IDS.with(|ids| {
+            ids.borrow_mut().insert(path.to_string(), id);
+        });
+        id
+    })
+}
+
+/// Record one fallback. Called only from a refusal arm.
+///
+/// `loc` is the file's line count: a corpus of many small files and a corpus of
+/// few large ones can carry the same file count and a different amount of code,
+/// so both are counted.
+pub fn record(path: &str, kind: &str, detail: &str, loc: u32, lang_id: u16) {
+    let reason = classify(kind, detail);
+    let channel = channel_index(kind);
+    let (line, col) = python_like_line(detail);
+    let sample = Sample {
+        line,
+        col,
+        loc,
+        path: path_id(path),
+        channel: channel as u8,
+    };
+    let index = reason.index();
+    STATS.with(|stats| {
+        let mut stats = stats.borrow_mut();
+        let bucket = &mut stats[index];
+        bucket.files += 1;
+        bucket.loc += loc as u64;
+        bucket.channels[channel] += 1;
+        if (bucket.kept as usize) < bucket.samples.len() {
+            bucket.samples[bucket.kept as usize] = sample;
+            bucket.kept += 1;
+        }
+    });
+    if lang_id != 0 {
+        LANGS.with(|langs| {
+            let mut langs = langs.borrow_mut();
+            let slot = langs.entry(lang_id).or_insert([0; FallbackReason::COUNT]);
+            slot[index] += 1;
+        });
+    }
+}
+
+/// Wipe every counter. Tests only.
+pub fn reset() {
+    STATS.with(|stats| {
+        let mut stats = stats.borrow_mut();
+        for bucket in stats.iter_mut() {
+            *bucket = ReasonStats::default();
+        }
+    });
+    LANGS.with(|langs| langs.borrow_mut().clear());
+    PATHS.with(|paths| paths.borrow_mut().clear());
+    PATH_IDS.with(|ids| ids.borrow_mut().clear());
+}
+
+/// Total fallbacks recorded. Used by the acceptance test that every fallback
+/// counter in the run has a matching event.
+pub fn total() -> u64 {
+    STATS.with(|stats| stats.borrow().iter().map(|bucket| bucket.files).sum())
+}
+
+fn sorted_reasons(snapshot: &[ReasonStats; FallbackReason::COUNT]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..FallbackReason::COUNT)
+        .filter(|index| snapshot[*index].files > 0)
+        .collect();
+    order.sort_unstable_by(|left, right| {
+        snapshot[*right]
+            .loc
+            .cmp(&snapshot[*left].loc)
+            .then(snapshot[*right].files.cmp(&snapshot[*left].files))
+            .then(left.cmp(right))
+    });
+    order
+}
+
+/// The `--report-fallbacks` table: ranked by LOC lost, then by files.
+pub fn report() -> String {
+    let snapshot = STATS.with(|stats| *stats.borrow());
+    let total_files: u64 = snapshot.iter().map(|bucket| bucket.files).sum();
+    let total_loc: u64 = snapshot.iter().map(|bucket| bucket.loc).sum();
+    let mut out = String::new();
+    out.push_str("FRCE — fallback root causes (ranked by LOC affected)\n");
+    out.push_str(&format!(
+        "  {total_files} fallbacks, {total_loc} LOC affected, {} distinct reasons\n\n",
+        snapshot.iter().filter(|bucket| bucket.files > 0).count()
+    ));
+    if total_files == 0 {
+        out.push_str("  none: every file took the CST path\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "{:>4}  {:<34} {:>7} {:>7} {:>9}  {:<12} {}\n",
+        "code", "reason", "files", "share", "loc_lost", "channel", "what a fix does"
+    ));
+    for index in sorted_reasons(&snapshot) {
+        let bucket = &snapshot[index];
+        let reason = FallbackReason::from_index(index).expect("index is in range");
+        let share = 100.0 * bucket.files as f64 / total_files as f64;
+        let channel = bucket
+            .channels
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, count)| (**count, std::cmp::Reverse(*i)))
+            .map(|(i, _)| CHANNELS[i])
+            .unwrap_or("other");
+        out.push_str(&format!(
+            "{:>4}  {:<34} {:>7} {:>6.2}% {:>9}  {:<12} {}\n",
+            reason.code(),
+            reason.name(),
+            bucket.files,
+            share,
+            bucket.loc,
+            channel,
+            reason.explanation()
+        ));
+    }
+    let per_language = LANGS.with(|langs| {
+        let langs = langs.borrow();
+        let mut rows: Vec<(u16, u64, usize, u64)> = langs
+            .iter()
+            .map(|(id, counters)| {
+                let files: u64 = counters.iter().sum();
