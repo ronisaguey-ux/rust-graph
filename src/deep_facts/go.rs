@@ -6718,3 +6718,323 @@ fn dotted_piece(text: &str) -> bool {
         let mut parts: Vec<String> = Vec::new();
         for child in self.children(id) {
             match self.kind(child) {
+                "modifiers" => {
+                    for modifier in self.children(child) {
+                        if self.kind(modifier) == "annotation" {
+                            // An annotation above the declaration is its own
+                            // event; only the ones written on the head's line
+                            // belong to the run of words the lexer reads.
+                            if self.line(modifier) < line {
+                                continue;
+                            }
+                            let word =
+                                self.children(modifier).into_iter().find(|&leaf| self.kind(leaf) == "identifier");
+                            if let Some(word) = word {
+                                let mut out = String::from("[\"n\",");
+                                push_string(&mut out, &self.text_string(word));
+                                out.push(']');
+                                parts.push(out);
+                            }
+                            continue;
+                        }
+                        let value = self.decl_value(modifier);
+                        if !value.is_empty() && value != "0" {
+                            parts.push(value);
+                        }
+                    }
+                }
+                // `val` is a name to the one-pass reader and `var` is not:
+                // `val x: Int` files `m:[n:val,n:x,n:Int]` while
+                // `private var y: String` files `m:[n:private,n:y,n:String]`.
+                "val" => {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, "val");
+                    out.push(']');
+                    parts.push(out);
+                }
+                "var" | ":" | "=" | "by" | "lateinit" | "const" => {}
+                "property_head" => {
+                    let mut out = String::from("[\"n\",");
+                    push_string(&mut out, name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                _ if child == ty => self.kt_type_names(ty, &mut parts),
+                _ => {
+                    let value = self.decl_value(child);
+                    if !value.is_empty() && value != "0" {
+                        parts.push(value);
+                    }
+                }
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        let value = match parts.len() {
+            1 => parts.pop().unwrap_or_default(),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        };
+        self.lexer_event(b'x', line, &[], &value, false);
+    }
+
+    /// `val a = 1`, `private val b: Int = 2`: the declared name and the value,
+    /// as the assignment the lexer files.
+    pub(crate) fn kt_property(&mut self, id: u32) {
+        let children = self.children(id);
+        // `@Deprecated(…)` written on its own line is an event of its own - the
+        // lexer files it as the annotation's call - and the declaration starts
+        // on the line of its head. Measured from the node's start, every
+        // annotated property claimed the annotation's line and lost the
+        // declaration the lexer writes under the head.
+        let line = children
+            .iter()
+            .copied()
+            .find(|&child| matches!(self.kind(child), "property_head" | "val" | "var"))
+            .map(|child| self.line(child))
+            .unwrap_or_else(|| self.line(id));
+        let name = children
+            .iter()
+            .copied()
+            .find(|&child| self.kind(child) == "property_head")
+            .and_then(|head| {
+                // A property named with one of Kotlin's soft keywords
+                // (`val value = …`, `val data = …`) carries that keyword as its
+                // head's only child, not an `identifier`. A property declared on
+                // an extension receiver (`val ApplicationRequest.uri`) writes
+                // the receiver first, so the name is the last segment.
+                self.children(head)
+                    .into_iter()
+                    // `val file = …`: the Kotlin grammar keeps `file` as a
+                    // keyword token (a use-site target and a script head), but
+                    // it is a legal property name. Without it a property named
+                    // `file` had no head, so its initialiser's call never
+                    // reached the record (MavenVerifierExtensions.kt).
+                    .filter(|&child| {
+                        matches!(self.kind(child), "identifier" | "file") || self.kinds.soft.contains(&self.kind(child))
+                    })
+                    .next_back()
+            })
+            .map(|node| self.text_string(node))
+            .or_else(|| {
+                self.children(id)
+                    .into_iter()
+                    .find(|&child| matches!(self.kind(child), "identifier" | "simple_identifier" | "file"))
+                    .map(|node| self.text_string(node))
+            });
+        let Some(name) = name else {
+            // Swift `let (pointer, count) = (a, b)`: the pattern is a tuple with
+            // no head or identifier, and the lexer writes the statement under
+            // the names it binds, so the event carries those targets.
+            if self.language.name == "swift" {
+                let pattern = children.iter().copied().find(|&child| self.kind(child) == "parenthesized_expression");
+                let value = children
+                    .iter()
+                    .copied()
+                    .skip_while(|&child| self.kind(child) != "=")
+                    .skip(1)
+                    .find(|&child| !self.is_layout(child));
+                if let (Some(pattern), Some(value)) = (pattern, value) {
+                    let targets = self.assignment_targets(pattern);
+                    if !targets.is_empty() {
+                        self.assignment_parts(targets, value, line, false);
+                    }
+                }
+            }
+            return;
+        };
+        // The initialiser is the child after `=` (or `by`), and nothing else.
+        // Taking "the last child that is not a type word" made the type of a
+        // property that has no initialiser (`val x: String`) read as its
+        // value, so the line was written as an assignment the lexer never
+        // makes instead of the declaration header it does.
+        let value = if self.is_kotlin() {
+            children
+                .iter()
+                .position(|&child| matches!(self.kind(child), "=" | "by"))
+                .and_then(|at| children.get(at + 1).copied())
+        } else {
+            children
+                .iter()
+                .copied()
+                .rev()
+                .find(|&child| {
+                    !matches!(
+                        self.kind(child),
+                        "val" | "var" | "property_head" | "modifiers" | ":" | "=" | "by" | "const" | "lateinit" | "override"
+                            | "private" | "public" | "internal" | "protected" | "type_identifier" | "user_type" | "nullable_type"
+                            | "function_type" | "generic_type" | "unsafe_cast" | "anonymous_function"
+                    )
+                })
+        };
+        let Some(value) = value else {
+            // `public val log: Logger`: a typed property with no initialiser is
+            // a declaration whose value is the run of names it read - the
+            // modifiers, `val`, the name and the type's names. Read as an
+            // assignment it wrote nothing at all, and every uninitialised
+            // property in the corpus lost its line.
+            if self.is_kotlin() {
+                let ty = children
+                    .iter()
+                    .position(|&child| self.kind(child) == ":")
+                    .and_then(|at| children.get(at + 1).copied())
+                    .filter(|&child| !self.is_layout(child));
+                let attached = children.iter().any(|&child| matches!(self.kind(child), "by" | "accessor"));
+                if let (Some(ty), false) = (ty, attached) {
+                    self.kt_nullable_property(id, &name, ty, line);
+                    return;
+                }
+                // `val x: String` with its getter on the next line: there is no
+                // initialiser to assign, so the lexer's header event has no
+                // counterpart in the record and is written as one.
+                self.java_header_event(id);
+            }
+            return;
+        };
+        // `val ApplicationRequest.uri: String get() = origin.uri`: the getter is
+        // written on the declaration's line, and its expression is the value the
+        // lexer files for the property.
+        let value = if self.kind(value) == "accessor" {
+            let inner = self.children(value);
+            match inner.iter().copied().rev().find(|&child| {
+                !self.is_layout(child)
+                    && !matches!(self.kind(child), "get" | "set" | "(" | ")" | "=" | "block" | "accessor_parameters")
+            }) {
+                Some(node) => node,
+                None => return,
+            }
+        } else {
+            value
+        };
+        self.assignment_parts(vec![name], value, line, false);
+    }
+
+    /// `package a.b`: the lexer files the clause as one event whose value is the
+    /// keyword and the dotted name; nothing wrote it, and a Kotlin file with a
+    /// package clause lost the first line of most of them.
+    pub(crate) fn kt_package(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut parts: Vec<String> = Vec::new();
+        for child in self.children(id) {
+            let kind = self.kind(child);
+            if matches!(kind, "identifier") || self.kinds.soft.contains(&kind) {
+                parts.push(self.text_string(child));
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        let mut text = format!("[\"x\",{line},[\"m\",[[\"n\",\"package\"],[\"n\",");
+        push_string(&mut text, &parts.join("."));
+        text.push_str("]]]]");
+        self.event(&text);
+    }
+
+    /// The bindings of a `from ... import` clause, in order. `from m import
+    /// (a, b as c)`, `from m import *` and `from m import a, b` all land here.
+    pub(crate) fn import_bindings(&mut self, children: &[u32], module: &str, line: u32) {
+        let mut index = 0;
+        while index < children.len() {
+            let child = children[index];
+            match self.kind(child) {
+                "import_list" => {
+                    let inner = self.children(child);
+                    self.import_bindings(&inner, &module, line);
+                }
+                "wildcard_import" | "*" => {
+                    self.facts.imports.push(Import { line, module: module.into(), kind: IMPORT_STAR, ..Import::default() });
+                }
+                "aliased_import" => {
+                    let inner = self.children(child);
+                    let Some(&name_node) = inner.first() else {
+                        index += 1;
+                        continue;
+                    };
+                    let name = self.text_string(name_node);
+                    let alias = inner
+                        .last()
+                        .filter(|&&last| last != name_node)
+                        .map(|&last| self.text_string(last))
+                        .unwrap_or_else(|| name.clone());
+                    self.facts.imports.push(Import { line, module: module.into(), name, alias, kind: IMPORT_MODULE });
+                }
+                "dotted_name" | "identifier" => {
+                    let name = self.text_string(child);
+                    let aliased = children.get(index + 1).is_some_and(|&next| self.kind(next) == "as");
+                    let alias = if aliased {
+                        children.get(index + 2).map(|&next| self.text_string(next)).unwrap_or_else(|| name.clone())
+                    } else {
+                        name.clone()
+                    };
+                    self.facts.imports.push(Import { line, module: module.into(), name, alias, kind: IMPORT_MODULE });
+                    if aliased {
+                        index += 2;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+
+    pub(crate) fn js_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let module = children
+            .iter()
+            .find(|&&child| self.kind(child) == "string")
+            .map(|&child| self.string_value(child))
+            .unwrap_or_default();
+        if module.is_empty() {
+            if let Some(&alias_node) = children.iter().find(|&&c| self.kind(c) == "import_alias") {
+                let inner = self.children(alias_node);
+                if let Some(&name_node) = inner.first() {
+                    if let Some(req_mod) = self.require_module(alias_node) {
+                        let alias = self.text_string(name_node);
+                        self.facts.imports.push(Import {
+                            line,
+                            module: req_mod,
+                            alias,
+                            kind: IMPORT_MODULE,
+                            ..Import::default()
+                        });
+                    }
+                }
+            }
+            return;
+        }
+        if let Some(star_at) = children.iter().position(|&child| self.kind(child) == "*") {
+            let alias = if children.get(star_at + 1).is_some_and(|&child| self.kind(child) == "as") {
+                children.get(star_at + 2).map(|&child| self.text_string(child)).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let kind = if alias.is_empty() { IMPORT_STAR } else { IMPORT_MODULE };
+            self.facts.imports.push(Import { line, module, alias, kind, ..Import::default() });
+            return;
+        }
+        for child in children {
+            match self.kind(child) {
+                "import_clause" | "export_clause" => self.js_bindings(child, &module, line),
+                "import_specifier" | "export_specifier" => self.js_specifier(child, &module, line),
+                "string" | "import" | "export" | "from" | ";" => {}
+                _ => self.js_bindings(child, &module, line),
+            }
+        }
+    }
+
+    pub(crate) fn js_bindings(&mut self, id: u32, module: &str, line: u32) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "identifier" | "default" | "type" => {
+                    let alias = self.text_string(child);
+                    if alias != "type" {
+                        self.facts.imports.push(Import { line, module: module.into(), alias, kind: IMPORT_MODULE, ..Import::default() });
+                    }
+                }
+                // The TypeScript grammar gives these words their own node kind,
+                // so `import get from 'lodash/get'` bound nothing on this side
+                // while the lexer recorded the alias.
+                "is" | "as" | "satisfies" | "get" | "set" | "static" | "readonly" | "declare" | "async" => {
+                    let alias = self.text_string(child);
+                    self.facts.imports.push(Import { line, module: module.into(), alias, kind: IMPORT_MODULE, ..Import::default() });
