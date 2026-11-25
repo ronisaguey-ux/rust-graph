@@ -4158,3 +4158,323 @@ impl<'a> Walker<'a> {
                         let lhs = code[..eq].trim();
                         let lhs = lhs.strip_prefix("local ").map(|x| x.trim()).unwrap_or(lhs);
                         let name = lhs.rsplit(&['.', ':'][..]).next().unwrap_or(lhs).trim();
+                        if !name.is_empty()
+                            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            && !existing_syms.contains(&(name.to_string(), ln))
+                        {
+                            existing_syms.insert((name.to_string(), ln));
+                            let owner = if lhs.contains('.') || lhs.contains(':') {
+                                lhs.rsplit_once(&['.', ':'][..]).map(|(o, _)| o.to_string()).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            let key = if owner.is_empty() {
+                                format!("{name}@{ln}")
+                            } else {
+                                format!("{owner}.{name}@{ln}")
+                            };
+                            self.facts.symbols.push(Symbol {
+                                name: name.to_string(),
+                                owner,
+                                kind: KIND_FUNCTION,
+                                line: ln,
+                                end_line: n_lines as u32,
+                                key,
+                                bases: Vec::new(),
+                                params: Vec::new(),
+                                calls: Vec::new(),
+                                events: String::new(),
+                            });
+                        }
+                    }
+                }
+            }
+            if let Some(r) = rest {
+                if let Some(par) = r.find('(') {
+                    let full = r[..par].trim();
+                    let name = full.rsplit(&['.', ':'][..]).next().unwrap_or(full).trim();
+                    if !name.is_empty()
+                        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        && !existing_syms.contains(&(name.to_string(), ln))
+                    {
+                        existing_syms.insert((name.to_string(), ln));
+                        let owner = if full.contains('.') || full.contains(':') {
+                            full.rsplit_once(&['.', ':'][..]).map(|(o, _)| o.to_string()).unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let key = if owner.is_empty() {
+                            format!("{name}@{ln}")
+                        } else {
+                            format!("{owner}.{name}@{ln}")
+                        };
+                        self.facts.symbols.push(Symbol {
+                            name: name.to_string(),
+                            owner,
+                            kind: KIND_FUNCTION,
+                            line: ln,
+                            end_line: n_lines as u32,
+                            key,
+                            bases: Vec::new(),
+                            params: Vec::new(),
+                            calls: Vec::new(),
+                            events: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Precompute covering function symbols for every line (up to 6 covering spans + last_started + last_col0 + 0)
+        let mut sym_spans: Vec<(u32, u32, usize)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, sym)| sym.kind == KIND_FUNCTION && sym.line > 0)
+            .map(|(i, sym)| (sym.line, sym.end_line.max(sym.line), i))
+            .collect();
+        sym_spans.sort_by_key(|&(s, e, _)| (e.saturating_sub(s), s));
+
+        let mut syms_by_start: Vec<(u32, usize, bool, bool, bool)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, sym)| sym.kind == KIND_FUNCTION && sym.line > 0)
+            .map(|(i, sym)| {
+                let raw = lines.get((sym.line as usize).saturating_sub(1)).copied().unwrap_or("");
+                let col0 = !raw.starts_with(' ') && !raw.starts_with('\t');
+                let tr = raw.trim_start();
+                let is_local_fn = tr.starts_with("local function ");
+                let is_named_fn = tr.starts_with("function ") || is_local_fn;
+                (sym.line, i, col0, is_named_fn, is_local_fn)
+            })
+            .collect();
+        syms_by_start.sort_by_key(|&(s, _, _, _, _)| s);
+
+        let mut line_targets: Vec<Vec<usize>> = vec![Vec::new(); n_lines + 1];
+        let mut last_started: usize = 0;
+        let mut prev_started: usize = 0;
+        let mut last_named: usize = 0;
+        let mut last_named_col0: usize = 0;
+        let mut first_local_fn_col0: usize = 0;
+        let mut last_local_fn_col0: usize = 0;
+        let mut sp_idx: usize = 0;
+        for ln in 1..=n_lines {
+            let l32 = ln as u32;
+            while sp_idx < syms_by_start.len() && syms_by_start[sp_idx].0 <= l32 {
+                let (_, si, col0, is_named, is_local_fn) = syms_by_start[sp_idx];
+                if si != last_started {
+                    prev_started = last_started;
+                    last_started = si;
+                }
+                if is_named {
+                    last_named = si;
+                    if col0 {
+                        last_named_col0 = si;
+                    }
+                }
+                if is_local_fn && col0 {
+                    if first_local_fn_col0 == 0 {
+                        first_local_fn_col0 = si;
+                    }
+                    last_local_fn_col0 = si;
+                }
+                sp_idx += 1;
+            }
+            let t = &mut line_targets[ln];
+            for &(s, e, si) in &sym_spans {
+                if l32 >= s && l32 <= e {
+                    if !t.contains(&si) {
+                        t.push(si);
+                        if t.len() >= 6 {
+                            break;
+                        }
+                    }
+                }
+            }
+            for cand in [last_started, prev_started, last_named, last_named_col0, first_local_fn_col0, last_local_fn_col0] {
+                if cand != 0 && !t.contains(&cand) {
+                    t.push(cand);
+                }
+            }
+            if !t.contains(&0) {
+                t.push(0);
+            }
+        }
+
+        let mut existing_imports: std::collections::HashSet<(String, String)> = self
+            .facts
+            .imports
+            .iter()
+            .map(|im| (im.module.clone(), im.alias.clone()))
+            .collect();
+        let mut existing_vars: std::collections::HashSet<(String, String)> = self
+            .facts
+            .vars
+            .iter()
+            .cloned()
+            .collect();
+
+        let n_syms = self.facts.symbols.len();
+        let mut extra_events: Vec<Vec<String>> = vec![Vec::new(); n_syms];
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+
+        let is_ident_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_ident_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+        let push_call_to = |syms: &mut Vec<Symbol>,
+                            ecalls: &mut Vec<std::collections::HashSet<(String, u32)>>,
+                            si: usize,
+                            path: String,
+                            line: u32| -> usize {
+            if !ecalls[si].contains(&(path.clone(), line)) {
+                ecalls[si].insert((path.clone(), line));
+                syms[si].calls.push(Call { path, line });
+                syms[si].calls.len() - 1
+            } else {
+                syms[si]
+                    .calls
+                    .iter()
+                    .position(|c| c.path == path && c.line == line)
+                    .unwrap_or(0)
+            }
+        };
+
+        // Pass 1: per-line token/call extraction (tracking long-bracket strings `[=[ ... ]=]`)
+        let mut per_line_tokens: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
+        let mut per_line_code: Vec<String> = vec![String::new(); n_lines + 1];
+        let mut per_line_brace_delta: Vec<i32> = vec![0; n_lines + 1];
+        let mut per_line_paren_delta: Vec<i32> = vec![0; n_lines + 1];
+        let mut per_line_calls: Vec<Vec<(String, usize)>> = vec![Vec::new(); n_lines + 1];
+
+        let mut long_str_eqs: Option<usize> = None; // Some(k) when inside `[==...==[`
+        let mut in_long_comment: Option<usize> = None;
+
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            let targets = &line_targets[ln];
+            let bytes = raw_line.as_bytes();
+
+            // Check if we're in a long comment `--[=[ ... ]=]`
+            if let Some(eqs) = in_long_comment {
+                let mut close = String::from("]");
+                for _ in 0..eqs { close.push('='); }
+                close.push(']');
+                if raw_line.contains(&close) {
+                    in_long_comment = None;
+                }
+                continue;
+            }
+
+            // Detect start of `--[=[` long comment
+            if long_str_eqs.is_none() {
+                let trimmed = raw_line.trim_start();
+                if let Some(after_dash) = trimmed.strip_prefix("--[") {
+                    let eqs = after_dash.bytes().take_while(|&b| b == b'=').count();
+                    if after_dash.as_bytes().get(eqs) == Some(&b'[') {
+                        let mut close = String::from("]");
+                        for _ in 0..eqs { close.push('='); }
+                        close.push(']');
+                        if !after_dash[eqs + 1..].contains(&close) {
+                            in_long_comment = Some(eqs);
+                        }
+                        continue;
+                    }
+                }
+                if trimmed.starts_with("--") {
+                    continue;
+                }
+            }
+
+            // Determine code slice (don't strip `--` or quotes when inside a long string `[=[ ... ]=]`)
+            let mut code_end = bytes.len();
+            let mut bdelta: i32 = 0;
+            let mut pdelta: i32 = 0;
+            let started_in_long = long_str_eqs.is_some();
+
+            {
+                let mut q: u8 = 0;
+                let mut i = 0;
+                while i < bytes.len() {
+                    if let Some(eqs) = long_str_eqs {
+                        if bytes[i] == b']' {
+                            let mut j = i + 1;
+                            let mut cnt = 0;
+                            while j < bytes.len() && bytes[j] == b'=' && cnt < eqs {
+                                j += 1;
+                                cnt += 1;
+                            }
+                            if cnt == eqs && j < bytes.len() && bytes[j] == b']' {
+                                long_str_eqs = None;
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    let b = bytes[i];
+                    if q != 0 {
+                        if b == b'\\' && i + 1 < bytes.len() {
+                            i += 2;
+                            continue;
+                        }
+                        if b == q {
+                            q = 0;
+                        }
+                    } else {
+                        if b == b'"' || b == b'\'' {
+                            q = b;
+                        } else if b == b'[' {
+                            let mut j = i + 1;
+                            while j < bytes.len() && bytes[j] == b'=' {
+                                j += 1;
+                            }
+                            if j < bytes.len() && bytes[j] == b'[' {
+                                long_str_eqs = Some(j - (i + 1));
+                                i = j + 1;
+                                continue;
+                            }
+                        } else if b == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+                            if i + 2 < bytes.len() && bytes[i + 2] == b'[' {
+                                let mut j = i + 3;
+                                while j < bytes.len() && bytes[j] == b'=' { j += 1; }
+                                if j < bytes.len() && bytes[j] == b'[' {
+                                    let eqs = j - (i + 3);
+                                    let mut close = String::from("]");
+                                    for _ in 0..eqs { close.push('='); }
+                                    close.push(']');
+                                    if let Some(rel) = raw_line[j + 1..].find(&close) {
+                                        i = j + 1 + rel + close.len();
+                                        continue;
+                                    }
+                                }
+                            }
+                            code_end = i;
+                            break;
+                        } else if b == b'{' {
+                            bdelta += 1;
+                        } else if b == b'}' {
+                            bdelta -= 1;
+                        } else if b == b'(' {
+                            pdelta += 1;
+                        } else if b == b')' {
+                            pdelta -= 1;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+
+            per_line_brace_delta[ln] = bdelta;
+            per_line_paren_delta[ln] = pdelta;
