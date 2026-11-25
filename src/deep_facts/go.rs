@@ -6718,3 +6718,323 @@ fn dotted_piece(text: &str) -> bool {
             // words the lexer read are covered.
             "cast_expression" | "user_cast_expression" | "sizeof_expression" if self.is_c() => {
                 let mut parts: Vec<String> = Vec::new();
+                let children = self.children(id);
+                for (at, &child) in children.iter().enumerate() {
+                    let child_kind = self.kind(child);
+                    if matches!(child_kind, "cast_type" | "sizeof_operand" | "user_cast_head") {
+                        for word in self.c_words_of(child) {
+                            let mut form = String::from("[\"n\",");
+                            push_string(&mut form, &word);
+                            form.push(']');
+                            parts.push(form);
+                        }
+                        continue;
+                    }
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    if at + 1 == children.len() {
+                        let form = self.form(child);
+                        if form != "0" {
+                            parts.push(form);
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `val h = object : Base() { … }`: an object expression is the
+            // keyword and its supertype's constructor call, which is the call
+            // the lexer records on that line. With no arm the node formed the
+            // constant 0, so every anonymous implementation lost its call.
+            "object_expression" => {
+                let mut parts: Vec<String> = Vec::new();
+                let mut word = String::from("[\"n\",");
+                push_string(&mut word, "object");
+                word.push(']');
+                parts.push(word);
+                for child in self.children(id) {
+                    if self.kind(child) != "supertypes" {
+                        continue;
+                    }
+                    for entry in self.children(child) {
+                        if matches!(self.kind(entry), "superclass_constructor" | "call_expression") {
+                            let form = self.call_form(entry);
+                            if form != "0" {
+                                parts.push(form);
+                            }
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `return { type, value, line }`: a shorthand property whose name
+            // is a keyword in another position carries that keyword's kind, so
+            // it read as a leaf and the property vanished from the value.
+            // `resiliencyChecks.x = .trap`: an implicit member names the member
+            // the lexer reads (`n:trap`). Its children are the `.` and the name,
+            // so the default arm found no value child and wrote the constant 0.
+            "implicit_member_expression" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
+            "identifier" | "this" | "super" | "self" | "shorthand_property_identifier" | "_" | "type" | "from"
+            | "of" | "satisfies" => {
+                let text = self.text_string(id);
+                let text = if self.language.name == "csharp" && text.starts_with('@') && text.len() > 1 {
+                    text[1..].to_string()
+                } else if text == "this" {
+                    "self".to_string()
+                } else {
+                    text
+                };
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &text);
+                    out.push(']');
+                    out
+                }
+            }
+            "lifetime" => {
+                let text = self.text_string(id);
+                let text = text.trim_start_matches('\'').trim_start_matches("r#");
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, text);
+                    out.push(']');
+                    out
+                }
+            }
+            // `String::class` written where a value goes: a callable reference
+            // names the path with a dot, the way the one-pass reader spells
+            // `::`, and read as the constant 0 it left the annotation's own
+            // argument disagreeing with the lexer (`@OptIn(X::class)`).
+            "callable_reference" => {
+                let mut path = String::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(&self.text_string(child));
+                }
+                if path.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    out
+                }
+            }
+            // Swift's `.trap` as a value (`x.mode = .trap`) is an implicit
+            // member: a name with no receiver. The lexer writes it as the
+            // member's name, and read through the default arm it was the
+            // constant 0, so every assignment of an enum case lost its value.
+            "implicit_member_expression" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
+            // `field_expression` is Rust's spelling of the same path; without
+            // this arm `self.skipped_groups == 0` read both sides as the
+            // constant and the name left the record.
+            // Swift's `.trap` names a member of the contextual type: the lexer
+            // reads the name, and the constant 0 here lost every such value.
+            "implicit_member_expression" => match self.children(id).iter().rev().find_map(|&child| self.leaf_name(child)) {
+                Some(name) => {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+                None => "0".to_string(),
+            },
+            // `MemoryLayout<Int>.size` and `Outer<Int>.Inner.self`: a member
+            // (or chained member) of a specialized type. Its base is a generic
+            // specialization that has no path, so the default arm below formed
+            // only the type arguments or dropped them along with the member.
+            // The lexer reads the type's names and every member, so all are kept.
+            "navigation_expression"
+                if self.language.name == "swift" && self.swift_has_generic_base(id) =>
+            {
+                let base = self.children(id)[0];
+                let mut parts = Vec::new();
+                if self.kind(base) == "generic_specialization" {
+                    for child in self.children(base) {
+                        if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | ",") {
+                            continue;
+                        }
+                        let value = self.form(child);
+                        if value != "0" {
+                            parts.push(value);
+                        }
+                    }
+                } else {
+                    let value = self.form(base);
+                    if value != "0" {
+                        parts.push(value);
+                    }
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `JEnumerable<JToken>.Empty`, `Provider<T>.Instance`: a member of a
+            // generic type. `path_of` drops the type arguments or returns only
+            // `.Member`, so the generic member-access arm below either wrote
+            // `n:Type.Member` without the type arguments or fell back to the
+            // base and dropped `.Member`. The lexer reads the type, its type
+            // arguments, and the member, so all are kept.
+            "member_access" | "conditional_member_access" | "member_access_expression"
+                if self.language.name == "csharp" && self.cs_has_generic_base(id) =>
+            {
+                let base = self.children(id)[0];
+                let mut parts = Vec::new();
+                let value = self.form(base);
+                if value != "0" {
+                    parts.push(value);
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `ducetExtract[scalars]!.collationElements`: a member read through a
+            // force unwrap has no dotted path, so the path arm below formed only
+            // the base and dropped the member. The lexer reads the base and the
+            // member as a pair, so both are kept.
+            "navigation_expression"
+                if self.language.name == "swift"
+                    && self.children(id).first().is_some_and(|&base| self.kind(base) == "force_unwrap") =>
+            {
+                let base = self.children(id)[0];
+                let mut parts = Vec::new();
+                let value = self.form(base);
+                if value != "0" {
+                    parts.push(value);
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `ducetExtract[scalars]!.collationElements`: a member read through a
+            // force unwrap has no dotted path, so the path arm below formed only
+            // the base and dropped the member. The lexer reads the base and the
+            // member as a pair, so both are kept.
+            "navigation_expression"
+                if self.language.name == "swift"
+                    && self.children(id).first().is_some_and(|&base| self.kind(base) == "force_unwrap") =>
+            {
+                let base = self.children(id)[0];
+                let mut parts = Vec::new();
+                let value = self.form(base);
+                if value != "0" {
+                    parts.push(value);
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            "attribute" | "member_expression" | "member_access_expression" | "nullsafe_member_access_expression" | "member_access" | "null_aware_member" | "subscript" | "subscript_expression" | "element_access" | "field_expression" | "meta_property"
+            // `Ordering::Acquire` in an argument list is a path, not a constant.
+            | "scoped_identifier" | "scoped_type_identifier" | "qualified_expression"
+            // Kotlin's `user.title` in a `"${user.title}"` hole.
+            | "navigation_expression"
+            // Swift's `second?.count` is an `optional_chaining_expression`; `path_of`
+            // already reads it, so `form` must not fall through to `0`.
+            | "optional_chaining_expression"
+            | "conditional_member_access" => {
+                let path = self.form_path(id);
+                if path.is_empty() || path.starts_with('.') {
+                    // `f(x)[0].y`: the base is a call, so there is no path, and
+                    // the value is the base's — a subscript of a value is that
+                    // value. Writing 0 here lost the call's argument.
+                    match self.children(id).first().copied() {
+                        Some(base) => {
+                            let base_form = self.form(base);
+                            let name = self.member_name(id);
+                            if self.language.name == "csharp"
+                                && !name.is_empty()
+                                && !self.named_call(base)
+                                && self.value_root_call(base).is_none()
+                            {
+                                let mut out = "[\"n\",".to_string();
+                                push_string(&mut out, &name);
+                                out.push(']');
+                                if base_form == "0" {
+                                    out
+                                } else {
+                                    format!("[\"m\",[{base_form},{out}]]")
+                                }
+                            } else {
+                                base_form
+                            }
+                        }
+                        None => "0".to_string(),
+                    }
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
