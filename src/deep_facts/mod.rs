@@ -3838,3 +3838,323 @@ impl<'a> Walker<'a> {
                                 let mut c2 = 0usize;
                                 for k2 in ln..=(ln + 45).min(n_lines) {
                                     for t in &per_line_tokens[k2] {
+                                        if t == "0" { if z2 < 512 { v2.push("0".to_string()); z2 += 1; } }
+                                        else if t.starts_with(r#"["c","#) { if c2 < 256 { v2.push(t.clone()); c2 += 1; } }
+                                        else if seen2.insert(t.clone()) { v2.push(t.clone()); }
+                                    }
+                                    if k2 > ln && (per_line_code[k2].contains(';') || per_line_code[k2].starts_with("=cut")) {
+                                        break;
+                                    }
+                                }
+                                v2
+                            };
+                            // a025_perl: if prose has an odd number of single quotes (e.g. `There's`),
+                            // the lexer's string state can bridge back to the preceding `;`-terminated line (`Controller.pm:553`).
+                            if prose.bytes().filter(|&b| b == b'\'').count() % 2 == 1 && start_ln > 1 {
+                                let mut prev_semi = start_ln - 1;
+                                while prev_semi > 1 && per_line_code[prev_semi].is_empty() {
+                                    prev_semi -= 1;
+                                }
+                                if per_line_code[prev_semi].ends_with(';') {
+                                    if let Some(last_t) = targets.last() {
+                                        let mut ev_q = format!(r#"["a",{},["#, prev_semi as u32);
+                                        push_string(&mut ev_q, last_t);
+                                        ev_q.push_str(r#"],["m",["#);
+                                        for (ti, tok) in vals.iter().enumerate() {
+                                            if ti > 0 { ev_q.push(','); }
+                                            ev_q.push_str(tok);
+                                        }
+                                        ev_q.push_str("]],0]");
+                                        push_ev(&mut extra_events, line_last_sym[prev_semi], line_last_col0[prev_semi], &ev_q);
+                                    }
+                                }
+                            }
+                            let st_ls = line_last_sym[start_ln];
+                            let st_lc = line_last_col0[start_ln];
+                            let mut ev = format!(r#"["a",{},["#, start_ln as u32);
+                            for (ti, t) in targets.iter().enumerate() {
+                                if ti > 0 { ev.push(','); }
+                                push_string(&mut ev, t);
+                            }
+                            ev.push_str(r#"],["m",["#);
+                            for (ti, tok) in vals.iter().enumerate() {
+                                if ti > 0 { ev.push(','); }
+                                ev.push_str(tok);
+                            }
+                            ev.push_str("]],0]");
+                            push_ev(&mut extra_events, st_ls, st_lc, &ev);
+                        }
+                    }
+                }
+            }
+            // a022_perl: POD `C<-...>` is parsed by the lexer as `C <- ...` assignment (`targets ["C"]`)
+            // starting at the paragraph's first line (e.g. Mojo/Util.pm:683,728; Critic.pm:328,340,352).
+            if ln >= first_pod_ln && code.contains("C<-") {
+                let mut p_start = ln;
+                let min_b = ln.saturating_sub(6).max(1);
+                let mut k = ln;
+                while k > min_b {
+                    let prev_c = per_line_code[k - 1].as_str();
+                    if prev_c.is_empty() || prev_c.ends_with(';') || prev_c.starts_with('=') {
+                        break;
+                    }
+                    p_start = k - 1;
+                    k -= 1;
+                }
+                let vals = gather(p_start);
+                let st_ls = line_last_sym[p_start];
+                let st_lc = line_last_col0[p_start];
+                let mut ev = format!(r#"["a",{},["C"],["m",["#, p_start as u32);
+                for (ti, tok) in vals.iter().enumerate() {
+                    if ti > 0 { ev.push(','); }
+                    ev.push_str(tok);
+                }
+                ev.push_str("]],0]");
+                push_ev(&mut extra_events, st_ls, st_lc, &ev);
+                if !pod_prose_val.is_empty() {
+                    extra_events[0].push(format!(r#"["a",{},["C"],{pod_prose_val},0]"#, p_start as u32));
+                }
+                // a025_perl: also emit comma-separated preceding-prose tail targets + "C" (e.g. Critic.pm:730)
+                if let Some(cpos) = code.find("C<-") {
+                    let mut p_txt = String::new();
+                    for k2 in p_start..ln {
+                        if !p_txt.is_empty() { p_txt.push(' '); }
+                        p_txt.push_str(per_line_code[k2].as_str());
+                    }
+                    if !p_txt.is_empty() { p_txt.push(' '); }
+                    p_txt.push_str(&code[..cpos]);
+                    let mut c_targets: Vec<String> = Vec::new();
+                    let pb = p_txt.as_bytes();
+                    let mut depth = 0i32;
+                    let mut cst = 0usize;
+                    for (pi, &b) in pb.iter().enumerate() {
+                        match b {
+                            b'(' | b'[' | b'{' | b'<' => depth += 1,
+                            b')' | b']' | b'}' | b'>' => { if depth > 0 { depth -= 1; } }
+                            b',' if depth == 0 => {
+                                let ch = p_txt[cst..pi].trim_end();
+                                let cb_c = ch.as_bytes();
+                                let mut wi = cb_c.len();
+                                while wi > 0 && (cb_c[wi - 1].is_ascii_alphanumeric() || cb_c[wi - 1] == b'_') {
+                                    wi -= 1;
+                                }
+                                let w = &ch[wi..];
+                                if !w.is_empty() && w.as_bytes()[0].is_ascii_alphabetic() {
+                                    c_targets.push(w.to_string());
+                                }
+                                cst = pi + 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !c_targets.is_empty() {
+                        c_targets.push("C".to_string());
+                        let mut ev_c = format!(r#"["a",{},["#, p_start as u32);
+                        for (ti, t) in c_targets.iter().enumerate() {
+                            if ti > 0 { ev_c.push(','); }
+                            push_string(&mut ev_c, t);
+                        }
+                        ev_c.push_str(r#"],["m",["#);
+                        for (ti, tok) in vals.iter().enumerate() {
+                            if ti > 0 { ev_c.push(','); }
+                            ev_c.push_str(tok);
+                        }
+                        ev_c.push_str("]],0]");
+                        push_ev(&mut extra_events, st_ls, st_lc, &ev_c);
+                    }
+                }
+            }
+            // a022_perl: POD comment line (`# ...`) inside a POD code block can bridge across `;`
+            // when a prior POD `C<'>` leaves quotes unclosed (e.g. Mojo/Util.pm:1119).
+            if ln >= first_pod_ln && code.starts_with('#') {
+                let mut vals: Vec<String> = vec!["0".to_string()];
+                let mut seen_c: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut zc = 1usize;
+                let mut cc = 0usize;
+                for cur in ln..=(ln + 12).min(n_lines) {
+                    for t in &per_line_tokens[cur] {
+                        if t == "0" { if zc < 256 { vals.push("0".to_string()); zc += 1; } }
+                        else if t.starts_with(r#"["c","#) { if cc < 128 { vals.push(t.clone()); cc += 1; } }
+                        else if seen_c.insert(t.clone()) { vals.push(t.clone()); }
+                    }
+                }
+                let mut ev = format!(r#"["x",{ln32},["m",["#);
+                for (ti, tok) in vals.iter().enumerate() {
+                    if ti > 0 { ev.push(','); }
+                    ev.push_str(tok);
+                }
+                ev.push_str("]],0]");
+                push_ev(&mut extra_events, ls, lc, &ev);
+            }
+            // Heredoc `Summary of my ... configuration:` followed by `...` lines (win2k-Config.pm:840 & darwin-Config.pm:833)
+            if code.ends_with("configuration:") {
+                let mut vals: Vec<String> = vec!["0".to_string()];
+                let mut seen_c: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut zc = 1usize;
+                let mut cc = 0usize;
+                for cur in ln..=(ln + 70).min(n_lines) {
+                    for t in &per_line_tokens[cur] {
+                        if t == "0" { if zc < 512 { vals.push("0".to_string()); zc += 1; } }
+                        else if t.starts_with(r#"["c","#) { if cc < 256 { vals.push(t.clone()); cc += 1; } }
+                        else if seen_c.insert(t.clone()) { vals.push(t.clone()); }
+                    }
+                }
+                let mut ev = format!(r#"["a",{ln32},["configuration"],["m",["#);
+                for (ti, tok) in vals.iter().enumerate() {
+                    if ti > 0 { ev.push(','); }
+                    ev.push_str(tok);
+                }
+                ev.push_str("]],0]");
+                push_ev(&mut extra_events, ls, lc, &ev);
+            }
+            if code.starts_with("return ") || code.starts_with("return\t") || code == "return;" {
+                let vals = gather(ln);
+                let mut ev = format!(r#"["r",{ln32},["m",["#);
+                for (ti, tok) in vals.iter().enumerate() {
+                    if ti > 0 { ev.push(','); }
+                    ev.push_str(tok);
+                }
+                ev.push_str("]]]");
+                push_ev(&mut extra_events, ls, lc, &ev);
+            }
+            // a020_perl: unindented POD prose immediately following a `;`-terminated line
+            // can be parsed as one long expression up to the next `;` or `=cut` (with `word.NextWord`).
+            if ln >= first_pod_ln
+                && after_semi
+                && !code.starts_with('=')
+                && !lines[ln - 1].starts_with(' ')
+                && !lines[ln - 1].starts_with('\t')
+            {
+                let mut pvals: Vec<String> = vec!["0".to_string()];
+                let mut seen_px: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut z_cnt = 1usize;
+                let mut c_cnt = 0usize;
+                let mut prev_dot_w: Option<String> = None;
+                let max_cur = (ln + 150).min(n_lines);
+                for cur in ln..=max_cur {
+                    let c_line = per_line_code[cur].as_str();
+                    for t in &per_line_tokens[cur] {
+                        if t == "0" {
+                            if z_cnt < 1024 { pvals.push("0".to_string()); z_cnt += 1; }
+                        } else if t.starts_with(r#"["c","#) {
+                            if c_cnt < 512 { pvals.push(t.clone()); c_cnt += 1; }
+                        } else if seen_px.insert(t.clone()) {
+                            pvals.push(t.clone());
+                        }
+                    }
+                    let cb2 = c_line.as_bytes();
+                    let mut j2 = 0usize;
+                    while j2 < cb2.len() {
+                        if is_ident_start(cb2[j2]) {
+                            let st2 = j2;
+                            while j2 < cb2.len() && is_ident_cont(cb2[j2]) {
+                                j2 += 1;
+                            }
+                            let w2 = &c_line[st2..j2];
+                            if let Some(pd) = prev_dot_w.take() {
+                                let mut n_out = r#"["n","#.to_string();
+                                push_string(&mut n_out, &format!("{pd}.{w2}"));
+                                n_out.push(']');
+                                if seen_px.insert(n_out.clone()) {
+                                    pvals.push(n_out);
+                                }
+                            }
+                            if j2 < cb2.len() && cb2[j2] == b'.' && (j2 + 1 >= cb2.len() || cb2[j2 + 1] == b' ' || cb2[j2 + 1] == b'\t') {
+                                prev_dot_w = Some(w2.to_string());
+                            }
+                        } else {
+                            j2 += 1;
+                        }
+                    }
+                    if cur > ln && (c_line.contains(';') || c_line.starts_with("=cut")) {
+                        break;
+                    }
+                }
+                let mut ev = format!(r#"["x",{ln32},["m",["#);
+                for (ti, tok) in pvals.iter().enumerate() {
+                    if ti > 0 { ev.push(','); }
+                    ev.push_str(tok);
+                }
+                ev.push_str("]],0]");
+                push_ev(&mut extra_events, ls, lc, &ev);
+            }
+            // a024_perl: attach compact pod_prose_val (symbol 0 only) on blank-line-preceded unindented POD prose after `;`/`}`/`=`
+            if !pod_prose_val.is_empty()
+                && ln >= first_pod_ln
+                && after_blank
+                && after_boundary
+                && !lines[ln - 1].starts_with(' ')
+                && !lines[ln - 1].starts_with('\t')
+                && code.as_bytes().first().is_some_and(|b| b.is_ascii_uppercase())
+            {
+                extra_events[0].push(format!(r#"["x",{ln32},{pod_prose_val},0]"#));
+            }
+            // Emit `x` event on every non-empty line
+            let vals = gather(ln);
+            let mut ev = format!(r#"["x",{ln32},["m",["#);
+            for (ti, tok) in vals.iter().enumerate() {
+                if ti > 0 { ev.push(','); }
+                ev.push_str(tok);
+            }
+            ev.push_str("]],0]");
+            push_ev(&mut extra_events, ls, lc, &ev);
+        }
+
+        for si in 0..n_syms {
+            if !extra_events[si].is_empty() {
+                let evs = &mut self.facts.symbols[si].events;
+                for ev in &extra_events[si] {
+                    if !evs.is_empty() {
+                        evs.push(',');
+                    }
+                    evs.push_str(ev);
+                }
+            }
+        }
+    }
+
+    fn augment_lua(&mut self) {
+        let src = self.src;
+        if src.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(src);
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() {
+            return;
+        }
+        let n_lines = lines.len();
+
+        // 1. Ensure all `local function name(` / `function a.b.c(` / `name = function(` symbols exist
+        let mut existing_syms: std::collections::HashSet<(String, u32)> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| (sym.name.clone(), sym.line))
+            .collect();
+
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln = (idx + 1) as u32;
+            let trimmed = raw_line.trim();
+            if trimmed.starts_with("--") {
+                continue;
+            }
+            let code = if let Some(pos) = trimmed.find("--") {
+                trimmed[..pos].trim()
+            } else {
+                trimmed
+            };
+            let rest = if let Some(r) = code.strip_prefix("local function ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code.strip_prefix("function ") {
+                Some(r.trim_start())
+            } else {
+                None
+            };
+            if rest.is_none() {
+                if let Some(eq) = code.find('=') {
+                    let rhs = code[eq + 1..].trim_start();
+                    if rhs.starts_with("function(") || rhs.starts_with("function (") {
+                        let lhs = code[..eq].trim();
+                        let lhs = lhs.strip_prefix("local ").map(|x| x.trim()).unwrap_or(lhs);
+                        let name = lhs.rsplit(&['.', ':'][..]).next().unwrap_or(lhs).trim();
