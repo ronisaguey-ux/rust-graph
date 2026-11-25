@@ -41,6 +41,8 @@ fn options(args: impl Iterator<Item = String>) -> Result<Options, String> {
             "--no-cache" => options.no_cache = true,
             "--max-files" => options.max_files = number(args.next(), "--max-files")? as usize,
             "--max-file-bytes" => options.max_file_bytes = number(args.next(), "--max-file-bytes")?,
+            #[cfg(all(feature = "deep", feature = "parser"))] "--frce-report" => options.frce_report = true,
+            #[cfg(all(feature = "deep", feature = "parser"))] "--frce-dump" => options.frce_dump = Some(PathBuf::from(args.next().ok_or("--frce-dump needs a file")?)),
             #[cfg(all(feature = "deep", feature = "parser"))] "--deep" | "--lexer" | "--no-fallback" | "--compare" => { if options.path != pipeline::PathMode::Auto { return Err("choose one of --deep and --lexer, not both".to_string()); } options.path = match arg.as_str() { "--deep" => pipeline::PathMode::Deep, "--lexer" | "--no-fallback" => pipeline::PathMode::Lexer, _ => pipeline::PathMode::Compare }; },
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             path if root.is_none() => root = Some(PathBuf::from(path)),
@@ -98,5 +100,7 @@ use crate::pipeline::gate::*;
 const USAGE_DEEP: &str = "       --deep          the parser only: read every file through the CST, ignore the lexer
        --lexer         the lexer only: one pass, no fallback  (alias: --no-fallback)
        --compare       parse both ways, print the per-file difference and exit without choosing
+       --frce-report   after the run, print the FRCE table: every fallback classified, ranked by LOC
+       --frce-dump F   after the run, write one JSON object per kept fallback sample to F
        (default: the lexer, with the parser as fallback — the CST is used when it is the
         heavier record, and when the lexer found nothing at all)";
