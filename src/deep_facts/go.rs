@@ -8958,3 +8958,323 @@ fn dotted_piece(text: &str) -> bool {
         let callee = children
             .iter()
             .copied()
+            .find(|&child| !matches!(self.kind(child), "argument_list" | "arguments" | "type_arguments" | "(" | ")"))?;
+        if !matches!(self.kind(callee), "identifier" | "simple_identifier") {
+            return None;
+        }
+        // The grammar keeps a trailing lambda as a direct child of the call,
+        // not inside an `arguments` node, which is why the check below has to
+        // look at both.
+        let args: Vec<u32> = children
+            .into_iter()
+            .filter(|&child| {
+                matches!(
+                    self.kind(child),
+                    "lambda_literal" | "annotated_lambda" | "lambda_expression" | "argument_list" | "arguments"
+                )
+            })
+            .flat_map(|child| {
+                if matches!(self.kind(child), "argument_list" | "arguments") {
+                    self.children(child)
+                } else {
+                    vec![child]
+                }
+            })
+            .filter(|&arg| !self.is_layout(arg))
+            .collect();
+        if args.len() != 1 || !matches!(self.kind(args[0]), "lambda_literal" | "annotated_lambda") {
+            return None;
+        }
+        Some(self.text_string(callee))
+    }
+
+    pub(crate) fn call_form(&mut self, id: u32) -> String {
+        self.call_form_link(id).0
+    }
+
+    /// A call's form, and — when the callee is a name — the index it was
+    /// recorded under together with the receiver it is called on, so the call
+    /// above it can name its receiver without guessing: `A().run` links `.run`
+    /// to `(0, "0")`, the call `A`.
+    pub(crate) fn call_form_link(&mut self, id: u32) -> (String, Option<(u32, String)>) {
+        let children = self.children(id);
+        let is_new = self.kind(id) == "new_expression";
+        let callee = children
+            .iter()
+            .copied()
+            .find(|&child| !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")" | "?."))
+            .unwrap_or(id);
+        // `type("H", (), {...})()`: the callee is a value produced by another
+        // call. That inner call is the fact and its arguments are where the
+        // dictionary (and everything in it) lives; the outer call has no name
+        // of its own, so it adds none. `callee != id` keeps a recovered call
+        // whose own callee is itself from descending forever.
+        // Scala's `new X(args)` is a `call` whose callee is a `new_expression`
+        // holding only `new` and the type name; the arguments live on the outer
+        // node. Unwrapping to the inner form dropped every argument, so each
+        // construction read as `c(0;[])` against the lexer's `c(0;[n:arg])`.
+        // Read it as a plain call named after the type instead.
+        let nested_callee = matches!(
+            self.kind(callee),
+            "call" | "call_expression" | "invocation_expression" | "object_creation"
+                | "object_creation_expression" | "generic_invocation" | "implicit_creation"
+                | "conditional_invocation"
+        ) || (self.kind(callee) == "new_expression" && self.language.name != "scala");
+        if callee != id && nested_callee {
+            let inner = self.form(callee);
+            if let Some(list) = children.iter().copied().find(|&child| matches!(self.kind(child), "argument_list" | "arguments")) {
+                self.arguments(list);
+            }
+            return (inner, None);
+        }
+        // `f().g()`: the receiver is a call, and it is a fact of its own. The
+        // call's own index and receiver go in the slot above it, so the record
+        // says which call produced the receiver: `A().run` records `A`, `.run`
+        // and the link between them. The calls array alone cannot say it — in
+        // `TaintAnalyzer(a, b(), c).run()` the argument `b()` is recorded
+        // between the two — and the path keeps the name the source spells.
+        let mut receiver_call = None;
+        // Scala's `select` is `object.name`: `s"...$x".format(y)` has the
+        // interpolated string as its receiver, and that receiver is a value.
+        let scala_select = self.language.name == "scala" && self.kind(callee) == "select";
+        if scala_select || matches!(self.kind(callee), "attribute" | "member_expression" | "member_access_expression" | "nullsafe_member_access_expression" | "member_access" | "null_aware_member" | "conditional_member_access" | "navigation_expression" | "member" | "safe_member" | "scope" | "scoped_property_access_expression") {
+            if let Some(&object) = self.children(callee).first() {
+                if self.named_call(object) {
+                    // `new URL(x).toString()`, `A().b()`, `A().b().c()`: a
+                    // receiver that is a call the walk records, whose own
+                    // receiver is carried along so a chain stays readable one
+                    // call at a time.
+                    // The receiver is the inner call's whole form, arguments
+                    // included: rebuilding it from the link alone wrote `[]` for
+                    // every argument and lost `Path(path)` in `Path(path).resolve()`.
+                    let (form, _link) = self.call_form_link(object);
+                    receiver_call = Some(form);
+                } else {
+                    // `[...xs].filter(f)`, `handlers[k](x)`: any expression,
+                    // whose calls are facts of their own. Its value is also the
+                    // receiver the lexer writes: `(a or b).split('-')` has
+                    // `a or b` there, and dropping it lost every name the
+                    // receiver held.
+                    let value = self.form(object);
+                    let object_path = self.path_of(object);
+                    if object_path.is_empty() || object_path.starts_with('.') {
+                        receiver_call = Some(value);
+                    }
+                }
+            }
+        } else if callee != id && !matches!(self.kind(callee), "identifier" | "property_identifier" | "type_identifier") {
+            // `(_SockFilter * len(filters))(*filters)`, `handlers[k](x)` and
+            // `f()()`: a callee that is not a plain name is an expression, and
+            // the calls inside it are facts. A name has none, so it is skipped.
+            let value = self.form(callee);
+            // `foo(K).map(f)`: a Scala field callee whose base is a call has
+            // a path that starts with `.` (no name before it), so the base's
+            // value is the receiver and its arguments must be kept too.
+            let path = self.path_of(callee);
+            if path.is_empty() || path.starts_with('.') {
+                receiver_call = Some(value);
+            }
+        }
+        let (path, mut receiver) = self.call_target(callee, receiver_call);
+        // A function literal is not a name: `go func() { … }()` has no callee to
+        // record, and writing a call with an empty path invented an entry the
+        // lexer never had — the literal's own invocation is not an edge.
+        if path.is_empty() && matches!(self.kind(callee), "func_literal") {
+            return ("0".to_string(), None);
+        }
+        let line = self.call_line(callee, id);
+        let args = children
+            .iter()
+            .copied()
+            .find(|&child| (matches!(self.kind(child), "argument_list" | "arguments" | "template_string") || (self.kind(child) == "call_arguments" && !matches!(self.facts.tag.as_str(), "ZIG" | "R"))));
+        let mut targ = None;
+        if let Some(list) = args.filter(|&list| self.kind(list) == "template_string") {
+            let inner = self.form(list);
+            if path.is_empty() && inner != "0" {
+                receiver = format!("[\"m\",[{receiver},{inner}]]");
+            } else if inner != "0" {
+                targ = Some(format!("[{inner}]"));
+            }
+        }
+        // `new Product { ExpiryDate = new DateTime(2000, 9, 28) }`: an object
+        // initialiser is not an argument list, so nothing walked its items and
+        // every call written inside one was lost - `DateTime` alone cost 58
+        // files. Each item's value is a value of its own, and a lambda among
+        // them keeps its own reading, which `c_calls_in_pub` already honours.
+        let mut nested = Vec::new();
+        for child in children.iter().copied() {
+            if matches!(self.kind(child), "object_initializer" | "array_initializer" | "collection_initializer") {
+                self.c_calls_in_pub(child, &mut nested);
+            }
+        }
+        for call in nested {
+            self.form(call);
+        }
+        let index = self.push_call(path, line);
+        let mut arg_list = match args {
+            Some(list) if self.kind(list) == "template_string" => targ.unwrap_or_else(|| "[]".to_string()),
+            Some(list) => self.arguments(list),
+            None if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
+                let mut items = Vec::new();
+                let mut past_callee = false;
+                for &child in &children {
+                    if !past_callee {
+                        if child == callee {
+                            past_callee = true;
+                        }
+                        continue;
+                    }
+                    let ck = self.kind(child);
+                    if (self.is_layout(child) && !matches!(ck, "simple_symbol" | "symbol")) || matches!(ck, "do_block" | "brace_block" | "block" | ",") {
+                        continue;
+                    }
+                    if ck == "label_argument" {
+                        let lch = self.children(child);
+                        let key = lch.first().map(|&n| self.text_string(n).trim_end_matches(':').to_string()).unwrap_or_default();
+                        let val = lch.iter().rev().copied().find(|&n| (!self.is_layout(n) || matches!(self.kind(n), "simple_symbol" | "symbol")) && Some(n) != lch.first().copied()).map(|n| self.form(n)).unwrap_or_else(|| "0".to_string());
+                        if !key.is_empty() {
+                            let mut k = String::from("[\"k\",");
+                            push_string(&mut k, &key);
+                            k.push(',');
+                            k.push_str(&val);
+                            k.push(']');
+                            items.push(k);
+                        }
+                    } else if matches!(ck, "simple_symbol" | "symbol") {
+                        let sym = self.text_string(child).trim_start_matches(':').to_string();
+                        if !sym.is_empty() {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &sym);
+                            n.push(']');
+                            items.push(n);
+                        } else {
+                            items.push("0".to_string());
+                        }
+                    } else {
+                        let f = self.form(child);
+                        items.push(if f.is_empty() { "0".to_string() } else { f });
+                    }
+                }
+                format!("[{}]", items.join(","))
+            }
+            None if self.facts.tag == "NIM" && self.kind(id) == "command_call" => {
+                let mut items = Vec::new();
+                for &child in &children {
+                    if child == callee || self.is_layout(child) || matches!(self.kind(child), "," | ";") {
+                        continue;
+                    }
+                    if self.kind(child) == "parenthesized" {
+                        for inner in self.children(child) {
+                            if self.is_layout(inner) || matches!(self.kind(inner), "(" | ")" | ",") {
+                                continue;
+                            }
+                            let f = self.form(inner);
+                            items.push(if f.is_empty() { "0".to_string() } else { f });
+                        }
+                    } else {
+                        let f = self.form(child);
+                        items.push(if f.is_empty() { "0".to_string() } else { f });
+                    }
+                }
+                format!("[{}]", items.join(","))
+            }
+            None => "[]".to_string(),
+        };
+        if self.is_kotlin() && !self.in_kotlin_expr_body {
+            let mut trailing = Vec::new();
+            for &child in &children {
+                if matches!(self.kind(child), "lambda_literal" | "annotated_lambda" | "labeled_lambda") {
+                    trailing.push(self.form(child));
+                }
+            }
+            if !trailing.is_empty() {
+                if arg_list == "[]" {
+                    arg_list = format!("[{}]", trailing.join(","));
+                } else if arg_list.ends_with(']') {
+                    arg_list.pop();
+                    arg_list.push(',');
+                    arg_list.push_str(&trailing.join(","));
+                    arg_list.push(']');
+                }
+            }
+        }
+        // `ResettableValue<(Int, Int) -> Bool>({ $0 == $1 })`: a generic
+        // specialization called with arguments is not a call to the lexer. It
+        // writes the type's names and the arguments' values as one value, so
+        // the form is that value and no `c`.
+        if self.language.name == "swift" && self.kind(callee) == "generic_specialization" && arg_list.len() > 2 {
+            let base = self.form(callee);
+            let inner = arg_list[1..arg_list.len() - 1].to_string();
+            let out = format!("[\"m\",[{base},{inner}]]");
+            return (out, Some((index as u32, receiver)));
+        }
+        // `Buf<Element>.create(n: 1)`: the lexer reads a member call on a
+        // specialized type as the type's names followed by an anonymous call.
+        if self.language.name == "swift"
+            && self.kind(callee) == "navigation_expression"
+            && self.children(callee).first().is_some_and(|&base| self.kind(base) == "generic_specialization")
+        {
+            let base = self.children(callee)[0];
+            let mut parts = Vec::new();
+            for child in self.children(base) {
+                if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | ",") {
+                    continue;
+                }
+                let value = self.form(child);
+                if !value.is_empty() && value != "0" {
+                    parts.push(value);
+                } else if self.language.name == "csharp" {
+                    if let Some(word) = self.leaf_name(child) {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, &word);
+                        out.push(']');
+                        parts.push(out);
+                    }
+                }
+            }
+            parts.push(format!("[\"c\",{index},0,{arg_list}]"));
+            return (format!("[\"m\",[{}]]", parts.join(",")), Some((index as u32, "0".to_string())));
+        }
+        let mut out = if self.language.name == "csharp"
+            && self.kind(id) == "object_creation"
+            && matches!(self.kind(callee), "array_type" | "generic_type")
+            && args.is_none()
+        {
+            let mut parts = Vec::new();
+            let base = self.form(callee);
+            if base != "0" {
+                parts.push(base);
+            }
+            for child in children.iter().copied() {
+                if matches!(self.kind(child), "object_initializer" | "array_initializer" | "collection_initializer") {
+                    let init_form = self.form(child);
+                    if init_form != "0" {
+                        parts.push(init_form);
+                    }
+                }
+            }
+            match parts.len() {
+                0 => "0".to_string(),
+                1 => parts.remove(0),
+                _ => format!("[\"m\",[{}]]", parts.join(",")),
+            }
+        } else {
+            let mut c_out = format!("[\"c\",{index},{receiver},{arg_list}]");
+            if self.language.name == "csharp" && self.kind(id) == "object_creation" {
+                let mut init_parts = Vec::new();
+                for child in children.iter().copied() {
+                    if matches!(self.kind(child), "object_initializer" | "array_initializer" | "collection_initializer") {
+                        let init_form = self.form(child);
+                        if init_form != "0" {
+                            init_parts.push(init_form);
+                        }
+                    }
+                }
+                if !init_parts.is_empty() {
+                    if args.is_none() && self.kind(callee) != "generic_type" {
+                        let mut parts = Vec::new();
+                        let callee_path = self.path_of(callee);
+                        if !callee_path.is_empty() {
+                            let mut name = String::from("[\"n\",");
+                            push_string(&mut name, &callee_path);
+                            name.push(']');
