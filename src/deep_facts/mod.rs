@@ -4478,3 +4478,323 @@ impl<'a> Walker<'a> {
         // Drop bare `0` literals when combined with names/calls in an expression,
         // matching how `form` omits constants inside merges, while keeping `0`
         // when it is the sole value (e.g. a call argument or `return 0;`).
+        if parts.len() > 1 && parts.iter().any(|p| p != "0") {
+            parts.retain(|p| p != "0");
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.pop().unwrap(),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
+    pub(crate) fn push_call(&mut self, path: String, line: u32) -> usize {
+        let symbol = self.frame().symbol;
+        let calls = &mut self.facts.symbols[symbol].calls;
+        calls.push(Call { path, line });
+        calls.len() - 1
+    }
+
+    /// `new T { Name = value, ... }`: the one-pass reader writes one `a` event for
+    /// the initialiser, on its first member's line, targeting that member. The
+    /// other members are folded into its value as names, so a later member is
+    /// not written on a line of its own. The CST read the initialiser for calls
+    /// alone and dropped that line, which left every `new T { ... }` (Avalonia's
+    /// `FilePickerFileTypes`, 20+ rows in one corpus) without the event.
+    pub(crate) fn cs_initializer_first_member(&mut self, id: u32) {
+        let children = self.children(id);
+        let mut members: Vec<(u32, u32)> = Vec::new();
+        let mut at = 0;
+        while at < children.len() {
+            if self.kind(children[at]) == "identifier" {
+                if let Some(&value) = children[at + 1..].iter().find(|&&child| self.kind(child) != "=") {
+                    members.push((children[at], value));
+                    at = children.iter().position(|&child| child == value).unwrap_or(at) + 1;
+                    continue;
+                }
+            }
+            at += 1;
+        }
+        let Some(&(name_node, value_node)) = members.first() else {
+            return;
+        };
+        let name = self.text_string(name_node);
+        let line = self.line(name_node);
+        let value = if members.len() == 1 {
+            self.cs_member_value(value_node)
+        } else {
+            // The later members, as the lexer folds them: a number is only its
+            // member's name, anything else is the name merged with its value, so
+            // every name and keyword literal the lexer read is an atom here too.
+            let mut parts = vec![self.cs_member_value(value_node)];
+            for &(later_name, later_value) in &members[1..] {
+                let later = self.text_string(later_name);
+                if self.kind(later_value).ends_with("integer_literal") {
+                    parts.push(format!("[\"n\",\"{later}\"]"));
+                } else {
+                    parts.push(format!("[\"m\",[[\"n\",\"{later}\"],{}]]", self.cs_member_value(later_value)));
+                }
+            }
+            format!("[\"t\",[{}]]", parts.join(","))
+        };
+        self.lexer_event(b'a', line, &[name], &value, false);
+        // The one-pass reader binds every member to the class it constructs, as
+        // it does a declaration (`var Background = SolidColorBrush`), so each
+        // member gets the same binding.
+        for (name_node, value_node) in members {
+            let name = self.text_string(name_node);
+            self.cs_bind_constructed(name, value_node);
+        }
+    }
+
+    /// The value of one initialiser member: a keyword literal is a name to the
+    /// one-pass reader, as in a declaration's initialiser, and anything else is
+    /// its own form (a constant when the form is empty). The calls the form
+    /// reads are already facts of the object-initialiser walk, so they are
+    /// taken back out of the call table: the form is only the value's shape.
+    fn cs_member_value(&mut self, value_node: u32) -> String {
+        match self.kind(value_node) {
+            kind @ ("true" | "false" | "null") => format!("[\"n\",\"{kind}\"]"),
+            _ => {
+                let symbol = self.frame().symbol;
+                let calls = self.facts.symbols[symbol].calls.len();
+                let form = self.form(value_node);
+                self.facts.symbols[symbol].calls.truncate(calls);
+                if form.is_empty() { "0".to_string() } else { form }
+            }
+        }
+    }
+
+    // -- enter / leave ------------------------------------------------------
+
+
+    fn tcl_is_ident(s: &str) -> bool {
+        s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b == b'.')
+    }
+
+    fn tcl_clean_name(s: &str) -> String {
+        s.trim_start_matches("::").replace("::", ".")
+    }
+
+    fn tcl_var_name(s: &str) -> Option<String> {
+        let rest = s.strip_prefix('$')?;
+        let rest = if let Some(after) = rest.strip_prefix('{') {
+            after.split('}').next().unwrap_or(after)
+        } else {
+            rest
+        };
+        let rest = rest.trim_start_matches("::");
+        let base = rest.split('(').next().unwrap_or(rest);
+        let name: String = base.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':').collect();
+        let clean = Self::tcl_clean_name(&name);
+        if !clean.is_empty() && clean.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+            Some(clean)
+        } else {
+            None
+        }
+    }
+
+    fn tcl_tokenize_commands(text: &str, start_line: u32) -> Vec<(u32, Vec<(u32, String)>)> {
+        let bytes = text.as_bytes();
+        let mut cmds: Vec<(u32, Vec<(u32, String)>)> = Vec::new();
+        let mut cur: Vec<(u32, String)> = Vec::new();
+        let mut cmd_line = start_line;
+        let mut line = start_line;
+        let mut i = 0;
+        let n = bytes.len();
+        while i < n {
+            let b = bytes[i];
+            if b == b' ' || b == b'\t' || b == b'\r' {
+                i += 1;
+                continue;
+            }
+            if b == b'\\' && i + 1 < n && bytes[i + 1] == b'\n' {
+                i += 2;
+                line += 1;
+                continue;
+            }
+            if b == b'\n' || b == b';' {
+                if !cur.is_empty() {
+                    cmds.push((cmd_line, std::mem::take(&mut cur)));
+                }
+                if b == b'\n' {
+                    line += 1;
+                }
+                i += 1;
+                continue;
+            }
+            if b == b'#' && cur.is_empty() {
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if cur.is_empty() {
+                cmd_line = line;
+            }
+            let tok_line = line;
+            let start = i;
+            if b == b'{' {
+                let mut depth = 0usize;
+                while i < n {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        if bytes[i + 1] == b'\n' {
+                            line += 1;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'\n' {
+                        line += 1;
+                    } else if bytes[i] == b'{' {
+                        depth += 1;
+                    } else if bytes[i] == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            } else if b == b'[' {
+                let mut depth = 0usize;
+                while i < n {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        if bytes[i + 1] == b'\n' {
+                            line += 1;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'\n' {
+                        line += 1;
+                    } else if bytes[i] == b'[' {
+                        depth += 1;
+                    } else if bytes[i] == b']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            } else if b == b'"' {
+                i += 1;
+                while i < n {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        if bytes[i + 1] == b'\n' {
+                            line += 1;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'\n' {
+                        line += 1;
+                    } else if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                while i < n && !matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n' | b';' | b'[') {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        if bytes[i + 1] == b'\n' {
+                            break;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+            }
+            if i > start {
+                cur.push((tok_line, text[start..i].to_string()));
+            } else {
+                i += 1;
+            }
+        }
+        if !cur.is_empty() {
+            cmds.push((cmd_line, cur));
+        }
+        cmds
+    }
+
+    fn tcl_eval_words(&mut self, words: &[(u32, String)], cmd_line: u32, depth: usize) -> String {
+        if words.is_empty() || depth > 24 {
+            return String::new();
+        }
+        // Handle nested `proc name args body`
+        if words[0].1 == "proc" && words.len() >= 2 {
+            let args_braced = words.get(2).is_some_and(|w| w.1.starts_with('{'));
+            let body_braced = words.len() >= 4 && words.last().is_some_and(|w| w.1.starts_with('{'));
+            if !args_braced || !body_braced {
+                self.push_call("proc".to_string(), cmd_line);
+            }
+            let raw_name = words[1].1.trim_matches(|c| c == '{' || c == '}');
+            let sym_name = Self::tcl_clean_name(raw_name);
+            if !sym_name.is_empty() {
+                let sym = self.add_symbol(sym_name, String::new(), KIND_FUNCTION, cmd_line, Vec::new());
+                self.stack.push(Frame {
+                    node: 0,
+                    symbol: sym,
+                    class: String::new(),
+                    receiver: String::new(),
+                    container: false,
+                    defines: Some(sym),
+                });
+                if let Some((bline, body)) = words.last() {
+                    if words.len() >= 4 && body.starts_with('{') && body.ends_with('}') && body.len() >= 2 {
+                        let inner = &body[1..body.len() - 1];
+                        self.tcl_scan_script(inner, *bline, depth + 1);
+                    }
+                }
+                self.stack.pop();
+                return String::new();
+            }
+        }
+        // Scan braced_word bodies recursively
+        // Tuple: (wline, ident_opt, form_str, is_value_token)
+        // Only plain words, quoted strings, and $variables are value tokens that trigger juxtaposed command_calls
+        let mut word_forms: Vec<(u32, Option<String>, String, bool)> = Vec::new();
+        for (wline, w) in words {
+            if w.starts_with('{') && w.ends_with('}') && w.len() >= 2 {
+                let inner = &w[1..w.len() - 1];
+                self.tcl_scan_script(inner, *wline, depth + 1);
+                let bform = if !inner.contains('\n') {
+                    let bsegs: Vec<String> = inner
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    if bsegs.is_empty() {
+                        "0".to_string()
+                    } else if bsegs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, &bsegs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = bsegs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    }
+                } else {
+                    "0".to_string()
+                };
+                word_forms.push((*wline, None, bform, false));
+            } else if w.starts_with('[') && w.ends_with(']') && w.len() >= 2 {
+                let inner = &w[1..w.len() - 1];
+                let sub_cmds = Self::tcl_tokenize_commands(inner, *wline);
+                let mut last_form = "0".to_string();
+                for (sline, swords) in sub_cmds {
