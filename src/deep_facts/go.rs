@@ -2558,3 +2558,323 @@ impl<'a> Walker<'a> {
         loop {
             if !matches!(self.kind(tail), "assignment" | "assignment_expression") {
                 break;
+            }
+            let inner = self.children(tail);
+            let Some(&binder) = inner.first() else { break };
+            if binder == tail {
+                break;
+            }
+            // The binder itself is an expression: `a[i] = b[f(x)] = v` calls
+            // `f` in the middle of the chain, and naming the binder alone left
+            // that call unrecorded.
+            let _ = self.form(binder);
+            if let Some(name) = self.value_path(binder) {
+                mids.push(name);
+            }
+            let Some(&next) = inner.last().filter(|&&child| child != binder) else { break };
+            if next == tail {
+                break;
+            }
+            tail = next;
+        }
+        let nested = tail != last;
+        if equals.len() > 1 {
+            for pair in equals.windows(2) {
+                for &child in &children[pair[0] + 1..pair[1]] {
+                    if let Some(name) = self.value_path(child) {
+                        mids.push(name);
+                    }
+                }
+            }
+        }
+        if !mids.is_empty() {
+            {
+                let expr = self.form(if nested { tail } else { last });
+                let mut merged = String::from("[\"m\",[");
+                for name in &mids {
+                    merged.push_str("[\"n\",");
+                    push_string(&mut merged, name);
+                    merged.push_str("],");
+                }
+                merged.push_str(&expr);
+                merged.push_str("]]");
+                let mut list = String::from("[");
+                for (index, name) in targets.iter().enumerate() {
+                    if index > 0 {
+                        list.push(0x2c as char);
+                    }
+                    push_string(&mut list, name);
+                }
+                list.push(']');
+                self.event(&format!("[\"a\",{line},{list},{merged}]"));
+                return;
+            }
+        }
+        self.assignment_parts(targets, last, line, weak);
+    }
+
+    pub(crate) fn assignment_targets(&self, id: u32) -> Vec<String> {
+        match self.kind(id) {
+            "subscript" | "subscript_expression" | "index_expression" | "element_access" | "element_reference" | "index" | "dereference" => {
+                let base = self.children(id).first().copied().unwrap_or(id);
+                self.assignment_targets(base)
+            }
+            "array" | "array_pattern" | "object" | "object_pattern" => self.pattern_names(id),
+            "pattern_list" | "tuple_pattern" | "list_pattern" | "tuple" | "list"
+            // `(a, b) = compute()` in Rust: the left side is a plain
+            // `tuple_expression`, the same node a value uses, so a tuple
+            // target bound only when the grammar called it a pattern. Without
+            // it the event lost its targets and the lexer's `a ["a","b"]` had
+            // no counterpart.
+            | "tuple_expression" | "expression_list" => self.children(id).into_iter().flat_map(|child| self.unpacked_names(child)).collect(),
+            // `(fd, path) = mkstemp()`: the Python grammar keeps a parenthesised
+            // target list as a `parenthesized_expression` with one child per
+            // name, so it fell to the path arm below and bound only the first.
+            "parenthesized_expression" => {
+                let inner: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if inner.len() == 1 {
+                    self.assignment_targets(inner[0])
+                } else {
+                    inner.into_iter().flat_map(|child| self.unpacked_names(child)).collect()
+                }
+            }
+            // The left side of a Python multi-target assignment (`a, b = g(x),
+            // 1`) is a `pattern_list` here, and this arm maps it, so the
+            // `["a",2,["a","b"],...]` event the lexer writes is written here
+            // too. The arm has always listed the kind, but the note it carried
+            // said the mapping was left out because `pipeline::loses` compared
+            // event *counts* and so could not see the value the CST cannot read
+            // on such a file's f-string return (`["r",3,0]` where the lexer
+            // follows `["r",3,["n","a"]]`); with a count-only guard, mapping the
+            // target would have kept that record. That condition is now met:
+            // the guard compares targets and value shapes, so the same file
+            // falls back on the value it lost. `tests/guard_truth.rs` checks
+            // both halves — the target kind is `pattern_list` and both names
+            // reach the record — and the full suite is green with the mapping
+            // on. The `expression_list` in the arm above is the *value* form,
+            // read by `form`, and adds nothing to a target.
+            // `x: Dict[str, int] = {}`: the target is the name inside the
+            // annotation, not the annotation. Reading it keeps the event an
+            // assignment (`["a",...]`) instead of a bare expression (`["x",...]`).
+            "annotated" => self.children(id).first().and_then(|&first| self.value_path(first)).into_iter().collect(),
+            // `*slot = slot.wrapping_add(value)`: the target is the value the
+            // pointer refers to, so the name is the operand. Read as a bare
+            // unary expression the assignment has no target at all and the
+            // event cannot be paired with the lexer's.
+            "unary_expression" | "unary" | "pointer_expression" => self
+                .children(id)
+                .into_iter()
+                .filter(|&child| !self.is_layout(child) && self.kind(child) != "*")
+                .find_map(|child| {
+                    let targets = self.assignment_targets(child);
+                    (!targets.is_empty()).then_some(targets)
+                })
+                .unwrap_or_default(),
+            // `meter.exhausted = …`: a field path is a target like any other
+            // path, and `value_path` does not read one.
+            _ => match self.value_path(id) {
+                Some(path) if !path.is_empty() => vec![path],
+                _ => {
+                    let path = self.path_of(id);
+                    if path.is_empty() { Vec::new() } else { vec![path] }
+                }
+            },
+        }
+    }
+
+    /// Every name of one element of an unpacking target list. `head, *rest =
+    /// xs` binds `rest` too — the star is how the list is split, not a
+    /// different kind of binder — and `typ, [data] = xs` binds both, so an
+    /// element that is itself a group contributes every name it holds instead
+    /// of one path its node does not have. Read through `value_path` alone the
+    /// group named nothing and the statement's target list lost a binder.
+    fn unpacked_names(&self, id: u32) -> Vec<String> {
+        // The star is how the list is split, not a different kind of binder,
+        // so `*rest` names `rest` and `*_` names `_`.
+        if self.kind(id) == "list_splat" {
+            return self.children(id).into_iter().filter_map(|child| self.value_path(child)).collect();
+        }
+        match self.kind(id) {
+            "pattern_list"
+            | "tuple_pattern"
+            | "list_pattern"
+            | "array_pattern"
+            | "object_pattern"
+            | "parenthesized_expression"
+            | "tuple"
+            | "list"
+            | "array"
+            | "object" => self.assignment_targets(id),
+            _ => self.value_path(id).into_iter().collect(),
+        }
+    }
+
+    pub(crate) fn assignment_event(&mut self, targets: Vec<String>, value: u32, line: u32, augmented: bool) {
+        self.assignment_parts(targets, value, line, augmented);
+    }
+
+    /// `provider = lambda client="": dashboard.payload(...)` is a definition,
+    /// not a value: the one-pass lexer opens a symbol for it, so the CST walk
+    /// does too, and its body is read inside that symbol so the calls land on
+    /// it rather than on the enclosing function.
+    pub(crate) fn bound_lambda(&mut self, name: &str, node: u32, line: u32) -> bool {
+        if self.kind(node) != "lambda" {
+            return false;
+        }
+        let owner = if self.frame().container { self.frame().class.clone() } else { String::new() };
+        let params = self
+            .child_of_kind(node, "lambda_parameters")
+            .map(|list| self.params(node, list))
+            .unwrap_or_default();
+        let index = self.add_symbol(name.to_string(), owner.clone(), KIND_FUNCTION, line, params);
+        let body = self.children(node).into_iter().rev().find(|&child| !self.is_layout(child));
+        self.stack.push(Frame { node, symbol: index, class: owner, receiver: String::new(), container: false, defines: Some(index) });
+        if let Some(body) = body {
+            if !matches!(self.kind(body), "block" | "statement_block") {
+                let at = self.line(body);
+                let value = self.form(body);
+                if value != "0" {
+                    self.event(&format!("[\"r\",{at},{value}]"));
+                }
+            }
+            self.facts.symbols[index].end_line = self.end_line(body);
+        }
+        self.stack.pop();
+        true
+    }
+
+    pub(crate) fn assignment_parts(&mut self, targets: Vec<String>, value: u32, line: u32, augmented: bool) {
+        if !augmented && targets.len() == 1 && self.bound_lambda(&targets[0].clone(), value, line) {
+            return;
+        }
+        // `module.exports = function (v) { … }`: the value is a definition the
+        // walk opens on its own, so its name comes from the assignment's target,
+        // exactly as a declarator's does. The one-pass lexer names the same
+        // symbol from the same target, so without this the two records disagree
+        // on the name of a function they both see.
+        if !augmented && self.is_js() && targets.len() == 1 {
+            // The name is the assignment's target path as written — `module.exports`
+            // stays `module.exports`, not `exports`. Taking the last segment made
+            // two different bindings share one symbol id (`exports`, then another
+            // `exports`) and merged their flows; the corpus went 863 -> 1144.
+            let target = targets[0].clone();
+            if self.kinds.definitions.iter().any(|def| def.kind == self.kind(value)) {
+                self.bound.push((value, target));
+                return;
+            }
+        }
+        let weak = augmented || targets.is_empty();
+        let expr = self.form(value);
+        if targets.is_empty() {
+            if expr != "0" {
+                self.event(&format!("[\"x\",{line},{expr}]"));
+            }
+            return;
+        }
+        let mut text = format!("[\"a\",{line},[");
+        for (index, name) in targets.iter().enumerate() {
+            if index > 0 {
+                text.push(',');
+            }
+            push_string(&mut text, name);
+        }
+        text.push_str(&format!("],{expr},{}]", u8::from(weak)));
+        self.event(&text);
+        if let Some(class) = self.constructed(value) {
+            for target in &targets {
+                // A C# declarator names one identifier; a dotted target is a
+                // member being assigned, not a variable being declared.
+                if !(self.language.name == "csharp" && target.contains('.')) {
+                    self.facts.vars.push((target.clone(), class.clone()));
+                }
+            }
+        } else {
+            // `s, t = Counter(a), Counter(b)`: one value per target, so the
+            // class a target holds is its own value's. Read as a tuple the
+            // whole value constructs nothing and every binding was dropped,
+            // while the lexer names the last one.
+            let items: Vec<u32> = match self.kind(value) {
+                "expression_list" | "tuple" | "tuple_expression" | "pattern_list" => {
+                    self.children(value).into_iter().filter(|&child| !self.is_layout(child)).collect()
+                }
+                _ => Vec::new(),
+            };
+            if items.len() == targets.len() {
+                for (target, item) in targets.iter().zip(items) {
+                    if let Some(class) = self.constructed(item) {
+                        self.facts.vars.push((target.clone(), class));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The class a call constructs, by the same convention the lexer uses: a
+    /// capitalised callee, or anything after `new`.
+    pub(crate) fn constructed(&self, value: u32) -> Option<String> {
+        // `Path(__file__).resolve().parent`: the value is an attribute chain
+        // whose base is the call. The lexer reads the first token, so the
+        // chain is unwrapped to the call that starts it.
+        let call = self.value_root_call(value)?;
+        if matches!(self.kind(call), "new_expression" | "const_object_expression" | "object_creation" | "object_creation_expression") {
+            let path = if matches!(self.kind(call), "new_expression" | "const_object_expression") {
+                self.children(call).into_iter().find_map(|child| {
+                    match self.kind(child) {
+                        "identifier" | "member_expression" | "attribute" | "name" => Some(self.path_of(child)),
+                        "qualified_name" => Some(self.text_string(child)),
+                        _ => None,
+                    }
+                })?
+            } else {
+                self.decl_path(self.decl_callee(call))
+            };
+            let last = path.rsplit(|c| c == '.' || c == '\\').next().unwrap_or(&path);
+            return last.starts_with(|ch: char| ch.is_uppercase()).then_some(last.to_string());
+        }
+        let path = self.root_callee(call)?;
+        let last = path.rsplit('.').next().unwrap_or("").to_string();
+        (last.starts_with(|ch: char| ch.is_uppercase()) && !last.contains('(')).then_some(last)
+    }
+
+    /// The call a value starts with: `a().b` -> the `a()` node, `a.b()` ->
+    /// `a.b()`, `(a)` -> the call in the parentheses.
+    pub(crate) fn value_root_call(&self, id: u32) -> Option<u32> {
+        match self.kind(id) {
+            // C# spells calls as `invocation_expression` / `generic_invocation`
+            // and `new T()` as `object_creation` / `object_creation_expression`.
+            "call" | "call_expression" | "new_expression" | "const_object_expression" | "invocation_expression" | "object_creation"
+            | "object_creation_expression" | "generic_invocation" => Some(id),
+            "attribute" | "member_expression" | "member_access" | "null_aware_member" | "field_access" | "subscript"
+            | "subscript_expression" | "parenthesized_expression" => {
+                self.children(id).first().and_then(|&object| self.value_root_call(object))
+            }
+            "await_expression" if self.facts.tag == "DART" => {
+                self.children(id).into_iter().rev().find(|&c| !self.is_layout(c)).and_then(|c| self.value_root_call(c))
+            }
+            // `candidate = Path(x).parent / candidate`: a binary value starts
+            // with its left operand, which is what the lexer's first token is.
+            "binary_operator" | "binary_expression" | "boolean_operator" | "conditional_expression"
+            | "ternary_expression" => self.children(id).first().and_then(|&left| self.value_root_call(left)),
+            // Swift spells the same node `binary` (and `a ?? b` as
+            // `nil_coalescing`). Without them the CST reader gave up on a whole
+            // file whose only unusual node was one of these: Double.swift had no
+            // CST record at all, and the audit could only report a single generic
+            // loss for it. Reading them costs per-line rows on the files that now
+            // parse, and that is the honest trade - a parsed file with named
+            // disagreements beats an unparsed one.
+            "binary" | "nil_coalescing" if self.language.name == "swift" => {
+                self.children(id).first().and_then(|&left| self.value_root_call(left))
+            }
+            // `new Foo() as any`, `new Foo() satisfies T`, `new Foo()!`: a type
+            // assertion or non-null postfix does not change the constructed class.
+            "as_expression" | "satisfies_expression" | "non_null_expression" => {
+                self.expression_child(id).and_then(|expr| self.value_root_call(expr))
+            }
+            // Swift spells the same shape `cast`/`force_unwrap`. Guarded on the
+            // language so no other grammar's node of that name is misread.
+            "cast" | "force_unwrap" if self.language.name == "swift" => {
+                self.expression_child(id).and_then(|expr| self.value_root_call(expr))
+            }
+            _ => None,
+        }
+    }
