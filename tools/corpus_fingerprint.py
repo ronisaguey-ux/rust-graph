@@ -7,8 +7,8 @@ measured 217/263. Neither number was wrong - they were taken on different
 directories that both called themselves corpus45. A percentage without the
 fingerprint of the files under it cannot be compared to anything.
 
-Print one line per language: file count, total bytes, total lines, and a sha1
-over every (relative path, sha1 of contents) pair, so two machines can be
+Print one line per language: file count, total bytes, total lines, and a sha256
+over every (relative path, sha256 of contents) pair, so two machines can be
 compared by eye and any drift is visible before a measurement is believed.
 
 Usage:
@@ -42,7 +42,7 @@ def fingerprint(root: str, lang: str) -> dict:
     base = os.path.join(root, lang)
     if not os.path.isdir(base):
         return {"lang": lang, "missing": True}
-    digest = hashlib.sha1()
+    digest = hashlib.sha256()
     count = size = lines = 0
     for path in files_of(root, lang):
         rel = os.path.relpath(path, base).encode()
@@ -50,9 +50,9 @@ def fingerprint(root: str, lang: str) -> dict:
         count += 1
         size += len(content)
         lines += content.count(b"\n")
-        digest.update(rel + b"\0" + hashlib.sha1(content).hexdigest().encode() + b"\n")
+        digest.update(rel + b"\0" + hashlib.sha256(content).hexdigest().encode() + b"\n")
     return {"lang": lang, "files": count, "bytes": size, "lines": lines,
-            "sha1": digest.hexdigest()[:16]}
+            "sha256": digest.hexdigest()[:16]}
 
 
 def main() -> int:
@@ -81,7 +81,7 @@ def main() -> int:
             print(f"{row['lang']}\tMISSING")
             continue
         print(f"{row['lang']}\tfiles={row['files']}\tlines={row['lines']}\t"
-              f"bytes={row['bytes']}\tsha1={row['sha1']}")
+              f"bytes={row['bytes']}\tsha256={row['sha256']}")
     return 0
 
 
