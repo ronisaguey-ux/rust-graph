@@ -7678,3 +7678,323 @@ fn dotted_piece(text: &str) -> bool {
                 let mut out = "[\"k\",".to_string();
                 push_string(&mut out, &name);
                 out.push(',');
+                out.push_str(&inner);
+                out.push(']');
+                out
+            }
+            // `lambda x: f(x)`: the parameters and body form the lambda value.
+            "lambda" | "lambda_parameter" | "lambda_star_parameter" | "lambda_parameters" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| {
+                        !self.is_layout(child)
+                            && !matches!(self.kind(child), "lambda" | ":" | "," | "=" | "*" | "**" | "/")
+                    })
+                    .collect();
+                let mut parts = Vec::new();
+                for (at, &child) in items.iter().enumerate() {
+                    let value = self.form(child);
+                    // `lambda x: ""` and `lambda: 0`: a body that is a literal
+                    // is the constant 0 and it is still the lambda's value.
+                    // Dropping every 0 left the parameter as the whole form, so
+                    // calendar's `_months.insert(0, lambda x: "")` lost the body.
+                    if value != "0" || at + 1 == items.len() {
+                        parts.push(value);
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `["a": "1", "b": "Foo"]`: Swift's grammar leaves a pair's key and
+            // value as siblings with the `:` between them, so each pair is
+            // read as one merged item, as the one-pass reader does. Groups are
+            // split on the `,` and a group of two is a `key: value` pair.
+            "collection_literal" if self.language.name == "swift" && self.swift_has_pair_colon(id) => {
+                let mut groups: Vec<Vec<u32>> = Vec::new();
+                let mut current: Vec<u32> = Vec::new();
+                for child in self.swift_collection_children(id) {
+                    match self.kind(child) {
+                        "," => {
+                            if !current.is_empty() {
+                                groups.push(std::mem::take(&mut current));
+                            }
+                        }
+                        ":" => {}
+                        _ if self.is_layout(child) => {}
+                        _ => current.push(child),
+                    }
+                }
+                if !current.is_empty() {
+                    groups.push(current);
+                }
+                if groups.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut forms: Vec<String> = Vec::new();
+                    for group in &groups {
+                        if group.len() == 1 {
+                            forms.push(self.form(group[0]));
+                            continue;
+                        }
+                        // A pair's cast value is spliced into the pair, as the
+                        // one-pass reader writes `"b": "Foo" as NSString`.
+                        let mut parts: Vec<String> = Vec::new();
+                        for &item in group {
+                            if self.kind(item) == "cast" {
+                                let inner: Vec<u32> = self
+                                    .children(item)
+                                    .into_iter()
+                                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "as" | "is" | "?" | "!"))
+                                    .collect();
+                                parts.extend(inner.into_iter().map(|child| self.form(child)));
+                            } else {
+                                parts.push(self.form(item));
+                            }
+                        }
+                        forms.push(format!("[\"m\",[{}]]", parts.join(",")));
+                    }
+                    format!("[\"t\",[{}]]", forms.join(","))
+                }
+            }
+            "array_initializer" | "collection_initializer" | "object_initializer"
+            | "anonymous_object" | "anonymous_body" | "with_expression"
+                if self.language.name == "csharp" =>
+            {
+                let mut groups: Vec<Vec<u32>> = Vec::new();
+                let mut cur: Vec<u32> = Vec::new();
+                for child in self.children(id) {
+                    if matches!(self.kind(child), "{" | "}" | "new" | "with") {
+                        continue;
+                    }
+                    if self.kind(child) == "," {
+                        if !cur.is_empty() {
+                            groups.push(std::mem::take(&mut cur));
+                        }
+                        continue;
+                    }
+                    if self.is_layout(child) || self.kind(child) == "=" {
+                        continue;
+                    }
+                    cur.push(child);
+                }
+                if !cur.is_empty() {
+                    groups.push(cur);
+                }
+                let mut parts = Vec::with_capacity(groups.len());
+                for g in groups {
+                    match g.len() {
+                        0 => {}
+                        1 => {
+                            let v = self.form(g[0]);
+                            // `["k"] = v`: `cs_preprocess` blanks `[` and `]`
+                            // so a string-keyed dictionary initializer parses as
+                            // `"k" = v`. Keep the key `0` alongside `v` instead
+                            // of dropping the constant LHS.
+                            if kind == "object_initializer" && self.kind(g[0]) == "assignment_expression" {
+                                let ac = self.children(g[0]);
+                                if !ac.is_empty() && self.form(ac[0]) == "0" {
+                                    parts.push(format!("[\"m\",[0,{v}]]"));
+                                    continue;
+                                }
+                            }
+                            parts.push(v);
+                        }
+                        _ => parts.push(self.merge_form(&g)),
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => format!("[\"m\",[{}]]", parts[0]),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            "implicit_array_creation" | "array_specifier" | "array_size_specifier" | "stackalloc_expression"
+            | "implicit_creation"
+                if self.language.name == "csharp" =>
+            {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if matches!(self.kind(child), "new" | "stackalloc" | "[" | "]" | ",") {
+                        continue;
+                    }
+                    if !self.is_layout(child) || self.leaf_name(child).is_some() {
+                        let v = self.form(child);
+                        // `new("All") { Patterns = ... }`: a non-empty argument
+                        // list (or bare argument/parenthesized child) evaluates
+                        // its argument constants even when its form is `0`,
+                        // whereas an empty `()` or `{}` has no arguments.
+                        let non_empty_arg = kind == "implicit_creation"
+                            && !matches!(self.kind(child), "object_initializer" | "collection_initializer" | "array_initializer")
+                            && (self.kind(child) != "argument_list"
+                                || self.children(child).into_iter().any(|c| !self.is_layout(c)));
+                        if v != "0" || non_empty_arg {
+                            parts.push(v);
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            "collection_literal" | "tuple" | "list" | "set" | "pattern_list" | "array" | "tuple_pattern" | "list_pattern" | "array_pattern" => {
+                // Swift wraps a literal's elements in one `collection_body`
+                // node, so `[1, 2, 3]` had one child and formed as `[0]`. The
+                // elements are that node's children, one per element.
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .flat_map(|child| {
+                        if self.kind(child) == "collection_body" {
+                            self.children(child)
+                        } else {
+                            vec![child]
+                        }
+                    })
+                    .filter(|&child| !self.is_layout(child))
+                    .collect();
+                self.delim_depth += 1;
+                let out = if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.tuple_form(&items)
+                };
+                self.delim_depth -= 1;
+                out
+            }
+            "list_comprehension" | "set_comprehension" | "generator_expression" | "dictionary_comprehension" => {
+                // `[f(x) for x in xs if p(x)]`: the element and every clause's
+                // value are what the reader needs, and the clauses carry calls.
+                let mut items: Vec<u32> = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    items.push(child);
+                }
+                self.delim_depth += 1;
+                let out = if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.tuple_form(&items)
+                };
+                self.delim_depth -= 1;
+                out
+            }
+            "for_in_clause" => {
+                // `for x in xs`: both the target and the iterable are written
+                // in the source and the one-pass lexer reads both. Reading
+                // only the iterable dropped the name the clause binds, and
+                // every comprehension over a name it also uses fell back.
+                let children = self.children(id);
+                match children.iter().position(|&child| self.kind(child) == "in") {
+                    Some(at) => {
+                        let mut items: Vec<u32> =
+                            children[..at].iter().copied().filter(|&child| !self.is_layout(child)).collect();
+                        items.extend(children[at + 1..].iter().copied().filter(|&child| !self.is_layout(child)));
+                        if items.is_empty() {
+                            "0".to_string()
+                        } else {
+                            self.merge_form(&items)
+                        }
+                    }
+                    None => match children.into_iter().rev().find(|&child| !self.is_layout(child)) {
+                        Some(child) => self.form(child),
+                        None => "0".to_string(),
+                    },
+                }
+            }
+            "if_clause" | "comprehension_clause" => {
+                // `if p(x)`: the value is the last child.
+                match self.children(id).into_iter().rev().find(|&child| !self.is_layout(child)) {
+                    Some(child) => self.form(child),
+                    None => "0".to_string(),
+                }
+            }
+            // An `object` literal has `{ ... }` children; a bare `object` leaf
+            // (e.g. C#'s predefined `object` type) falls through to `leaf_name`.
+            "dictionary" | "object" if self.node(id).first_child != NONE => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.merge_form(&items)
+                }
+            }
+            "pair" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                // `{ [key]: 1 }`: the one-pass reader writes the computed key as
+                // a list holding the name in it, and the pair there is the key,
+                // not a key/value merge.
+                if items.first().is_some_and(|&first| self.kind(first) == "computed_property_name") {
+                    let inner = self
+                        .children(items[0])
+                        .into_iter()
+                        .find(|&child| !self.is_layout(child));
+                    let key = inner.map(|child| self.form(child)).unwrap_or_else(|| "0".to_string());
+                    // `{ [TypeId]: { … } }` is a pair like any other: the key
+                    // is a computed list and the value is the pair's last item.
+                    // Returning the key alone dropped the value (14 js files).
+                    let value = match items.last() {
+                        Some(&last) if last != items[0] => self.form(last),
+                        _ => "0".to_string(),
+                    };
+                    return format!("[\"m\",[[\"t\",[{key}]],{value}]]");
+                }
+                match items.len() {
+                    // `{ async: async }`: key and value are the same keyword, so
+                    // both children are layout and the pair held nothing at all —
+                    // the one-pass reader writes the name once and the CST wrote
+                    // the constant 0, dropping the property. A key and value that
+                    // spell the same word are one name.
+                    0 => {
+                        let words: Vec<String> = self
+                            .children(id)
+                            .into_iter()
+                            .map(|child| self.text_string(child))
+                            .filter(|text| {
+                                !text.is_empty()
+                                    && text != ":"
+                                    && (text.as_bytes()[0].is_ascii_alphabetic() || text.as_bytes()[0] == b'_')
+                            })
+                            .collect();
+                        if let Some(first) = words.first().filter(|_| words.iter().all(|word| word == &words[0])) {
+                            let mut out = "[\"m\",[[\"n\",".to_string();
+                            push_string(&mut out, first);
+                            out.push_str("]]]");
+                            out
+                        } else {
+                            "0".to_string()
+                        }
+                    }
+                    // `{ type: "boolean" }`: a key spelled like a keyword (`type`,
+                    // `class`, `default`) has that keyword as its kind, so
+                    // is_layout() drops it and the pair is left holding its value
+                    // alone. The lexer reads the key as a name, so the CST must:
+                    // the key is the first child whose text is a word.
+                    1 => {
+                        let key = self
+                            .children(id)
+                            .into_iter()
+                            .find(|&child| {
+                                let text = self.text_string(child);
+                                !text.is_empty()
+                                    && text != ":"
+                                    && (text.as_bytes()[0].is_ascii_alphabetic() || text.as_bytes()[0] == b'_')
+                            });
+                        match key {
+                            Some(key) => {
+                                let mut out = "[\"m\",[[\"n\",".to_string();
+                                push_string(&mut out, &self.text_string(key));
+                                out.push_str("],");
+                                out.push_str(&self.form(items[0]));
+                                out.push_str("]]");
+                                out
+                            }
+                            None => self.form(items[0]),
+                        }
