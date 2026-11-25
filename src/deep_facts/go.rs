@@ -26,7 +26,6 @@ impl<'a> Walker<'a> {
             "package_clause" | "type_declaration" => self.decl_statement(id),
             // A struct field is its own statement to the lexer, because `struct
             // {` opened a block: `Name string` sits on the module symbol.
-            "field_declaration" => self.decl_statement(id),
             // An interface method is a statement there too: `Get(id int) (...)`.
             "method_elem" => self.decl_statement(id),
             // `~int | ~int64` in a generic constraint is a statement of its own.
@@ -42,6 +41,28 @@ impl<'a> Walker<'a> {
             "if_statement" | "expression_switch_statement" | "type_switch_statement" | "switch_statement"
             | "select_statement" => self.go_header(id),
             "expression_case" | "default_case" | "type_case" | "communication_case" => self.go_case(id),
+            "method_elem" => {
+                if let Some(first) = self.children(id).into_iter().find(|&c| !self.is_layout(c)) {
+                    let name = self.text_string(first);
+                    if !name.is_empty() {
+                        let line = self.line(first);
+                        self.push_call(name, line);
+                    }
+                }
+            }
+            "field_declaration" => {
+                let ch = self.children(id);
+                if ch.iter().any(|&c| self.kind(c) == "parenthesized_type") {
+                    if let Some(&first) = ch.iter().find(|&&c| !self.is_layout(c)) {
+                        let name = self.text_string(first);
+                        if !name.is_empty() {
+                            let line = self.line(first);
+                            self.push_call(name, line);
+                        }
+                    }
+                }
+                self.decl_statement(id);
+            }
             "func_literal" => {
                 if let Some(&index) = self.go_literal_frames.get(&id) {
                     let class = self.facts.symbols[index].owner.clone();
@@ -513,9 +534,26 @@ impl<'a> Walker<'a> {
             .filter(|&&child| !self.is_layout(child))
             .filter_map(|&child| self.decl_target(child))
             .collect();
-        if targets.len() == 1 {
-            if let Some(class) = children.get(at + 1).and_then(|&value| self.constructed_class(value)) {
-                self.facts.vars.push((targets[0].clone(), class));
+        if !targets.is_empty() {
+            let mut rhs_exprs: Vec<u32> = Vec::new();
+            for &c in &children[at + 1..] {
+                if self.is_layout(c) || self.kind(c) == "," {
+                    continue;
+                }
+                if self.kind(c) == "expression_list" {
+                    for ec in self.children(c) {
+                        if !self.is_layout(ec) && self.kind(ec) != "," {
+                            rhs_exprs.push(ec);
+                        }
+                    }
+                } else {
+                    rhs_exprs.push(c);
+                }
+            }
+            for (t, &e) in targets.iter().zip(rhs_exprs.iter()) {
+                if let Some(class) = self.constructed_class(e) {
+                    self.facts.vars.push((t.clone(), class));
+                }
             }
         }
         // `verifyString := func(s string) { … }`: the one-pass lexer opens a
@@ -537,7 +575,7 @@ impl<'a> Walker<'a> {
                     // `db.head.memTruncationCallBack = func() {`: a selector is
                     // a name the lexer opens a symbol for too, so only targets
                     // that are not names (`m["a"]`) are left out.
-                    || matches!(kind, "selector_expression" | "field_access" | "this")
+                    || matches!(kind, "selector_expression" | "field_access" | "this" | "unary_expression")
             });
             if plain_name {
                 if let Some(literal) = self.go_find_func_literal(&children[at + 1..]) {
@@ -619,8 +657,21 @@ impl<'a> Walker<'a> {
                 })
                 .collect();
             if let [value] = values[..] {
-                if let Some(class) = self.constructed(value) {
+                if let Some(class) = self.constructed(value).or_else(|| self.constructed_class(value)) {
                     self.facts.vars.push((declared[0].clone(), class));
+                }
+            }
+        } else if declared.len() > 1 {
+            let values: Vec<u32> = parts[equal + 1..]
+                .iter()
+                .flat_map(|&part| match self.kind(part) {
+                    "expression_list" => self.children(part).into_iter().filter(|&child| !self.is_layout(child) && self.kind(child) != ",").collect(),
+                    _ => vec![part],
+                })
+                .collect();
+            for (t, &v) in declared.iter().zip(values.iter()) {
+                if let Some(class) = self.constructed(v).or_else(|| self.constructed_class(v)) {
+                    self.facts.vars.push((t.clone(), class));
                 }
             }
         }
@@ -725,6 +776,9 @@ impl<'a> Walker<'a> {
             let value = self.decl_value(child);
             let line = self.line(child);
             self.lexer_event(b'x', line, &[], &value, false);
+            if self.language.name == "go" && self.line(id) == line && self.child_of_kind(id, "short_var_declaration").is_some() {
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
         }
         // `switch v := f(x); v {` and `if v := f(x); p(v) {`: the lexer writes
         // one condition event over the whole header as well, and a value that
@@ -732,6 +786,22 @@ impl<'a> Walker<'a> {
         if let Some(value) = self.header_value(id) {
             let line = self.line(id);
             self.lexer_event(b'x', line, &[], &value, false);
+        }
+        if self.language.name == "go" && self.kind(id) == "if_statement" {
+            let mut parts = Vec::new();
+            for child in self.children(id) {
+                if !self.is_layout(child) && self.kind(child) != "else_clause" {
+                    let v = self.decl_value(child);
+                    if !v.is_empty() && v != "0" {
+                        parts.push(v);
+                    }
+                }
+            }
+            if parts.len() > 1 {
+                let line = self.line(id);
+                let val = format!("[\"m\",[{}]]", parts.join(","));
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
         }
         self.event("[\"b\"]");
     }
@@ -788,6 +858,20 @@ impl<'a> Walker<'a> {
         let colon = children.iter().position(|&child| {
             self.node(child).first_child == NONE && self.text(child) == b":"
         });
+        if let Some(col_at) = colon {
+            let exprs: Vec<u32> = children[..col_at]
+                .iter()
+                .copied()
+                .filter(|&c| !self.is_layout(c) && !matches!(self.kind(c), "case" | "default"))
+                .collect();
+            if !exprs.is_empty() {
+                let case_line = self.line(exprs[0]);
+                let cv = self.decl_values(&exprs);
+                if !cv.is_empty() && cv != "0" {
+                    self.lexer_event(b'x', case_line, &[], &cv, false);
+                }
+            }
+        }
         let after = colon.map(|at| at + 1).unwrap_or(children.len());
         for child in children[after..].iter().copied() {
             if self.is_layout(child) {
@@ -848,6 +932,19 @@ impl<'a> Walker<'a> {
             // the constant 0.
             let leading_dot_number = first == b'.' && text.len() > 1 && text[1].is_ascii_digit();
             if first.is_ascii_digit() || first == b'"' || first == b'\'' || first == b'`' || leading_dot_number {
+                if self.language.name == "go"
+                    && first == b'\''
+                    && text.len() > 4
+                    && text[1] == b'\\'
+                    && matches!(text[2], b'u' | b'U')
+                    && text.ends_with(b"'")
+                {
+                    let esc = String::from_utf8_lossy(&text[2..text.len() - 1]);
+                    let mut out = "[\"m\",[0,[\"n\",".to_string();
+                    push_string(&mut out, &esc);
+                    out.push_str("]]]");
+                    return out;
+                }
                 return "0".to_string();
             }
             // Go identifiers may be Unicode too: `stream{ƒ: ƒ}` names `ƒ`.
@@ -889,6 +986,27 @@ impl<'a> Walker<'a> {
         if kind == "nameof_expression" {
             let line = self.line(id);
             self.push_call("nameof".to_string(), line);
+        }
+        if self.language.name == "go" && kind == "method_elem" {
+            if let Some(first) = self.children(id).into_iter().find(|&c| !self.is_layout(c)) {
+                let name = self.text_string(first);
+                if !name.is_empty() {
+                    let line = self.line(first);
+                    self.push_call(name, line);
+                }
+            }
+        }
+        if self.language.name == "go" && kind == "field_declaration" {
+            let ch = self.children(id);
+            if ch.iter().any(|&c| self.kind(c) == "parenthesized_type") {
+                if let Some(&first) = ch.iter().find(|&&c| !self.is_layout(c)) {
+                    let name = self.text_string(first);
+                    if !name.is_empty() {
+                        let line = self.line(first);
+                        self.push_call(name, line);
+                    }
+                }
+            }
         }
         // The same flat, numeric-free merge `form` writes for java, for the
         // values that arrive through the declaration path (`int x = a + 1`,
@@ -970,6 +1088,28 @@ impl<'a> Walker<'a> {
         }
         if matches!(kind, "call_expression" | "method_invocation" | "object_creation_expression" | "object_creation" | "invocation_expression") {
             let callee = self.decl_callee(id);
+            if self.language.name == "go" && kind == "call_expression" && self.kind(callee) == "func_literal" {
+                let mut parts = Vec::new();
+                let body = self.decl_value(callee);
+                if !body.is_empty() && body != "0" {
+                    parts.push(body);
+                }
+                if let Some(list) = self.children(id).into_iter().find(|&c| matches!(self.kind(c), "arguments" | "argument_list")) {
+                    let av = self.decl_value(list);
+                    if !av.is_empty() && av != "0" {
+                        let arg_line = self.line(list);
+                        if arg_line > self.line(callee) {
+                            self.lexer_event(b'x', arg_line, &[], &av, false);
+                        }
+                        parts.push(av);
+                    }
+                }
+                return match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.pop().unwrap_or_else(|| "0".to_string()),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                };
+            }
             if self.language.name == "csharp" && kind == "object_creation" && matches!(self.kind(callee), "array_type" | "generic_type") {
                 let mut parts = Vec::new();
                 for child in self.children(id) {
@@ -1033,6 +1173,41 @@ impl<'a> Walker<'a> {
                         return format!("[\"m\",[{literal},{call}]]");
                     }
                 }
+            }
+            if self.language.name == "go"
+                && kind == "call_expression"
+                && matches!(
+                    self.kind(callee),
+                    "parenthesized_expression"
+                        | "parenthesized_type"
+                        | "pointer_type"
+                        | "index_expression"
+                        | "index_list_expression"
+                        | "type_instantiation_expression"
+                        | "interface_type"
+                        | "struct_type"
+                        | "function_type"
+                        | "slice_type"
+                        | "array_type"
+                        | "map_type"
+                        | "channel_type"
+                )
+            {
+                let mut parts = Vec::new();
+                let cv = self.decl_value(callee);
+                if !cv.is_empty() && cv != "0" {
+                    parts.push(cv);
+                }
+                parts.push(call);
+                for child in self.children(id) {
+                    if child != callee && !self.is_layout(child) {
+                        let av = self.decl_value(child);
+                        if !av.is_empty() && av != "0" {
+                            parts.push(av);
+                        }
+                    }
+                }
+                return format!("[\"m\",[{}]]", parts.join(","));
             }
             // `() -> new BeanE() { @Override public void afterPropertiesSet() { … } }`:
             // a body that builds an anonymous class keeps the class's members —
@@ -1100,6 +1275,16 @@ impl<'a> Walker<'a> {
                 push_string(&mut out, &path);
                 out.push(']');
                 parts.push(out);
+                if self.language.name == "go" {
+                    if let Some(stripped) = path.strip_prefix("in.").or_else(|| path.strip_prefix("as.")) {
+                        if !stripped.is_empty() {
+                            let mut s_out = "[\"n\",".to_string();
+                            push_string(&mut s_out, stripped);
+                            s_out.push(']');
+                            parts.push(s_out);
+                        }
+                    }
+                }
                 // A Java dotted name whose base names something and whose
                 // leaves spell the path is one name to the one-pass reader
                 // (`n:Label.FLAG_DEBUG_ONLY`, `n:BigInteger.class`). Descending
@@ -1515,7 +1700,19 @@ impl<'a> Walker<'a> {
                 // cast's names were nowhere in the record (spring's
                 // JacksonJsonViewTests and HttpServiceMethod, commons-lang's
                 // EqualsBuilderTest: 6 rows).
-                let cast = matches!(self.kind(object), "parenthesized_expression" | "cast_expression");
+                let mut cur = object;
+                let mut has_go_assert = false;
+                if self.language.name == "go" {
+                    while self.kind(cur) == "selector_expression" {
+                        if let Some(inner) = self.children(cur).into_iter().find(|&c| !self.is_layout(c)) {
+                            cur = inner;
+                        } else {
+                            break;
+                        }
+                    }
+                    has_go_assert = matches!(self.kind(cur), "type_assertion_expression" | "parenthesized_expression");
+                }
+                let cast = has_go_assert || matches!(self.kind(object), "parenthesized_expression" | "cast_expression" | "type_assertion_expression");
                 (object != call && (cast || self.decl_has_call(object))).then_some(object)
             }
             // `Ordering.from(k).<K>onKeys()`: Java's `method_invocation` with
@@ -1568,6 +1765,16 @@ impl<'a> Walker<'a> {
         let path = self.decl_path(callee);
         match path.rsplit_once('.') {
             Some((head, _)) if !head.is_empty() => {
+                let head = if self.language.name == "go" {
+                    let h = head.strip_prefix("in.").or_else(|| head.strip_prefix("as.")).unwrap_or(head);
+                    if matches!(self.frame().receiver.as_str(), "in" | "as") {
+                        h.strip_prefix("self.").unwrap_or(h)
+                    } else {
+                        h
+                    }
+                } else {
+                    head
+                };
                 let mut out = "[\"n\",".to_string();
                 push_string(&mut out, head);
                 out.push(']');
@@ -1791,6 +1998,8 @@ impl<'a> Walker<'a> {
                 | "invocation_expression"
                 | "object_creation_expression"
                 | "object_creation" => return true,
+                "type_assertion_expression"
+                    if self.language.name == "go" => return true,
                 _ => return false,
             }
         }
@@ -1816,7 +2025,11 @@ impl<'a> Walker<'a> {
                         | "invocation_expression"
                         | "object_creation_expression"
                         | "object_creation"
-                ) =>
+                ) || (self.language.name == "go"
+                    && matches!(
+                        self.kind(base),
+                        "type_assertion_expression"
+                    )) =>
             {
                 String::new()
             }
@@ -1857,6 +2070,13 @@ impl<'a> Walker<'a> {
             // was a target list the CST never wrote (1,008 rows over 89 files,
             // the largest java cluster left).
             "index_expression" | "array_access" => {
+                if self.language.name == "go" {
+                    if let Some(&base) = self.children(id).first() {
+                        if let Some(t) = self.decl_target(base) {
+                            return Some(t);
+                        }
+                    }
+                }
                 let path = self.children(id).first().map(|&base| self.decl_path(base)).unwrap_or_default();
                 (!path.is_empty()).then_some(path)
             }

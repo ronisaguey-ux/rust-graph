@@ -195,6 +195,8 @@ fn capitalised(path: &str) -> Option<String> {
     (last.starts_with(|ch: char| ch.is_uppercase()) && !last.contains('(')).then(|| path.to_string())
 }
 
+const MAX_EMIT_DEPTH: u32 = 512;
+
 pub struct Emit<'a> {
     pub src: &'a [u8],
     pub lang: &'static Language,
@@ -206,6 +208,8 @@ pub struct Emit<'a> {
     /// The statement is a declaration with no block after it (see
     /// `Parser::bodyless`), so a generic method's name is a call.
     pub bodyless: bool,
+    /// Recursion depth guard for deeply nested expressions / bareword chains.
+    pub depth: u32,
 }
 
 impl Emit<'_> {
@@ -537,6 +541,23 @@ impl Emit<'_> {
 
     /// Everything up to a comma or closer, combined.
     pub fn mix(&mut self, out: &mut String, close: u8) {
+        if self.depth >= MAX_EMIT_DEPTH {
+            while self.pos < self.toks.len() {
+                let b = self.op_byte(0);
+                if b == b',' || (close != 0 && b == close) {
+                    break;
+                }
+                self.pos += 1;
+            }
+            out.push('0');
+            return;
+        }
+        self.depth += 1;
+        self.mix_inner(out, close);
+        self.depth -= 1;
+    }
+
+    fn mix_inner(&mut self, out: &mut String, close: u8) {
         let _probe = prof::on().then(|| prof::Probe::enter(4));
         let start = out.len();
         // Calls written by the pattern: in Rust `Pat => value` drops everything
@@ -1861,7 +1882,7 @@ impl Emit<'_> {
         if from >= to {
             return String::new();
         }
-        let mut nested = Emit { src, lang, toks: &all[from..to], pos: 0, calls: self.calls, receiver, bodyless: false };
+        let mut nested = Emit { src, lang, toks: &all[from..to], pos: 0, calls: self.calls, receiver, bodyless: false, depth: self.depth + 1 };
         let mut value = String::new();
         nested.mix(&mut value, 0);
         value
@@ -1891,7 +1912,7 @@ impl Emit<'_> {
                     }
                 }
                 let mut nested =
-                    Emit { src: slice, lang: self.lang, toks: &tokens, pos: 0, calls: self.calls, receiver: self.receiver, bodyless: false };
+                    Emit { src: slice, lang: self.lang, toks: &tokens, pos: 0, calls: self.calls, receiver: self.receiver, bodyless: false, depth: self.depth + 1 };
                 let mut value = String::new();
                 nested.mix(&mut value, 0);
                 if value != "0" {
@@ -2887,6 +2908,9 @@ impl Emit<'_> {
 
     /// `system "ls"` and `f x y`: the name just emitted was a call after all.
     fn juxtaposed(&mut self, out: &mut String, close: u8, line: u32, ident_start: usize) {
+        if self.depth >= MAX_EMIT_DEPTH {
+            return;
+        }
         let Some(next) = self.tok(0) else { return };
         let is_value = matches!(next.kind, Kind::Ident | Kind::Str | Kind::Num)
             || (self.lang.apply_calls && self.op_byte(0) == b'(');
@@ -3453,7 +3477,7 @@ mod tests {
             }
         }
         let mut calls = Vec::new();
-        let mut emit = Emit { src: body.as_bytes(), lang, toks: &tokens, pos: 0, calls: &mut calls, receiver: "", bodyless: false };
+        let mut emit = Emit { src: body.as_bytes(), lang, toks: &tokens, pos: 0, calls: &mut calls, receiver: "", bodyless: false, depth: 0 };
         let mut out = String::new();
         emit.mix(&mut out, 0);
         (out, calls.into_iter().map(|call| call.path).collect())
