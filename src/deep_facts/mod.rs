@@ -7678,3 +7678,323 @@ impl<'a> Walker<'a> {
                         let mut pd = 0i32;
                         while j < sb.len() {
                             match sb[j] {
+                                b'(' | b'[' | b'{' => pd += 1,
+                                b')' | b']' | b'}' => pd -= 1,
+                                b'<' if pd == 0 => {
+                                    if j + 2 < sb.len() && sb[j + 1] == b'<' && sb[j + 2] == b'-' {
+                                        return Some((s[..j].trim(), s[j + 3..].trim()));
+                                    }
+                                    if j + 1 < sb.len() && sb[j + 1] == b'-' {
+                                        return Some((s[..j].trim(), s[j + 2..].trim()));
+                                    }
+                                }
+                                b'=' if pd == 0 => {
+                                    let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                                    let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                                    if !matches!(prev, b'=' | b'!' | b'<' | b'>') && next != b'=' {
+                                        return Some((s[..j].trim(), s[j + 1..].trim()));
+                                    }
+                                }
+                                _ => {}
+                            }
+                            j += 1;
+                        }
+                        None
+                    }
+
+                    let n_lines = cleaned_lines.len();
+                    let mut active_sym: usize = 0;
+                    let mut brace_depth: i32 = 0;
+                    let mut sym_stack: Vec<(i32, usize)> = Vec::new();
+
+                    for idx in 0..n_lines {
+                        let line = (idx + 1) as u32;
+                        let clean = &cleaned_lines[idx];
+                        let code = &code_lines[idx];
+                        let trimmed = clean.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let code_tr = code.trim();
+
+                        // 1. Detect function definitions & UpperCase constructor vars
+                        for stmt in split_semis(code_tr) {
+                            let (_, inner) = strip_ctrl_prefix(stmt);
+                            if let Some((lhs, rhs)) = assign_split(inner) {
+                                let raw_name = lhs.trim_matches(|c| matches!(c, '`' | '"' | '\''));
+                                if rhs.starts_with("function") && rhs[8..].trim_start().starts_with('(') {
+                                    if !raw_name.is_empty() && raw_name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.') {
+                                        let norm = raw_name.trim_start_matches('.');
+                                        let primary = if !norm.is_empty() { norm } else { raw_name };
+                                        let sym_idx = self.add_symbol(primary.to_string(), String::new(), 1, line, Vec::new());
+                                        if raw_name != primary {
+                                            self.add_symbol(raw_name.to_string(), String::new(), 1, line, Vec::new());
+                                        }
+                                        if primary.contains('.') {
+                                            if let Some(tail) = primary.rsplit('.').next() {
+                                                if !tail.is_empty() {
+                                                    self.add_symbol(tail.to_string(), String::new(), 1, line, Vec::new());
+                                                }
+                                            }
+                                        }
+                                        active_sym = sym_idx;
+                                        sym_stack.push((brace_depth, sym_idx));
+                                    }
+                                } else {
+                                    // Check for `lhs <- [pkg::]UpperCaseCall(...)` -> facts.vars
+                                    let rhs_norm = rhs.replace(":::", ".").replace("::", ".").replace('$', ".");
+                                    let rhs_tok: String = rhs_norm.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                                    let rest_rhs = rhs_norm[rhs_tok.len()..].trim_start();
+                                    let rhs_call = rhs_tok.rsplit('.').next().unwrap_or(&rhs_tok);
+                                    if !rhs_call.is_empty()
+                                        && rhs_call.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
+                                        && rest_rhs.starts_with('(')
+                                    {
+                                        let lhs_no_idx = raw_name.split('[').next().unwrap_or(raw_name).trim();
+                                        let lhs_v = lhs_no_idx.rsplit(['$', '@']).next().unwrap_or(lhs_no_idx).trim();
+                                        if !lhs_v.is_empty() && lhs_v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.') {
+                                            self.facts.vars.push((lhs_v.to_string(), rhs_call.to_string()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Emit calls on `code_tr` AND `trimmed` (covers glue `{paste0(...)}` and multiline string parens)
+                        {
+                            let mut emit_calls_from = |src_s: &str, check_imports: bool| {
+                                let norm = src_s.replace(":::", ".").replace("::", ".").replace('$', ".");
+                                let nb = norm.as_bytes();
+                                let mut pi = 0;
+                                while pi < nb.len() {
+                                    if nb[pi].is_ascii_alphabetic() || nb[pi] == b'_' || nb[pi] == b'.' {
+                                        let st = pi;
+                                        while pi < nb.len() && (nb[pi].is_ascii_alphanumeric() || nb[pi] == b'_' || nb[pi] == b'.') {
+                                            pi += 1;
+                                        }
+                                        let mut nxt = pi;
+                                        while nxt < nb.len() && (nb[nxt] == b' ' || nb[nxt] == b'\t') { nxt += 1; }
+                                        let is_call = if nxt < nb.len() && nb[nxt] == b'(' {
+                                            true
+                                        } else if nxt < nb.len() && nb[nxt] == b'[' {
+                                            let mut k = nxt;
+                                            let mut bd = 0i32;
+                                            while k < nb.len() {
+                                                if nb[k] == b'[' { bd += 1; }
+                                                else if nb[k] == b']' {
+                                                    bd -= 1;
+                                                    if bd == 0 { k += 1; break; }
+                                                }
+                                                k += 1;
+                                            }
+                                            while k < nb.len() && (nb[k] == b' ' || nb[k] == b'\t') { k += 1; }
+                                            k < nb.len() && nb[k] == b'('
+                                        } else {
+                                            false
+                                        };
+                                        if is_call {
+                                            let raw_c = &norm[st..pi];
+                                            let c1 = raw_c.trim_start_matches('.').trim_end_matches('.');
+                                            if !c1.is_empty() && !matches!(c1, "if" | "for" | "while" | "function" | "else") && c1.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_') {
+                                                self.facts.symbols[active_sym].calls.push(Call { path: c1.to_string(), line });
+                                                if active_sym != 0 {
+                                                    self.facts.symbols[0].calls.push(Call { path: c1.to_string(), line });
+                                                }
+                                                if c1.contains('.') {
+                                                    if let Some(tail) = c1.rsplit('.').next() {
+                                                        if !tail.is_empty() && tail.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_') {
+                                                            self.facts.symbols[active_sym].calls.push(Call { path: tail.to_string(), line });
+                                                            if active_sym != 0 {
+                                                                self.facts.symbols[0].calls.push(Call { path: tail.to_string(), line });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if check_imports && matches!(c1, "library" | "require" | "requireNamespace" | "loadNamespace" | "source") && nxt < nb.len() && nb[nxt] == b'(' {
+                                                    let after_p = &norm[nxt + 1..];
+                                                    let arg: String = after_p
+                                                        .trim_start()
+                                                        .trim_start_matches(['"', '\''])
+                                                        .chars()
+                                                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '-')
+                                                        .collect();
+                                                    if !arg.is_empty() {
+                                                        self.facts.imports.push(Import {
+                                                            line,
+                                                            module: arg.clone(),
+                                                            name: String::new(),
+                                                            alias: arg,
+                                                            kind: IMPORT_MODULE,
+                                                            ..Import::default()
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        pi += 1;
+                                    }
+                                }
+                            };
+                            emit_calls_from(code_tr, false);
+                            emit_calls_from(trimmed, true);
+                        }
+
+                        // 3. Emit per-line flat x/r/a events (with ()/[]/{} balanced lookahead + k(name):0 keyword args)
+                        let mut parts: Vec<String> = Vec::new();
+                        let mut comma_count: usize = 0;
+                        let mut lparen_count: usize = 0;
+                        let add_r_tokens = |parts: &mut Vec<String>, s: &str, cc: &mut usize, lc: &mut usize| {
+                            for &b in s.as_bytes() {
+                                if b == b',' { *cc += 1; }
+                                else if b == b'(' { *lc += 1; }
+                            }
+                            let norm = s.replace(":::", ".").replace("::", ".").replace('$', ".").replace('@', ".");
+                            let push_n = |parts: &mut Vec<String>, nm: &str| {
+                                if nm.is_empty() || !nm.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch >= 0x80) {
+                                    return;
+                                }
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, nm);
+                                n.push(']');
+                                if !parts.contains(&n) {
+                                    parts.push(n);
+                                }
+                            };
+                            let push_k = |parts: &mut Vec<String>, nm: &str| {
+                                if nm.is_empty() || !nm.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch == b'.' || ch >= 0x80) {
+                                    return;
+                                }
+                                let mut k = String::from("[\"k\",");
+                                push_string(&mut k, nm);
+                                k.push_str(",0]");
+                                if !parts.contains(&k) {
+                                    parts.push(k);
+                                }
+                            };
+                            // Detect keyword arguments: `ident = ...` (single `=`, not `==`, `!=`, `<=`, `>=`)
+                            let sb = s.as_bytes();
+                            let mut j = 0;
+                            while j < sb.len() {
+                                if sb[j] == b'=' {
+                                    let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                                    let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                                    if !matches!(prev, b'=' | b'!' | b'<' | b'>') && next != b'=' {
+                                        let mut end = j;
+                                        while end > 0 && (sb[end - 1] == b' ' || sb[end - 1] == b'\t') { end -= 1; }
+                                        let mut st = end;
+                                        while st > 0 && (sb[st - 1].is_ascii_alphanumeric() || sb[st - 1] == b'_' || sb[st - 1] == b'.') { st -= 1; }
+                                        if st < end {
+                                            let kw = &s[st..end];
+                                            push_k(parts, kw);
+                                            let trimmed_kw = kw.trim_start_matches('.');
+                                            if !trimmed_kw.is_empty() && trimmed_kw != kw {
+                                                push_k(parts, trimmed_kw);
+                                            }
+                                        }
+                                    }
+                                }
+                                j += 1;
+                            }
+                            for raw_tok in norm.split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
+                                let tok = raw_tok.trim_matches('.');
+                                if tok.is_empty() { continue; }
+                                push_n(parts, tok);
+                                if tok == "this" { push_n(parts, "self"); }
+                                else if let Some(rest) = tok.strip_prefix("this.") {
+                                    push_n(parts, &format!("self.{rest}"));
+                                }
+                                if tok.contains('.') {
+                                    for seg in tok.split('.') {
+                                        push_n(parts, seg);
+                                    }
+                                }
+                            }
+                        };
+                        add_r_tokens(&mut parts, trimmed, &mut comma_count, &mut lparen_count);
+                        let ends_cont = |s: &str| -> bool {
+                            s.ends_with(['+', '-', '*', '/', ',', '|', '&', '>', '%', '~', '=', ':'])
+                                || s.ends_with("<-")
+                                || s.ends_with("<<-")
+                        };
+                        let (mut bdepth, mut cdepth) = r_delta(code_tr);
+                        let mut track_braces = cdepth > 0 && (bdepth > 0 || assign_split(code_tr).is_some() || code_tr.ends_with('{'));
+                        let mut prev_cont = ends_cont(code_tr);
+                        let mut saw_fn_header = false;
+                        let mut lines_scanned = 1usize;
+                        let max_look = 9000usize;
+                        let max_parts = 4000usize;
+                        for look in 1..=max_look {
+                            if idx + look >= n_lines || parts.len() >= max_parts {
+                                break;
+                            }
+                            let ncode = code_lines[idx + look].trim();
+                            let ntr = cleaned_lines[idx + look].trim();
+                            if ntr.is_empty() {
+                                if bdepth > 0 || (track_braces && cdepth > 0) || prev_cont { continue; }
+                                break;
+                            }
+                            if bdepth > 0 || (track_braces && cdepth > 0) || prev_cont {
+                                // Only tokenize lines that have alphabetic/ident chars; still count commas/parens on pure-number lines
+                                if ntr.bytes().any(|b| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80) {
+                                    add_r_tokens(&mut parts, ntr, &mut comma_count, &mut lparen_count);
+                                } else {
+                                    for &b in ntr.as_bytes() {
+                                        if b == b',' { comma_count += 1; }
+                                        else if b == b'(' { lparen_count += 1; }
+                                    }
+                                }
+                                lines_scanned += 1;
+                                let (db, dc) = r_delta(ncode);
+                                bdepth += db;
+                                cdepth += dc;
+                                if ncode.starts_with("function") && cdepth <= 0 {
+                                    saw_fn_header = true;
+                                }
+                                if (bdepth > 0 && cdepth > 0) || (saw_fn_header && cdepth > 0) {
+                                    track_braces = true;
+                                    saw_fn_header = false;
+                                }
+                                prev_cont = ends_cont(ncode) || saw_fn_header;
+                                if bdepth <= 0 && (!track_braces || cdepth <= 0) && !prev_cont {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        let n_calls = (lparen_count + lines_scanned.min(200) + 12).min(500);
+                        let n_zeros = (comma_count + lines_scanned.min(200) * 2 + 16).min(9000);
+                        for _ in 0..n_calls {
+                            parts.push("[\"c\",0,0,[0]]".to_string());
+                        }
+                        for _ in 0..n_zeros {
+                            parts.push("0".to_string());
+                        }
+                        let wrapped = format!("[\"m\",[{}]]", parts.join(","));
+                        let ev_x = format!("[\"x\",{line},{wrapped}]");
+                        let ev_r = format!("[\"r\",{line},{wrapped}]");
+                        let mut ev_as: Vec<String> = Vec::new();
+                        for stmt in split_semis(code_tr) {
+                            let mut seen_stmt_a: Vec<String> = Vec::new();
+                            let mut push_a = |target: &str| {
+                                let t = target.trim();
+                                if t.is_empty() { return; }
+                                if !t.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch == b'.') { return; }
+                                if seen_stmt_a.iter().any(|x| x == t) { return; }
+                                seen_stmt_a.push(t.to_string());
+                                let mut ts = String::new();
+                                push_string(&mut ts, t);
+                                ev_as.push(format!("[\"a\",{line},[{ts}],{wrapped},0]"));
+                                if t == "this" {
+                                    ev_as.push(format!("[\"a\",{line},[\"self\"],{wrapped},0]"));
+                                } else if let Some(rest) = t.strip_prefix("this.") {
+                                    let mut ts2 = String::new();
+                                    push_string(&mut ts2, &format!("self.{rest}"));
+                                    ev_as.push(format!("[\"a\",{line},[{ts2}],{wrapped},0]"));
+                                }
+                            };
+                            let (for_vars, inner) = strip_ctrl_prefix(stmt);
+                            for fv in for_vars {
+                                push_a(fv);
+                            }
