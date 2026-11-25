@@ -11198,3 +11198,215 @@ impl<'a> Walker<'a> {
         // Source order: the stack pops the last pushed first.
         let mut walk: Vec<u32> = heritage.into_iter().rev().collect();
         while let Some(node) = walk.pop() {
+            for child in self.children(node) {
+                match self.kind(child) {
+                    "identifier" | "type_identifier" => out.push(self.text_string(child)),
+                    "attribute" | "member_expression" | "nested_type_identifier" => {
+                        if let Some(last) = self.last_name(child) {
+                            out.push(last);
+                        }
+                    }
+                    "(" | ")" | "," | ":" | "extends" | "implements" | "with" | "argument_list" | "class_heritage"
+                    | "implements_clause" | "type_arguments" => walk.push(child),
+                    _ => walk.push(child),
+                }
+            }
+        }
+        out
+    }
+
+    /// The leftmost identifier under a node: for a generic type that is the
+    /// constructor, which is the name the type goes by — `JsonString<LogEntry>`
+    /// is `JsonString`, not the argument inside the angle brackets.
+    pub(crate) fn first_name(&self, id: u32) -> Option<String> {
+        let mut walk = vec![id];
+        while let Some(node) = walk.pop() {
+            let kind = self.kind(node);
+            if matches!(kind, "identifier" | "property_identifier" | "type_identifier") {
+                return Some(self.text_string(node));
+            }
+            let mut kids = Vec::new();
+            let mut child = self.node(node).first_child;
+            while child != NONE {
+                kids.push(child);
+                child = self.node(child).next_sibling;
+            }
+            for &child in kids.iter().rev() {
+                walk.push(child);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn last_name(&self, id: u32) -> Option<String> {
+        let mut last = None;
+        let mut walk = vec![id];
+        while let Some(node) = walk.pop() {
+            let kind = self.kind(node);
+            if matches!(kind, "identifier" | "property_identifier" | "type_identifier") {
+                last = Some(self.text_string(node));
+            }
+            // Depth-first in source order, so the last name assigned is the
+            // rightmost one: `func.placeholder` is `placeholder`. Pushing the
+            // children left to right popped them right to left and left the
+            // caller with `func`.
+            let mut kids = Vec::new();
+            let mut child = self.node(node).first_child;
+            while child != NONE {
+                kids.push(child);
+                child = self.node(child).next_sibling;
+            }
+            for &child in kids.iter().rev() {
+                walk.push(child);
+            }
+        }
+        last
+    }
+
+    /// `def f(a, b=1, *c)`, `function f(a, {b}, ...c)`, `(a, b) => {}`,
+    /// `func f(id int)`, `Item find(int id)`.
+    pub(crate) fn params(&self, def: u32, list: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        let list_kind = self.kind(list);
+        // JS class heritage shares the slot but is not a parameter list.
+        if list_kind == "class_heritage" {
+            return out;
+        }
+        // Java and C-family declarations are `type name`, so the name is the
+        // last identifier of the parameter, not the first (which is the type).
+        let type_first = self.kinds.family == Family::Java;
+        for child in self.children(list) {
+            let kind = self.kind(child);
+            match kind {
+                "(" | ")" | "," | "[" | "]" | "{" | "}" | ":" => {}
+                "parameter" | "identifier" | "required_parameter" | "optional_parameter" | "rest_parameter"
+                | "typed_parameter" | "default_parameter" | "typed_default_parameter" | "list_splat_pattern"
+                | "dictionary_splat_pattern" => {
+                    if let Some(name) = self.parameter_name(child, type_first) {
+                        out.push(name);
+                    }
+                }
+                "object_pattern" | "array_pattern" => {
+                    out.extend(self.pattern_names(child));
+                }
+                _ => {
+                    if let Some(name) = self.parameter_name(child, type_first) {
+                        out.push(name);
+                    }
+                }
+            }
+        }
+        let _ = def;
+        out
+    }
+
+    /// The value of one enum member as a flow form: a literal is `0`, and a
+    /// reference is its name - the same shapes the lexer writes.
+    pub(crate) fn enum_member_value(&mut self, id: u32) -> String {
+        if self.language.name == "csharp" {
+            let children = self.children(id);
+            if let Some(at) = children.iter().position(|&c| self.kind(c) == "=") {
+                if let Some(&val) = children[at + 1..].iter().find(|&&c| !self.is_layout(c)) {
+                    let f = self.form(val);
+                    return if f.is_empty() { "0".to_string() } else { f };
+                }
+            }
+            // Do not fall through to the member's own identifier when `=` has
+            // a constant RHS (`Binary = 0x00`) or no `=` at all.
+            return "0".to_string();
+        }
+        for child in self.children(id) {
+            let kind = self.kind(child);
+            if matches!(kind, "identifier") {
+                let text = self.text_string(child);
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, &text);
+                form.push(']');
+                return form;
+            }
+            if kind.contains("literal") || kind == "number" || kind == "integer" {
+                return "0".to_string();
+            }
+        }
+        "0".to_string()
+    }
+
+    pub(crate) fn first_identifier(&self, id: u32) -> Option<String> {
+        if matches!(self.kind(id), "identifier" | "property_identifier")
+            || self.kinds.soft.contains(&self.kind(id))
+        {
+            return Some(self.text_string(id));
+        }
+        let mut child = self.node(id).first_child;
+        while child != NONE {
+            if let Some(name) = self.first_identifier(child) {
+                return Some(name);
+            }
+            child = self.node(child).next_sibling;
+        }
+        None
+    }
+
+    /// The parameter's own name: the first identifier of a `name type` list
+    /// (Go) and the last of a `type name` one (Java, `List<Item> items`).
+    pub(crate) fn parameter_name(&self, id: u32, type_first: bool) -> Option<String> {
+        if !type_first {
+            return self.first_identifier(id);
+        }
+        let mut leaves = Vec::new();
+        self.collect_leaves(id, &mut leaves);
+        leaves
+            .into_iter()
+            .filter(|&leaf| matches!(self.kind(leaf), "identifier"))
+            .next_back()
+            .map(|leaf| self.text_string(leaf))
+    }
+
+}
+
+/// Byte offset of the start of each line, so a node's line is a binary search.
+fn line_starts(src: &[u8]) -> Vec<u32> {
+    let mut out = vec![0u32];
+    for (index, byte) in src.iter().enumerate() {
+        if *byte == b'\n' {
+            out.push(index as u32 + 1);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod accessor_name_tests {
+    use super::*;
+    use crate::deep_integration::{self, Lang};
+
+    /// `get` and `set` are the words a grammar uses for accessors, so a
+    /// function that carries one as its own name arrives with that anonymous
+    /// token instead of an `identifier`, and the walk named nothing: the lexer
+    /// had `set` and the CST had `<anonymous>`, which is a fallback on every
+    /// `module.exports` helper called `set` in the wild.
+    #[test]
+    fn a_function_named_set_or_get_still_has_a_name() {
+        for (source, expected) in [
+            ("function set(a, b) { return a; }", "set"),
+            ("function get(a) { return a; }", "get"),
+            ("function setter(a) { return a; }", "setter"),
+            ("return function async(_x) {};", "async"),
+        ] {
+            let tree = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a tree");
+            let facts = extract(source.as_bytes(), &tree, Lang::JavaScript);
+            let names: Vec<&str> = facts.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+            assert!(names.contains(&expected), "{source} named {names:?}");
+        }
+    }
+
+    #[test]
+    fn a_bound_function_expression_takes_the_declarator_name() {
+        let source = "const noopfn = function() {\n    ;\n}.bind();\n";
+        let tree = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a tree");
+        let facts = extract(source.as_bytes(), &tree, Lang::JavaScript);
+        let names: Vec<&str> = facts.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert!(names.contains(&"noopfn"), "{source} named {names:?}");
+        assert!(!names.iter().any(|name| name.starts_with("<anonymous>")), "{source} named {names:?}");
+    }
+}
