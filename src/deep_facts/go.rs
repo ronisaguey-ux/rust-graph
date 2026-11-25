@@ -318,3 +318,323 @@ impl<'a> Walker<'a> {
             if kind == "[" {
                 bracket_depth = bracket_depth.saturating_sub(1);
                 continue;
+            }
+            if bracket_depth > 0 {
+                continue;
+            }
+            let is_name = kind == "identifier"
+                || matches!(kind, "member_access" | "field_access")
+                || (self.language.name == "csharp"
+                    && (self.kinds.soft.contains(&kind)
+                        || matches!(
+                            kind,
+                            "file"
+                                | "set"
+                                | "remove"
+                                | "get"
+                                | "init"
+                                | "add"
+                                | "value"
+                                | "and"
+                                | "or"
+                                | "not"
+                                | "when"
+                                | "where"
+                                | "with"
+                                | "from"
+                                | "into"
+                                | "let"
+                                | "join"
+                                | "on"
+                                | "equals"
+                                | "by"
+                                | "ascending"
+                                | "descending"
+                                | "group"
+                                | "select"
+                                | "order"
+                                | "alias"
+                                | "async"
+                                | "await"
+                                | "dynamic"
+                                | "nameof"
+                                | "notnull"
+                                | "unmanaged"
+                                | "managed"
+                                | "required"
+                                | "scoped"
+                                | "args"
+                        )));
+            if is_name {
+                let raw = if matches!(kind, "member_access" | "field_access") {
+                    self.path_of(child)
+                } else {
+                    self.text_string(child)
+                };
+                let clean = if self.language.name == "csharp" {
+                    raw.strip_prefix('@').unwrap_or(&raw).to_string()
+                } else {
+                    raw
+                };
+                return (!clean.is_empty()).then_some(clean);
+            }
+        }
+        None
+    }
+
+    /// Bind `target` to the class of the call at the head of `value`: the
+    /// one-pass reader names a binding after the first call it reads, even when
+    /// the chain goes on past it (`CreateHostBuilder(..)?.Build()` binds
+    /// `CreateHostBuilder`), and only a capitalised name is a class.
+    pub(crate) fn cs_bind_constructed(&mut self, target: String, value: u32) {
+        let mut pending = vec![value];
+        let mut earliest: Option<(u32, u32)> = None;
+        while let Some(node) = pending.pop() {
+            if matches!(
+                self.kind(node),
+                "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression" | "generic_invocation"
+            ) {
+                let start = self.node(node).start;
+                if earliest.map_or(true, |(at, _)| start < at) {
+                    earliest = Some((start, node));
+                }
+            }
+            for child in self.children(node) {
+                pending.push(child);
+            }
+        }
+        let Some((_, call)) = earliest else {
+            return;
+        };
+        // `CreateHostBuilder(..)?.Build()`: the binding names the call at the
+        // head of the chain, so the callee is followed to its leftmost call
+        // before the name is read.
+        let mut node = call;
+        loop {
+            let callee = self.decl_callee(node);
+            if callee == node {
+                break;
+            }
+            let Some(inner) = self.children(callee).into_iter().find(|&child| !self.is_layout(child)) else {
+                break;
+            };
+            if !matches!(
+                self.kind(inner),
+                "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression" | "generic_invocation"
+            ) {
+                break;
+            }
+            node = inner;
+        }
+        let path = self.decl_path(node);
+        let last = path.rsplit('.').next().unwrap_or("");
+        if last.starts_with(|ch: char| ch.is_uppercase()) {
+            self.facts.vars.push((target, last.to_string()));
+        }
+    }
+
+    /// `int total = 0;`, `List<Item> items = f();`, `private Map<...> index;`.
+    /// With an initializer the lexer writes an assignment to the declared name;
+    /// without one the statement is an expression, and the type names are in it.
+
+    /// The names a Java declaration binds, read the way the lexer reads them:
+    /// every leaf before the initializer's `=`, split at commas, and the last
+    /// name of each part. The commas inside a generic type split too, because
+    /// the lexer's unpacker counts only brackets: `Map<K, List<Item>> items`
+    /// binds `K` and `items` to it.
+
+    /// Every leaf of a node, in source order.
+    pub(crate) fn collect_leaves(&self, id: u32, out: &mut Vec<u32>) {
+        let mut pending = vec![id];
+        let mut order = Vec::new();
+        while let Some(node) = pending.pop() {
+            let mut child = self.node(node).first_child;
+            let mut kids = Vec::new();
+            while child != NONE {
+                kids.push(child);
+                child = self.node(child).next_sibling;
+            }
+            if kids.is_empty() {
+                order.push(node);
+            } else {
+                for &kid in kids.iter().rev() {
+                    pending.push(kid);
+                }
+            }
+        }
+        out.extend(order);
+    }
+
+    /// `for _, v := range xs { ... }`: the lexer's `{` after the clause is not a
+    /// block (the clause holds a top-level assignment), so the loop is one
+    /// statement and the event's value carries the body's names too.
+    pub(crate) fn go_range_loop(&mut self, id: u32) {
+        let mut targets = Vec::new();
+        if let Some(clause) = self.child_of_kind(id, "range_clause") {
+            for child in self.children(clause) {
+                if matches!(self.text_string(child).as_str(), ":=" | "=") {
+                    break;
+                }
+                if self.is_layout(child) {
+                    continue;
+                }
+                if self.kind(child) == "expression_list" {
+                    for part in self.children(child) {
+                        if let Some(target) = self.decl_target(part) {
+                            targets.push(target);
+                        }
+                    }
+                } else if let Some(target) = self.decl_target(child) {
+                    targets.push(target);
+                }
+            }
+        }
+        // The whole statement, body included: the lexer writes the range clause
+        // and the loop body as one value (`for _, a := range xs { go f(a) }`
+        // merges both), so narrowing this to the clause alone invented a
+        // disagreement that was not there.
+        let value = self.decl_value(id);
+        let line = self.line(id);
+        self.lexer_event(b'a', line, &targets, &value, false);
+        self.event("[\"b\"]");
+    }
+
+    /// `a, b := f()`, `x = y`, `xs[i] += 1`.
+    pub(crate) fn go_assign(&mut self, id: u32) {
+        let children = self.children(id);
+        let split = children.iter().position(|&child| {
+            self.node(child).first_child == NONE
+                && matches!(self.text_string(child).as_str(), "=" | ":=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "&^=")
+        });
+        let Some(at) = split else { return };
+        let operator = self.text_string(children[at]);
+        let targets: Vec<String> = children[..at]
+            .iter()
+            .filter(|&&child| !self.is_layout(child))
+            .filter_map(|&child| self.decl_target(child))
+            .collect();
+        if targets.len() == 1 {
+            if let Some(class) = children.get(at + 1).and_then(|&value| self.constructed_class(value)) {
+                self.facts.vars.push((targets[0].clone(), class));
+            }
+        }
+        // `verifyString := func(s string) { … }`: the one-pass lexer opens a
+        // function symbol for the name a literal is bound to, because a `func(`
+        // that follows a binder reads as a definition to it. The tree keeps
+        // only the literal, so the name was the one fact every Go file with a
+        // callback lost — 1,162 symbol losses, one per file.
+        if let [target] = targets.as_slice() {
+            // The binder must be a plain name. `indexers[nodeIndex] = func(obj any) …`
+            // binds through an index expression, and the target read as the map's
+            // name filed the literal under `indexers`: a function symbol the
+            // lexer never opens, so every statement of that body was orphaned
+            // (kubernetes.go newIndexedPodsInformer: 10 rows).
+            let binder = children[..at].iter().copied().find(|&child| !self.is_layout(child));
+            let plain_name = binder.is_some_and(|child| {
+                let kind = self.kind(child);
+                kind == "identifier"
+                    || self.kinds.soft.contains(&kind)
+                    // `db.head.memTruncationCallBack = func() {`: a selector is
+                    // a name the lexer opens a symbol for too, so only targets
+                    // that are not names (`m["a"]`) are left out.
+                    || matches!(kind, "selector_expression" | "field_access" | "this")
+            });
+            if plain_name {
+                if let Some(literal) = self.go_find_func_literal(&children[at + 1..]) {
+                    let line = self.line(id);
+                    self.go_bind_func_literal(target, literal, line);
+                }
+            }
+        }
+        let value = self.decl_values(&children[at + 1..]);
+        let line = self.line(id);
+        let weak = !matches!(operator.as_str(), "=" | ":=");
+        self.lexer_event(b'a', line, &targets, &value, weak);
+    }
+
+
+    pub(crate) fn go_return(&mut self, id: u32) {
+        let children = self.children(id);
+        let rest: Vec<u32> = children.into_iter().skip(1).collect();
+        let value = self.decl_values(&rest);
+        let line = self.line(id);
+        self.lexer_event(b'r', line, &[], &value, false);
+    }
+
+
+    /// `var zero V` is an expression to the lexer; `var x = f()` is an
+    /// assignment to `x`; a `var (...)` group is one expression statement.
+    pub(crate) fn go_var(&mut self, id: u32) {
+        let children = self.children(id);
+        if children.iter().any(|&child| self.kind(child) == "var_spec_list") {
+            return self.decl_statement(id);
+        }
+        let Some(spec) = children.iter().copied().find(|&child| matches!(self.kind(child), "var_spec" | "const_spec"))
+        else {
+            return self.decl_statement(id);
+        };
+        let parts = self.children(spec);
+        let Some(equal) = parts.iter().position(|&child| self.kind(child) == "=") else {
+            return self.decl_statement(id);
+        };
+        let value = self.decl_values(&parts[equal + 1..]);
+        let line = self.line(id);
+        // `var a, b int = 1, 2` binds two names, and the lexer writes one event
+        // per declarator; reading the first name alone left every later binder
+        // with no counterpart and the file fell back. A name is the identifier
+        // that opens a comma-separated group: the one after it is the type.
+        let mut declared: Vec<String> = Vec::new();
+        let mut expect_name = true;
+        for &part in &parts[..equal] {
+            let kind = self.kind(part);
+            if kind == "," {
+                expect_name = true;
+                continue;
+            }
+            match (expect_name, kind) {
+                (true, "identifier") => {
+                    declared.extend(self.decl_target(part));
+                    expect_name = false;
+                }
+                _ => break,
+            }
+        }
+        if declared.is_empty() {
+            let target = parts.first().and_then(|&name| self.decl_target(name)).into_iter().collect::<Vec<_>>();
+            self.lexer_event(b'a', line, &target, &value, false);
+            return;
+        }
+        if declared.len() == 1 {
+            if let Some(literal) = self.go_find_func_literal(&parts[equal + 1..]) {
+                self.go_bind_func_literal(&declared[0], literal, line);
+            }
+            // `var emptyJSON = JSONText("{}")` binds the name to the class it
+            // converts to, as `emptyJSON := JSONText("{}")` does in `go_assign`.
+            // The value is the spec's one expression, possibly in a list.
+            let values: Vec<u32> = parts[equal + 1..]
+                .iter()
+                .flat_map(|&part| match self.kind(part) {
+                    "expression_list" => self.children(part).into_iter().filter(|&child| !self.is_layout(child)).collect(),
+                    _ => vec![part],
+                })
+                .collect();
+            if let [value] = values[..] {
+                if let Some(class) = self.constructed(value) {
+                    self.facts.vars.push((declared[0].clone(), class));
+                }
+            }
+        }
+        for name in declared {
+            self.lexer_event(b'a', line, std::slice::from_ref(&name), &value, false);
+        }
+    }
+
+    fn go_find_func_literal(&self, nodes: &[u32]) -> Option<u32> {
+        for &node in nodes {
+            match self.kind(node) {
+                "func_literal" => return Some(node),
+                "call_expression" => {
+                    if let Some(callee) = self.children(node).into_iter().find(|&c| !self.is_layout(c)) {
+                        if self.kind(callee) == "func_literal" {
+                            return Some(callee);
+                        }
