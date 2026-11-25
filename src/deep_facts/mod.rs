@@ -7358,3 +7358,323 @@ impl<'a> Walker<'a> {
             } else {
                 acc = format!("[\"m\",[{form_str},{acc}]]");
             }
+        }
+        acc
+    }
+
+    fn tcl_scan_script(&mut self, text: &str, start_line: u32, depth: usize) {
+        if depth > 24 {
+            return;
+        }
+        let cmds = Self::tcl_tokenize_commands(text, start_line);
+        for (cline, words) in cmds {
+            let ret_pos = words.iter().position(|w| w.1 == "return");
+            if let Some(rp) = ret_pos {
+                if rp == 0 {
+                    let val = if words.len() > 1 {
+                        self.tcl_eval_words(&words[1..], cline, depth)
+                    } else {
+                        "0".to_string()
+                    };
+                    let rv = if val.is_empty() { "0".to_string() } else { val };
+                    self.lexer_event(b'r', cline, &[], &rv, false);
+                } else {
+                    let val = self.tcl_eval_words(&words, cline, depth);
+                    if !val.is_empty() && val != "0" {
+                        self.lexer_event(b'x', cline, &[], &val, false);
+                    }
+                    let rline = words[rp].0;
+                    let rval = if rp + 1 < words.len() {
+                        self.tcl_eval_words(&words[rp + 1..], rline, depth)
+                    } else {
+                        "0".to_string()
+                    };
+                    let rv = if rval.is_empty() { "0".to_string() } else { rval };
+                    self.lexer_event(b'r', rline, &[], &rv, false);
+                }
+            } else {
+                let val = self.tcl_eval_words(&words, cline, depth);
+                if !val.is_empty() && val != "0" {
+                    self.lexer_event(b'x', cline, &[], &val, false);
+                }
+            }
+        }
+    }
+
+    fn tcl_proc_command(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let words: Vec<u32> = children
+            .into_iter()
+            .filter(|&c| !matches!(self.kind(c), "whitespace" | "comment" | "newline" | ";" | "command_end"))
+            .collect();
+        // words[0] is "proc", words[1] is name, last braced_word is body
+        let raw_name = words.get(1).map(|&c| self.text_string(c)).unwrap_or_default();
+        let sym_name = Self::tcl_clean_name(raw_name.trim_matches(|c| c == '{' || c == '}'));
+        if sym_name.is_empty() {
+            return;
+        }
+        let args_braced = words.get(2).is_some_and(|&c| self.kind(c) == "braced_word");
+        let body_braced = words.len() >= 4 && words.last().is_some_and(|&c| self.kind(c) == "braced_word");
+        if !args_braced || !body_braced {
+            self.push_call("proc".to_string(), line);
+        }
+        let sym = self.add_symbol(sym_name, String::new(), KIND_FUNCTION, line, Vec::new());
+        self.stack.push(Frame {
+            node: id,
+            symbol: sym,
+            class: String::new(),
+            receiver: String::new(),
+            container: false,
+            defines: Some(sym),
+        });
+        if let Some(&body_node) = words.last() {
+            if words.len() >= 4 && self.kind(body_node) == "braced_word" {
+                let raw_body = self.text_string(body_node);
+                if raw_body.starts_with('{') && raw_body.ends_with('}') && raw_body.len() >= 2 {
+                    self.tcl_scan_script(&raw_body[1..raw_body.len() - 1], self.line(body_node), 1);
+                }
+            } else {
+                self.push_call("proc".to_string(), line);
+            }
+        }
+        self.stack.pop();
+    }
+
+    fn tcl_call_command(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let mut words: Vec<(u32, String)> = Vec::new();
+        for c in children {
+            let ck = self.kind(c);
+            if matches!(ck, "whitespace" | "comment" | "newline" | ";" | "command_end") {
+                continue;
+            }
+            words.push((self.line(c), self.text_string(c)));
+        }
+        let is_ret = words.first().is_some_and(|w| w.1 == "return");
+        let val = if is_ret && words.len() > 1 {
+            self.tcl_eval_words(&words[1..], line, 0)
+        } else {
+            self.tcl_eval_words(&words, line, 0)
+        };
+        if is_ret {
+            let rv = if val.is_empty() { "0".to_string() } else { val };
+            self.lexer_event(b'r', line, &[], &rv, false);
+        } else if !val.is_empty() && val != "0" {
+            self.lexer_event(b'x', line, &[], &val, false);
+        }
+    }
+
+    pub(crate) fn enter(&mut self, id: u32) {
+        let kind = self.kind(id);
+        if self.is_rust() && self.enter_rust(id) {
+            return;
+        }
+        if self.facts.tag == "TCL" && kind == "proc_command" {
+            self.tcl_proc_command(id);
+            return;
+        }
+        // C, C++: the declared name lives inside a declarator, so the node
+        // cannot be read off a `Def` table. `enter_c` only claims the nodes it
+        // actually reads, and the generic walk keeps everything else.
+        if self.is_c() && self.enter_c(id) {
+            return;
+        }
+        // `public abstract T Create(Type objectType);` in an interface or an
+        // abstract class has no body: the grammar calls it a declaration and
+        // the lexer reads a call, so every abstract member of the corpus lost
+        // one. Read before the definition table claims the node. An
+        // expression-bodied method (`=>`) has a body and is read below instead.
+        // `public delegate object ObjectConstructor<T>(params object[] args);`:
+        // a delegate declaration is one header statement to the one-pass
+        // reader, and the definition table claims the node before any arm can
+        // read it, so every delegate declaration lost its line.
+        if (kind == "method_declaration"
+            && self.kinds.calls.contains(&"object_creation_expression")
+            && !self
+                .children(id)
+                .into_iter()
+                .any(|child| matches!(self.kind(child), "block" | "=>")))
+            || (kind == "delegate_declaration" && self.language.name == "csharp")
+        {
+            let children = self.children(id);
+            let named = children
+                .iter()
+                .copied()
+                .take_while(|&child| !matches!(self.kind(child), "parameter_list" | "formal_parameters" | "type_parameters"))
+                .filter(|&child| self.kind(child) == "identifier" || self.leaf_name(child).is_some())
+                .last();
+            if let Some(named) = named {
+                let name = self.text_string(named);
+                let call_line = self.line(named);
+                let index = self.push_call(name, call_line);
+                let mut line = self.line(id);
+                if self.language.name == "csharp" {
+                    if let Some(first) = children.iter().copied().find(|&child| {
+                        matches!(self.kind(child), "attributes" | "attribute_section" | "attribute_list")
+                    }) {
+                        line = self.line(first);
+                    }
+                }
+                let mut parts: Vec<String> = Vec::new();
+                let mut attributed = false;
+                // The header words run up to the parameter list, so the name and
+                // the generic parameters (`MapFrom<TMember>`) reach the value the
+                // way the lexer writes them; stopping at `type_parameters` lost
+                // every generic abstract member's name and type parameters.
+                for child in &children {
+                    if matches!(self.kind(*child), "parameter_list" | "formal_parameters") {
+                        break;
+                    }
+                    if self.language.name == "csharp"
+                        && matches!(self.kind(*child), "attributes" | "attribute_section" | "attribute_list")
+                    {
+                        self.csharp_attributes(*child, &mut attributed, &mut parts);
+                        continue;
+                    }
+                    for word in self.c_words_of(*child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &word);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                }
+                let mut args: Vec<String> = Vec::new();
+                if let Some(list) = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "parameter_list" | "formal_parameters"))
+                {
+                    for parameter in self.children(list) {
+                        if self.kind(parameter) != "parameter" {
+                            continue;
+                        }
+                        let mut p_parts: Vec<String> = Vec::new();
+                        let mut p_attr = false;
+                        for p_child in self.children(parameter) {
+                            if self.language.name == "csharp"
+                                && matches!(self.kind(p_child), "attributes" | "attribute_section" | "attribute_list")
+                            {
+                                self.csharp_attributes(p_child, &mut p_attr, &mut p_parts);
+                                continue;
+                            }
+                            for word in self.c_words_of(p_child) {
+                                let word = if word == "this" { "self" } else { word.as_str() };
+                                let mut form = String::from("[\"n\",");
+                                push_string(&mut form, word);
+                                form.push(']');
+                                p_parts.push(form);
+                            }
+                        }
+                        if !p_parts.is_empty() {
+                            args.push(format!("[\"m\",[{}]]", p_parts.join(",")));
+                        }
+                    }
+                }
+                let call = format!("[\"c\",{index},0,[{}]]", args.join(","));
+                parts.push(call);
+                for child in &children {
+                    if self.kind(*child) != "type_parameter_constraints" {
+                        continue;
+                    }
+                    for word in self.c_words_of(*child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &word);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                }
+                let value = format!("[\"m\",[{}]]", parts.join(","));
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
+        }
+        if kind == "lib_definition" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let idx = self.push_call("lib".to_string(), line);
+            let cname = self.children(id).into_iter().find(|&c| matches!(self.kind(c), "constant" | "scope")).map(|c| self.text_string(c)).unwrap_or_default();
+            let val = if cname.is_empty() {
+                format!("[\"c\",{idx},0,[]]")
+            } else {
+                let mut arg = String::from("[\"n\",");
+                push_string(&mut arg, &cname);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
+            };
+            self.lexer_event(b'x', line, &[], &val, false);
+        }
+        if kind == "fun_declaration" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let idx = self.push_call("fun".to_string(), line);
+            let fname = self.children(id).into_iter().find(|&c| self.kind(c) == "identifier").map(|c| self.text_string(c)).unwrap_or_default();
+            let val = if fname.is_empty() {
+                format!("[\"c\",{idx},0,[]]")
+            } else {
+                let mut arg = String::from("[\"n\",");
+                push_string(&mut arg, &fname);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
+            };
+            self.lexer_event(b'x', line, &[], &val, false);
+        }
+        if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
+            self.open_definition(id, def);
+            if self.language.name == "csharp" && !def.container {
+                self.cs_arrow_body(id, self.line(id));
+            }
+            return;
+        }
+        if self.has_kind(id, self.kinds.imports) {
+            self.import(id);
+            return;
+        }
+        // Go and Java write a statement where Python writes an expression and
+        // JavaScript a declarator; their arms are the lexer's statement model,
+        // read off the tree, and none of them is any arm below.
+        match self.kinds.family {
+            Family::Go => {
+                self.go_enter(id);
+                return;
+            }
+            Family::Java => {
+                self.java_enter(id);
+                return;
+            }
+            Family::Plain | Family::Js | Family::Rust => {}
+        }
+        match kind {
+            // A field declaration is a statement to the lexer: `private readonly
+            // DeserializationTracker _tracker;` is an `x` event over the whole
+            // header, and nothing read the node, so every C# field an API
+            // declares left an event the tree never wrote. Go has the same arm
+            // in its own statement model.
+            "field_declaration" | "event_field_declaration" | "event_declaration" => {
+                // A field initialised with a call is an assignment to the
+                // lexer; anything else is the header event.
+                if !self.cs_field_assignment(id) {
+                    // `private int _mask = 31;`: a field with a constant
+                    // initialiser is an assignment to 0 for the lexer, and the
+                    // arm wrote the header alone - no event on the line at all.
+                    let children = self.children(id);
+                    let assigned = children.iter().position(|&child| self.kind(child) == "=");
+                    let target = assigned.and_then(|at| self.cs_decl_target(&children[..at]));
+                    match (assigned, target) {
+                        (Some(at), Some(name)) => {
+                            // C#: the initialiser is the value. `public bool Flag
+                            // = false;` is `a [Flag] n:false` to the lexer, and
+                            // writing the constant `0` for every field but a call
+                            // left each such field a disagreement. A keyword
+                            // literal is a name to the one-pass reader, and a
+                            // constant's initialiser merges the name and the
+                            // constant, so the written form is the child's own.
+                            // Other languages keep the constant: the model is the
+                            // C# arm's, measured here, not theirs.
+                            let form = if self.language.name == "csharp" {
+                                let child = children[at + 1..]
+                                    .iter()
+                                    .copied()
+                                    .find(|&c| !self.is_layout(c) && self.kind(c) != "ref");
+                                let kind = child.map(|node| self.kind(node)).unwrap_or("");
+                                let first_form = match kind {
+                                    "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
+                                    "" => "0".to_string(),
