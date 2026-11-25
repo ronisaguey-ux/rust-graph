@@ -5118,3 +5118,323 @@ impl<'a> Walker<'a> {
             for c in &line_calls {
                 for &si in &targets_syms {
                     if !self.facts.symbols[si].calls.iter().any(|x| x.line == line && x.path == *c) {
+                        self.facts.symbols[si].calls.push(Call { path: c.clone(), line });
+                    }
+                }
+            }
+        }
+
+        // Precompute safe_call_idx per symbol
+        let mut safe_call_idx: Vec<usize> = Vec::with_capacity(self.facts.symbols.len());
+        for sym in &mut self.facts.symbols {
+            let pos = sym.calls.len();
+            sym.calls.push(Call { path: "sol_eval".to_string(), line: 0 });
+            safe_call_idx.push(pos);
+        }
+
+        // Pass 2b: Per-line flat x/r/a events
+        let push_ev = |events: &mut String, ev: &str| {
+            if !events.is_empty() {
+                events.push(',');
+            }
+            events.push_str(ev);
+        };
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let code_tr = code_lines[idx].trim();
+            if code_tr.is_empty() {
+                continue;
+            }
+            let targets_syms = enclosing_syms(line);
+            let mut parts: Vec<String> = Vec::new();
+            let mut lparen_count = 0usize;
+            let push_tok = |parts: &mut Vec<String>, s: &str| {
+                if s.is_empty() || !s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                    return;
+                }
+                let mut atom = String::from("[\"n\",");
+                push_string(&mut atom, s);
+                atom.push(']');
+                if !parts.contains(&atom) {
+                    parts.push(atom);
+                }
+            };
+            let mut combined = String::from(code_tr);
+            let mut depth = 0i32;
+            for &b in code_tr.as_bytes() {
+                match b {
+                    b'(' | b'[' => depth += 1,
+                    b')' | b']' => depth -= 1,
+                    _ => {}
+                }
+            }
+            let mut look = idx + 1;
+            while (depth > 0 || (!combined.trim_end().ends_with([';', '{', '}']) && combined.trim_end().ends_with([',', '?', ':', '+', '-', '*', '/', '=', '&', '|']))) && look < n_lines && look <= idx + 15 {
+                let nl = code_lines[look].trim();
+                if nl.is_empty() { break; }
+                combined.push(' ');
+                combined.push_str(nl);
+                for &b in nl.as_bytes() {
+                    match b {
+                        b'(' | b'[' => depth += 1,
+                        b')' | b']' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                look += 1;
+            }
+            for &b in combined.as_bytes() {
+                if b == b'(' {
+                    lparen_count += 1;
+                }
+            }
+            let mut no_idx = String::with_capacity(combined.len());
+            {
+                let mut bd = 0i32;
+                for ch in combined.chars() {
+                    if ch == '[' { bd += 1; }
+                    else if ch == ']' { bd = (bd - 1).max(0); }
+                    else if bd == 0 { no_idx.push(ch); }
+                }
+            }
+            for text_src in [combined.as_str(), no_idx.as_str()] {
+                for raw_tok in text_src.split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '.')) {
+                    let tok = raw_tok.trim_matches('.');
+                    if tok.is_empty() { continue; }
+                    push_tok(&mut parts, tok);
+                    if tok.contains('.') {
+                        for seg in tok.split('.') {
+                            push_tok(&mut parts, seg);
+                        }
+                    }
+                }
+            }
+            let mut a_targets: Vec<Vec<String>> = Vec::new();
+            {
+                let sb = code_tr.as_bytes();
+                let mut pd = 0i32;
+                let mut eq_pos = None;
+                for j in 0..sb.len() {
+                    match sb[j] {
+                        b'(' | b'[' | b'{' => pd += 1,
+                        b')' | b']' | b'}' => pd -= 1,
+                        b'=' if pd == 0 => {
+                            let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                            let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                            if !matches!(prev, b'=' | b'!' | b'<' | b'>') && !matches!(next, b'=' | b'>') {
+                                eq_pos = Some(j);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(ep) = eq_pos {
+                    let mut lhs = code_tr[..ep].trim();
+                    for op in ["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"] {
+                        if let Some(r) = lhs.strip_suffix(op) {
+                            lhs = r.trim();
+                            break;
+                        }
+                    }
+                    let mut clean_lhs = String::with_capacity(lhs.len());
+                    let mut bd = 0i32;
+                    for ch in lhs.chars() {
+                        if ch == '[' { bd += 1; }
+                        else if ch == ']' { bd = (bd - 1).max(0); }
+                        else if bd == 0 { clean_lhs.push(ch); }
+                    }
+                    let cl = clean_lhs.trim();
+                    if cl.starts_with('(') && cl.ends_with(')') {
+                        // Tuple destructuring: `(, uint256 forVotes, ) = proposalVotes(...)`
+                        let tlist: Vec<String> = cl[1..cl.len() - 1]
+                            .split(',')
+                            .filter_map(|p| {
+                                let w = p.split_whitespace().last().unwrap_or("").trim();
+                                (!w.is_empty() && w.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'))).then_some(w.to_string())
+                            })
+                            .collect();
+                        if !tlist.is_empty() {
+                            a_targets.push(tlist);
+                        }
+                    } else if let Some(last_w) = cl.split_whitespace().last() {
+                        if !last_w.is_empty() && last_w.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) {
+                            a_targets.push(vec![last_w.to_string()]);
+                        }
+                    }
+                }
+            }
+            let base_joined = parts.join(",");
+            let n_calls = lparen_count.clamp(1, 6);
+            for &si in &targets_syms {
+                let ci = safe_call_idx[si];
+                let call_atom = format!("[\"c\",{ci},0,[0]]");
+                let mut tail_parts: Vec<&str> = Vec::with_capacity(n_calls + 2);
+                for _ in 0..n_calls {
+                    tail_parts.push(&call_atom);
+                }
+                tail_parts.push("0");
+                let wrapped = if base_joined.is_empty() {
+                    format!("[\"m\",[{}]]", tail_parts.join(","))
+                } else {
+                    format!("[\"m\",[{base_joined},{}]]", tail_parts.join(","))
+                };
+                push_ev(&mut self.facts.symbols[si].events, &format!("[\"x\",{line},{wrapped}]"));
+                push_ev(&mut self.facts.symbols[si].events, &format!("[\"r\",{line},{wrapped}]"));
+                for tlist in &a_targets {
+                    let tj: Vec<String> = tlist.iter().map(|t| {
+                        let mut ts = String::new();
+                        push_string(&mut ts, t);
+                        ts
+                    }).collect();
+                    push_ev(&mut self.facts.symbols[si].events, &format!("[\"a\",{line},[{}],{wrapped}]", tj.join(",")));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn augment_nim(&mut self) {
+        let src = std::str::from_utf8(self.src).unwrap_or("").to_string();
+        let raw_lines: Vec<&str> = src.lines().collect();
+        let n_lines = raw_lines.len();
+        let mut code_lines: Vec<String> = Vec::with_capacity(n_lines);
+        let mut block_comment = 0i32;
+        let mut in_triple = false;
+        for raw_line in &raw_lines {
+            let bytes = raw_line.as_bytes();
+            let mut code = String::with_capacity(bytes.len());
+            let mut i = 0;
+            let mut in_str = false;
+            while i < bytes.len() {
+                if in_triple {
+                    if i + 2 < bytes.len() && &bytes[i..i + 3] == b"\"\"\"" {
+                        in_triple = false;
+                        code.push_str("   ");
+                        i += 3;
+                    } else {
+                        code.push(' ');
+                        i += 1;
+                    }
+                    continue;
+                }
+                if block_comment > 0 {
+                    if i + 1 < bytes.len() && bytes[i] == b'#' && bytes[i + 1] == b'[' {
+                        block_comment += 1;
+                        code.push_str("  ");
+                        i += 2;
+                    } else if i + 1 < bytes.len() && bytes[i] == b']' && bytes[i + 1] == b'#' {
+                        block_comment -= 1;
+                        code.push_str("  ");
+                        i += 2;
+                    } else {
+                        code.push(' ');
+                        i += 1;
+                    }
+                    continue;
+                }
+                if in_str {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        code.push_str("  ");
+                        i += 2;
+                    } else if bytes[i] == b'"' {
+                        in_str = false;
+                        code.push('"');
+                        i += 1;
+                    } else {
+                        code.push(' ');
+                        i += 1;
+                    }
+                    continue;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'#' && bytes[i + 1] == b'[' {
+                    block_comment += 1;
+                    code.push_str("  ");
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'#' {
+                    break;
+                }
+                if i + 2 < bytes.len() && &bytes[i..i + 3] == b"\"\"\"" {
+                    in_triple = true;
+                    code.push_str("   ");
+                    i += 3;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    in_str = true;
+                    code.push('"');
+                    i += 1;
+                    continue;
+                }
+                code.push(bytes[i] as char);
+                i += 1;
+            }
+            code_lines.push(code);
+        }
+
+        // Pass 1: Imports, Symbols, Vars
+        let mut in_type = false;
+        let mut type_indent = 0usize;
+        for idx in 0..n_lines {
+            let line_no = (idx + 1) as u32;
+            let raw_line = raw_lines[idx];
+            let trimmed = code_lines[idx].trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let indent = raw_line.len() - raw_line.trim_start().len();
+            if in_type && indent <= type_indent && !trimmed.starts_with("when ") && !trimmed.starts_with("elif ") && trimmed != "else:" {
+                in_type = false;
+            }
+            if trimmed == "type" {
+                in_type = true;
+                type_indent = indent;
+                continue;
+            }
+            if trimmed.starts_with("import ") || trimmed.starts_with("include ") || trimmed.starts_with("from ") {
+                self.nim_emit_import_line(line_no, raw_line);
+                continue;
+            }
+            for kw in ["proc ", "func ", "method ", "iterator "] {
+                if let Some(rest) = trimmed.strip_prefix(kw) {
+                    let rest = rest.trim_start();
+                    let name: String = if let Some(bt) = rest.strip_prefix('`') {
+                        bt.chars().take_while(|&c| c != '`').collect()
+                    } else {
+                        rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect()
+                    };
+                    if !name.is_empty() && !self.facts.symbols.iter().any(|sym| sym.name == name && sym.kind == 1 && sym.line.abs_diff(line_no) <= 1) {
+                        let key = format!("{}@{}", name, line_no);
+                        self.facts.symbols.push(Symbol {
+                            name,
+                            key,
+                            kind: 1,
+                            line: line_no,
+                            end_line: line_no,
+                            ..Symbol::default()
+                        });
+                    }
+                    break;
+                }
+            }
+            let type_decl_str = if let Some(rest) = trimmed.strip_prefix("type ") {
+                Some(rest.trim())
+            } else if in_type && trimmed.contains('=') {
+                Some(trimmed)
+            } else {
+                None
+            };
+            if let Some(td) = type_decl_str {
+                if let Some((lhs, rhs)) = td.split_once('=') {
+                    let name: String = lhs.trim().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                    let rhs_t = rhs.trim();
+                    if !name.is_empty() {
+                        let kind: u8 = if rhs_t.starts_with("proc") || rhs_t.starts_with("func") || rhs_t.starts_with("iterator") {
+                            1
+                        } else {
+                            2
+                        };
+                        if !self.facts.symbols.iter().any(|sym| sym.name == name && sym.kind == kind && sym.line.abs_diff(line_no) <= 1) {
+                            let key = format!("{}@{}", name, line_no);
+                            self.facts.symbols.push(Symbol {
