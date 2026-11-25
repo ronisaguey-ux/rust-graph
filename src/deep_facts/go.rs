@@ -4478,3 +4478,323 @@ impl<'a> Walker<'a> {
                     }
                     continue;
                 }
+                if let Some(q) = str_q {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        code.push_str("  ");
+                        i += 2;
+                    } else if bytes[i] == q {
+                        str_q = None;
+                        code.push(q as char);
+                        i += 1;
+                    } else {
+                        code.push(' ');
+                        i += 1;
+                    }
+                    continue;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                    break;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    in_block = true;
+                    code.push_str("  ");
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' || bytes[i] == b'\'' {
+                    str_q = Some(bytes[i]);
+                    code.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+                code.push(bytes[i] as char);
+                i += 1;
+            }
+            code_lines.push(code);
+        }
+
+        let push_ev = |events: &mut String, ev: &str| {
+            if !events.is_empty() {
+                events.push(',');
+            }
+            events.push_str(ev);
+        };
+
+        let mut prepend_x = String::new();
+        let mut in_interface = false;
+        let mut in_struct = false;
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let code_tr = code_lines[idx].trim();
+            if code_tr.starts_with("@interface ") {
+                in_interface = true;
+                continue;
+            }
+            if code_tr.starts_with("@end") {
+                in_interface = false;
+                continue;
+            }
+            if code_tr.starts_with("typedef struct") || code_tr.starts_with("struct ") {
+                in_struct = true;
+                continue;
+            }
+            if in_struct && code_tr.starts_with('}') {
+                in_struct = false;
+                continue;
+            }
+            if (!in_interface && !in_struct) || code_tr.is_empty() || code_tr.starts_with('#') {
+                continue;
+            }
+            // Collect tokens from this line (and up to 5 continuation lines if method signature doesn't end with ';')
+            let mut combined = String::from(code_tr);
+            let mut look = idx + 1;
+            while !combined.trim_end().ends_with(';') && !combined.trim_end().ends_with('{') && !combined.trim_end().ends_with('}') && look < n_lines && look <= idx + 6 {
+                let nl = code_lines[look].trim();
+                if !nl.is_empty() {
+                    combined.push(' ');
+                    combined.push_str(nl);
+                }
+                look += 1;
+            }
+            let mut parts: Vec<String> = Vec::new();
+            for raw_tok in combined.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+                if !raw_tok.is_empty() && raw_tok.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                    let mut atom = String::from("[\"n\",");
+                    push_string(&mut atom, raw_tok);
+                    atom.push(']');
+                    if !parts.contains(&atom) {
+                        parts.push(atom);
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                parts.push("0".to_string());
+                let wrapped = format!("[\"m\",[{}]]", parts.join(","));
+                push_ev(&mut prepend_x, &format!("[\"x\",{line},{wrapped}]"));
+            }
+        }
+        if !prepend_x.is_empty() && !self.facts.symbols.is_empty() {
+            if !self.facts.symbols[0].events.is_empty() {
+                prepend_x.push(',');
+                prepend_x.push_str(&self.facts.symbols[0].events);
+            }
+            self.facts.symbols[0].events = prepend_x;
+        }
+
+        let mut brace_depth = 0i32;
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let code_tr = code_lines[idx].trim();
+            let depth_at_start = brace_depth;
+            for &b in code_tr.as_bytes() {
+                match b {
+                    b'{' => brace_depth += 1,
+                    b'}' => brace_depth = (brace_depth - 1).max(0),
+                    _ => {}
+                }
+            }
+            if code_tr.is_empty() || code_tr.starts_with('#') {
+                continue;
+            }
+            let sb = code_tr.as_bytes();
+            let mut pd = 0i32;
+            let mut eq_pos = None;
+            for j in 0..sb.len() {
+                match sb[j] {
+                    b'(' | b'[' | b'{' => pd += 1,
+                    b')' | b']' | b'}' => pd -= 1,
+                    b'=' if pd == 0 => {
+                        let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                        let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                        if !matches!(prev, b'=' | b'!' | b'<' | b'>') && next != b'=' {
+                            eq_pos = Some(j);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(ep) = eq_pos {
+                let lhs = code_tr[..ep].trim();
+                let rhs = code_tr[ep + 1..].trim();
+                // 1. Vars: strip `[...]` subscripts from LHS (e.g. `v[2].iov_len = MIN(...)` -> `v.iov_len = MIN`)
+                let mut lhs_stripped = String::with_capacity(lhs.len());
+                let mut bd = 0i32;
+                for ch in lhs.chars() {
+                    match ch {
+                        '[' => bd += 1,
+                        ']' => bd = (bd - 1).max(0),
+                        _ if bd == 0 => lhs_stripped.push(ch),
+                        _ => {}
+                    }
+                }
+                let lhs_var = lhs_stripped
+                    .split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '.'))
+                    .rev()
+                    .find(|w| !w.is_empty() && w.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                    .unwrap_or("")
+                    .trim_matches('.');
+                if !lhs_var.is_empty() {
+                    let mut rhs_buf = rhs.to_string();
+                    if idx + 1 < n_lines {
+                        rhs_buf.push(' ');
+                        rhs_buf.push_str(code_lines[idx + 1].trim());
+                    }
+                    let mut upper_tys: Vec<String> = Vec::new();
+                    for raw_t in rhs_buf.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+                        if !raw_t.is_empty() && raw_t.bytes().next().is_some_and(|b| b.is_ascii_uppercase()) && !upper_tys.iter().any(|x| x == raw_t) {
+                            upper_tys.push(raw_t.to_string());
+                        }
+                    }
+                    for ty in upper_tys.iter().take(6) {
+                        self.facts.vars.push((lhs_var.to_string(), ty.clone()));
+                    }
+                }
+                // 2. Top-level ObjC declarations (`static __auto_type _cancel = YES;`, `DDLoggerName const DDLoggerNameASL = @"...";`)
+                if depth_at_start == 0 && !lhs_var.is_empty() && !self.facts.symbols.is_empty() {
+                    let mut parts: Vec<String> = Vec::new();
+                    for raw_tok in rhs.split(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '.')) {
+                        let tok = raw_tok.trim_matches('.');
+                        if !tok.is_empty() && tok.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                            let mut atom = String::from("[\"n\",");
+                            push_string(&mut atom, tok);
+                            atom.push(']');
+                            if !parts.contains(&atom) {
+                                parts.push(atom);
+                            }
+                        }
+                    }
+                    parts.push("0".to_string());
+                    let mut t_str = String::new();
+                    push_string(&mut t_str, lhs_var);
+                    let wrapped = format!("[\"m\",[{}]]", parts.join(","));
+                    push_ev(&mut self.facts.symbols[0].events, &format!("[\"a\",{line},[{t_str}],{wrapped}]"));
+                }
+            }
+        }
+    }
+
+
+    pub(crate) fn augment_php(&mut self) {
+        let src = std::str::from_utf8(self.src).unwrap_or("").to_string();
+        let raw_lines: Vec<&str> = src.lines().collect();
+        let n_lines = raw_lines.len();
+        let mut code_lines: Vec<String> = Vec::with_capacity(n_lines);
+        let mut in_block = false;
+        for raw_line in &raw_lines {
+            let bytes = raw_line.as_bytes();
+            let mut code = String::with_capacity(bytes.len());
+            let mut i = 0;
+            let mut str_q: Option<u8> = None;
+            while i < bytes.len() {
+                if in_block {
+                    if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        in_block = false;
+                        code.push_str("  ");
+                        i += 2;
+                    } else {
+                        code.push(' ');
+                        i += 1;
+                    }
+                    continue;
+                }
+                if let Some(q) = str_q {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        code.push_str("  ");
+                        i += 2;
+                    } else if bytes[i] == q {
+                        str_q = None;
+                        code.push(q as char);
+                        i += 1;
+                    } else {
+                        code.push(' ');
+                        i += 1;
+                    }
+                    continue;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                    break;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    in_block = true;
+                    code.push_str("  ");
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'#' && (i + 1 >= bytes.len() || bytes[i + 1] != b'[') {
+                    break;
+                }
+                if bytes[i] == b'"' || bytes[i] == b'\'' {
+                    str_q = Some(bytes[i]);
+                    code.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+                code.push(bytes[i] as char);
+                i += 1;
+            }
+            code_lines.push(code);
+        }
+
+        let mut line_depth_start: Vec<i32> = Vec::with_capacity(n_lines);
+        let mut cur_depth = 0i32;
+        for cl in &code_lines {
+            line_depth_start.push(cur_depth);
+            for &b in cl.as_bytes() {
+                match b {
+                    b'{' => cur_depth += 1,
+                    b'}' => cur_depth = (cur_depth - 1).max(0),
+                    _ => {}
+                }
+            }
+        }
+
+        // Pass 1: Closure-assigned symbols (`$name = function(...)` / `$name = fn(...)`) and dynamic `require`/`include` imports
+        for idx in 0..n_lines {
+            let line_no = (idx + 1) as u32;
+            let trimmed = code_lines[idx].trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Closure-assigned symbols: `$name = [static] function (` or `$name = [static] fn (`
+            if let Some((lhs, rhs)) = trimmed.split_once('=') {
+                let lhs_t = lhs.trim();
+                let rhs_t = rhs.trim();
+                let is_closure = rhs_t.starts_with("function ")
+                    || rhs_t.starts_with("function(")
+                    || rhs_t.starts_with("static function ")
+                    || rhs_t.starts_with("static function(")
+                    || rhs_t.starts_with("fn ")
+                    || rhs_t.starts_with("fn(")
+                    || rhs_t.starts_with("static fn ")
+                    || rhs_t.starts_with("static fn(");
+                if is_closure {
+                    if let Some(after_dollar) = lhs_t.rsplit_once('$').map(|(_, r)| r) {
+                        let name: String = after_dollar.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                        if !name.is_empty() && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                            if !self.facts.symbols.iter().any(|sym| sym.name == name && sym.kind == 1 && sym.line.abs_diff(line_no) <= 1) {
+                                let key = format!("{}@{}", name, line_no);
+                                self.facts.symbols.push(Symbol { name, key, kind: 1, line: line_no, end_line: line_no, ..Symbol::default() });
+                            }
+                        }
+                    }
+                }
+            }
+            // Dynamic require/include imports (`require $path;`, `require_once $this->...;`, `include '...'`)
+            for rkw in ["require_once ", "require ", "include_once ", "include "] {
+                if let Some(pos) = trimmed.find(rkw) {
+                    let after = trimmed[pos + rkw.len()..].trim_start_matches(['(', ' ']);
+                    if let Some(after_d) = after.strip_prefix('$') {
+                        let vn: String = after_d.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                        if !vn.is_empty() {
+                            self.facts.imports.push(Import {
+                                line: line_no,
+                                module: vn.clone(),
+                                alias: vn,
+                                kind: IMPORT_MODULE,
+                                ..Import::default()
+                            });
+                        }
+                    }
+                    // Also check string literal path in raw line (e.g. `require __DIR__.'/bootstrap/app.php'`)
+                    let raw_tr = raw_lines[idx];
