@@ -3,6 +3,13 @@
 Every number in this repo comes from one of these commands. They are written to be
 pasted as-is, in this order, and each one prints the only line that matters.
 
+## 0. What counts as done
+
+The official gates live in `docs/TARGETS.md` (owner-approved 2026-11-25): LOC-weighted
+fallback <= 2% per language, file-weighted <= 5% as a floor, corpus-wide LOC lost
+<= 0.5%, no single FRCE class above 20% of what is left, FRCE unclassified < 3%.
+A round is judged on those, not on the file number alone.
+
 ## 1. Build the binary the measurements use
 
 ```bash
