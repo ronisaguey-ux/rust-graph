@@ -10238,3 +10238,323 @@ fn dotted_piece(text: &str) -> bool {
                 out.push(']');
                 out
             }
+            _ => {
+                // A node with no mapping: its first value-bearing child, so a
+                // wrapper the grammar added costs nothing.
+                match self.expression_child(id) {
+                    Some(child) if self.node(child).first_child != NONE => self.form(child),
+                    _ => "0".to_string(),
+                }
+            }
+        }
+    }
+
+
+    /// Calls visible in the raw tokens of an `ERROR` region: `name(` or
+    /// `a.b(`. Nothing is invented — the name and the argument list are both in
+    /// the source, and the region is only reached where the grammar failed to
+    /// build a node for them.
+    pub(crate) fn nim_recovered_calls(&mut self, id: u32) -> Vec<usize> {
+        let mut calls = Vec::new();
+        let mut leaves = Vec::new();
+        self.cs_collect_leaves(id, &mut leaves);
+        let mut i = 0;
+        while i < leaves.len() {
+            let tok = leaves[i];
+            let k = self.kind(tok);
+            let txt = self.text_string(tok);
+            let is_name = k == "identifier" || matches!(txt.as_str(), "cast" | "addr" | "proc" | "func" | "iterator" | "typeof" | "sizeof" | "defined" | "declared");
+            if !is_name {
+                i += 1;
+                continue;
+            }
+            if matches!(txt.as_str(), "if" | "elif" | "when" | "while" | "for" | "case" | "of" | "return" | "yield" | "raise" | "discard" | "not" | "and" | "or" | "xor" | "in" | "notin" | "is" | "isnot" | "as" | "div" | "mod" | "shl" | "shr" | "var" | "let" | "const" | "type" | "import" | "include" | "from" | "export" | "except" | "try" | "finally" | "block" | "defer" | "tuple" | "object" | "enum" | "distinct" | "ref" | "ptr" | "out" | "static") {
+                i += 1;
+                continue;
+            }
+            let mut end = i;
+            let mut name = txt.clone();
+            while end + 2 < leaves.len()
+                && self.text_string(leaves[end + 1]) == "."
+                && self.kind(leaves[end + 2]) == "identifier"
+            {
+                name.push('.');
+                name.push_str(&self.text_string(leaves[end + 2]));
+                end += 2;
+            }
+            let next = end + 1;
+            if next < leaves.len() {
+                let nt = self.text_string(leaves[next]);
+                if nt == "(" {
+                    let line = self.line(tok);
+                    calls.push(self.push_call(name, line));
+                    i = next + 1;
+                    continue;
+                }
+                if nt == "[" {
+                    let mut depth = 0i32;
+                    let mut j = next;
+                    while j < leaves.len() {
+                        let jt = self.text_string(leaves[j]);
+                        if jt == "[" {
+                            depth += 1;
+                        } else if jt == "]" {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                    if j + 1 < leaves.len() && self.text_string(leaves[j + 1]) == "(" {
+                        let line = self.line(tok);
+                        calls.push(self.push_call(name, line));
+                        i = next + 1;
+                        continue;
+                    }
+                }
+            }
+            i = end + 1;
+        }
+        calls
+    }
+
+    pub(crate) fn recovered_calls(&mut self, id: u32) -> Vec<usize> {
+        if self.facts.tag == "ERL" {
+            return self.erl_recovered_calls(id);
+        }
+        if self.facts.tag == "NIM" {
+            return self.nim_recovered_calls(id);
+        }
+        let mut calls = Vec::new();
+        let tokens: Vec<u32> = self.children(id);
+        let mut at = 0;
+        while at < tokens.len() {
+            // Recovery inside an expression-bodied property/accessor may leave a
+            // `member_access_expression` (`_egl.GetCurrentDisplay`) intact right
+            // before `(` or `argument_list`.
+            if matches!(
+                self.kind(tokens[at]),
+                "member_access_expression"
+                    | "member_expression"
+                    | "member_access"
+                    | "conditional_member_access"
+                    | "navigation_expression"
+                    | "field_expression"
+            ) {
+                let name = self.path_of(tokens[at]);
+                if !name.is_empty()
+                    && at + 1 < tokens.len()
+                    && matches!(self.kind(tokens[at + 1]), "(" | "argument_list" | "arguments")
+                {
+                    let line = self.line(tokens[at]);
+                    calls.push(self.push_call(name, line));
+                }
+                at += 1;
+                continue;
+            }
+            if self.kind(tokens[at]) != "identifier" {
+                at += 1;
+                continue;
+            }
+            // `a.b(` walks the dotted chain forward before the paren, and the
+            // name keeps every component: the resolver matches on the path.
+            let mut end = at;
+            let mut name = self.text_string(tokens[at]);
+            while end + 2 < tokens.len()
+                && matches!(self.kind(tokens[end + 1]), "." | "?.")
+                && self.kind(tokens[end + 2]) == "identifier"
+            {
+                name.push('.');
+                name.push_str(&self.text_string(tokens[end + 2]));
+                end += 2;
+            }
+            if end + 1 < tokens.len()
+                && matches!(self.kind(tokens[end + 1]), "(" | "argument_list" | "arguments")
+            {
+                let line = self.line(tokens[at]);
+                calls.push(self.push_call(name, line));
+            }
+            at = end + 1;
+        }
+        calls
+    }
+
+    pub(crate) fn tuple_form(&mut self, items: &[u32]) -> String {
+        let mut out = "[\"t\",[".to_string();
+        for (index, &item) in items.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&self.form(item));
+        }
+        out.push_str("]]");
+        out
+    }
+
+    /// Whether a Swift `navigation_expression` is rooted at a `generic_specialization`.
+    fn swift_has_generic_base(&self, mut id: u32) -> bool {
+        while self.kind(id) == "navigation_expression" {
+            let Some(&base) = self.children(id).first() else {
+                return false;
+            };
+            if self.kind(base) == "generic_specialization" {
+                return true;
+            }
+            id = base;
+        }
+        false
+    }
+
+    /// Whether a C# `member_access` is rooted at a `generic_name` or `generic_type`.
+    fn cs_has_generic_base(&self, mut id: u32) -> bool {
+        while matches!(self.kind(id), "member_access" | "conditional_member_access" | "member_access_expression") {
+            let Some(&base) = self.children(id).first() else {
+                return false;
+            };
+            if matches!(self.kind(base), "generic_name" | "generic_type")
+                || (self.kind(base) == "ERROR" && self.text(base).trim_ascii_end().ends_with(b">"))
+            {
+                return true;
+            }
+            id = base;
+        }
+        false
+    }
+
+    /// The tuple form of a Swift closure head of two or more plain names.
+    fn swift_closure_head(&mut self, id: u32) -> Option<String> {
+        let signature = self.child_of_kind(id, "closure_signature")?;
+        let source = self.child_of_kind(signature, "closure_parameter_group").unwrap_or(signature);
+        let items: Vec<u32> = self
+            .children(source)
+            .into_iter()
+            .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")" | "," | "in"))
+            .collect();
+        // A Swift closure parameter can be `_`, which `form` and the lexer read
+        // as `["n","_"]`.
+        if items.len() < 2 || !items.iter().all(|&child| matches!(self.kind(child), "identifier" | "_")) {
+            return None;
+        }
+        let mut names = Vec::new();
+        for child in items {
+            let mut form = String::from("[\"n\",");
+            push_string(&mut form, &self.text_string(child));
+            form.push(']');
+            names.push(form);
+        }
+        Some(format!("[\"t\",[{}]]", names.join(",")))
+    }
+
+    /// Identifier leaves inside a Swift closure signature or unmapped statement.
+    fn swift_collect_idents(&self, node: u32, out: &mut Vec<String>) {
+        let mut stack: Vec<u32> = self.children(node);
+        stack.reverse();
+        while let Some(child) = stack.pop() {
+            if self.is_layout(child) {
+                continue;
+            }
+            if self.kind(child) == "labeled_argument" {
+                // Keep keyword argument labels (`split(separator: "/")`) as
+                // `["k", name, 0]` rather than plain `["n", name]`, matching
+                // the lexer's keyword-argument form.
+                let parts = self.children(child);
+                let name = parts.first().map(|&node| self.path_of(node)).unwrap_or_default();
+                if !name.is_empty() {
+                    let mut keyed = String::from("[\"k\",");
+                    push_string(&mut keyed, &name);
+                    keyed.push_str(",0]");
+                    out.push(keyed);
+                }
+                if parts.len() > 1 {
+                    if let Some(&inner) = parts.last() {
+                        stack.push(inner);
+                    }
+                }
+                continue;
+            }
+            if matches!(self.kind(child), "identifier" | "_") {
+                let text = self.text_string(child);
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, &text);
+                form.push(']');
+                out.push(form);
+                continue;
+            }
+            let mut kids = self.children(child);
+            kids.reverse();
+            stack.extend(kids);
+        }
+    }
+
+    /// Formed expressions, literals and identifier leaves inside an unmapped
+    /// Swift statement (e.g. `for`, `if`, `switch`, `return`) inside a closure.
+    fn swift_collect_forms(&mut self, node: u32, out: &mut Vec<String>) {
+        let mut stack: Vec<u32> = self.children(node);
+        stack.reverse();
+        while let Some(child) = stack.pop() {
+            if self.is_layout(child) {
+                continue;
+            }
+            let kind = self.kind(child);
+            if matches!(
+                kind,
+                "call_expression"
+                    | "property_declaration"
+                    | "closure"
+                    | "trailing_closure"
+                    | "navigation_expression"
+                    | "subscript_expression"
+                    | "integer_literal"
+                    | "hex_literal"
+                    | "oct_literal"
+                    | "bin_literal"
+                    | "real_literal"
+                    | "boolean_literal"
+                    | "nil"
+            ) {
+                out.push(self.form(child));
+                continue;
+            }
+            if matches!(kind, "line_string_literal" | "multi_line_string_literal" | "raw_string_literal")
+                && !self
+                    .children(child)
+                    .into_iter()
+                    .any(|grand| self.kind(grand) == "interpolated_expression")
+            {
+                out.push("0".to_string());
+                continue;
+            }
+            if kind == "labeled_argument" {
+                let parts = self.children(child);
+                let name = parts.first().map(|&node| self.path_of(node)).unwrap_or_default();
+                if !name.is_empty() {
+                    let mut keyed = String::from("[\"k\",");
+                    push_string(&mut keyed, &name);
+                    keyed.push_str(",0]");
+                    out.push(keyed);
+                }
+                if parts.len() > 1 {
+                    if let Some(&inner) = parts.last() {
+                        stack.push(inner);
+                    }
+                }
+                continue;
+            }
+            if matches!(kind, "identifier" | "_") {
+                let text = self.text_string(child);
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, &text);
+                form.push(']');
+                out.push(form);
+                continue;
+            }
+            let mut kids = self.children(child);
+            kids.reverse();
+            stack.extend(kids);
+        }
+    }
+
+    /// A Swift literal's elements in order, with the `,` and `:` separators
+    /// kept: Swift wraps them in one `collection_body` node.
+    fn swift_collection_children(&self, id: u32) -> Vec<u32> {
