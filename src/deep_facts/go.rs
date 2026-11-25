@@ -7998,3 +7998,323 @@ fn dotted_piece(text: &str) -> bool {
             return format!("[\"m\",[{}]]", parts.join(","));
         }
         if self.facts.tag == "LUA" && kind == "table_constructor" {
+            let mut parts = Vec::new();
+            for child in self.children(id) {
+                let ck = self.kind(child);
+                if matches!(ck, "nil" | "true" | "false") {
+                    parts.push(format!("[\"n\",\"{ck}\"]"));
+                    continue;
+                }
+                if matches!(ck, "string" | "number") {
+                    parts.push("0".to_string());
+                    continue;
+                }
+                if self.is_layout(child) || matches!(ck, "{" | "}" | "," | ";") {
+                    continue;
+                }
+                if ck == "named_field" {
+                    let fch = self.children(child);
+                    let key = fch.first().map(|&n| self.text_string(n)).unwrap_or_default();
+                    let rhs = fch.iter().rev().copied().find(|&n| {
+                        let nk = self.kind(n);
+                        Some(n) != fch.first().copied() && (matches!(nk, "nil" | "true" | "false" | "string" | "number") || (!self.is_layout(n) && nk != "="))
+                    });
+                    let val = rhs
+                        .map(|n| {
+                            let nk = self.kind(n);
+                            if matches!(nk, "nil" | "true" | "false") {
+                                format!("[\"n\",\"{nk}\"]")
+                            } else if matches!(nk, "string" | "number") {
+                                "0".to_string()
+                            } else {
+                                let f = self.form(n);
+                                if f.is_empty() { "0".to_string() } else { f }
+                            }
+                        })
+                        .unwrap_or_else(|| "0".to_string());
+                    if !key.is_empty() {
+                        let mut kf = String::from("[\"n\",");
+                        push_string(&mut kf, &key);
+                        kf.push(']');
+                        parts.push(format!("[\"m\",[{}]]", format!("{kf},{val}")));
+                    } else {
+                        parts.push(val);
+                    }
+                } else if ck == "keyed_field" {
+                    let fch = self.children(child);
+                    let mut fparts = Vec::new();
+                    for fc in fch {
+                        let fck = self.kind(fc);
+                        if matches!(fck, "nil" | "true" | "false") {
+                            fparts.push(format!("[\"n\",\"{fck}\"]"));
+                        } else if matches!(fck, "string" | "number") {
+                            fparts.push("0".to_string());
+                        } else if !self.is_layout(fc) && !matches!(fck, "=" | "[" | "]") {
+                            let v = self.form(fc);
+                            fparts.push(if v.is_empty() { "0".to_string() } else { v });
+                        }
+                    }
+                    if fparts.len() == 1 {
+                        parts.push(fparts.remove(0));
+                    } else if fparts.len() > 1 {
+                        parts.push(format!("[\"m\",[{}]]", fparts.join(",")));
+                    }
+                } else {
+                    let v = self.form(child);
+                    parts.push(if v.is_empty() { "0".to_string() } else { v });
+                }
+            }
+            return if parts.is_empty() {
+                "0".to_string()
+            } else {
+                format!("[\"m\",[{}]]", parts.join(","))
+            };
+        }
+        if matches!(
+            kind,
+            "member" | "safe_member" | "scope" | "member_access_expression" | "nullsafe_member_access_expression" | "scoped_property_access_expression"
+        ) && matches!(self.facts.tag.as_str(), "RB" | "CR" | "PHP" | "LUA" | "DART" | "SOL" | "R") {
+            let p = self.path_of(id);
+            if !p.is_empty() && !p.starts_with('.') {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &p);
+                out.push(']');
+                return out;
+            }
+            if let Some(&obj) = self.children(id).first() {
+                let inner = self.form(obj);
+                if !inner.is_empty() && inner != "0" {
+                    return inner;
+                }
+            }
+        }
+        match kind {
+            // `Foo::class`, `Foo::bar`: a callable reference is one dotted name
+            // to the lexer (`n:Foo.class`), and the tree writes the receiver and
+            // the referenced name as two nodes.
+            "callable_reference" if self.is_kotlin() => {
+                let children = self.children(id);
+                let mut text = String::new();
+                for child in children {
+                    if self.is_layout(child) || self.kind(child) == "::" {
+                        continue;
+                    }
+                    if !text.is_empty() {
+                        text.push('.');
+                    }
+                    text.push_str(&self.text_string(child));
+                }
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &text);
+                    out.push(']');
+                    out
+                }
+            }
+            // `get() = ::periodPatternCategory`: a bare callable reference has
+            // no receiver, so the grammar files it as `absolute_reference`
+            // rather than `callable_reference`. The lexer reads the reference
+            // name as the accessor's value; read as the constant 0 the getter
+            // line lost its only name (`override val … get() = ::name`).
+            "absolute_reference" if self.is_kotlin() => {
+                let children = self.children(id);
+                let mut text = String::new();
+                for child in children {
+                    if self.is_layout(child) || self.kind(child) == "::" {
+                        continue;
+                    }
+                    text.push_str(&self.text_string(child));
+                }
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &text);
+                    out.push(']');
+                    out
+                }
+            }
+            // `\Sortable1.name`, `\.optionalObject`: Swift's key-path literal
+            // names the root type and property chain (or the property alone
+            // when rooted on an inferred type). The lexer skips `\` and `.`
+            // and reads the dotted name, while the default arm wrote `0`.
+            "key_path_expression" if self.language.name == "swift" => {
+                let mut text = String::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) || matches!(self.kind(child), "\\" | ".") {
+                        continue;
+                    }
+                    if !text.is_empty() {
+                        text.push('.');
+                    }
+                    text.push_str(&self.text_string(child));
+                }
+                if text.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &text);
+                    out.push(']');
+                    out
+                }
+            }
+            // `object : Base()`: an anonymous object is the name `object`
+            // merged with its supertype constructor's call, which is how the
+            // lexer writes it. Nothing read the node, so the value was the
+            // constant 0 and the constructor call was lost with it.
+            "object_expression" if self.is_kotlin() => {
+                let mut parts: Vec<String> = vec![String::from("[\"n\",\"object\"]")];
+                if let Some(list) = self.child_of_kind(id, "supertypes") {
+                    for child in self.children(list) {
+                        if self.is_layout(child) {
+                            continue;
+                        }
+                        let part = self.form(child);
+                        if part != "0" {
+                            parts.push(part);
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `object : Base by delegate()`: a delegation call is the fact the
+            // lexer records on the object's line. The grammar builds a
+            // `supertype_delegation` node whose delegate is a name plus an
+            // argument list, not a `call_expression`, so no arm walked it and
+            // the call was missing from the CST's record. Keep the value 0 —
+            // the object's own event already reads as `n:object` — and only
+            // record the call.
+            "supertype_delegation" if self.is_kotlin() => {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.kind(child) == "by") {
+                    let rest = &children[at + 1..];
+                    if let Some(&call) = rest.iter().find(|&&child| self.kind(child) == "call_expression") {
+                        let _ = self.form(call);
+                    } else {
+                        let args = rest.iter().copied().find(|&child| matches!(self.kind(child), "arguments" | "argument_list"));
+                        let mut name = String::new();
+                        for &child in rest {
+                            if matches!(self.kind(child), "arguments" | "argument_list") {
+                                break;
+                            }
+                            match self.kind(child) {
+                                "." | "?." => name.push('.'),
+                                k if self.is_layout(child) || k == "by" => {}
+                                _ => name.push_str(&self.text_string(child)),
+                            }
+                        }
+                        if !name.is_empty() {
+                            self.push_call(name, self.line(id));
+                            if let Some(list) = args {
+                                let _ = self.arguments(list);
+                            }
+                        }
+                    }
+                }
+                "0".to_string()
+            }
+            // `object : Base()`, `class C : Base()`: a supertype constructor is
+            // a call of its type's name with its own arguments.
+            "superclass_constructor" if self.is_kotlin() => self.call_form(id),
+            // `Assert.Throws<T>(() => reader.Read())`: the one-pass reader
+            // writes a generic invocation as the callee's name, the type
+            // argument's name and the arguments' value - never as a call of its
+            // own - and a call inside the arguments belongs to the same
+            // statement. Read as a member access the tree wrote the name alone
+            // and dropped every lambda argument (636 rows, the largest C#
+            // cluster left after the attributes).
+            "generic_invocation" => return self.cs_generic_invocation(id),
+            // `() => reader.Read()` as an argument: the one-pass reader files
+            // the body's value in the statement and records the call inside
+            // it. The tree kept the lambda node and nothing read its body, so
+            // every lambda argument lost what it contains.
+            "lambda_expression" if self.language.name == "csharp" => return self.cs_lambda_value(id),
+            // `nameof(Color)`: the one-pass reader records a call to `nameof`
+            // with the named expression as its argument, rather than `0`.
+            "nameof_expression" if self.language.name == "csharp" => {
+                let line = self.line(id);
+                let index = self.push_call("nameof".to_string(), line);
+                let inner = self
+                    .child_of_kind(id, "nameof_arguments")
+                    .map(|args| self.arguments(args))
+                    .unwrap_or_else(|| "[]".to_string());
+                return format!("[\"c\",{index},0,{inner}]");
+            }
+            // `defaultBindingMode: BindingMode.TwoWay`: a C# named argument
+            // merges the parameter name and the argument value, as the one-pass
+            // reader does.
+            "named_argument" if self.language.name == "csharp" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => return "0".to_string(),
+                    1 => return self.form(items[0]),
+                    _ => return self.merge_form(&items),
+                }
+            }
+            // `IColorPalette?`, `object?`: a C# nullable or parenthesized type
+            // wraps its inner type, including predefined keyword types like
+            // `object` or `int`.
+            "nullable_type" | "parenthesized_type" if self.language.name == "csharp" => {
+                let inner = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&child| !self.is_layout(child) || self.leaf_name(child).is_some());
+                return inner.map_or_else(|| "0".to_string(), |child| self.form(child));
+            }
+            // `typeof(T)`: the one-pass reader keeps the type name inside the
+            // parentheses, whereas the fallback descended into
+            // `parenthesized_type` and returned `0` for a bare type identifier.
+            "typeof_expression" | "sizeof_expression" | "default_expression" if self.language.name == "csharp" => {
+                if kind == "default_expression" && self.expression_child(id).is_none() {
+                    return "[\"n\",\"default\"]".to_string();
+                }
+                return self.expression_child(id).map_or_else(|| "0".to_string(), |child| self.form(child));
+            }
+            "null_forgiving" | "checked_expression" | "checked_arguments" if self.language.name == "csharp" => {
+                return self.expression_child(id).map_or_else(|| "0".to_string(), |child| self.form(child));
+            }
+            "out_declaration" if self.language.name == "csharp" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if let Some(word) = self.leaf_name(child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &word);
+                        form.push(']');
+                        parts.push(form);
+                    } else if self.node(child).first_child != NONE {
+                        // A non-leaf type such as `nullable_type` (`SymbolResult?`)
+                        // has no leaf name, so form it to keep the type name.
+                        let form = self.form(child);
+                        if !form.is_empty() && form != "0" {
+                            parts.push(form);
+                        }
+                    }
+                }
+                return match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                };
+            }
+            // `x switch { null => 1, _ => y }`: the subject, the keyword, and
+            // each arm's value, as the one-pass reader writes it. The arms'
+            // patterns bind nothing a call can reach, but a guard and an arm
+            // value can hold calls, which are recorded by visiting them. Read
+            // through the default arm the switch had no children it knew, so
+            // every name in it was lost and its value was `0`.
+            "switch_expression" if self.language.name == "csharp" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                let subject = match items.first() {
+                    Some(&first) if self.kind(first) != "switch" => self.form(first),
+                    _ => "0".to_string(),
+                };
+                let mut arms: Vec<String> = Vec::new();
+                let bodies: Vec<u32> = items.iter().copied().filter(|&child| self.kind(child) == "switch_expr_body").collect();
+                for body in bodies {
+                    let arm_nodes: Vec<u32> = self.children(body).into_iter().filter(|&child| self.kind(child) == "switch_expr_arm").collect();
