@@ -3518,3 +3518,323 @@ impl<'a> Walker<'a> {
         self.facts.symbols.len() - 1
     }
 
+    pub(crate) fn event(&mut self, text: &str) {
+        let symbol = self.frame().symbol;
+        let events = &mut self.facts.symbols[symbol].events;
+        if !events.is_empty() {
+            events.push(',');
+        }
+        events.push_str(text);
+    }
+
+    /// True when `id` is a call whose own callee is a name, so that the call it
+    /// records is the value the expression produces: `A()`, `new Foo()`,
+    /// `a.b()`. `f()()` records only `f`, and that value is what gets called,
+    /// not what the expression produces.
+    pub(crate) fn named_call(&self, id: u32) -> bool {
+        if !matches!(
+            self.kind(id),
+            "call" | "call_expression" | "new_expression" | "invocation_expression"
+                | "object_creation" | "object_creation_expression"
+        ) {
+            return false;
+        }
+        match self.children(id).into_iter().find(|&child| {
+            !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")" | "?.")
+        }) {
+            Some(callee) => {
+                callee != id
+                    && !matches!(
+                        self.kind(callee),
+                        "call" | "call_expression" | "new_expression" | "invocation_expression"
+                            | "object_creation" | "object_creation_expression" | "generic_invocation"
+                            | "implicit_creation" | "conditional_invocation"
+                    )
+            }
+            None => false,
+        }
+    }
+
+    /// `Func<int, int> handler = x => x;` and `_creator = a => Make(a);`: a
+    /// binding whose value is a lambda holds a function, and the one-pass lexer
+    /// opens a symbol under the target's name. Nothing in the tree did, so every
+    /// such binding was a symbol the CST never declared.
+    pub(crate) fn cs_lambda_symbol(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "lambda_expression") else {
+            return;
+        };
+        // `cfg.ShouldMapProperty = p => true;` has a `member_access` on the
+        // left of `=`, not a bare `identifier`, so read the rightmost name.
+        let Some(target) = children[..at]
+            .iter()
+            .rev()
+            .find(|&&child| matches!(self.kind(child), "identifier" | "member_access" | "field_access"))
+            .and_then(|&child| self.last_name(child))
+        else {
+            return;
+        };
+        if target.is_empty() {
+            return;
+        }
+        let line = self.line(id);
+        let owner = self.frame().class.clone();
+        self.add_symbol(target, String::new(), KIND_FUNCTION, line, Vec::new());
+    }
+
+    /// `handler = (a, b) => f(a, b);` and `cfg.P = x => x;`: in the C#
+    /// grammar `=>` has lower precedence than `=`, so a statement-level lambda
+    /// assignment parses as `lambda_expression(assignment_expression(lhs, =, params), =>, body)`.
+    /// Declare the target as `KIND_FUNCTION` to match the one-pass lexer.
+    pub(crate) fn cs_lambda_assignment_symbol(&mut self, id: u32) {
+        let Some(lhs) = self.children(id).into_iter().find(|&c| !self.is_layout(c)) else {
+            return;
+        };
+        if self.kind(lhs) != "assignment_expression" {
+            return;
+        }
+        let children = self.children(lhs);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "=") else {
+            return;
+        };
+        let Some(target) = children[..at]
+            .iter()
+            .rev()
+            .find(|&&child| matches!(self.kind(child), "identifier" | "member_access" | "field_access"))
+            .and_then(|&child| self.last_name(child))
+        else {
+            return;
+        };
+        if target.is_empty() {
+            return;
+        }
+        let line = self.line(id);
+        let owner = self.frame().class.clone();
+        self.add_symbol(target, String::new(), KIND_FUNCTION, line, Vec::new());
+    }
+
+    /// Every call inside a lambda body, block or expression, at any depth. The
+    /// shared `c_calls_in_pub` stops at a block and at a nested lambda because a
+    /// C/C++ lambda body is entered on its own walk; a C# lambda is not, so its
+    /// block has to be read here or not at all.
+    pub(crate) fn cs_initializer_vars(&mut self, id: u32) {
+        let children: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .filter(|&c| !self.is_layout(c) && !matches!(self.kind(c), "{" | "}" | ","))
+            .collect();
+        let mut i = 0;
+        while i + 2 < children.len() {
+            if self.kind(children[i + 1]) == "=" {
+                if let Some(target) = self.leaf_name(children[i]) {
+                    self.cs_bind_constructed(target, children[i + 2]);
+                }
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub(crate) fn lambda_calls(&self, id: u32, out: &mut Vec<u32>) {
+        for child in self.children(id) {
+            if matches!(
+                self.kind(child),
+                "invocation_expression" | "object_creation" | "object_creation_expression" | "call_expression"
+                    | "generic_invocation" | "conditional_invocation"
+            ) {
+                out.push(child);
+            }
+            self.lambda_calls(child, out);
+        }
+    }
+
+    pub(crate) fn erl_recovered_calls(&mut self, id: u32) -> Vec<usize> {
+        let mut leaves = Vec::new();
+        self.cs_collect_leaves(id, &mut leaves);
+        let mut calls = Vec::new();
+        let mut i = 0;
+        while i + 1 < leaves.len() {
+            let tok = leaves[i];
+            let k = self.kind(tok);
+            let is_name = matches!(
+                k,
+                "atom" | "variable" | "quoted_atom" | "name"
+                    | "module" | "export" | "import" | "behaviour" | "include"
+                    | "define" | "ifdef" | "endif" | "spec" | "type" | "record"
+            );
+            if is_name && self.kind(leaves[i + 1]) == "(" {
+                let raw = self.text_string(tok);
+                let name = if k == "quoted_atom" {
+                    raw.trim_matches('\'').to_string()
+                } else {
+                    raw
+                };
+                if !name.is_empty() {
+                    let line = self.line(tok);
+                    calls.push(self.push_call(name, line));
+                }
+            }
+            i += 1;
+        }
+        calls
+    }
+
+    pub(crate) fn erl_leaf_name(&self, tok: u32) -> Option<String> {
+        let k = self.kind(tok);
+        if matches!(
+            k,
+            "atom" | "variable" | "quoted_atom" | "name"
+                | "module" | "export" | "import" | "behaviour" | "include"
+                | "define" | "ifdef" | "endif" | "spec" | "type" | "record"
+                | "true" | "false"
+        ) {
+            let raw = self.text_string(tok);
+            let name = if k == "quoted_atom" {
+                raw.trim_matches('\'').to_string()
+            } else {
+                raw
+            };
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    fn erl_chunk_form(&mut self, chunk: &[u32]) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < chunk.len() {
+            let tok = chunk[i];
+            if let Some(name) = self.erl_leaf_name(tok) {
+                if i + 1 < chunk.len() && self.kind(chunk[i + 1]) == "(" {
+                    let line = self.line(tok);
+                    let idx = self.push_call(name.clone(), line);
+                    parts.push(format!("[\"c\",{idx},0,[0]]"));
+                }
+                let mut f = String::from("[\"n\",");
+                push_string(&mut f, &name);
+                f.push(']');
+                parts.push(f);
+            }
+            i += 1;
+        }
+        match parts.len() {
+            0 => "0".to_string(),
+            1 => parts.remove(0),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        }
+    }
+
+    fn erl_emit_recovered_chunk(&mut self, chunk: &[u32]) {
+        if chunk.is_empty() {
+            return;
+        }
+        let line = self.line(chunk[0]);
+        let mut depth = 0i32;
+        let mut eq_at = None;
+        for (i, &tok) in chunk.iter().enumerate() {
+            match self.kind(tok) {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth = (depth - 1).max(0),
+                "=" | "=:=" if depth == 0 => {
+                    eq_at = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if let Some(pos) = eq_at {
+            let lhs = &chunk[..pos];
+            let rhs = &chunk[pos + 1..];
+            let mut targets: Vec<String> = Vec::new();
+            for &tok in lhs {
+                if let Some(name) = self.erl_leaf_name(tok) {
+                    if !targets.contains(&name) {
+                        targets.push(name);
+                    }
+                }
+            }
+            let rhs_val = self.erl_chunk_form(rhs);
+            if !targets.is_empty() {
+                self.lexer_event(b'a', line, &targets, &rhs_val, false);
+            }
+            let full_val = self.erl_chunk_form(chunk);
+            if full_val != "0" {
+                self.lexer_event(b'x', line, &[], &full_val, false);
+            }
+        } else {
+            let full_val = self.erl_chunk_form(chunk);
+            if full_val != "0" {
+                self.lexer_event(b'x', line, &[], &full_val, false);
+            }
+        }
+    }
+
+    pub(crate) fn erl_recovered_events(&mut self, id: u32) {
+        let mut leaves = Vec::new();
+        self.cs_collect_leaves(id, &mut leaves);
+        let mut chunk: Vec<u32> = Vec::new();
+        let mut depth = 0i32;
+        for tok in leaves {
+            let k = self.kind(tok);
+            match k {
+                "(" | "[" | "{" => {
+                    depth += 1;
+                    chunk.push(tok);
+                }
+                ")" | "]" | "}" => {
+                    depth = (depth - 1).max(0);
+                    chunk.push(tok);
+                }
+                "," | ";" | "." | "->" if depth == 0 => {
+                    self.erl_emit_recovered_chunk(&chunk);
+                    chunk.clear();
+                }
+                _ => {
+                    chunk.push(tok);
+                }
+            }
+        }
+        self.erl_emit_recovered_chunk(&chunk);
+    }
+
+    pub(crate) fn cs_has_error(&self, id: u32) -> bool {
+        if self.kind(id) == "ERROR" {
+            return true;
+        }
+        self.children(id).into_iter().any(|c| self.cs_has_error(c))
+    }
+
+    pub(crate) fn cs_collect_leaves(&self, id: u32, out: &mut Vec<u32>) {
+        let node = self.node(id);
+        if node.first_child == NONE {
+            if node.start < node.end && !self.kind(id).contains("comment") {
+                out.push(id);
+            }
+            return;
+        }
+        for child in self.children(id) {
+            self.cs_collect_leaves(child, out);
+        }
+    }
+
+    pub(crate) fn cs_recovered_calls(&mut self, id: u32) {
+        let tokens: Vec<u32> = self.children(id);
+        self.cs_recovered_calls_tokens(&tokens);
+    }
+
+    pub(crate) fn cs_recovered_calls_tokens(&mut self, tokens: &[u32]) {
+        let mut at = 0;
+        while at < tokens.len() {
+            if matches!(
+                self.kind(tokens[at]),
+                "member_access_expression" | "member_access" | "conditional_member_access"
+            ) {
+                let name = self.path_of(tokens[at]);
+                if !name.is_empty()
+                    && at + 1 < tokens.len()
+                    && matches!(self.kind(tokens[at + 1]), "(" | "argument_list" | "arguments")
+                {
+                    let line = self.line(tokens[at]);
