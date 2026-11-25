@@ -5758,3 +5758,323 @@ fn dotted_piece(text: &str) -> bool {
                     continue;
                 }
                 let f = self.form(c);
+                if !f.is_empty() {
+                    return f;
+                }
+            }
+        }
+        if self.facts.tag == "DART" && kind == "list_literal" {
+            let mut items = Vec::new();
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if matches!(ck, "[" | "]" | ",") {
+                    continue;
+                }
+                if self.is_layout(c) && !matches!(ck, "string_literal" | "string" | "number" | "true" | "false" | "null") {
+                    continue;
+                }
+                let f = if matches!(ck, "true" | "false" | "null") {
+                    format!("[\"n\",\"{ck}\"]")
+                } else {
+                    self.form(c)
+                };
+                items.push(if f.is_empty() { "0".to_string() } else { f });
+            }
+            if items.is_empty() {
+                return "0".to_string();
+            }
+            return format!("[\"t\",[{}]]", items.join(","));
+        }
+        if self.facts.tag == "PHP" && kind == "variable_name" {
+            let nm = self.text_string(id).trim_start_matches('$').to_string();
+            if !nm.is_empty() {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &nm);
+                out.push(']');
+                return out;
+            }
+        }
+        if self.facts.tag == "PHP" && kind == "array_literal" {
+            let mut items = Vec::new();
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if matches!(ck, "[" | "]" | ",") {
+                    continue;
+                }
+                if self.is_layout(c) && !matches!(ck, "string" | "encapsed_string" | "integer" | "float" | "true" | "false" | "null") {
+                    continue;
+                }
+                if ck == "pair_element" {
+                    for pc in self.children(c) {
+                        let pck = self.kind(pc);
+                        if pck == "=>" || (self.is_layout(pc) && !matches!(pck, "string" | "encapsed_string" | "integer" | "float" | "true" | "false" | "null")) {
+                            continue;
+                        }
+                        let f = if matches!(pck, "true" | "false" | "null") {
+                            format!("[\"n\",\"{pck}\"]")
+                        } else {
+                            self.form(pc)
+                        };
+                        items.push(if f.is_empty() { "0".to_string() } else { f });
+                    }
+                } else {
+                    let f = if matches!(ck, "true" | "false" | "null") {
+                        format!("[\"n\",\"{ck}\"]")
+                    } else {
+                        self.form(c)
+                    };
+                    items.push(if f.is_empty() { "0".to_string() } else { f });
+                }
+            }
+            if items.is_empty() {
+                return "0".to_string();
+            }
+            return format!("[\"t\",[{}]]", items.join(","));
+        }
+        if self.facts.tag == "PAS" && kind == "identifier" {
+            let nm = self.text_string(id).to_ascii_lowercase();
+            let mut out = String::from("[\"n\",");
+            push_string(&mut out, &nm);
+            out.push(']');
+            return out;
+        }
+        if self.facts.tag == "PAS" && kind == "member" {
+            let path = self.path_of(id).to_ascii_lowercase();
+            if !path.is_empty() && !path.starts_with('.') {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &path);
+                out.push(']');
+                return out;
+            }
+            if path.starts_with('.') {
+                let ch = self.children(id);
+                if let Some(&base) = ch.first() {
+                    let bf = self.form(base);
+                    let mname = self.member_name(id).to_ascii_lowercase();
+                    if !bf.is_empty() && bf != "0" && !mname.is_empty() {
+                        let mut mn = String::from("[\"n\",");
+                        push_string(&mut mn, &mname);
+                        mn.push(']');
+                        return format!("[\"m\",[{}]]", format!("{bf},{mn}"));
+                    }
+                }
+            }
+        }
+        if self.facts.tag == "PAS" && kind == "number" {
+            let raw = self.text_string(id);
+            if let Some(hex) = raw.strip_prefix('$') {
+                if hex.bytes().next().is_some_and(|b| b.is_ascii_alphabetic()) {
+                    let lower = hex.to_ascii_lowercase();
+                    let mut out = String::from("[\"n\",");
+                    push_string(&mut out, &lower);
+                    out.push(']');
+                    return out;
+                }
+            }
+        }
+        if self.facts.tag == "PAS" && kind == "nil" {
+            return "[\"n\",\"nil\"]".to_string();
+        }
+        if self.facts.tag == "PAS" && kind == "array_type" {
+            let mut items = vec!["[\"n\",\"array\"]".to_string()];
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if self.is_layout(c) || matches!(ck, "array" | "of" | "[" | "]") {
+                    continue;
+                }
+                let f = self.form(c);
+                if !f.is_empty() && f != "0" {
+                    items.push(f);
+                }
+            }
+            return format!("[\"m\",[{}]]", items.join(","));
+        }
+        if self.facts.tag == "PAS" && kind == "enumeration_type" {
+            let mut items = Vec::new();
+            for c in self.children(id) {
+                if self.kind(c) == "identifier" {
+                    let nm = self.text_string(c).to_ascii_lowercase();
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &nm);
+                    n.push(']');
+                    items.push(n);
+                }
+            }
+            if !items.is_empty() {
+                return format!("[\"t\",[{}]]", items.join(","));
+            }
+        }
+        if self.facts.tag == "PAS" && matches!(kind, "true" | "false") {
+            return format!("[\"n\",\"{kind}\"]");
+        }
+        if self.facts.tag == "PAS"
+            && matches!(
+                kind,
+                "additive" | "multiplicative" | "logical" | "comparison" | "unary"
+                    | "index" | "dereference" | "parenthesized_expression"
+            )
+        {
+            let mut parts = Vec::new();
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if matches!(ck, "div" | "mod" | "shl" | "shr") {
+                    parts.push(format!("[\"n\",\"{ck}\"]"));
+                    continue;
+                }
+                if self.is_layout(c) && !matches!(ck, "string" | "number") {
+                    continue;
+                }
+                if matches!(ck, "+" | "-" | "*" | "/" | "and" | "or" | "not" | "=" | "<>" | "<" | ">" | "<=" | ">=" | "in" | "@" | "^" | "." | "(" | ")") {
+                    continue;
+                }
+                let v = if ck == "string" {
+                    "0".to_string()
+                } else {
+                    self.form(c)
+                };
+                if !v.is_empty() {
+                    parts.push(v);
+                }
+            }
+            if parts.is_empty() {
+                return "0".to_string();
+            }
+            if parts.len() == 1 {
+                return parts.into_iter().next().unwrap();
+            }
+            if kind == "parenthesized_expression" {
+                return format!("[\"t\",[{}]]", parts.join(","));
+            }
+            return format!("[\"m\",[{}]]", parts.join(","));
+        }
+        if self.facts.tag == "ERL" && kind == "unary" {
+            let children = self.children(id);
+            let mut saw_catch = false;
+            for c in children {
+                if self.is_layout(c) { continue; }
+                let ck = self.kind(c);
+                if ck == "catch" {
+                    saw_catch = true;
+                } else if saw_catch {
+                    if ck == "paren_expression" {
+                        let line = self.line(id);
+                        self.push_call("catch".to_string(), line);
+                    }
+                    break;
+                }
+            }
+        }
+        if self.facts.tag == "ERL" && kind == "bitwise" {
+            let children = self.children(id);
+            let mut prev_op: Option<(String, u32)> = None;
+            for c in children {
+                if self.is_layout(c) { continue; }
+                let ck = self.kind(c);
+                if matches!(ck, "bor" | "band" | "bxor" | "bsl" | "bsr") {
+                    prev_op = Some((ck.to_string(), self.line(c)));
+                } else if let Some((op, oline)) = prev_op.take() {
+                    if ck == "paren_expression" {
+                        self.push_call(op, oline);
+                    }
+                }
+            }
+        }
+        if self.facts.tag == "ERL" && kind == "case_expression" {
+            let children = self.children(id);
+            let first_expr = children
+                .iter()
+                .copied()
+                .find(|&c| !self.is_layout(c) && self.kind(c) != "case");
+            if let Some(expr) = first_expr {
+                if self.kind(expr) == "paren_expression" {
+                    let line = self.line(id);
+                    self.push_call("case".to_string(), line);
+                }
+            }
+        }
+        if self.facts.tag == "ERL"
+            && matches!(
+                kind,
+                "tuple_literal" | "list_literal" | "list_item" | "list_tail" | "list_comp_tail"
+                    | "qualifier" | "case_expression" | "case_clauses" | "case_clause"
+                    | "if_expression" | "begin_expression" | "receive_expression"
+                    | "after_clause" | "try_expression" | "catch_clause" | "catch_clauses" | "catch_item" | "body"
+                    | "map_literal" | "map_body" | "map_field" | "map_assoc"
+                    | "anonymous_clauses" | "anonymous_clause" | "paren_expression" | "guard" | "guard_sequence" | "parameter_group" | "parameters"
+                    | "send_expression" | "logical_expression" | "comparison" | "list_operation"
+                    | "arithmetic" | "bitwise" | "match_expression" | "record_access" | "unary" | "argument"
+            )
+        {
+            let mut parts = Vec::new();
+            let kids: Vec<u32> = self.children(id).into_iter().filter(|&c| !self.is_layout(c)).collect();
+            for (ki, &c) in kids.iter().enumerate() {
+                if self.kind(c) == "ERROR" {
+                    if let Some(&next) = kids.get(ki + 1) {
+                        if matches!(self.kind(next), "paren_expression" | "call_arguments" | "parameter_group" | "(") {
+                            let mut leaves = Vec::new();
+                            self.cs_collect_leaves(c, &mut leaves);
+                            if let Some(&last_tok) = leaves.iter().rev().find(|&&t| self.erl_leaf_name(t).is_some()) {
+                                if let Some(nm) = self.erl_leaf_name(last_tok) {
+                                    let _ = self.push_call(nm, self.line(last_tok));
+                                }
+                            }
+                        }
+                    }
+                }
+                let v = self.form(c);
+                if !v.is_empty() && v != "0" {
+                    parts.push(v);
+                }
+            }
+            if parts.is_empty() {
+                return "0".to_string();
+            }
+            if matches!(kind, "tuple_literal" | "list_literal") {
+                return format!("[\"t\",[{}]]", parts.join(","));
+            }
+            if parts.len() == 1 {
+                return parts.into_iter().next().unwrap();
+            }
+            return format!("[\"m\",[{}]]", parts.join(","));
+        }
+        if self.facts.tag == "ERL" && kind == "fun_expression" {
+            let line = self.line(id);
+            let idx = self.push_call("fun".to_string(), line);
+            let mut parts = Vec::new();
+            for c in self.children(id) {
+                if !self.is_layout(c) && !matches!(self.kind(c), "fun" | "end") {
+                    let v = self.form(c);
+                    if !v.is_empty() && v != "0" {
+                        parts.push(v);
+                    }
+                }
+            }
+            return format!("[\"c\",{idx},0,[{}]]", parts.join(","));
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR")
+            && matches!(
+                kind,
+                "if_modifier" | "unless_modifier" | "while_modifier" | "until_modifier" | "rescue_modifier"
+            )
+        {
+            let exprs: Vec<u32> = self
+                .children(id)
+                .into_iter()
+                .filter(|&c| {
+                    !self.is_layout(c)
+                        && !matches!(
+                            self.kind(c),
+                            "if_modifier" | "unless_modifier" | "while_modifier" | "until_modifier" | "rescue_modifier"
+                                | "if" | "unless" | "while" | "until" | "rescue"
+                        )
+                })
+                .collect();
+            if let Some(&expr) = exprs.first() {
+                return self.form(expr);
+            }
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR")
+            && matches!(kind, "instance_variable" | "class_variable" | "global_variable")
+        {
+            let raw = self.text_string(id);
+            let stripped = raw.trim_start_matches('@').trim_start_matches('$');
