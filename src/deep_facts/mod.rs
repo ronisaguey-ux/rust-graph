@@ -10558,3 +10558,323 @@ impl<'a> Walker<'a> {
     fn objc_method_lines(&mut self) {
         // A tree with an unbalanced end can leave the walk with no frame, and
         // an event needs one to belong to: the module's own frame is restored
+        // for the pass and dropped again after it.
+        let restored = self.stack.is_empty();
+        if restored {
+            self.stack.push(Frame {
+                node: 0,
+                symbol: 0,
+                class: String::new(),
+                receiver: String::new(),
+                container: false,
+                defines: None,
+            });
+        }
+        let mut taken: Vec<u32> = Vec::new();
+        for symbol in &self.facts.symbols {
+            let text = &symbol.events;
+            for marker in ["[\"x\",", "[\"a\","] {
+                let mut at = 0;
+                while let Some(found) = text[at..].find(marker) {
+                    let start = at + found + marker.len();
+                    let digits: String = text[start..].chars().take_while(|ch| ch.is_ascii_digit()).collect();
+                    if let Ok(line) = digits.parse::<u32>() {
+                        taken.push(line);
+                    }
+                    at = start;
+                }
+            }
+        }
+        let count = self.line_starts.len();
+        for index in 0..count {
+            let start = self.line_starts[index] as usize;
+            let end = self.line_starts.get(index + 1).map(|&at| at as usize).unwrap_or(self.src.len());
+            let line = index as u32 + 1;
+            if taken.contains(&line) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&self.src[start..end]);
+            let trimmed = text.trim();
+            // `@import Foundation;`: a module import is one statement to the
+            // lexer - the keyword and the module - and the grammar gives it no
+            // node at all, so every one in every header was a loss.
+            if let Some(rest) = trimmed.strip_prefix("@import") {
+                let module = rest.trim().trim_end_matches(';').trim();
+                if !module.is_empty() {
+                    let mut value = String::from("[\"m\",[[\"n\",\"import\"],[\"n\",");
+                    push_string(&mut value, module);
+                    value.push_str("]]]");
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                continue;
+            }
+            // `@class A, B;` / `@synthesize window = _window;`: forward and
+            // synthesized declarations are one statement to the lexer, and the
+            // grammar has no node for either.
+            for (prefix, keyword) in [("@class", "class"), ("@synthesize", "synthesize")] {
+                let Some(rest) = trimmed.strip_prefix(prefix) else { continue };
+                let names: Vec<String> = rest
+                    .trim()
+                    .trim_end_matches(';')
+                    .split(',')
+                    .map(|part| part.split('=').next().unwrap_or("").trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    // `RACSequence<__covariant ValueType>` is a class name and
+                    // the type parameters it forwards, which the one-pass reader
+                    // files as three names in a row. Kept whole, the recorded
+                    // name held the angle brackets and no row matched.
+                    .flat_map(|name| {
+                        let mut parts = vec![name.clone()];
+                        if let Some(open) = name.find('<') {
+                            let base = name[..open].trim().to_string();
+                            let inner = name[open + 1..].trim_end_matches('>');
+                            parts = vec![base];
+                            parts.extend(
+                                inner
+                                    .split(',')
+                                    // `__covariant ValueType` is two names to the
+                                    // one-pass reader: the variance word and the
+                                    // parameter, written with a space between.
+                                    .flat_map(|part| part.split_whitespace().map(str::to_string))
+                                    .filter(|part| !part.is_empty()),
+                            );
+                        }
+                        parts
+                    })
+                    .collect();
+                if names.is_empty() {
+                    break;
+                }
+                let name_form = |text: &str| {
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, text);
+                    form.push(']');
+                    form
+                };
+                let mut parts: Vec<String> = Vec::new();
+                if names.len() > 1 {
+                    parts.push(format!("[\"m\",[{}]]", [name_form(keyword), name_form(&names[0])].join(",")));
+                    for name in &names[1..] {
+                        parts.push(name_form(name));
+                    }
+                } else {
+                    parts.push(format!(
+                        "[\"m\",[{}]]",
+                        [name_form(keyword), name_form(&names[0])].join(",")
+                    ));
+                }
+                let value = if parts.len() > 1 {
+                    format!("[\"t\",[{}]]", parts.join(","))
+                } else {
+                    parts.pop().unwrap()
+                };
+                self.lexer_event(b'x', line, &[], &value, false);
+                break;
+            }
+            if trimmed.starts_with("@class") || trimmed.starts_with("@synthesize") {
+                continue;
+            }
+            // `@property (nonatomic, readonly, getter=isWindow) BOOL isWindow;`:
+            // the grammar hands many of these back as macro calls, so the arm
+            // never fires and the line lost the call the lexer writes. Read from
+            // the line: the attribute list is the call's arguments (an
+            // assignment attribute is a keyword argument) and the type and name
+            // follow it.
+            if let Some(rest) = trimmed.strip_prefix("@property") {
+                let rest = rest.trim();
+                let mut attributes: Vec<String> = Vec::new();
+                let mut after = rest;
+                if let Some(open) = rest.find('(') {
+                    if let Some(close) = rest[open..].find(')') {
+                        let inside = &rest[open + 1..open + close];
+                        for item in inside.split(',') {
+                            let item = item.trim();
+                            if item.is_empty() {
+                                continue;
+                            }
+                            match item.find('=') {
+                                Some(at) => {
+                                    let key = item[..at].trim();
+                                    let value = item[at + 1..].trim();
+                                    let mut form = String::from("[\"k\",");
+                                    push_string(&mut form, key);
+                                    form.push_str(",[\"n\",");
+                                    push_string(&mut form, value);
+                                    form.push_str("]]");
+                                    attributes.push(form);
+                                }
+                                None => {
+                                    let mut form = String::from("[\"n\",");
+                                    push_string(&mut form, item);
+                                    form.push(']');
+                                    attributes.push(form);
+                                }
+                            }
+                        }
+                        after = &rest[open + close + 1..];
+                    }
+                }
+                let mut words: Vec<String> = Vec::new();
+                let mut word = String::new();
+                for ch in after.chars() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        word.push(ch);
+                    } else if !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                if !word.is_empty() {
+                    words.push(word);
+                }
+                if !words.is_empty() {
+                    let index = self.push_call("property".to_string(), line);
+                    let call = format!("[\"c\",{index},0,[{}]]", attributes.join(","));
+                    let mut parts = vec![call];
+                    for word in &words {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, word);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                    let value = format!("[\"m\",[{}]]", parts.join(","));
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                continue;
+            }
+            let mut chars = trimmed.chars();
+            let sign = match chars.next() {
+                Some(ch @ ('-' | '+')) => ch,
+                _ => continue,
+            };
+            let _ = sign;
+            match chars.next() {
+                Some(' ') | Some('(') => {}
+                _ => continue,
+            }
+            // `+ (UIColor *)colorWithHue:(CGFloat)hue` continued over four
+            // lines is one declaration to the one-pass reader, which writes it
+            // once on the line it starts. Read one line at a time, a declaration
+            // that wraps could never end in `;` on its first line and was
+            // dropped - 3 call losses on the corpus, each a whole file.
+            let mut declaration = trimmed.to_string();
+            let mut next = index + 1;
+            while !declaration.trim_end().ends_with(';')
+                && !declaration.contains('{')
+                && !declaration.contains('}')
+                && next < count
+                && declaration.len() < 4000
+            {
+                let start = self.line_starts[next] as usize;
+                let end = self.line_starts.get(next + 1).map(|&at| at as usize).unwrap_or(self.src.len());
+                let more = String::from_utf8_lossy(&self.src[start..end]).trim().to_string();
+                next += 1;
+                if more.is_empty() {
+                    continue;
+                }
+                declaration.push(' ');
+                declaration.push_str(&more);
+            }
+            if !declaration.trim_end().ends_with(';') {
+                continue;
+            }
+            // A parenthesised type is a name only while it stays one word:
+            // `(UIControlState)state` is two names, and the one-pass reader
+            // flattens it, but `(nullable UIImage *)image` is a call over the
+            // words inside the parens. Read as one flat word list, every
+            // nullability-qualified parameter disagreed with the lexer and took
+            // its whole file down with it.
+            let mut pieces: Vec<(bool, Vec<String>)> = Vec::new();
+            let mut word = String::new();
+            let mut depth = 0usize;
+            let mut group: Vec<String> = Vec::new();
+            // A block-typed parameter is a callee to the one-pass reader: it
+            // writes an anonymous call for `success:(void (^)(…))success`, and
+            // although the guard excuses the call as an artefact, the choice
+            // between the two records weighs it. Without it every header that
+            // takes a completion block lost the file to the lexer on count.
+            let mut blocks = 0usize;
+            let mut caret = false;
+            for ch in declaration.chars() {
+                if ch.is_alphanumeric() || ch == '_' {
+                    word.push(ch);
+                    continue;
+                }
+                // A nested paren is where the lexer stops reading the outer
+                // group: `(nullable void (^)(NSURLRequest *request))` is one
+                // merge of `nullable` and `void`, and the block's own parameters
+                // are not part of it. Words past the first nested '(' are
+                // therefore dropped, not folded in.
+                if !word.is_empty() {
+                    let done = std::mem::take(&mut word);
+                    if depth == 1 {
+                        group.push(done);
+                    } else if depth == 0 {
+                        pieces.push((false, vec![done]));
+                    }
+                }
+                match ch {
+                    '(' => {
+                        depth += 1;
+                        if depth == 1 {
+                            group.clear();
+                            caret = false;
+                        }
+                    }
+                    '^' => {
+                        if depth > 0 {
+                            caret = true;
+                        }
+                    }
+                    ')' => {
+                        if depth == 1 {
+                            if caret {
+                                blocks += 1;
+                            }
+                            pieces.push((true, std::mem::take(&mut group)));
+                        }
+                        depth = depth.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+            }
+            if !word.is_empty() {
+                if depth == 1 {
+                    group.push(word);
+                } else if depth == 0 {
+                    pieces.push((false, vec![word]));
+                }
+            }
+            if depth > 0 && !group.is_empty() {
+                pieces.push((true, group));
+            }
+            let words: usize = pieces.iter().map(|(_, names)| names.len()).sum();
+            if words < 2 {
+                continue;
+            }
+            let name_form = |text: &str| {
+                let mut form = String::from("[\"n\",");
+                push_string(&mut form, text);
+                form.push(']');
+                form
+            };
+            let mut parts: Vec<String> = Vec::new();
+            for (is_group, names) in &pieces {
+                if *is_group && names.len() > 1 {
+                    let inner: Vec<String> = names
+                        .iter()
+                        .map(|name| {
+                            if name == "void" {
+                                "0".to_string()
+                            } else {
+                                name_form(name)
+                            }
+                        })
+                        .collect();
+                    parts.push(format!("[\"m\",[{}]]", inner.join(",")));
+                    continue;
+                }
+                for name in names {
+                    if name == "void" {
+                        parts.push("0".to_string());
+                        continue;
+                    }
