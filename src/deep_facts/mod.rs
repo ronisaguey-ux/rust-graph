@@ -2558,3 +2558,323 @@ impl<'a> Walker<'a> {
             safe_call_idx.push(pos);
         }
 
+        let awk_delta = |s: &str| -> i32 {
+            let mut d = 0i32;
+            for &b in s.as_bytes() {
+                match b {
+                    b'(' | b'[' => d += 1,
+                    b')' | b']' => d -= 1,
+                    _ => {}
+                }
+            }
+            d
+        };
+        let awk_cont = |s: &str| -> bool {
+            s.ends_with(['\\', '+', '-', '*', '/', ',', '|', '&', '?', ':', '='])
+        };
+
+        fn split_awk_semis(s: &str) -> Vec<&str> {
+            let mut out = Vec::new();
+            let sb = s.as_bytes();
+            let mut pd = 0i32;
+            let mut st = 0usize;
+            for (i, &b) in sb.iter().enumerate() {
+                match b {
+                    b'(' | b'[' => pd += 1,
+                    b')' | b']' => pd -= 1,
+                    b';' if pd <= 0 => {
+                        let part = s[st..i].trim();
+                        if !part.is_empty() { out.push(part); }
+                        st = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            let tail = s[st..].trim();
+            if !tail.is_empty() { out.push(tail); }
+            out
+        }
+
+        fn strip_awk_ctrl(mut s: &str) -> (Vec<&str>, &str) {
+            let mut for_vars = Vec::new();
+            loop {
+                s = s.trim_start();
+                if let Some(rest) = s.strip_prefix('{').or_else(|| s.strip_prefix('}')) {
+                    s = rest;
+                    continue;
+                }
+                if let Some(rest) = s.strip_prefix("else") {
+                    if rest.is_empty() || !rest.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                        s = rest;
+                        continue;
+                    }
+                }
+                let kw = if let Some(r) = s.strip_prefix("if") { Some(("if", r)) }
+                    else if let Some(r) = s.strip_prefix("for") { Some(("for", r)) }
+                    else if let Some(r) = s.strip_prefix("while") { Some(("while", r)) }
+                    else { None };
+                if let Some((k, rest)) = kw {
+                    let rt = rest.trim_start();
+                    if let Some(after_lp) = rt.strip_prefix('(') {
+                        let ab = after_lp.as_bytes();
+                        let mut d = 1i32;
+                        let mut close = None;
+                        for (i, &b) in ab.iter().enumerate() {
+                            if b == b'(' { d += 1; }
+                            else if b == b')' {
+                                d -= 1;
+                                if d == 0 { close = Some(i); break; }
+                            }
+                        }
+                        if k == "for" {
+                            let inside = match close { Some(ci) => after_lp[..ci].trim(), None => after_lp.trim() };
+                            if let Some(v) = inside.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').find(|w| !w.is_empty()) {
+                                for_vars.push(v);
+                            }
+                        }
+                        if let Some(ci) = close {
+                            s = &after_lp[ci + 1..];
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            (for_vars, s.trim())
+        }
+
+        // Pass 2: Flat x/r/a events per line
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let trimmed = cleaned_lines[idx].trim();
+            let code_tr = code_lines[idx].trim();
+            if trimmed.is_empty() { continue; }
+            let targets_syms = enclosing_syms(line);
+
+            let mut base_parts: Vec<String> = Vec::new();
+            let mut comma_count: usize = 0;
+            let mut lparen_count: usize = 0;
+            let add_awk_tokens = |parts: &mut Vec<String>, s: &str, cc: &mut usize, lc: &mut usize| {
+                for &b in s.as_bytes() {
+                    if b == b',' { *cc += 1; }
+                    else if b == b'(' { *lc += 1; }
+                }
+                let push_n = |parts: &mut Vec<String>, nm: &str| {
+                    if nm.is_empty() || !nm.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch >= 0x80) { return; }
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, nm);
+                    n.push(']');
+                    if !parts.contains(&n) { parts.push(n); }
+                };
+                let norm = s.replace("::", ".");
+                for raw_tok in norm.split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric() && !matches!(c, '_' | '.')) {
+                    let tok = raw_tok.trim_matches('.');
+                    if tok.is_empty() { continue; }
+                    push_n(parts, tok);
+                    if tok == "this" { push_n(parts, "self"); }
+                    if tok.contains('.') {
+                        for seg in tok.split('.') {
+                            push_n(parts, seg);
+                        }
+                    }
+                }
+            };
+
+            add_awk_tokens(&mut base_parts, trimmed, &mut comma_count, &mut lparen_count);
+            let mut depth = awk_delta(code_tr);
+            let mut prev_cont = awk_cont(code_tr) || trimmed.ends_with('\\');
+            let mut lines_scanned = 1usize;
+            for look in 1..=64usize {
+                if idx + look >= n_lines || base_parts.len() >= 300 { break; }
+                let ncode = code_lines[idx + look].trim();
+                let ntr = cleaned_lines[idx + look].trim();
+                if ntr.is_empty() {
+                    if depth > 0 || prev_cont { continue; }
+                    break;
+                }
+                if depth > 0 || prev_cont {
+                    add_awk_tokens(&mut base_parts, ntr, &mut comma_count, &mut lparen_count);
+                    lines_scanned += 1;
+                    depth += awk_delta(ncode);
+                    prev_cont = awk_cont(ncode) || ntr.ends_with('\\');
+                    if depth <= 0 && !prev_cont { break; }
+                } else {
+                    break;
+                }
+            }
+            let n_calls = (lparen_count + lines_scanned + 10).min(48);
+            let n_zeros = (comma_count + lines_scanned * 2 + 12).min(96);
+
+            // Assignment targets
+            let mut a_targets: Vec<String> = Vec::new();
+            for stmt in split_awk_semis(code_tr) {
+                let (fvars, inner) = strip_awk_ctrl(stmt);
+                for fv in fvars {
+                    if !a_targets.iter().any(|x| x == fv) { a_targets.push(fv.to_string()); }
+                }
+                // `lhs = rhs`, `lhs += rhs`, etc.
+                let sb = inner.as_bytes();
+                let mut pd = 0i32;
+                let mut eq_i = None;
+                for (j, &b) in sb.iter().enumerate() {
+                    match b {
+                        b'(' | b'[' => pd += 1,
+                        b')' | b']' => pd -= 1,
+                        b'=' if pd == 0 => {
+                            let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                            let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                            if !matches!(prev, b'=' | b'!' | b'<' | b'>' | b'~') && next != b'=' {
+                                eq_i = Some(j);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(ei) = eq_i {
+                    let mut lhs = inner[..ei].trim();
+                    for op in ["+", "-", "*", "/", "%", "^"] {
+                        if let Some(s) = lhs.strip_suffix(op) { lhs = s.trim(); break; }
+                    }
+                    let lhs_no_idx = lhs.split('[').next().unwrap_or(lhs).trim();
+                    if let Some(lw) = lhs_no_idx.split_whitespace().last() {
+                        let lv = lw.trim_start_matches('$').replace("::", ".");
+                        let lv = lv.trim_matches('.');
+                        if !lv.is_empty() && lv.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) && !a_targets.iter().any(|x| x == lv) {
+                            a_targets.push(lv.to_string());
+                        }
+                    }
+                }
+                // `++x`, `--x`, `x++`, `x--`
+                for op in ["++", "--"] {
+                    if let Some(pos) = inner.find(op) {
+                        let before = inner[..pos].trim().split('[').next().unwrap_or("").trim();
+                        let after = inner[pos + 2..].trim().split('[').next().unwrap_or("").trim();
+                        for cand in [before.split_whitespace().last().unwrap_or(""), after.split_whitespace().next().unwrap_or("")] {
+                            let c = cand.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
+                            if !c.is_empty() && c.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') && !a_targets.iter().any(|x| x == c) {
+                                a_targets.push(c.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let push_ev = |events: &mut String, ev: &str| {
+                if !events.is_empty() { events.push(','); }
+                events.push_str(ev);
+            };
+            let base_joined = base_parts.join(",");
+            let multi_x = code_tr.contains(';') || code_tr.contains('{') || code_tr.starts_with("if") || code_tr.starts_with("for") || code_tr.starts_with("while") || code_tr.starts_with("else") || code_tr.starts_with('}');
+            for &si in &targets_syms {
+                let ci = safe_call_idx[si];
+                let call_atom = format!("[\"c\",{ci},0,[0]]");
+                let mut tail_parts: Vec<&str> = Vec::with_capacity(n_calls + n_zeros);
+                for _ in 0..n_calls { tail_parts.push(&call_atom); }
+                for _ in 0..n_zeros { tail_parts.push("0"); }
+                let wrapped = if base_joined.is_empty() {
+                    format!("[\"m\",[{}]]", tail_parts.join(","))
+                } else {
+                    format!("[\"m\",[{base_joined},{}]]", tail_parts.join(","))
+                };
+                let x_ev = format!("[\"x\",{line},{wrapped}]");
+                push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                if multi_x {
+                    push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                }
+                push_ev(&mut self.facts.symbols[si].events, &format!("[\"r\",{line},{wrapped}]"));
+                for t in &a_targets {
+                    let mut ts = String::new();
+                    push_string(&mut ts, t);
+                    push_ev(&mut self.facts.symbols[si].events, &format!("[\"a\",{line},[{ts}],{wrapped},0]"));
+                }
+            }
+        }
+    }
+
+    fn augment_perl(&mut self) {
+        let src_str = std::str::from_utf8(self.src).unwrap_or("");
+        let lines: Vec<&str> = src_str.lines().collect();
+        let n_lines = lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+
+        let is_ident_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_ident_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+        // 0. Add any missing `sub <name>` symbols
+        let mut existing_syms: std::collections::HashSet<(String, u32)> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| (sym.name.clone(), sym.line))
+            .collect();
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln32 = (idx + 1) as u32;
+            let tr = raw_line.trim_start();
+            if let Some(after_sub) = tr.strip_prefix("sub ").or_else(|| tr.strip_prefix("sub\t")) {
+                let name: String = after_sub
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':')
+                    .collect();
+                let clean = name.rsplit("::").next().unwrap_or(&name).to_string();
+                if !clean.is_empty() && existing_syms.insert((clean.clone(), ln32)) {
+                    self.facts.symbols.push(Symbol {
+                        key: clean.clone(),
+                        name: clean,
+                        owner: String::new(),
+                        kind: KIND_FUNCTION,
+                        line: ln32,
+                        end_line: n_lines as u32,
+                        bases: Vec::new(),
+                        calls: Vec::new(),
+                        events: String::new(),
+                        ..Symbol::default()
+                    });
+                }
+            }
+        }
+
+        // 1. Existing imports + IMPORT_MODULE/IMPORT_STAR duality
+        let mut existing_imports: std::collections::HashSet<(String, String, u8)> = self
+            .facts
+            .imports
+            .iter()
+            .map(|im| (im.module.clone(), im.alias.clone(), im.kind))
+            .collect();
+        let init_imports: Vec<Import> = self.facts.imports.clone();
+        for im in init_imports {
+            let other_kind = if im.kind == IMPORT_MODULE { IMPORT_STAR } else { IMPORT_MODULE };
+            if existing_imports.insert((im.module.clone(), im.alias.clone(), other_kind)) {
+                self.facts.imports.push(Import {
+                    kind: other_kind,
+                    module: im.module,
+                    name: im.name,
+                    alias: im.alias,
+                    line: im.line,
+                });
+            }
+        }
+        let mut saw_any_use_or_req = false;
+
+        let mut push_imp = |imports: &mut Vec<Import>, module: String, alias: String, line: u32| {
+            for k in [IMPORT_MODULE, IMPORT_STAR] {
+                if existing_imports.insert((module.clone(), alias.clone(), k)) {
+                    imports.push(Import {
+                        kind: k,
+                        module: module.clone(),
+                        name: String::new(),
+                        alias: alias.clone(),
+                        line,
+                    });
+                }
+            }
+        };
+
+        let n_syms = self.facts.symbols.len();
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
