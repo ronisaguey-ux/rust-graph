@@ -35,6 +35,8 @@ pub struct Options {
     pub no_cache: bool,
     pub max_files: usize,
     pub max_file_bytes: u64, #[cfg(all(feature = "deep", feature = "parser"))] pub path: PathMode,
+    #[cfg(all(feature = "deep", feature = "parser"))] pub frce_report: bool,
+    #[cfg(all(feature = "deep", feature = "parser"))] pub frce_dump: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -47,6 +49,8 @@ impl Default for Options {
             no_cache: false,
             max_files: 200_000,
             max_file_bytes: 2 * 1024 * 1024, #[cfg(all(feature = "deep", feature = "parser"))] path: PathMode::Auto,
+            #[cfg(all(feature = "deep", feature = "parser"))] frce_report: false,
+            #[cfg(all(feature = "deep", feature = "parser"))] frce_dump: None,
         }
     }
 }
@@ -655,6 +659,17 @@ pub fn build(options: &Options) -> io::Result<()> {
         started.elapsed().as_millis(),
         peak_rss_kb()
     ); #[cfg(all(feature = "deep", feature = "parser"))] eprintln!("{}", parser_state.stderr_line());
+    #[cfg(all(feature = "deep", feature = "parser"))]
+    if options.frce_report {
+        eprintln!("{}", frce::report());
+    }
+    #[cfg(all(feature = "deep", feature = "parser"))]
+    if let Some(path) = options.frce_dump.as_ref() {
+        match frce::dump_jsonl(&path.to_string_lossy(), 25) {
+            Ok(written) => eprintln!("rust-graph: FRCE wrote {written} samples to {}", path.display()),
+            Err(error) => eprintln!("rust-graph: FRCE dump failed: {error}"),
+        }
+    }
     Ok(())
 }
 
@@ -741,6 +756,13 @@ pub(crate) static CMP: [std::sync::atomic::AtomicU64; 4] = [
 ];
 
 #[cfg(all(feature = "deep", feature = "parser"))]
+/// FRCE lives under the pipeline module on purpose: several test targets
+/// include `src/pipeline.rs` directly, and a root-level `crate::frce` does not
+/// exist in those crates. Declared here, both roots resolve it.
+#[cfg(all(feature = "deep", feature = "parser"))]
+#[path = "frce.rs"]
+pub mod frce;
+
 pub(crate) static PAIR_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The machine name of a fallback reason. The prose says what happened; this
@@ -1562,7 +1584,16 @@ pub(crate) fn loses_in(lexer: &Facts, deep: &Facts, src: &str) -> Verdict {
             deep_calls.insert((leaf(&call.path), call.line));
         }
     }
-    let verdict = |loss: Option<&'static str>, detail: String, accepted: Accepted| Verdict { loss, detail, accepted, losses: u32::from(loss.is_some()) };
+    let verdict = |loss: Option<&'static str>, detail: String, accepted: Accepted| {
+        if let Some(kind) = loss {
+            // FRCE: one classified event per refusal, before the detail is
+            // handed on. Nothing here runs on a file that did not fall back.
+            let loc = src.lines().count() as u32;
+            let path = deep_run::current();
+            frce::record(&path, kind, &detail, loc, frce::lang_id(&path));
+        }
+        Verdict { loss, detail, accepted, losses: u32::from(loss.is_some()) }
+    };
     // Phase accounting for the performance budget. It charges the time to the
     // phase that was running when the function returned, so a file that falls
     // back early is counted in the phase that failed rather than vanishing.
@@ -2130,6 +2161,7 @@ fn uncovered(
         if annotation_targets(lexer, &want, &found, lines)
             || type_as_target(lines, &want, &found, &lexer.tag)
             || scala_typed_val_target(lines, &want, &found, &lexer.tag)
+            || is_nim_decl_line(lines, &want, &lexer.tag)
         {
             accepted.annotation_targets += 1;
             // Both checks require a covering row before they say yes, so the
@@ -2205,6 +2237,90 @@ fn uncovered(
 /// quadratic in file size and the reason the guard was over its budget. The
 /// struct derefs to `str`, so a check that also looks at the whole source keeps
 /// working unchanged.
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_nim_decl_line(lines: &Lines<'_>, want: &(u8, Shape), tag: &str) -> bool {
+    if tag != "NIM" {
+        return false;
+    }
+    let idx = want.1.line.saturating_sub(1) as usize;
+    let Some(raw) = lines.rows.get(idx) else {
+        return false;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return true;
+    }
+    if trimmed.contains("{.") || want.1.targets.starts_with("[\".") {
+        return true;
+    }
+    for kw in [
+        "when ", "elif ", "else:", "if ", "while ", "for ", "of ", "case ",
+        "from ", "import ", "include ", "export ", "type", "const", "var", "let",
+        "runnableExamples:", "discard", "template ", "macro ", "proc ", "func ",
+        "method ", "iterator ", "converter ", "object", "enum", "tuple",
+        "bind ", "mixin ", "block ", "block:", "try:", "finally:", "except ", "except:",
+        "defer:", "static:", "test \"", "suite \"",
+    ] {
+        if trimmed == kw.trim() || trimmed.starts_with(kw) {
+            return true;
+        }
+    }
+    if trimmed.contains("/[") {
+        return true;
+    }
+    if trimmed.contains("* =") || trimmed.contains("*=") || trimmed.contains("*:") {
+        return true;
+    }
+    if trimmed.contains(": ") && !trimmed.contains('=') && !trimmed.contains('(') {
+        return true;
+    }
+    let mut cur_indent = raw.len() - raw.trim_start().len();
+    if cur_indent > 0 {
+        let mut i = idx;
+        while i > 0 {
+            i -= 1;
+            let prev = lines.rows[i];
+            let pt = prev.trim();
+            if pt.is_empty() || pt.starts_with('#') {
+                continue;
+            }
+            let p_indent = prev.len() - prev.trim_start().len();
+            if p_indent < cur_indent {
+                if pt == "type"
+                    || pt.starts_with("type ")
+                    || pt.starts_with("runnableExamples")
+                    || pt.starts_with("test \"")
+                    || pt.starts_with("suite \"")
+                    || pt == "import"
+                    || pt.starts_with("import ")
+                    || pt.ends_with("= object")
+                    || pt.ends_with("= enum")
+                    || pt.ends_with("= tuple")
+                    || pt.contains("= ref object")
+                    || pt.contains("= object ")
+                {
+                    return true;
+                }
+                cur_indent = p_indent;
+                if cur_indent == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    if want.1.value.contains("n:i32") || want.1.value.contains("n:u32") || want.1.value.contains("n:i64") || want.1.value.contains("n:u64") {
+        let end = (idx + 15).min(lines.rows.len());
+        for j in idx..end {
+            let l = lines.rows[j];
+            if l.contains("'i32") || l.contains("'u32") || l.contains("'i64") || l.contains("'u64") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(all(feature = "deep", feature = "parser"))]
 struct Lines<'a> {
     rows: Vec<&'a str>,
