@@ -638,3 +638,206 @@ pub fn report() -> String {
             .iter()
             .map(|(id, counters)| {
                 let files: u64 = counters.iter().sum();
+                let top = counters
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(i, count)| (**count, std::cmp::Reverse(*i)))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let loc = snapshot[top].loc;
+                (*id, files, top, loc)
+            })
+            .collect();
+        rows.sort_unstable_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+        rows
+    });
+    if !per_language.is_empty() {
+        out.push_str("\nby language (fallbacks, leading reason)\n");
+        for (id, files, top, loc) in per_language {
+            let reason = FallbackReason::from_index(top).expect("index is in range");
+            out.push_str(&format!(
+                "  {:<14} {:>6} fallbacks  {:<34} ({} LOC in that reason across the run)\n",
+                lang_name(id),
+                files,
+                reason.name(),
+                loc
+            ));
+        }
+    }
+    let lo = std::env::var("RG_FRCE_SAMPLES").ok().and_then(|value| value.parse().ok()).unwrap_or(0);
+    if lo > 0 {
+        out.push_str("\nsamples\n");
+        for index in sorted_reasons(&snapshot) {
+            let bucket = &snapshot[index];
+            let reason = FallbackReason::from_index(index).expect("index is in range");
+            for sample in bucket.samples.iter().take(lo.min(3)) {
+                let path = PATHS.with(|paths| paths.borrow().get(sample.path as usize).cloned().unwrap_or_default());
+                out.push_str(&format!(
+                    "  {} {}:{} line {} loc {} {}\n",
+                    reason.name(),
+                    path,
+                    sample.line,
+                    sample.line,
+                    sample.loc,
+                    CHANNELS[sample.channel as usize]
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
+/// The line a sample points at, trimmed, for a reproducer a person can read.
+fn line_text(path: &str, line: u32) -> String {
+    if path.is_empty() || line == 0 {
+        return String::new();
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return String::new(),
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    text.lines()
+        .nth(line as usize - 1)
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(200)
+        .collect()
+}
+
+/// `--dump-fallbacks <path>`: one JSON object per kept sample, capped per reason.
+pub fn dump_jsonl(path: &str, per_reason: usize) -> std::io::Result<usize> {
+    let snapshot = STATS.with(|stats| *stats.borrow());
+    let mut file = std::fs::File::create(path)?;
+    let mut written = 0usize;
+    for index in sorted_reasons(&snapshot) {
+        let bucket = &snapshot[index];
+        let reason = FallbackReason::from_index(index).expect("index is in range");
+        let kept = bucket.kept as usize;
+        for sample in bucket.samples.iter().take(per_reason.min(kept)) {
+            let source = PATHS.with(|paths| paths.borrow().get(sample.path as usize).cloned().unwrap_or_default());
+            let text = line_text(&source, sample.line);
+            writeln!(
+                file,
+                "{{\"schema\":1,\"code\":{},\"reason\":\"{}\",\"channel\":\"{}\",\"file\":\"{}\",\"line\":{},\"col\":{},\"loc_affected\":{},\"files_in_reason\":{},\"loc_in_reason\":{},\"source\":\"{}\"}}",
+                reason.code(),
+                reason.name(),
+                CHANNELS[sample.channel as usize],
+                escape(&source),
+                sample.line,
+                sample.col,
+                sample.loc,
+                bucket.files,
+                bucket.loc,
+                escape(&text)
+            )?;
+            written += 1;
+        }
+    }
+    file.flush()?;
+    Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_reason_has_a_code_and_an_explanation() {
+        for (index, reason) in REASONS.iter().enumerate() {
+            assert_eq!(reason.code() as usize, index + 1, "code order is the contract");
+            assert_eq!(reason.index(), index);
+            assert!(!reason.name().is_empty());
+            assert!(!reason.explanation().is_empty());
+            assert_eq!(FallbackReason::from_index(index), Some(*reason));
+        }
+        assert_eq!(FallbackReason::from_index(FallbackReason::COUNT), None);
+    }
+
+    #[test]
+    fn classification_is_deterministic_and_covers_the_guard_arms() {
+        assert_eq!(
+            classify("event", "event x line 5: no event on a line both readers can mean"),
+            FallbackReason::MissingStatementTerminator
+        );
+        assert_eq!(
+            classify("event", "a name the lexer read is not in the CST's value"),
+            FallbackReason::DifferentialNameValue
+        );
+        assert_eq!(
+            classify("event", "a call or constant the lexer read is not in the CST's value"),
+            FallbackReason::DifferentialCallValue
+        );
+        assert_eq!(
+            classify("event", "the CST wrote the value as the constant 0"),
+            FallbackReason::DifferentialConstantZero
+        );
+        assert_eq!(
+            classify("event", "the statement's target list differs (names or order)"),
+            FallbackReason::DifferentialTargetsDiffer
+        );
+        assert_eq!(
+            classify("call", "call printf line 4 in "),
+            FallbackReason::DifferentialMissingFact
+        );
+        assert_eq!(classify("weird", "nothing recognisable"), FallbackReason::UnclassifiedSyntaxBailout);
+    }
+
+    #[test]
+    fn line_and_column_are_read_from_the_detail() {
+        assert_eq!(python_like_line("event x line 42 targets  in  (paired  line 1)"), (42, 0));
+        assert_eq!(python_like_line("call f line 7 col 12 in x"), (7, 12));
+        assert_eq!(python_like_line("no line here"), (0, 0));
+    }
+
+    #[test]
+    fn counters_sample_and_rank() {
+        reset();
+        record("a.tcl", "call", "call printf line 4 in ", 200, 1);
+        record("b.tcl", "call", "call printf line 9 in ", 900, 1);
+        record("c.tcl", "event", "the CST wrote the value as the constant 0", 50, 2);
+        assert_eq!(total(), 3);
+        let table = report();
+        assert!(table.contains("DifferentialMissingFact"));
+        assert!(table.contains("DifferentialConstantZero"));
+        // 900 + 200 LOC of missing facts outranks 50 LOC of constant-zero.
+        let missing = table.find("DifferentialMissingFact").unwrap();
+        let zero = table.find("DifferentialConstantZero").unwrap();
+        assert!(missing < zero, "rank order is LOC first");
+        reset();
+        assert_eq!(total(), 0);
+    }
+
+    #[test]
+    fn jsonl_dump_is_valid_one_object_per_line() {
+        reset();
+        record("src/example.rs", "event", "the CST wrote the value as the constant 0", 120, 1);
+        let path = std::env::temp_dir().join("frce-test.jsonl");
+        let written = dump_jsonl(path.to_str().unwrap(), 25).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(written, 1);
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.starts_with('{') && text.trim_end().ends_with('}'));
+        assert!(text.contains("\"schema\":1"));
+        assert!(text.contains("\"reason\":\"DifferentialConstantZero\""));
+        reset();
+    }
+}
