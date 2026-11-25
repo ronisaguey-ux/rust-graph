@@ -8318,3 +8318,323 @@ fn dotted_piece(text: &str) -> bool {
                         parts.push(value);
                     } else if self.language.name == "csharp" {
                         if let Some(word) = self.leaf_name(child) {
+                            let mut out = "[\"n\",".to_string();
+                            push_string(&mut out, &word);
+                            out.push(']');
+                            parts.push(out);
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `[u8; CLASSES]`: an array type holds a type name and a length, both
+            // of them names the lexer reads.
+            "array_type" | "slice_type" | "reference_type" | "pointer_type" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if matches!(self.kind(child), "[" | "]" | "&" | "*" | ";")
+                        || (self.is_layout(child) && !(self.language.name == "csharp" && self.leaf_name(child).is_some()))
+                    {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        parts.push(value);
+                    } else if self.language.name == "csharp" {
+                        if let Some(word) = self.leaf_name(child) {
+                            let mut out = "[\"n\",".to_string();
+                            push_string(&mut out, &word);
+                            out.push(']');
+                            parts.push(out);
+                        }
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            "dimensions" if self.language.name == "csharp" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if !self.is_layout(child) && !matches!(self.kind(child), "[" | "]" | ",") {
+                        parts.push(self.form(child));
+                    }
+                }
+                if parts.is_empty() {
+                    "0".to_string()
+                } else {
+                    // Sized dimensions (`new object?[0]`) form as a bracketed list
+                    // (`["t",[0]]`) to match the one-pass reader.
+                    format!("[\"t\",[{}]]", parts.join(","))
+                }
+            }
+            // Rust's and JavaScript's lexers have no keyword table for these:
+            // `true` is a name, and an object literal `{ value: true }` records
+            // one where the CST was writing a constant.
+            // C++ is the same: `constexpr bool X = false;` inside a namespace
+            // reaches this walk, and the lexer reads `false` as a name.
+            "true" | "false" if self.is_rust() || self.is_js() || self.is_c() => {
+                let text = self.text_string(id);
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &text);
+                out.push(']');
+                out
+            }
+            // Kotlin's one-pass reader has no keyword table either, so
+            // `enableSsl = false` files `n:false` and `x = null` files `n:null`
+            // while the CST wrote the constant 0 - every boolean and null
+            // initialiser on a line the lexer reads as a statement disagreed.
+            "true" | "false" | "null" if self.is_kotlin() => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
+            // JavaScript reads `null` and `undefined` as names too: there is no
+            // keyword table on the lexer's side, so `obj.__proto__ = null`
+            // records `n:null` while the CST wrote the constant 0.
+            "null" | "undefined" if self.is_js() => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
+            // C# spells its three constants as keywords and the one-pass
+            // reader writes each of them as a name (`n:true`, `n:null`). A
+            // *generic* method's body reaches this shared walk instead of
+            // `c_function`, so `return true;` inside `T M<T>()` formed as the
+            // constant 0 and lost its value on every member with a type
+            // parameter list, while the same statement in a non-generic method
+            // was right.
+            "true" | "false" | "null" if self.language.name == "csharp" => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
+            // C++ spells `true`/`false` as keywords; the one-pass reader writes each
+            // as a name, so `constexpr bool X = true;` in a namespace is `n:true`.
+            "true" | "false" if self.language.name == "cpp" => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
+            // C++ spells `true`/`false` as keywords; the one-pass reader writes each
+            // as a name, so `constexpr bool X = true;` in a namespace is `n:true`.
+            "true" | "false" if self.language.name == "cpp" => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
+            // C++ spells `true`/`false` as keywords; the one-pass reader writes each
+            // as a name, so `constexpr bool X = true;` in a namespace is `n:true`.
+            "true" | "false" if self.language.name == "cpp" => {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                out
+            }
+            // C#'s `string` and `float` are predefined type keywords (leaves
+            // whose text is `string` / `float`), not literals (`string_literal`
+            // / `real_literal`), so the one-pass reader writes `n:string` /
+            // `n:float`.
+            "string" | "float" | "bool" if self.language.name == "csharp" => format!("[\"n\",\"{kind}\"]"),
+            "string" | "string_literal" | "number" | "integer" | "float" | "true" | "false"
+            | "none" | "null" | "undefined" | "regex" | "comment"
+            | "arrow_function" | "function_expression" | "generator_function" => "0".to_string(),
+            // `WindowGroup { ... }`: Swift's trailing closure call has the
+            // callee as its first expression child; when the callee is a bare
+            // identifier leaf (`WindowGroup`), the generic fallback skips it
+            // because `first_child == NONE`.
+            "trailing_closure" if self.language.name == "swift" => {
+                let callee = self.expression_child(id).map_or_else(|| "0".to_string(), |child| self.form(child));
+                let closure = self.children(id).into_iter().find(|&child| self.kind(child) == "closure");
+                match closure.map(|child| self.form(child)) {
+                    Some(form) if form != "0" => format!("[\"m\",[{callee},[\"m\",[{form}]]]]"),
+                    _ => callee,
+                }
+            }
+            "trailing_closure" => self
+                .expression_child(id)
+                .map_or_else(|| "0".to_string(), |child| self.form(child)),
+            // `.init({ _ in stringCtx })` / `{ request.response(a: b) }`: a Swift
+            // closure is its parameters and the formed values of its body
+            // statements, which is how the lexer writes it. Flattening the body
+            // to identifier leaves dropped every call inside `{ ... }` from
+            // the enclosing assignment or call argument. Keep the calls pushed
+            // while forming the body: truncating `calls` afterwards leaves
+            // `["c", id, ...]` in the closure's value pointing at freed indices
+            // that an enclosing `{ ... }()` or later call reuses.
+            "closure" if self.language.name == "swift" => {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(head) = self.swift_closure_head(id) {
+                    parts.push(head);
+                } else if let Some(sig) = self.child_of_kind(id, "closure_signature") {
+                    self.swift_collect_idents(sig, &mut parts);
+                }
+                let statements: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != "closure_signature")
+                    .collect();
+                for statement in statements {
+                    let value = self.form(statement);
+                    if value != "0" {
+                        parts.push(value);
+                    } else {
+                        // Statements that `form` does not map (e.g. `for`,
+                        // `switch`, `return`) still contribute their calls,
+                        // literals and identifier leaves, matching the lexer's
+                        // flat read.
+                        self.swift_collect_forms(statement, &mut parts);
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `class Action extends _AttributeHolder(Function) {}`: the body is
+            // deferred, but the `extends` heritage expression is evaluated when
+            // the class expression is evaluated.
+            "class" => match self.children(id).into_iter().find(|&child| self.kind(child) == "class_heritage") {
+                Some(heritage) => self
+                    .expression_child(heritage)
+                    .map_or_else(|| "0".to_string(), |child| self.form(child)),
+                None => "0".to_string(),
+            },
+            // A region the grammar could not name. The tokens are still there —
+            // recovery keeps every byte — so the values inside it are read like
+            // any other: `("prefix " f"{call(x)}")` is an ERROR today because
+            // implicit concatenation of a literal with an f-string is not a
+            // rule, and skipping the region dropped the call inside it.
+            "ERROR" => {
+                // Recovery may leave bare tokens (identifiers and literals, e.g.
+                // inside a Swift collection literal whose typed closure
+                // parameter failed to parse) alongside structured subtrees;
+                // keep every non-layout child so neither names nor constants
+                // are dropped.
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child))
+                    .collect();
+                // The tokens inside a region the grammar could not name are
+                // still there, and a call is visible in them: a name followed by
+                // an argument list. Reading that is not inventing a fact — it is
+                // reading what recovery left — and it is the only way a call
+                // inside `("prefix " f"{call(x)}")` survives, since implicit
+                // concatenation of a literal with an f-string is not a rule yet.
+                let calls = self.recovered_calls(id);
+                let mut parts: Vec<String> = items.into_iter().map(|item| self.form(item)).collect();
+                for call in calls {
+                    parts.push(format!("[\"c\",{call},0,[0]]"));
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // A keyword reused as an identifier (`match`, `type`, `case`)
+            // carries that keyword as its kind; the spelling is the name.
+            _ if self.leaf_name(id).is_some() => {
+                let text = self.leaf_name(id).unwrap_or_default();
+                let text = if text == "this" { "self".to_string() } else { text };
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &text);
+                out.push(']');
+                out
+            }
+            _ => {
+                // A node with no mapping: its first value-bearing child, so a
+                // wrapper the grammar added costs nothing.
+                match self.expression_child(id) {
+                    Some(child) if self.node(child).first_child != NONE => self.form(child),
+                    _ => "0".to_string(),
+                }
+            }
+        }
+    }
+
+
+    /// Calls visible in the raw tokens of an `ERROR` region: `name(` or
+    /// `a.b(`. Nothing is invented — the name and the argument list are both in
+    /// the source, and the region is only reached where the grammar failed to
+    /// build a node for them.
+    pub(crate) fn nim_recovered_calls(&mut self, id: u32) -> Vec<usize> {
+        let mut calls = Vec::new();
+        let mut leaves = Vec::new();
+        self.cs_collect_leaves(id, &mut leaves);
+        let mut i = 0;
+        while i < leaves.len() {
+            let tok = leaves[i];
+            let k = self.kind(tok);
+            let txt = self.text_string(tok);
+            let is_name = k == "identifier" || matches!(txt.as_str(), "cast" | "addr" | "proc" | "func" | "iterator" | "typeof" | "sizeof" | "defined" | "declared");
+            if !is_name {
+                i += 1;
+                continue;
+            }
+            if matches!(txt.as_str(), "if" | "elif" | "when" | "while" | "for" | "case" | "of" | "return" | "yield" | "raise" | "discard" | "not" | "and" | "or" | "xor" | "in" | "notin" | "is" | "isnot" | "as" | "div" | "mod" | "shl" | "shr" | "var" | "let" | "const" | "type" | "import" | "include" | "from" | "export" | "except" | "try" | "finally" | "block" | "defer" | "tuple" | "object" | "enum" | "distinct" | "ref" | "ptr" | "out" | "static") {
+                i += 1;
+                continue;
+            }
+            let mut end = i;
+            let mut name = txt.clone();
+            while end + 2 < leaves.len()
+                && self.text_string(leaves[end + 1]) == "."
+                && self.kind(leaves[end + 2]) == "identifier"
+            {
+                name.push('.');
+                name.push_str(&self.text_string(leaves[end + 2]));
+                end += 2;
+            }
+            let next = end + 1;
+            if next < leaves.len() {
+                let nt = self.text_string(leaves[next]);
+                if nt == "(" {
+                    let line = self.line(tok);
+                    calls.push(self.push_call(name, line));
+                    i = next + 1;
+                    continue;
+                }
+                if nt == "[" {
+                    let mut depth = 0i32;
+                    let mut j = next;
+                    while j < leaves.len() {
+                        let jt = self.text_string(leaves[j]);
+                        if jt == "[" {
+                            depth += 1;
+                        } else if jt == "]" {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                    if j + 1 < leaves.len() && self.text_string(leaves[j + 1]) == "(" {
+                        let line = self.line(tok);
+                        calls.push(self.push_call(name, line));
+                        i = next + 1;
+                        continue;
+                    }
+                }
+            }
+            i = end + 1;
+        }
+        calls
+    }
+
+    pub(crate) fn recovered_calls(&mut self, id: u32) -> Vec<usize> {
+        if self.facts.tag == "ERL" {
