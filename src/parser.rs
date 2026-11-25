@@ -2938,6 +2938,7 @@ impl<'a> Parser<'a> {
             calls: &mut calls,
             receiver: &receiver,
             bodyless: self.bodyless,
+            depth: 0,
         };
         write(&mut emit, &mut out);
         self.facts.symbols[symbol].calls = calls;

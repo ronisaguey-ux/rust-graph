@@ -3218,7 +3218,7 @@ fn is_declaration_call(src: &Lines<'_>, name: &str, line: u32) -> bool {
     while let Some(at) = text[from..].find(name) {
         let start = from + at;
         let prefix = text[..start].trim_end();
-        if INTRODUCERS.iter().any(|word| prefix.ends_with(word)) {
+        if start > prefix.len() && INTRODUCERS.iter().any(|word| prefix.ends_with(word)) {
             return true;
         }
         from = start + name.len();
