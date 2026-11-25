@@ -7998,3 +7998,323 @@ fn dotted_piece(text: &str) -> bool {
                             }
                             None => self.form(items[0]),
                         }
+                    }
+                    _ => {
+                        let key = self.form(items[0]);
+                        let value = self.form(items[items.len() - 1]);
+                        format!("[\"m\",[{key},{value}]]")
+                    }
+                }
+            }
+            "keyword_argument" => {
+                // `f(default=True)` is `name`, `=`, `value`: the separator is a
+                // child, and taking the children as a pair read the value as
+                // the `=` and every keyword argument as a constant.
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != "=")
+                    .collect();
+                // The grammar writes the `=` sometimes as a child and sometimes
+                // not, so the name is the first item and the value the last.
+                match (items.first().copied(), items.last().copied()) {
+                    (Some(name), Some(value)) if items.len() >= 2 => {
+                        let mut out = "[\"k\",".to_string();
+                        push_string(&mut out, &self.text_string(name));
+                        out.push(',');
+                        out.push_str(&self.form(value));
+                        out.push(']');
+                        out
+                    }
+                    _ => "0".to_string(),
+                }
+            }
+            // `f(*args, **kwargs)`: Python spells the double splat its own way,
+            // and the one-pass lexer reads the name under it.
+            "spread_element" | "spread_argument" | "rest_pattern" | "list_splat" | "list_splat_pattern" | "dictionary_splat" => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
+            "assignment" | "assignment_expression" | "augmented_assignment_expression" => {
+                let children = self.children(id);
+                let value = children.last().filter(|&&last| last != children[0]).map(|&last| self.form(last)).unwrap_or_else(|| "0".to_string());
+                if self.language.name == "csharp" {
+                    let binder = self.form(children[0]);
+                    if let Some(first) = children.first().copied() {
+                        if let Some(&last) = children.last().filter(|&&l| l != first) {
+                            let t_name = match self.kind(first) {
+                                "identifier" => Some(self.text_string(first)),
+                                "member_access" | "field_access" => Some(self.path_of(first)),
+                                _ => self.leaf_name(first),
+                            };
+                            if let Some(t_name) = t_name.filter(|s| !s.is_empty()) {
+                                self.cs_bind_constructed(t_name, last);
+                            }
+                        }
+                    }
+                    if binder != "0" {
+                        return format!("[\"m\",[{binder},{value}]]");
+                    }
+                }
+                // `cache['SHA1'] = cache['sha1'] = _sha1.sha1` nests: the right
+                // side is another assignment, and the one-pass lexer reads the
+                // line left to right, so its value names the inner binder too.
+                // Reading only the innermost value dropped `cache`.
+                let chained = children
+                    .last()
+                    .filter(|&&last| last != children[0])
+                    .is_some_and(|&last| matches!(self.kind(last), "assignment" | "assignment_expression"));
+                if chained {
+                    let binder = self.form(children[0]);
+                    return format!("[\"m\",[{binder},{value}]]");
+                }
+                // `var _default = exports.default = (0, f)(x)`: the declaration's
+                // value is an assignment of its own, and the one-pass lexer
+                // reads that binder into the value. Transpiled CommonJS does
+                // this on nearly every module, and the CST wrote the inner
+                // value alone.
+                if self.is_js() {
+                    let binder = self.form(children[0]);
+                    if binder != "0" {
+                        return format!("[\"m\",[{binder},{value}]]");
+                    }
+                }
+                value
+            }
+            // `f"{a(x)} b{c(y)}"` and `` `a${h(x)}b${g(y)}` ``: the text is not
+            // a value, but each field's expression is, and the one-pass lexer's
+            // string reader forms the same merge of them. So a call written in
+            // a field is a fact on both paths, and a field with no call saves
+            // nothing to compare.
+            // Kotlin's `"$a ${f(b)}"` and Swift's `"\(f(b))"` are one
+            // `string_literal` with an `interpolation` per hole, exactly as
+            // Python's f-string and JavaScript's template are. Reading the
+            // literal as text made every call in a hole invisible — the lexer's
+            // string reader does see them, so the hole is the fact.
+            "f_string" | "template_string" | "string_literal"
+                if matches!(kind, "f_string" | "template_string")
+                    || matches!(self.language.name, "kotlin" | "swift" | "scala") =>
+            {
+                // Python's replacement field is `interpolation`, JavaScript's
+                // is `template_substitution`; everything else is the same
+                // shape, and a template with no substitution is still `0`.
+                let field = if matches!(kind, "f_string" | "string_literal") {
+                    "interpolation"
+                } else {
+                    "template_substitution"
+                };
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    // Kotlin's `$name` is a token, not a node: the grammar hands
+                    // it over as `template_name`, and its text is the name
+                    // between the `$`. Skipped, the hole became the constant 0
+                    // and the lexer's `n:name` had nowhere to pair.
+                    if self.kind(child) == "template_name" {
+                        let text = self.text_string(child);
+                        let name = text.trim_start_matches('$');
+                        let name = if name == "this" { "self" } else { name };
+                        if !name.is_empty() {
+                            let mut out = "[\"n\",".to_string();
+                            push_string(&mut out, name);
+                            out.push(']');
+                            parts.push(out);
+                        }
+                        continue;
+                    }
+                    if self.kind(child) != field {
+                        continue;
+                    }
+                    // `{x!r:>{w}}` holds one expression; the conversion and the
+                    // format spec are text, and their nested fields are
+                    // `interpolation` nodes of their own, so they are reached
+                    // from the spec, not from here. A template substitution's
+                    // nested substitutions live inside a nested `template_string`
+                    // node, which `form` reaches as the substitution's value.
+                    // A leaf identifier is a value: requiring the part to have
+                    // children of its own skipped `{a}` entirely and left the
+                    // field as the constant 0.
+                    if self.language.name == "swift" {
+                        // A Swift interpolation can split a nested generic
+                        // type like `Outer.Inner<Int>.self` into the base
+                        // navigation expression plus recovered `<Int>.self`
+                        // siblings, so read every non-layout part in the hole.
+                        let mut hole_parts = Vec::new();
+                        for part in self.children(child) {
+                            if !self.is_layout(part)
+                                && !matches!(
+                                    self.kind(part),
+                                    "{" | "}" | ":" | "!" | "template_open" | "template_close"
+                                )
+                                && self.kind(part) != field
+                            {
+                                hole_parts.push(self.form(part));
+                            }
+                        }
+                        if hole_parts.len() == 1 {
+                            parts.push(hole_parts.remove(0));
+                        } else {
+                            for formed in hole_parts {
+                                if formed != "0" {
+                                    parts.push(formed);
+                                }
+                            }
+                        }
+                    } else {
+                        let value = self.children(child).into_iter().find(|&part| {
+                            !self.is_layout(part)
+                                && !matches!(
+                                    self.kind(part),
+                                    "{" | "}" | ":" | "!" | "template_open" | "template_close"
+                                )
+                                && self.kind(part) != field
+                        });
+                        if let Some(value) = value {
+                            parts.push(self.form(value));
+                        }
+                    }
+                    for sub in self.children(child) {
+                        if self.kind(sub) == field {
+                            let inner = self.children(sub).into_iter().find(|&part| {
+                                !self.is_layout(part)
+                                    && !matches!(
+                                        self.kind(part),
+                                        "{" | "}" | ":" | "!" | "template_open" | "template_close"
+                                    )
+                                    && self.kind(part) != field
+                            });
+                            if let Some(inner) = inner {
+                                parts.push(self.form(inner));
+                            }
+                        }
+                    }
+                }
+                // Scala's `s"...${f(x)}"` names its interpolator: the lexer
+                // reads the `s` as a name ahead of the fields, so the value is
+                // `m:[n:s,...]`. Without it the one field was the whole value.
+                if self.language.name == "scala" && !parts.is_empty() {
+                    let prefix = self
+                        .children(id)
+                        .into_iter()
+                        .find(|&child| self.kind(child) == "string_start")
+                        .map(|child| self.text_string(child).trim_end_matches('"').to_string())
+                        .unwrap_or_default();
+                    if !prefix.is_empty() {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, &prefix);
+                        out.push(']');
+                        parts.insert(0, out);
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // C# `$"{...}"` is lexed as a single `interpolated_string_literal`
+            // token, so its holes are not CST children. Parse each hole's
+            // expression so calls and names inside interpolations are recorded.
+            "interpolated_string_literal" if self.language.name == "csharp" => {
+                self.cs_interpolated_form(id)
+            }
+            // `a to listOf(1)`: Kotlin's infix call is a value with two operands
+            // and a name between them. Read through the default arm only the
+            // first operand was formed, so a call written on the right of `to`,
+            // `until`, `downTo` or any user infix function was never recorded -
+            // every map entry built with `to` lost its value's call.
+            "infix_expression" if self.is_kotlin() => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.merge_form(&items)
+                }
+            }
+            // `minBackoff * math.pow(2, n)`: Scala spells an infix expression as
+            // a `binary` node. The default arm read only its first operand, so
+            // a call on the right (`math.pow`, `a * f(b)`) was never recorded
+            // and the binding lost the value the lexer wrote as a merge of both
+            // operands. Form both sides like Kotlin's infix expression. Swift's
+            // `a == f(b)` is the same node: an `if` on it lost its condition
+            // and every call in it (`if lhs == Unicode.Scalar(x)`). Swift's
+            // `a..<b` is a `range` node with the same two operands: the default
+            // arm wrote `0` for `return start..<end`, the lexer `m:[start,end]`.
+            // `a ?? b` is its own `nil_coalescing` node over the same two operands, so the
+            // default arm wrote `0` where the lexer read both names.
+            "binary" | "range" | "nil_coalescing" if matches!(self.language.name, "scala" | "swift") => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.merge_form(&items)
+                }
+            }
+            // `reportConnectFailure { … }`: Scala's argument block is a call to
+            // the name before the brace, and the lexer files the line as that
+            // name. The default arm read the node as nothing, so the event was
+            // lost; the block's own statements are read by the walk.
+            "block_argument" if self.language.name == "scala" => {
+                match self.children(id).into_iter().find(|&child| !self.is_layout(child)) {
+                    Some(callee) => self.form(callee),
+                    None => "0".to_string(),
+                }
+            }
+            // `ResettableValue<(Int, Int) -> Bool>`: a tuple type in a type
+            // list is its element types, which the lexer reads as a tuple. The
+            // generic arm below read the node as nothing, so `Int, Int` were
+            // lost from the value.
+            "tuple_type" if matches!(self.language.name, "swift" | "csharp") => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| {
+                        !(self.is_layout(child) && !(self.language.name == "csharp" && self.leaf_name(child).is_some()))
+                            && !matches!(self.kind(child), "(" | ")" | ",")
+                    })
+                    .collect();
+                self.delim_depth += 1;
+                let out = if items.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.tuple_form(&items)
+                };
+                self.delim_depth -= 1;
+                out
+            }
+            "tuple_element" if self.language.name == "csharp" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) && self.leaf_name(child).is_none() && self.kind(child) != "predefined_type" {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        parts.push(value);
+                    } else if let Some(word) = self.leaf_name(child).or_else(|| (self.kind(child) == "predefined_type").then(|| self.text_string(child))) {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, &word);
+                        out.push(']');
+                        parts.push(out);
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `UnsafeCell<State>`, `Vec<Entry>`: a generic type holds the base
+            // and the type arguments, and both are names the lexer reads.
+            "generic_type" | "generic_specialization" | "type_arguments" | "type_parameter_list" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if matches!(self.kind(child), "<" | ">" | ">>" | "," | "::")
+                        || (self.is_layout(child) && !(self.language.name == "csharp" && self.leaf_name(child).is_some()))
+                    {
+                        continue;
+                    }
+                    let value = self.form(child);
+                    if value != "0" {
+                        parts.push(value);
+                    } else if self.language.name == "csharp" {
+                        if let Some(word) = self.leaf_name(child) {
