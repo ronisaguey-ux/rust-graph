@@ -8638,3 +8638,323 @@ fn dotted_piece(text: &str) -> bool {
                 let mut parts = Vec::new();
                 let value = self.form(base);
                 if value != "0" {
+                    parts.push(value);
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `ducetExtract[scalars]!.collationElements`: a member read through a
+            // force unwrap has no dotted path, so the path arm below formed only
+            // the base and dropped the member. The lexer reads the base and the
+            // member as a pair, so both are kept.
+            "navigation_expression"
+                if self.language.name == "swift"
+                    && self.children(id).first().is_some_and(|&base| self.kind(base) == "force_unwrap") =>
+            {
+                let base = self.children(id)[0];
+                let mut parts = Vec::new();
+                let value = self.form(base);
+                if value != "0" {
+                    parts.push(value);
+                }
+                let name = self.member_name(id);
+                if !name.is_empty() {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            "attribute" | "member_expression" | "member_access_expression" | "nullsafe_member_access_expression" | "member_access" | "null_aware_member" | "subscript" | "subscript_expression" | "element_access" | "field_expression" | "meta_property"
+            // `Ordering::Acquire` in an argument list is a path, not a constant.
+            | "scoped_identifier" | "scoped_type_identifier" | "qualified_expression"
+            // Kotlin's `user.title` in a `"${user.title}"` hole.
+            | "navigation_expression"
+            // Swift's `second?.count` is an `optional_chaining_expression`; `path_of`
+            // already reads it, so `form` must not fall through to `0`.
+            | "optional_chaining_expression"
+            | "conditional_member_access" => {
+                let path = self.form_path(id);
+                if path.is_empty() || path.starts_with('.') {
+                    // `f(x)[0].y`: the base is a call, so there is no path, and
+                    // the value is the base's — a subscript of a value is that
+                    // value. Writing 0 here lost the call's argument.
+                    match self.children(id).first().copied() {
+                        Some(base) => {
+                            let base_form = self.form(base);
+                            let name = self.member_name(id);
+                            if self.language.name == "csharp"
+                                && !name.is_empty()
+                                && !self.named_call(base)
+                                && self.value_root_call(base).is_none()
+                            {
+                                let mut out = "[\"n\",".to_string();
+                                push_string(&mut out, &name);
+                                out.push(']');
+                                if base_form == "0" {
+                                    out
+                                } else {
+                                    format!("[\"m\",[{base_form},{out}]]")
+                                }
+                            } else {
+                                base_form
+                            }
+                        }
+                        None => "0".to_string(),
+                    }
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    out
+                }
+            }
+            // `register: .rflags`: a Swift implicit member names a member of
+            // the contextual type, so it is a name, not a constant. Formed as
+            // the default 0, every labeled argument written with a leading dot
+            // lost its value on the CST path only.
+            "implicit_member_expression" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
+            // `val Normal = FSM.Normal`: Scala spells a dotted name as a
+            // `select` node. It is not in the member-access list above, so the
+            // default arm formed it as the constant 0 and every binding to a
+            // qualified name lost its value (`FSM.Normal`, `java.lang.Math.PI`,
+            // `ManagedActorEventBus.this.system`).
+            "select" if self.language.name == "scala" => {
+                let path = self.form_path(id);
+                if path.is_empty() || path.starts_with('.') {
+                    match self.children(id).first().copied() {
+                        Some(base) => self.form(base),
+                        None => "0".to_string(),
+                    }
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    out
+                }
+            }
+            // `resiliencyChecks.x = .trap`: a leading-dot member has no
+            // receiver, so it is a name, not the constant 0 the default arm
+            // wrote. The lexer names it by its member alone (`n:trap`).
+            "implicit_member_expression" if self.language.name == "swift" => {
+                let name = self.member_name(id);
+                if name.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &name);
+                    out.push(']');
+                    out
+                }
+            }
+            "qualified_type" if self.is_kotlin() || self.language.name == "csharp" => {
+                let path = self.path_of(id);
+                if path.is_empty() {
+                    "0".to_string()
+                } else {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &path);
+                    out.push(']');
+                    out
+                }
+            }
+            // `longStrings[toInt()]`: Kotlin's indexed access is the base's
+            // value, and a call written in the subscript is a fact of its own.
+            // With no arm the node formed the constant 0 and the call in the
+            // index was lost on every `xs[f(..)]` in the corpus.
+            // Swift, Go and the rest spell an indexed access differently; this
+            // arm is the Kotlin node only.
+            "index_expression" if self.is_kotlin() => {
+                let children = self.children(id);
+                for child in &children {
+                    if self.kind(*child) != "subscript" {
+                        continue;
+                    }
+                    for inner in self.children(*child) {
+                        if !self.is_layout(inner) {
+                            self.form(inner);
+                        }
+                    }
+                }
+                match children.first() {
+                    Some(&base) => self.form(base),
+                    None => "0".to_string(),
+                }
+            }
+            // `(0, _createSvgIcon.default)(...)`: the comma idiom every
+            // transpiler emits is a sequence expression, and it was forming as
+            // the constant 0, so every CommonJS `exports.default = ...` in the
+            // corpus lost its value.
+            "sequence_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.tuple_form(&items),
+                }
+            }
+            // `nameof(x)`: the lexer reads `nameof(...)` as a call to `nameof`
+            // with the inner expression as its argument, whereas the unmapped
+            // fallback descended into `nameof_arguments` and returned `0` for
+            // a leaf identifier.
+            "nameof_expression" => {
+                let line = self.line(id);
+                let index = self.push_call("nameof".to_string(), line);
+                let args = self
+                    .child_of_kind(id, "nameof_arguments")
+                    .and_then(|list| self.expression_child(list))
+                    .map_or_else(|| "[]".to_string(), |expr| format!("[{}]", self.form(expr)));
+                format!("[\"c\",{index},0,{args}]")
+            }
+            "argument_list" | "arguments" | "parenthesized_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                self.delim_depth += 1;
+                let out = match items.len() {
+                    0 => "0".to_string(),
+                    1 => {
+                        let inner = self.form(items[0]);
+                        let node = &self.nodes[id as usize];
+                        if kind == "parenthesized_expression"
+                            && self.language.name == "csharp"
+                            && self.orig_src.get(node.start as usize) == Some(&b'[')
+                            && self.orig_src.get(node.end.saturating_sub(1) as usize) == Some(&b']')
+                        {
+                            format!("[\"t\",[{inner}]]")
+                        } else {
+                            inner
+                        }
+                    }
+                    _ => self.tuple_form(&items),
+                };
+                self.delim_depth -= 1;
+                out
+            }
+            "binary_expression" if self.language.name == "java" => {
+                let mut items = Vec::new();
+                self.java_binary(id, &mut items);
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => items.pop().unwrap_or_else(|| "0".to_string()),
+                    _ => format!("[\"m\",[{}]]", items.join(",")),
+                }
+            }
+            "binary_operator" | "comparison_operator" | "comparison_expression" | "boolean_operator" | "binary_expression" | "ternary_expression"
+            // `f() ?: g()`: the elvis holds two values the way a binary
+            // expression does, and read as a wrapper the right operand left the
+            // record - every `?: error("...")` lost the call in its fallback.
+            | "elvis_expression"
+            // `a .. b`, `a ..< b`: Kotlin's range expression holds two
+            // operands, and read through the unmapped fallback it kept only the
+            // left leaf and dropped any calls on the right.
+            | "range_expression"
+            // Swift's `0...index` holds two operands the same way.
+            | "range"
+            // `a if c else b` holds three values and every one is read; the
+            // condition is where `x if p(v) else y` calls `p`. `(n := f())` is
+            // the same: the value is on the right, the name on the left.
+            | "conditional_expression" | "named_expression"
+            // `xs[lo():hi():st()]`: a slice and a subscript list are lists of
+            // values, not wrappers, so nothing may be dropped.
+            | "slice" | "subscript_list"
+            // Swift's `a..<b` and `a...b` are a `range` node with two operands;
+            // read through the default arm it wrote `0`, so `return start..<end`
+            // lost its value (the lexer reads `m:[n:start,n:end]`).
+            // Ruby names its range `range` too, so only Swift's reads here.
+            // Ruby and Scala name their binary expression `binary` too, and
+            // keep the default arm; only Swift's reads through this one.
+            | "range" | "binary" if (kind != "binary" && kind != "range") || self.language.name == "swift" => {
+                // `type + 'x'`: `type` is a keyword in this grammar, so the
+                // layout filter drops it and the binary expression keeps only
+                // its right operand — the lexer reads `m:[n:type,0]` and the
+                // CST wrote `0`. A word that is not one of this arm's operators
+                // is an operand.
+                let mut items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.binary_operand(child))
+                    .collect();
+                if kind == "binary" && self.delim_depth == 0 {
+                    // An operand is its own event only when the operator that
+                    // joins it sits on its own line (`+ x` leading a line) at
+                    // statement level; inside delimiters (`(...)`, `[...]`) the
+                    // lexer keeps the whole binary expression in one event, and
+                    // an operator that trails the first line (`a &&` then `b`)
+                    // keeps the operand in the expression that starts there.
+                    let all = self.children(id);
+                    let first = items.first().map(|&child| self.line(child));
+                    let (here, below): (Vec<u32>, Vec<u32>) = items.into_iter().partition(|&child| {
+                        let joined_by = all.iter().position(|&c| c == child).and_then(|at| at.checked_sub(1)).map(|at| all[at]);
+                        Some(self.line(child)) == first || joined_by.is_some_and(|op| Some(self.line(op)) == first)
+                    });
+                    for child in below {
+                        let value = self.form(child);
+                        if value != "0" {
+                            let line = self.line(child);
+                            self.event(&format!("[\"x\",{line},{value}]"));
+                        }
+                    }
+                    items = here;
+                }
+                if items.len() == 1 {
+                    return self.form(items[0]);
+                }
+                self.merge_form(&items)
+            }
+            // `val a = if (c) f(0) else g`: Scala's `if` is an expression
+            // whose value is either branch. Read through the default arm the
+            // value was the condition alone, so both branches' names and calls
+            // left the record (`acc.history(0)` and `acc.current`, 8 rows in
+            // the scala corpus's jdk accumulators). The `if` and `else`
+            // keywords are not operands.
+            "if_statement" if self.language.name == "scala" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.binary_operand(child) && !matches!(self.text_string(child).as_str(), "if" | "else"))
+                    .collect();
+                if items.len() == 1 {
+                    return self.form(items[0]);
+                }
+                self.merge_form(&items)
+            }
+            // `x ?? throw new ArgumentNullException(nameof(x))`: a throw
+            // expression is its operand, and the call the lexer reads on that
+            // line is inside it.
+            "throw_expression" | "throw_statement" => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
+            // `f() && let Some(x) = g()`: a let-chain operand of a binary
+            // expression. The pattern is a binding, not a value, so the node
+            // renders as the expression to the right of `=` — reading the node
+            // as an unmapped child rendered the whole operand as the constant 0
+            // and lost the call inside it.
+            "let_condition" | "let_chain" => match self.rust_let_value(id) {
+                Some(value) => self.form(value),
+                None => "0".to_string(),
+            },
