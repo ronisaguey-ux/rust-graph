@@ -1278,3 +1278,323 @@ impl<'a> Walker<'a> {
             let mut code = String::with_capacity(raw_line.len());
             let chars: Vec<char> = raw_line.chars().collect();
             let mut q: Option<char> = None;
+            let mut i = 0;
+            while i < chars.len() {
+                let ch = chars[i];
+                if let Some(qc) = q {
+                    clean.push(ch);
+                    if ch == '\\' && i + 1 < chars.len() {
+                        i += 1;
+                        clean.push(chars[i]);
+                        code.push(' ');
+                    } else if ch == qc {
+                        q = None;
+                        code.push(qc);
+                    } else {
+                        code.push(' ');
+                    }
+                } else {
+                    if ch == '#' && !(i + 1 < chars.len() && chars[i + 1] == '{') {
+                        break;
+                    }
+                    if ch == '"' || ch == '\'' || (ch == '`' && !(i > 0 && chars[i - 1] == '$')) {
+                        q = Some(ch);
+                        code.push(ch);
+                    } else {
+                        code.push(ch);
+                    }
+                    clean.push(ch);
+                }
+                i += 1;
+            }
+            cleaned_lines.push(clean);
+            code_lines.push(code);
+        }
+
+        let n_lines = cleaned_lines.len();
+        let is_pipe_kw = |w: &str| -> bool {
+            matches!(w, "if" | "for" | "while" | "switch" | "catch")
+        };
+        let is_any_rb_kw = |w: &str| -> bool {
+            let tail = w.rsplit('.').next().unwrap_or(w);
+            matches!(
+                tail,
+                "if" | "for" | "while" | "switch" | "catch" | "unless" | "until" | "case" | "when"
+                    | "elsif" | "else" | "def" | "class" | "module" | "end" | "begin" | "rescue"
+                    | "ensure" | "do" | "and" | "or" | "not" | "return" | "raise"
+                    | "yield" | "break" | "next" | "redo" | "retry" | "super" | "defined?"
+                    | "true" | "false" | "nil" | "self" | "alias" | "private" | "protected"
+                    | "public" | "require" | "require_relative" | "include" | "extend"
+            )
+        };
+
+        // Pass 1: Add missing Ruby symbols
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let code_tr = code_lines[idx].trim();
+            for (kw, kind) in [("class ", 2u8), ("module ", 2u8)] {
+                if let Some(r) = code_tr.strip_prefix(kw) {
+                    let r = r.trim_start();
+                    if !r.starts_with("<<") {
+                        let raw_tok: String = r
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | ':'))
+                            .collect();
+                        let base = raw_tok.rsplit(':').next().unwrap_or(&raw_tok);
+                        if !base.is_empty() && base.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                            let exists = self.facts.symbols.iter().any(|s| s.line == line && s.name == base);
+                            if !exists {
+                                self.add_symbol(base.to_string(), String::new(), kind, line, Vec::new());
+                            }
+                        }
+                    }
+                }
+            }
+            let rest = if let Some(r) = code_tr.strip_prefix("def ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code_tr.strip_prefix("private def ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code_tr.strip_prefix("protected def ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code_tr.strip_prefix("public def ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code_tr.strip_prefix("module_function def ") {
+                Some(r.trim_start())
+            } else {
+                None
+            };
+            if let Some(r) = rest {
+                let raw_tok: String = r
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '.' | ':' | '?' | '!' | '='))
+                    .collect();
+                let mut candidates: Vec<String> = Vec::new();
+                if let Some((recv, rest_op)) = r.split_once('.') {
+                    let rt = recv.trim();
+                    if !rt.is_empty()
+                        && rt.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        && rest_op.starts_with(['[', '=', '+', '-', '*', '/', '<', '>', '!', '~', '|', '&', '^'])
+                    {
+                        candidates.push(rt.to_string());
+                    }
+                }
+                let base = raw_tok.rsplit(['.', ':']).next().unwrap_or(&raw_tok);
+                if !base.is_empty() && base.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                    candidates.push(base.to_string());
+                    if let Some(stripped) = base.strip_suffix('=') {
+                        if !stripped.is_empty() {
+                            candidates.push(stripped.to_string());
+                        }
+                    }
+                }
+                for cand in candidates {
+                    let exists = self.facts.symbols.iter().any(|s| s.line == line && s.name == cand);
+                    if !exists {
+                        self.add_symbol(cand, String::new(), 1, line, Vec::new());
+                    }
+                }
+            }
+            if let Some((lhs, rhs)) = code_tr.split_once('=') {
+                let rhs_t = rhs.trim_start();
+                if rhs_t.starts_with("lambda") || rhs_t.starts_with("proc") || rhs_t.starts_with("->") {
+                    let lhs_t = lhs.trim();
+                    if !lhs_t.is_empty() && lhs_t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                        let exists = self.facts.symbols.iter().any(|s| s.line == line && s.name == lhs_t);
+                        if !exists {
+                            self.add_symbol(lhs_t.to_string(), String::new(), 1, line, Vec::new());
+                        }
+                    }
+                } else {
+                    let rhs_call: String = rhs_t.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                    let after_c = rhs_t[rhs_call.len()..].trim_start();
+                    if !rhs_call.is_empty()
+                        && rhs_call.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
+                        && after_c.starts_with('(')
+                    {
+                        let lhs_t = lhs.trim().trim_start_matches('@');
+                        if !lhs_t.is_empty() && lhs_t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                            self.facts.vars.push((lhs_t.to_string(), rhs_call));
+                        }
+                    }
+                }
+            }
+            // Dynamic `require expr` imports
+            for rkw in ["require ", "require_relative "] {
+                if let Some(after_r) = code_tr.strip_prefix(rkw) {
+                    let expr = after_r.trim().trim_start_matches('(').trim();
+                    let mod_tok: String = expr
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '.'))
+                        .collect();
+                    if !mod_tok.is_empty() && mod_tok.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                        let alias = mod_tok.rsplit('.').next().unwrap_or(&mod_tok).to_string();
+                        self.facts.imports.push(Import {
+                            line,
+                            module: mod_tok,
+                            name: String::new(),
+                            alias,
+                            kind: IMPORT_MODULE,
+                            ..Import::default()
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut sym_meta: Vec<(usize, u32, u8)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, s)| (i, s.line, s.kind))
+            .collect();
+        sym_meta.sort_by_key(|&(_, sl, _)| sl);
+
+        let enclosing_syms = |line: u32| -> Vec<usize> {
+            let mut out: Vec<usize> = vec![0];
+            let mut methods: Vec<usize> = Vec::new();
+            let mut last_class: Option<usize> = None;
+            let mut last_any: Option<usize> = None;
+            for &(si, sl, sk) in &sym_meta {
+                if sl <= line {
+                    last_any = Some(si);
+                    if sk == 1 {
+                        let is_lambda_line = code_lines
+                            .get(sl.saturating_sub(1) as usize)
+                            .is_some_and(|l| !l.trim_start().contains("def "));
+                        if !is_lambda_line {
+                            methods.push(si);
+                        }
+                    } else if sk == 2 {
+                        last_class = Some(si);
+                    }
+                }
+            }
+            for &si in methods.iter().rev().take(4) {
+                if !out.contains(&si) { out.push(si); }
+            }
+            if let Some(si) = last_class {
+                if !out.contains(&si) { out.push(si); }
+            }
+            if let Some(si) = last_any {
+                if !out.contains(&si) { out.push(si); }
+            }
+            out
+        };
+
+        // Pass 2a: Emit ALL calls first so every symbol has its full call table before Pass 2b picks safe_ci!
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let trimmed = cleaned_lines[idx].trim();
+            let code_tr = code_lines[idx].trim();
+            if trimmed.is_empty() || code_tr.starts_with("def ") { continue; }
+            let targets_syms = enclosing_syms(line);
+
+            let mut line_calls: Vec<String> = Vec::new();
+            let mut add_call = |c: &str| {
+                let c1 = c.trim_start_matches(['.', '!']).trim_end_matches('.');
+                if c1.is_empty() || is_pipe_kw(c1) { return; }
+                if !c1.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_') { return; }
+                if !line_calls.iter().any(|x| x == c1) {
+                    line_calls.push(c1.to_string());
+                }
+                if let Some(tail) = c1.rsplit('.').next() {
+                    if !tail.is_empty() && !is_pipe_kw(tail) && tail != c1
+                        && tail.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_')
+                    {
+                        if !line_calls.iter().any(|x| x == tail) {
+                            line_calls.push(tail.to_string());
+                        }
+                    }
+                }
+            };
+            let mut scan_calls_str = |src_s: &str| {
+                let norm = src_s.replace("::", ".").replace("&.", ".");
+                let nb = norm.as_bytes();
+                let mut pi = 0;
+                while pi < nb.len() {
+                    if nb[pi].is_ascii_alphabetic() || nb[pi] == b'_' || nb[pi] == b'@' {
+                        let st = pi;
+                        while pi < nb.len() && (nb[pi].is_ascii_alphanumeric() || matches!(nb[pi], b'_' | b'.' | b'?' | b'!' | b'@')) {
+                            pi += 1;
+                        }
+                        let raw_tok = &norm[st..pi];
+                        let clean_tok = raw_tok.replace("@@", "self.").replace('@', "self.");
+                        let mut nxt = pi;
+                        while nxt < nb.len() && (nb[nxt] == b' ' || nb[nxt] == b'\t') { nxt += 1; }
+                        let has_paren = nxt < nb.len() && (nb[nxt] == b'(' || nb[nxt] == b'[' || (nxt == pi && (nb[nxt] == b'"' || nb[nxt] == b'\'')));
+                        let has_cmd_arg = !has_paren
+                            && nxt > pi
+                            && nxt < nb.len()
+                            && (nb[nxt].is_ascii_alphanumeric()
+                                || matches!(nb[nxt], b'"' | b'\'' | b':' | b'@' | b'$' | b'[' | b'{' | b'%' | b'/' | b'_' | b'&' | b'*' | b'<' | b'!'));
+                        if has_paren || has_cmd_arg {
+                            add_call(&clean_tok);
+                        }
+                    } else {
+                        pi += 1;
+                    }
+                }
+            };
+            scan_calls_str(code_tr);
+            if trimmed.contains('"') || trimmed.contains('\'') || trimmed.contains('`') {
+                scan_calls_str(trimmed);
+            }
+            // Push non-keyword calls before keyword calls
+            for pass_kw in [false, true] {
+                for c in &line_calls {
+                    if is_any_rb_kw(c) != pass_kw { continue; }
+                    for &si in &targets_syms {
+                        let exists = self.facts.symbols[si].calls.iter().any(|x| x.line == line && x.path == *c);
+                        if !exists {
+                            self.facts.symbols[si].calls.push(Call { path: c.clone(), line });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Precompute a guaranteed-safe call index per symbol (a non-keyword call so `["c",safe_ci,0,[0]]` ALWAYS renders as `c(0;[0])`!)
+        let mut safe_call_idx: Vec<usize> = Vec::with_capacity(self.facts.symbols.len());
+        for sym in &mut self.facts.symbols {
+            let pos = sym.calls.len();
+            sym.calls.push(Call { path: "rb_eval".to_string(), line: 0 });
+            safe_call_idx.push(pos);
+        }
+
+        let rb_delta = |s: &str| -> i32 {
+            let mut d = 0i32;
+            for &b in s.as_bytes() {
+                match b {
+                    b'(' | b'[' | b'{' => d += 1,
+                    b')' | b']' | b'}' => d -= 1,
+                    _ => {}
+                }
+            }
+            d
+        };
+
+        let ends_cont = |s: &str| -> bool {
+            s.ends_with(['+', '-', '*', '/', ',', '|', '&', '=', '.', '\\', '?', ':', '(', '[', '{'])
+        };
+
+        // Pass 2b: Per-line flat x/r/a events using per-symbol `safe_call_idx[si]`
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let trimmed = cleaned_lines[idx].trim();
+            let code_tr = code_lines[idx].trim();
+            if trimmed.is_empty() { continue; }
+            let targets_syms = enclosing_syms(line);
+
+            let mut base_parts: Vec<String> = Vec::new();
+            let mut comma_count: usize = 0;
+            let mut lparen_count: usize = 0;
+            let add_rb_tokens = |parts: &mut Vec<String>, s: &str, cc: &mut usize, lc: &mut usize| {
+                for &b in s.as_bytes() {
+                    if b == b',' { *cc += 1; }
+                    else if b == b'(' { *lc += 1; }
+                }
+                let push_n = |parts: &mut Vec<String>, nm: &str| {
+                    if nm.is_empty() || !nm.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch >= 0x80) {
+                        return;
