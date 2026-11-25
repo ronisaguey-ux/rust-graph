@@ -6078,3 +6078,323 @@ impl<'a> Walker<'a> {
                     self.c_calls_in_pub(child, &mut calls);
                 }
                 for call in calls {
+                    self.form(call);
+                }
+            }
+            // `Assert.Throws(null, () => G(1))` and `Export(def, () => part.Get())`:
+            // a lambda passed as an argument is the whole content of that
+            // argument, and the expression reader gives a lambda no form, so
+            // every call written inside one stayed in the tree and out of the
+            // call table. They are calls all the same — the cast arm below has
+            // the same shape of gap — so they are read here, and only the call
+            // table is written: a lambda has no value of its own to compare.
+            "lambda_expression" if self.language.name == "csharp" => {
+                self.cs_lambda_assignment_symbol(id);
+                let mut calls = Vec::new();
+                self.lambda_calls(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            // `new CVariation(t) { Attribute = new Variation("x") { Pri = 0 } }`:
+            // a creation inside an object initialiser is a call of its own, and
+            // the initialiser was read for its assignments alone, so every nested
+            // creation stayed in the tree and out of the call table.
+            // `yield return v;` hands `v` out of the body exactly as `return v;`
+            // does, so it is read by the return handler. It used to fall into the
+            // arm below, which forms only lambdas, so the yielded expression and
+            // every call in it (and every `new T[]` event) vanished from the
+            // CST: an iterator accessor such as `get { yield return f(); }` lost
+            // its whole body.
+            "yield_statement" if self.language.name == "csharp" => self.return_statement(id),
+            "object_initializer" | "array_initializer" | "anonymous_body"
+            | "using_statement"
+            | "fixed_statement"
+                if self.language.name == "csharp" =>
+            {
+                if matches!(kind, "object_initializer" | "array_initializer" | "anonymous_body") {
+                    self.cs_initializer_vars(id);
+                }
+                if kind == "object_initializer" {
+                    self.cs_initializer_first_member(id);
+                }
+                // `using (a.B()) stmt`: the C# grammar expects a declaration
+                // inside `using (...)`, so an expression resource puts `(` into
+                // an `ERROR` node and leaves `a.B` outside it as a type/name.
+                // Recover calls from the flattened header tokens when errored.
+                if kind == "using_statement" && self.cs_has_error(id) {
+                    let mut leaves = Vec::new();
+                    for child in self.children(id) {
+                        if self.kind(child) != "using" {
+                            self.cs_collect_leaves(child, &mut leaves);
+                        }
+                    }
+                    if let Some(open) = leaves.iter().position(|&n| self.kind(n) == "(") {
+                        let mut depth = 0i32;
+                        let mut close = leaves.len();
+                        for (i, &n) in leaves[open..].iter().enumerate() {
+                            match self.kind(n) {
+                                "(" => depth += 1,
+                                ")" => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        close = open + i;
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if close > open + 1 {
+                            self.cs_recovered_calls_tokens(&leaves[open + 1..close]);
+                        }
+                    }
+                }
+                let mut calls = Vec::new();
+                self.lambda_calls(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            "ERROR" if self.language.name == "csharp" => {
+                self.cs_recovered_calls(id);
+                self.cs_recovered_events(id);
+            }
+            "ERROR" if self.facts.tag == "ERL" => {
+                let _ = self.erl_recovered_calls(id);
+                self.erl_recovered_events(id);
+            }
+            "ERROR" if self.facts.tag == "NIM" => {
+                let _ = self.nim_recovered_calls(id);
+                self.nim_recovered_imports(id);
+                self.nim_recovered_events(id);
+            }
+            "expression_statement" if self.facts.tag == "LUA" => {
+                let children = self.children(id);
+                if let Some(atail) = children.iter().copied().find(|&c| self.kind(c) == "assignment_tail") {
+                    let line = self.line(id);
+                    let targets: Vec<String> = children
+                        .iter()
+                        .copied()
+                        .take_while(|&c| c != atail)
+                        .filter(|&c| !self.is_layout(c) && self.kind(c) != ",")
+                        .map(|n| {
+                            let p = self.path_of(n);
+                            if p.is_empty() { self.text_string(n) } else { p }
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !targets.is_empty() {
+                        let tname = targets[0].clone();
+                        let raw_tail = self.text_string(atail);
+                        if let Some((_, rhs)) = raw_tail.split_once('=') {
+                            let rhs_t = rhs.trim();
+                            if rhs_t.starts_with("require") {
+                                let bytes = rhs_t.as_bytes();
+                                let mut i = 0;
+                                while i < bytes.len() {
+                                    if bytes[i] == b'"' || bytes[i] == b'\'' {
+                                        let q = bytes[i];
+                                        i += 1;
+                                        let mut val = String::new();
+                                        while i < bytes.len() && bytes[i] != q {
+                                            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                                i += 1;
+                                            }
+                                            val.push(bytes[i] as char);
+                                            i += 1;
+                                        }
+                                        let alias = tname.rsplit(|c| c == '.' || c == ':').next().unwrap_or("").to_string();
+                                        if !val.is_empty() && !alias.is_empty() {
+                                            self.facts.imports.push(Import {
+                                                line,
+                                                module: val,
+                                                alias,
+                                                kind: IMPORT_MODULE,
+                                                ..Import::default()
+                                            });
+                                        }
+                                        break;
+                                    }
+                                    i += 1;
+                                }
+                            }
+                        }
+                        let mut vals: Vec<String> = Vec::new();
+                        if let Some(el) = self.children(atail).into_iter().find(|&c| self.kind(c) == "expression_list") {
+                            for ec in self.children(el) {
+                                let eck = self.kind(ec);
+                                if matches!(eck, "nil" | "true" | "false") {
+                                    vals.push(format!("[\"n\",\"{eck}\"]"));
+                                    continue;
+                                }
+                                if self.is_layout(ec) || eck == "," {
+                                    continue;
+                                }
+                                if eck == "function_expression" {
+                                    let lhs_is_index = children
+                                        .iter()
+                                        .copied()
+                                        .find(|&c| !self.is_layout(c) && c != atail)
+                                        .is_some_and(|n| self.kind(n) == "index");
+                                    if !lhs_is_index {
+                                        let sym = tname.rsplit(|c| c == '.' || c == ':').next().unwrap_or(&tname).to_string();
+                                        if !sym.is_empty() {
+                                            self.bound.push((ec, sym));
+                                        }
+                                    }
+                                }
+                                let f = self.form(ec);
+                                vals.push(if f.is_empty() { "0".to_string() } else { f });
+                            }
+                        }
+                        let val = if vals.is_empty() {
+                            "0".to_string()
+                        } else if vals.len() == 1 {
+                            vals.remove(0)
+                        } else {
+                            format!("[\"t\",[{}]]", vals.join(","))
+                        };
+                        self.lexer_event(b'a', line, &targets, &val, false);
+                    }
+                } else {
+                    self.expression_statement(id);
+                }
+            }
+            "expression_statement" => self.expression_statement(id),
+            "command_call" if matches!(self.facts.tag.as_str(), "RB" | "CR" | "NIM") => {
+                let val = self.form(id);
+                if !val.is_empty() && val != "0" {
+                    self.lexer_event(b'x', self.line(id), &[], &val, false);
+                }
+            }
+            "when_statement" | "elif_clause" | "of_clause" if self.facts.tag == "NIM" => {
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if matches!(ck, ":" | "suite" | "inline_suite" | "block_suite" | "elif_clause" | "else_clause") {
+                        break;
+                    }
+                    if matches!(ck, "when" | "elif" | "of" | ",") || self.is_layout(ch) {
+                        continue;
+                    }
+                    let _ = self.form(ch);
+                }
+            }
+            "discard_statement" | "yield_statement" | "inline_body" if self.facts.tag == "NIM" => {
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if matches!(ck, "discard" | "yield") || self.is_layout(ch) {
+                        continue;
+                    }
+                    let _ = self.form(ch);
+                }
+            }
+            "inline_statement" if self.facts.tag == "NIM" => {
+                if let Some(ch) = self.expression_child(id) {
+                    if self.kind(ch) != "command_call" {
+                        self.statement_node(id, ch);
+                    }
+                }
+            }
+            "if_statement" | "unless_statement" | "elsif_clause" | "case_statement" | "when_clause" | "while_statement" | "until_statement"
+                if self.facts.tag == "RB" =>
+            {
+                let line = self.line(id);
+                let mut parts = Vec::new();
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if matches!(ck, "body" | "else_clause" | "elsif_clause" | "when_clause" | "then_token" | "end") {
+                        break;
+                    }
+                    if matches!(ck, "if" | "unless" | "elsif" | "case" | "when" | "while" | "until") {
+                        continue;
+                    }
+                    if self.is_layout(ch) {
+                        continue;
+                    }
+                    let f = self.form(ch);
+                    if !f.is_empty() && f != "0" {
+                        parts.push(f);
+                    }
+                }
+                if parts.len() == 1 {
+                    self.lexer_event(b'x', line, &[], &parts[0], false);
+                } else if parts.len() > 1 {
+                    self.lexer_event(b'x', line, &[], &format!("[\"m\",[{}]]", parts.join(",")), false);
+                }
+            }
+            "multiple_assignment" if self.facts.tag == "RB" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    let mut targets = Vec::new();
+                    for &c in &children[..eq] {
+                        if self.is_layout(c) || self.kind(c) == "," {
+                            continue;
+                        }
+                        let p = self.path_of(c);
+                        if !p.is_empty() {
+                            targets.push(p);
+                        }
+                    }
+                    let mut vals = Vec::new();
+                    for &c in &children[eq + 1..] {
+                        if self.is_layout(c) || self.kind(c) == "," {
+                            continue;
+                        }
+                        let f = self.form(c);
+                        vals.push(if f.is_empty() { "0".to_string() } else { f });
+                    }
+                    if !targets.is_empty() && !vals.is_empty() {
+                        let val = if vals.len() == 1 {
+                            vals.remove(0)
+                        } else {
+                            format!("[\"t\",[{}]]", vals.join(","))
+                        };
+                        self.lexer_event(b'a', line, &targets, &val, false);
+                    }
+                }
+            }
+            "import_statement" | "include_statement" | "from_statement" if self.facts.tag == "NIM" => {
+                self.nim_import(id);
+            }
+            "value_declaration" if self.facts.tag == "NIM" => {
+                let children = self.children(id);
+                let eq = children.iter().position(|&c| self.kind(c) == "=");
+                let colon = children.iter().position(|&c| self.kind(c) == ":");
+                let end_names = colon.or(eq).unwrap_or(children.len());
+                let mut targets = Vec::new();
+                for &c in &children[..end_names] {
+                    if self.kind(c) == "identifier" {
+                        let name = self.text_string(c);
+                        if !name.is_empty() {
+                            targets.push(name);
+                        }
+                    }
+                }
+                if let Some(col) = colon {
+                    let stop = eq.unwrap_or(children.len());
+                    if let Some(ty) = children[col + 1..stop].iter().copied().find_map(|c| self.leaf_name(c)) {
+                        if ty.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                            for t in &targets {
+                                self.facts.vars.push((t.clone(), ty.clone()));
+                            }
+                        }
+                    }
+                }
+                if let Some(eq_idx) = eq {
+                    let line = self.line(id);
+                    if let Some(&rhs) = children[eq_idx + 1..].iter().find(|&&c| !self.is_layout(c)) {
+                        if self.kind(rhs) == "call" {
+                            if let Some(callee) = self.children(rhs).first().copied().and_then(|c| self.leaf_name(c)) {
+                                if callee.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                    for t in &targets {
+                                        self.facts.vars.push((t.clone(), callee.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        let val = self.form(rhs);
+                        if !targets.is_empty() {
+                            self.lexer_event(b'a', line, &targets, &val, false);
+                        }
