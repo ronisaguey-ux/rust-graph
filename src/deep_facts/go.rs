@@ -4798,3 +4798,323 @@ impl<'a> Walker<'a> {
         }
         if selectors.is_empty() {
             if parts.is_empty() {
+                return;
+            }
+            let alias = parts.last().cloned().unwrap_or_default();
+            self.facts.imports.push(Import {
+                line,
+                module: parts.join("."),
+                name: String::new(),
+                alias,
+                kind: IMPORT_MODULE,
+            });
+            return;
+        }
+        let module = parts.join(".");
+        for selector in selectors {
+            if self.is_layout(selector) || matches!(self.kind(selector), "import_selectors" | "," | "{" | "}") {
+                continue;
+            }
+            // `{Failure => Bad}`: one selector node carrying both names. Emitted as
+            // two imports before, which is not what the source states and left every
+            // Scala rename disagreeing with the lexer.
+            if self.kind(selector) == "import_selector" {
+                let names: Vec<String> = self
+                    .children(selector)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != "=>")
+                    .map(|child| self.text_string(child))
+                    .collect();
+                if let Some(name) = names.first().cloned() {
+                    let alias = names.get(1).cloned().unwrap_or_else(|| name.clone());
+                    self.facts.imports.push(Import {
+                        line,
+                        module: module.clone(),
+                        name,
+                        alias,
+                        kind: IMPORT_MODULE,
+                    });
+                    continue;
+                }
+            }
+            let name = self.text_string(selector);
+            self.facts.imports.push(Import {
+                line,
+                module: module.clone(),
+                name: name.clone(),
+                alias: name,
+                kind: IMPORT_MODULE,
+            });
+        }
+    }
+
+    /// `import a.b.C` and `import a.b.C as D`: one module, and the alias the
+    /// lexer files — the name after `as`, or the last segment when none is
+    /// spelled.
+/// One segment of a dotted name: letters, digits, `_`, and anything non-ASCII
+/// (an identifier in the source's own language). A node whose text fails this is
+/// not a segment — an argument list, a star, an `as` clause.
+fn dotted_piece(text: &str) -> bool {
+    if text.starts_with('`') && text.ends_with('`') && text.len() > 2 {
+        return true;
+    }
+    !text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || c == '_' || !c.is_ascii())
+}
+
+    pub(crate) fn kt_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut parts: Vec<String> = Vec::new();
+        let mut alias: Option<String> = None;
+        let mut after_as = false;
+        for child in self.children(id) {
+            let kind = self.kind(child);
+            if kind == "as" {
+                after_as = true;
+                continue;
+            }
+            // A path segment can be a contextual keyword: Kotlin's grammar names
+            // 39 of them (`annotation`, `field`, `value`, …), and
+            // `import java.lang.annotation.Inherited` is a real import whose middle
+            // segment is one. Filtering on `identifier` dropped it, so the record
+            // said `java.lang.Inherited` — 3,882 rows of the kotlin corpus, the
+            // single largest loss class in the language.
+            let text = self.text_string(child);
+            let piece = text.trim();
+            // The directive's own keyword is a child of the header and is not a
+            // segment; every other word here is one.
+            if piece == "import" || !Self::dotted_piece(piece) {
+                continue;
+            }
+            if after_as {
+                alias = Some(piece.to_string());
+            } else {
+                parts.push(piece.to_string());
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        let module = parts.join(".");
+        // `import a.b.*`: a star import binds no name, and the lexer files it
+        // with an empty alias rather than the last segment.
+        let star = self.text_string(id).trim_end().ends_with('*');
+        let alias = alias.unwrap_or_else(|| if star { String::new() } else { parts.last().cloned().unwrap_or_default() });
+        let kind = if star { IMPORT_STAR } else { IMPORT_MODULE };
+        self.facts.imports.push(Import { line, module, alias, kind, ..Import::default() });
+    }
+
+    /// The statements inside a Kotlin lambda, read one at a time: the body is a
+    /// list of statements, not an expression, and reading it as a value turned
+    /// `repositories { … }` into an anonymous call.
+    pub(crate) fn kt_lambda_statements(&mut self, id: u32) {
+        for child in self.children(id) {
+            match self.kind(child) {
+                "lambda_body" | "lambda_items" | "statements" => self.kt_lambda_statements(child),
+                "expression_statement" => self.expression_statement(child),
+                "script_statement" => self.kt_script_statement(child),
+                "property_declaration" => self.kt_property(child),
+                "call_expression" => {
+                    self.form(child);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `rootProject.name = "demo"`, `group = "com.x"`: the flat statement a
+    /// Kotlin script keeps, written as the assignment the lexer files.
+    pub(crate) fn kt_script_statement(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut names: Vec<String> = Vec::new();
+        let mut value: Option<u32> = None;
+        let mut arguments: Option<u32> = None;
+        let mut recovered = false;
+        for child in self.children(id) {
+            let kind = self.kind(child);
+            if kind == "ERROR" || kind.starts_with("ERROR") || kind.contains("MISSING") {
+                recovered = true;
+            }
+            if value.is_none() && arguments.is_none() && matches!(kind, "identifier" | "simple_identifier" | "file") {
+                names.push(self.text_string(child));
+                continue;
+            }
+            if self.is_layout(child) || kind == "=" {
+                continue;
+            }
+            if kind == "arguments" || kind == "argument_list" {
+                arguments = Some(child);
+                continue;
+            }
+            value = Some(child);
+        }
+        if names.is_empty() {
+            return;
+        }
+        // `include(":shared")`, `apply(plugin = "x")`: a script line that is a
+        // head and its argument list, nothing else, is a call — and the one-pass
+        // reader records it as one, but the arm below only wrote its value, so
+        // every Gradle settings file lost the `include` call to the guard (60 of
+        // 72 fallbacks on a .kts sample, the largest `call … line 1` cluster in
+        // the corpus). Only the plain shape counts: a line with a value of its
+        // own (`… = this == null || isEmpty()`) or one the grammar recovered
+        // (`RoutingContext.()` after a broken typealias) keeps the arm below,
+        // which walks that value and records the calls inside it.
+        if let Some(args) = arguments.filter(|_| value.is_none() && !recovered) {
+            let path = names.join(".");
+            let index = self.push_call(path, line);
+            let receiver = if names.len() > 1 {
+                let mut out = "[\"n\",".to_string();
+                push_string(&mut out, &names[..names.len() - 1].join("."));
+                out.push(']');
+                out
+            } else {
+                "0".to_string()
+            };
+            // The event is the call itself, not an assignment: the one-pass
+            // reader files `include(":x")` as `c(0;[0])` on that line, so a
+            // merge of the name and the argument value paired with nothing.
+            let args_form = self.arguments(args);
+            self.event(&format!("[\"x\",{line},[\"c\",{index},{receiver},{args_form}]]"));
+            return;
+        }
+        match value {
+            // `tasks.test { … }`: a trailing lambda is not a value, and the
+            // lexer files the line as the name alone. The lambda's own body is
+            // walked here because this arm claims the node.
+            Some(node) if matches!(self.kind(node), "lambda_literal" | "annotated_lambda" | "lambda_expression") => {
+                self.kt_lambda_statements(node);
+                let mut text = "[[\"n\",".to_string();
+                push_string(&mut text, &names.join("."));
+                text.push_str("]]");
+                self.event(&format!("[\"x\",{line},[\"m\",{text}]]"));
+            }
+            Some(node) => self.assignment_parts(vec![names.join(".")], node, line, false),
+            None => {
+                let mut text = "[[\"n\",".to_string();
+                push_string(&mut text, &names.join("."));
+                text.push_str("]]");
+                let value = format!("[\"m\",{text}]");
+                self.event(&format!("[\"x\",{line},{value}]"));
+            }
+        }
+    }
+
+    /// `true` when the type after the `:` carries a `?` anywhere. The lexer's
+    /// Kotlin statement reader stops the type at that `?`, so the property is
+    /// left as a declaration (`x`) rather than the assignment (`a`) an untyped
+    /// or non-nullable property gets.
+    fn kt_type_nullable(&self, id: u32) -> bool {
+        if self.kind(id) == "?" {
+            return true;
+        }
+        self.children(id).into_iter().any(|child| self.kt_type_nullable(child))
+    }
+
+    /// The identifier leaves of a type, in source order, as names:
+    /// `List<String>` is `n:List` then `n:String`, the run of names the lexer
+    /// reads in the type.
+    fn kt_type_names(&self, id: u32, parts: &mut Vec<String>) {
+        if self.node(id).first_child == NONE {
+            if self.kind(id) == "identifier" {
+                let mut out = String::from("[\"n\",");
+                push_string(&mut out, &self.text_string(id));
+                out.push(']');
+                parts.push(out);
+            }
+            return;
+        }
+        for child in self.children(id) {
+            self.kt_type_names(child, parts);
+        }
+    }
+
+    /// `var x: List<String>? = null`: the modifiers, the name, the type's names
+    /// and a name or call on the right of the `=`, in that order, as the one
+    /// declaration event the lexer files for the statement.
+    fn kt_nullable_property(&mut self, id: u32, name: &str, ty: u32, line: u32) {
+        let mut parts: Vec<String> = Vec::new();
+        for child in self.children(id) {
+            match self.kind(child) {
+                "modifiers" => {
+                    for modifier in self.children(child) {
+                        if self.kind(modifier) == "annotation" {
+                            // An annotation above the declaration is its own
+                            // event; only the ones written on the head's line
+                            // belong to the run of words the lexer reads.
+                            if self.line(modifier) < line {
+                                continue;
+                            }
+                            let word =
+                                self.children(modifier).into_iter().find(|&leaf| self.kind(leaf) == "identifier");
+                            if let Some(word) = word {
+                                let mut out = String::from("[\"n\",");
+                                push_string(&mut out, &self.text_string(word));
+                                out.push(']');
+                                parts.push(out);
+                            }
+                            continue;
+                        }
+                        let value = self.decl_value(modifier);
+                        if !value.is_empty() && value != "0" {
+                            parts.push(value);
+                        }
+                    }
+                }
+                // `val` is a name to the one-pass reader and `var` is not:
+                // `val x: Int` files `m:[n:val,n:x,n:Int]` while
+                // `private var y: String` files `m:[n:private,n:y,n:String]`.
+                "val" => {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, "val");
+                    out.push(']');
+                    parts.push(out);
+                }
+                "var" | ":" | "=" | "by" | "lateinit" | "const" => {}
+                "property_head" => {
+                    let mut out = String::from("[\"n\",");
+                    push_string(&mut out, name);
+                    out.push(']');
+                    parts.push(out);
+                }
+                _ if child == ty => self.kt_type_names(ty, &mut parts),
+                _ => {
+                    let value = self.decl_value(child);
+                    if !value.is_empty() && value != "0" {
+                        parts.push(value);
+                    }
+                }
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+        let value = match parts.len() {
+            1 => parts.pop().unwrap_or_default(),
+            _ => format!("[\"m\",[{}]]", parts.join(",")),
+        };
+        self.lexer_event(b'x', line, &[], &value, false);
+    }
+
+    /// `val a = 1`, `private val b: Int = 2`: the declared name and the value,
+    /// as the assignment the lexer files.
+    pub(crate) fn kt_property(&mut self, id: u32) {
+        let children = self.children(id);
+        // `@Deprecated(…)` written on its own line is an event of its own - the
+        // lexer files it as the annotation's call - and the declaration starts
+        // on the line of its head. Measured from the node's start, every
+        // annotated property claimed the annotation's line and lost the
+        // declaration the lexer writes under the head.
+        let line = children
+            .iter()
+            .copied()
+            .find(|&child| matches!(self.kind(child), "property_head" | "val" | "var"))
+            .map(|child| self.line(child))
+            .unwrap_or_else(|| self.line(id));
+        let name = children
+            .iter()
+            .copied()
+            .find(|&child| self.kind(child) == "property_head")
+            .and_then(|head| {
+                // A property named with one of Kotlin's soft keywords
+                // (`val value = …`, `val data = …`) carries that keyword as its
+                // head's only child, not an `identifier`. A property declared on
