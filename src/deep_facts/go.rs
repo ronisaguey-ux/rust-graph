@@ -2878,3 +2878,323 @@ impl<'a> Walker<'a> {
             _ => None,
         }
     }
+
+    /// The callee at the root of a call chain: `a.b().c()` -> `a.b`, `f()()` ->
+    /// `f`, `a.b()` -> `a.b`.
+    pub(crate) fn root_callee(&self, id: u32) -> Option<String> {
+        match self.kind(id) {
+            "call" | "call_expression" | "new_expression" | "invocation_expression" | "generic_invocation" => {
+                let callee = self.children(id).into_iter().find(|&child| {
+                    !matches!(
+                        self.kind(child),
+                        "new" | "argument_list" | "arguments" | "type_arguments" | "type_parameter_list" | "(" | ")"
+                    )
+                })?;
+                (callee != id).then(|| self.root_callee(callee)).flatten()
+            }
+            "attribute" | "member_expression" | "navigation_expression" | "member_access" | "field_access" => {
+                let object = self.children(id).first().copied()?;
+                let path = self.path_of(id);
+                // `Config.Array(...).pipe` starts with a call: unwrap to that
+                // call so the class is the one the lexer's first tokens name.
+                // Otherwise the whole path is the answer: `Context.Reference`
+                // constructs Reference, not Context, and returning the object
+                // root reported every namespaced constructor as a lost var.
+                if path.contains("()")
+                    || matches!(
+                        self.kind(object),
+                        "call" | "call_expression" | "new_expression" | "invocation_expression"
+                            | "object_creation" | "object_creation_expression"
+                    )
+                {
+                    return self.root_callee(object);
+                }
+                let path = if self.facts.tag == "PAS" { path.to_ascii_lowercase() } else { path };
+                (!path.is_empty()).then_some(path)
+            }
+            _ => {
+                let path = self.path_of(id);
+                let path = if self.facts.tag == "PAS" { path.to_ascii_lowercase() } else { path };
+                (!path.is_empty()).then_some(path)
+            }
+        }
+    }
+
+    // -- control flow -------------------------------------------------------
+
+    fn swift_condition_item(&mut self, item: u32) -> String {
+        if self.kind(item) == "binding_condition" {
+            if let Some(binding) = self.child_of_kind(item, "condition_binding") {
+                let parts = self.children(binding);
+                if let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") {
+                    if let (Some(&first), Some(&value)) = (parts.first(), parts.get(at + 1)) {
+                        let targets = self.pattern_names(first);
+                        if targets.len() == 1 && self.kind(value) != "type_annotation" {
+                            let bound = self.form(value);
+                            let mut name = "[\"n\",".to_string();
+                            push_string(&mut name, &targets[0]);
+                            name.push(']');
+                            return format!("[\"m\",[{name},{bound}]]");
+                        }
+                    }
+                }
+            }
+            return "0".to_string();
+        }
+        self.form(item)
+    }
+
+    pub(crate) fn condition_before(&mut self, id: u32) {
+        // `if a, b, c {`: Swift condition lists have multiple comma-separated
+        // clauses before `block`, and the lexer records all of them as a tuple.
+        // Reading only the first child dropped every clause after the first.
+        if self.language.name == "swift" {
+            let items: Vec<u32> = self
+                .children(id)
+                .into_iter()
+                .take_while(|&child| !matches!(self.kind(child), "block" | "else_clause"))
+                .filter(|&child| !self.is_layout(child) && self.kind(child) != ",")
+                .collect();
+            if items.len() > 1 {
+                let parts: Vec<String> = items.iter().map(|&item| self.swift_condition_item(item)).collect();
+                if parts.iter().any(|part| part != "0") {
+                    let mut expr = items[0];
+                    while self.kind(expr) == "parenthesized_expression" {
+                        match self.expression_child(expr) {
+                            Some(inner) => expr = inner,
+                            None => break,
+                        }
+                    }
+                    let line = self.line(expr);
+                    self.event(&format!("[\"x\",{line},[\"t\",[{}]]]", parts.join(",")));
+                }
+                return;
+            }
+        }
+        // `if let credentials = store.credentials(for: space) {` with the body on the following
+        // lines: the condition is a `binding_condition`, and `form` on that kind writes the
+        // constant 0, so the whole binding was silently dropped. Written inline the loss hid
+        // behind the body's own event on the same line, which is why it needed a two-line
+        // difference to show.
+        if self.language.name == "swift" {
+            if let Some(condition) = self.child_of_kind(id, "binding_condition") {
+                if let Some(binding) = self.child_of_kind(condition, "condition_binding") {
+                    let parts = self.children(binding);
+                    if let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") {
+                        if let (Some(&first), Some(&value)) = (parts.first(), parts.get(at + 1)) {
+                            let targets = self.pattern_names(first);
+                            if targets.len() == 1 && self.kind(value) != "type_annotation" {
+                                // A conditional binding is the assignment a
+                                // plain `let` writes, and the lexer reads it as
+                                // one (`a result = value`); `guard let … else`
+                                // already writes the same event here. Written as
+                                // a pair of its own the binding matched nothing
+                                // the lexer wrote, so its line was reported as a
+                                // loss (Diffing.swift:418).
+                                let line = self.line(binding);
+                                self.assignment_event(targets, value, line, false);
+                                return;
+                            }
+                        }
+                    }
+                    // `guard let hProcess else {` (Swift's shorthand optional
+                    // binding): no `=` and no initialiser, so the arm above
+                    // found no value and the line kept nothing. The condition
+                    // still reads the binding it shadows, and the one-pass
+                    // reader files that name on the guard line. `if let x {` is
+                    // silent there, so only a guard writes.
+                    if self.kind(id) == "guard_statement" {
+                        if let Some(&first) = parts.first() {
+                            let targets = self.pattern_names(first);
+                            if targets.len() == 1 {
+                                let mut name = "[\"n\",".to_string();
+                                push_string(&mut name, &targets[0]);
+                                name.push(']');
+                                let line = self.line(binding);
+                                self.event(&format!("[\"x\",{line},{name}]"));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // `if x:` / `while x:` / `async with x:`: the first child that is not a
+        // keyword or punctuation is the test.
+        for child in self.children(id) {
+            if self.is_layout(child) {
+                continue;
+            }
+            if matches!(self.kind(child), "block" | "statement_block" | "else_clause" | "elif_clause" | "catch_clause" | "finally_clause") {
+                return;
+            }
+            let value = self.form(child);
+            if value != "0" {
+                let mut expr = child;
+                while self.kind(expr) == "parenthesized_expression" {
+                    match self.expression_child(expr) {
+                        Some(inner) => expr = inner,
+                        None => break,
+                    }
+                }
+                let line = self.line(expr);
+                self.event(&format!("[\"x\",{line},{value}]"));
+            }
+            return;
+        }
+    }
+
+    /// `guard let x = value else { … }`: the name the condition binds and its
+    /// initialiser. A guard with no initialiser binds nothing to a value.
+    pub(crate) fn swift_guard_binding(&mut self, id: u32) -> Option<(Vec<String>, u32)> {
+        let condition = self.child_of_kind(id, "binding_condition")?;
+        let binding = self.child_of_kind(condition, "condition_binding")?;
+        let children = self.children(binding);
+        let at = children.iter().position(|&child| self.kind(child) == "=")?;
+        let value = *children.get(at + 1)?;
+        let targets = self.pattern_names(*children.first()?);
+        (!targets.is_empty()).then_some((targets, value))
+    }
+
+    /// `guard let code = a ?? b else {`: the lexer reads the binding and both
+    /// operands as one name list on the guard line; the CST wrote nothing.
+    pub(crate) fn swift_guard_coalesce(&mut self, id: u32) -> bool {
+        let Some(binding) = self.child_of_kind(id, "binding_condition") else { return false };
+        let Some(condition) = self.child_of_kind(binding, "condition_binding") else { return false };
+        let parts = self.children(condition);
+        let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") else { return false };
+        let Some(&value) = parts.get(at + 1) else { return false };
+        if self.kind(value) != "nil_coalescing" {
+            return false;
+        }
+        let targets = self.pattern_names(parts[0]);
+        if targets.len() != 1 {
+            return false;
+        }
+        let bound = self.form(value);
+        let Some(inner) = bound.strip_prefix("[\"m\",[").and_then(|rest| rest.strip_suffix("]]")) else { return false };
+        let mut name = "[\"n\",".to_string();
+        push_string(&mut name, &targets[0]);
+        name.push(']');
+        let line = self.line(binding);
+        self.event(&format!("[\"x\",{line},[\"m\",[{name},{inner}]]]"));
+        true
+    }
+
+    /// `if let x = value, cond(x) {`: the binding and the call that follows it
+    /// in the same condition list. `condition_before` reads only the first
+    /// condition, and a binding forms as nothing, so the call was lost.
+    pub(crate) fn swift_binding_then_call(&mut self, id: u32) -> bool {
+        let items: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .take_while(|&child| !matches!(self.kind(child), "block" | "else_clause"))
+            .filter(|&child| !self.is_layout(child) && self.kind(child) != ",")
+            .collect();
+        let [binding, call] = items[..] else { return false };
+        if self.kind(binding) != "binding_condition" || self.kind(call) != "call_expression" {
+            return false;
+        }
+        let Some(condition) = self.child_of_kind(binding, "condition_binding") else { return false };
+        let parts = self.children(condition);
+        let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") else { return false };
+        let Some(&value) = parts.get(at + 1) else { return false };
+        let targets = self.pattern_names(parts[0]);
+        if targets.len() != 1 {
+            return false;
+        }
+        let bound = self.form(value);
+        let mut name = "[\"n\",".to_string();
+        push_string(&mut name, &targets[0]);
+        name.push(']');
+        let test = self.form(call);
+        let line = self.line(binding);
+        self.event(&format!("[\"x\",{line},[\"t\",[[\"m\",[{name},{bound}]],{test}]]]"));
+        true
+    }
+
+    /// `if cond, var x = value {`: the plain condition and the binding that
+    /// follows it. `condition_before` reads only the first condition, so the
+    /// call in the binding's initialiser was lost.
+    pub(crate) fn swift_call_then_binding(&mut self, id: u32) -> bool {
+        let items: Vec<u32> = self
+            .children(id)
+            .into_iter()
+            .take_while(|&child| !matches!(self.kind(child), "block" | "else_clause"))
+            .filter(|&child| !self.is_layout(child) && self.kind(child) != ",")
+            .collect();
+        let [test, binding] = items[..] else { return false };
+        if self.kind(binding) != "binding_condition" || self.kind(test) == "binding_condition" {
+            return false;
+        }
+        let Some(condition) = self.child_of_kind(binding, "condition_binding") else { return false };
+        let parts = self.children(condition);
+        let Some(at) = parts.iter().position(|&part| self.kind(part) == "=") else { return false };
+        let Some(&value) = parts.get(at + 1) else { return false };
+        let targets = self.pattern_names(parts[0]);
+        if targets.len() != 1 {
+            return false;
+        }
+        let bound = self.form(value);
+        let mut name = "[\"n\",".to_string();
+        push_string(&mut name, &targets[0]);
+        name.push(']');
+        let first = self.form(test);
+        let line = self.line(test);
+        self.event(&format!("[\"x\",{line},[\"t\",[{first},[\"m\",[{name},{bound}]]]]]"));
+        true
+    }
+
+    /// `for a, b in xs` / `for (const a of xs)` -> targets and iterable.
+    pub(crate) fn loop_binding(&mut self, id: u32) -> Option<(Vec<String>, u32)> {
+        let children = self.children(id);
+        // Python writes `with open(p) as f:` and `except E as error:` with the
+        // `as` inside an `as_pattern` of its own, so the scan below never saw
+        // it and the name the statement binds had no event at all.
+        if let Some(pattern) = children.iter().copied().find(|&child| self.kind(child) == "as_pattern") {
+            let inner = self.children(pattern);
+            let at = inner.iter().position(|&child| self.kind(child) == "as")?;
+            let value = *inner[..at].iter().rev().find(|&&child| !self.is_layout(child))?;
+            let mut targets = Vec::new();
+            for &child in &children {
+                if self.kind(child) == "as_pattern" {
+                    let parts = self.children(child);
+                    if let Some(as_at) = parts.iter().position(|&part| self.kind(part) == "as") {
+                        if let Some(&target) = parts.get(as_at + 1) {
+                            targets.extend(self.pattern_names(target));
+                        }
+                    }
+                }
+            }
+            return Some((targets, value));
+        }
+        let mut split = None;
+        for (index, &child) in children.iter().enumerate() {
+            if matches!(self.kind(child), "in" | "of" | "as") {
+                split = Some(index);
+                break;
+            }
+        }
+        // C# keeps the header inside `foreach_header`: `foreach (T x in ys)`.
+        // Only the last non-layout child before `in` is the binding; the type
+        // precedes it.
+        if split.is_none() {
+            if let Some(header) = children.iter().copied().find(|&child| self.kind(child) == "foreach_header") {
+                let inner = self.children(header);
+                let at = inner.iter().position(|&child| self.kind(child) == "in")?;
+                let targets = inner[..at]
+                    .iter()
+                    .rev()
+                    .find(|&&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")"))
+                    .map(|&child| self.pattern_names(child))
+                    .unwrap_or_default();
+                let value = *inner.get(at + 1)?;
+                return Some((targets, value));
+            }
+        }
+        // JS keeps the header inside `for_header`: `for (let x of y)`.
+        if split.is_none() {
+            let header = children.iter().copied().find(|&child| self.kind(child) == "for_header")?;
+            let inner = self.children(header);
+            let at = inner.iter().position(|&child| matches!(self.kind(child), "in" | "of"))?;
+            let targets = inner[..at]
