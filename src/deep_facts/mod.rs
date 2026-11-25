@@ -12798,3 +12798,323 @@ impl<'a> Walker<'a> {
                     text.push_str("]]");
                     self.event(&text);
                 }
+            }
+            // `guard cond else { … }` is an `if` whose body runs when the
+            // condition fails: the same condition event and block as `if`.
+            "if_statement" | "guard_statement" => {
+                if !(self.language.name == "swift" && (self.swift_binding_then_call(id) || self.swift_call_then_binding(id))) {
+                    self.condition_before(id);
+                }
+                self.event("[\"b\"]");
+            }
+            // `guard let member = transform(m) else { return nil }` binds
+            // `member` to its initialiser, as `for` does. Nothing read the
+            // condition's binding, so the line had a return and no assignment,
+            // and the call in the initialiser was lost with it.
+            "guard_statement" => {
+                // `guard cond else { … }` tests its condition like an `if`: the
+                // condition's call or comparison is an event before the block.
+                self.condition_before(id);
+                if let Some((targets, value)) = self.swift_guard_binding(id) {
+                    self.assignment_event(targets, value, self.line(id), false);
+                }
+            }
+            "elif_clause" | "else_clause" => {
+                self.event("[\"e\"]");
+                if kind == "elif_clause" {
+                    self.condition_before(id);
+                } else {
+                    // `["f"]`: an arm with no condition, so the branches cover
+                    // every case. The lexer writes it for a bare `else`; the
+                    // events are the same fact either way.
+                    self.event("[\"f\"]");
+                }
+            }
+            // `strings.forEach { (string, contiguous) in`: two plain names in a
+            // closure head are one tuple event on the header line, which the
+            // one-pass lexer writes; the CST wrote nothing for the head. A single
+            // name is folded into the body's value by the closure form instead,
+            // so only two or more names are an event here.
+            "closure_signature" if self.language.name == "swift" => {
+                let source = self.child_of_kind(id, "closure_parameter_group").unwrap_or(id);
+                let items: Vec<u32> = self
+                    .children(source)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")" | "," | "in"))
+                    .collect();
+                if items.len() >= 2 && items.iter().all(|&child| self.kind(child) == "identifier") {
+                    let mut names = Vec::new();
+                    for child in items {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &self.text_string(child));
+                        form.push(']');
+                        names.push(form);
+                    }
+                    let line = self.line(id);
+                    self.event(&format!("[\"x\",{line},[\"t\",[{}]]]", names.join(",")));
+                }
+            }
+            "with_statement" => {
+                // `with A(), B() as f:` has one value per context manager. The
+                // bound one carries the assignment event; every other is still
+                // an expression whose calls are facts, and reading only the
+                // first dropped `open()` from `with nullcontext(), open(p)`.
+                self.event("[\"b\"]");
+                let bound = self.loop_binding(id);
+                let bound_value = bound.as_ref().map(|(_, value)| *value);
+                if let Some((targets, value)) = bound {
+                    self.assignment_event(targets, value, self.line(id), false);
+                    for child in self.children(id) {
+                        if Some(child) == bound_value
+                            || self.is_layout(child)
+                            || matches!(self.kind(child), "block" | "statement_block")
+                        {
+                            continue;
+                        }
+                        let value = self.form(child);
+                        if value != "0" {
+                            let line = self.line(child);
+                            self.event(&format!("[\"x\",{line},{value}]"));
+                        }
+                    }
+                } else {
+                    // `with self._lock:` binds nothing, and `with a, b:` is read
+                    // by the lexer as one tuple event on the header line.
+                    let mut values = Vec::new();
+                    for child in self.children(id) {
+                        if self.is_layout(child) || matches!(self.kind(child), "block" | "statement_block") {
+                            continue;
+                        }
+                        let value = self.form(child);
+                        if value != "0" {
+                            values.push(value);
+                        }
+                    }
+                    let line = self.line(id);
+                    match values.len() {
+                        0 => {}
+                        1 => self.event(&format!("[\"x\",{line},{}]", values[0])),
+                        _ => self.event(&format!("[\"x\",{line},[\"t\",[{}]]]", values.join(","))),
+                    }
+                }
+            }
+            "for_statement" | "for_in_statement" | "foreach_statement" => {
+                self.event("[\"b\"]");
+                if let Some((target, value)) = self.loop_binding(id) {
+                    self.assignment_event(target, value, self.line(id), false);
+                } else if let Some(header) = self.child_of_kind(id, "for_header") {
+                    let inner = self.children(header);
+                    if let Some(semi) = inner.iter().position(|&c| self.kind(c) == ";") {
+                        // `for (i = length; …)`: an init that is not a
+                        // declaration is an assignment, and the lexer files it
+                        // as one. Only looking after the first `;` dropped the
+                        // target and its value. The grammar wraps the init in
+                        // an `expressions` node, so the assignment is one level
+                        // down.
+                        for &child in &inner[..semi] {
+                            self.for_init(child);
+                        }
+                        for &child in &inner[semi + 1..] {
+                            if !self.is_layout(child) {
+                                let value = self.form(child);
+                                if value != "0" {
+                                    let line = self.line(child);
+                                    self.event(&format!("[\"x\",{line},{value}]"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "while_statement" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
+            // `lock (obj) stmt`: evaluates the lock expression and opens a
+            // block, like `while`, rather than walking the body via `lambda_calls`.
+            "lock_statement" if self.language.name == "csharp" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
+            "try_statement" | "match_statement" | "do_statement" => self.event("[\"b\"]"),
+            // `switch (x)` carries a condition the one-pass reader writes as an
+            // expression on the header line; the clause events below are the
+            // body. Reading the body alone dropped the scrutinee, which is a
+            // fact the resolver keeps (a call in the test is a call).
+            "switch_statement" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
+            // Scala's `try f() finally g()`: the clause's body is an expression,
+            // not a block, so no statement walk reads it and `g()` was lost (the
+            // try statement's value reads only its first child). A block body is
+            // walked statement by statement and needs nothing here.
+            "finally_clause" if self.language.name == "scala" => {
+                let body = self.children(id).into_iter().find(|&child| self.kind(child) == "try_body");
+                if let Some(inner) = body.and_then(|body| self.children(body).into_iter().find(|&child| !self.is_layout(child))) {
+                    if self.kind(inner) != "block" {
+                        self.form(inner);
+                    }
+                }
+                self.event("[\"e\"]");
+            }
+            "catch_clause" | "finally_clause" | "except_clause" | "switch_case" | "case_clause" => {
+                // `except ValueError:` names a type the one-pass reader files
+                // as a value on the clause's line; the clause emits only its
+                // terminator, so that name had no counterpart at all.
+                // `except OSError as error:` binds a name, and the lexer
+                // reads the clause as an assignment of the type to it.
+                if kind == "catch_clause" {
+                    if self.language.name == "csharp" {
+                        let mut calls = Vec::new();
+                        for child in self.children(id) {
+                            if self.kind(child) != "block" {
+                                self.lambda_calls(child, &mut calls);
+                            }
+                        }
+                        for call in calls {
+                            self.form(call);
+                        }
+                    }
+                    // `catch (e)`: the lexer reads the caught binding as the
+                    // clause's value. The binding sits inside a
+                    // `catch_parameter`, so the name is one level down.
+                    let mut names = Vec::new();
+                    for child in self.children(id) {
+                        names.extend(self.pattern_names(child));
+                    }
+                    if let Some(name) = names.into_iter().next() {
+                        let line = self.line(id);
+                        let mut text = format!("[\"x\",{line},[\"n\",");
+                        push_string(&mut text, &name);
+                        text.push_str("]]");
+                        self.event(&text);
+                    }
+                }
+                // `finally close()`: Scala's finally takes one expression, and
+                // the grammar wraps it in a `try_body` that no arm forms, so the
+                // call and its line were lost (akka: 3 call losses). A braced
+                // body is a block the walk already reads.
+                if kind == "finally_clause" && self.language.name == "scala" {
+                    let body = self.children(id).into_iter().find(|&c| self.kind(c) == "try_body");
+                    let expr = body.and_then(|body| self.children(body).into_iter().find(|&c| !self.is_layout(c)));
+                    if let Some(expr) = expr.filter(|&c| !matches!(self.kind(c), "block" | "statement_block")) {
+                        let form = self.form(expr);
+                        if form != "0" {
+                            let line = self.line(expr);
+                            self.event(&format!("[\"x\",{line},{form}]"));
+                        }
+                    }
+                }
+                if kind == "except_clause" {
+                    if let Some((targets, value)) = self.loop_binding(id) {
+                        self.assignment_event(targets, value, self.line(id), false);
+                        self.event("[\"e\"]");
+                        return;
+                    }
+                    let mut parts = Vec::new();
+                    for child in self.children(id) {
+                        if self.is_layout(child) || matches!(self.kind(child), "except" | ":") {
+                            continue;
+                        }
+                        if matches!(self.kind(child), "block" | "statement_block") {
+                            break;
+                        }
+                        let form = self.form(child);
+                        if form != "0" {
+                            parts.push(form);
+                        }
+                    }
+                    if !parts.is_empty() {
+                        let line = self.line(id);
+                        self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                    }
+                }
+                self.event("[\"e\"]")
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn leave(&mut self, id: u32) {
+        let kind = self.kind(id);
+        if matches!(self.kinds.family, Family::Go | Family::Java) {
+            if self.frame().node == id {
+                let frame = self.stack.pop().expect("a frame to pop");
+                if let Some(index) = frame.defines {
+                    self.facts.symbols[index].end_line = self.end_line(id);
+                }
+            }
+            return;
+        }
+        // `(a) => f(a)`: the body is an expression, not a block, so nothing in
+        // the walk below would read it. It is this function's return value.
+        if kind == "arrow_function" && self.frame().node == id {
+            if let Some(&body) = self.children(id).last() {
+                if !matches!(self.kind(body), "statement_block" | "block") {
+                    let line = self.line(id);
+                    let value = self.form(body);
+                    self.event(&format!("[\"r\",{line},{value}]"));
+                }
+            }
+        }
+        if self.is_rust() {
+            self.leave_rust(id);
+        }
+        if matches!(
+            kind,
+            "if_statement"
+                | "guard_statement"
+                | "for_statement"
+                | "for_in_statement"
+                | "foreach_statement"
+                | "while_statement"
+                | "lock_statement"
+                | "do_statement"
+                | "try_statement"
+                | "switch_statement"
+                | "match_statement"
+                | "with_statement"
+        ) {
+            self.event("[\"j\"]");
+            if kind == "do_statement" {
+                if let Some(cond) = self
+                    .children(id)
+                    .into_iter()
+                    .rev()
+                    .find(|&c| !self.is_layout(c) && !matches!(self.kind(c), "statement_block" | "block"))
+                {
+                    let value = self.form(cond);
+                    if value != "0" {
+                        let line = self.line(cond);
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
+                }
+            }
+        }
+        if self.frame().node != id {
+            return;
+        }
+        let frame = self.stack.pop().expect("a frame to pop");
+        if let Some(index) = frame.defines {
+            self.facts.symbols[index].end_line = self.end_line(id);
+        }
+    }
+
+    pub(crate) fn is_js(&self) -> bool {
+        self.kinds.family == Family::Js
+    }
+
+    /// `true` for Kotlin: it is the only grammar here whose imports table
+    /// carries the package clause, and the walk needs to know before it reads
+    /// `property_declaration`, which Swift also uses.
+    /// The ObjC method declarations the CST could not hold: a line that opens
+    /// with `-` or `+` and is a declaration (no body) is read as `x` with its
+    /// words, and only where no other reader wrote an event.
+    /// The tree-sitter Scala grammar gives a nested import no node: `import`
+    /// inside a class or object body comes back as an ERROR whose `import`
+    /// child has no children, and the rest of the line is read as expressions.
+    /// The one-pass reader still files the import, so every file with one lost
+    /// its line (76 files, one row each, in the scala corpus). Read those
+    /// imports off the source, the way the Objective-C declarations are, and
+    /// spell them exactly as the lexer does.
