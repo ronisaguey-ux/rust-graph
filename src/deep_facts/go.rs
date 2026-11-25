@@ -4158,3 +4158,323 @@ impl<'a> Walker<'a> {
                 continue;
             }
             let (mod_raw, alias) = if let Some((a, b)) = item.split_once(" as ") {
+                (a.trim(), b.trim().to_string())
+            } else {
+                (item, String::new())
+            };
+            let module = mod_raw.replace('/', ".").trim_end_matches('.').to_string();
+            if module.is_empty() {
+                continue;
+            }
+            let al = if alias.is_empty() {
+                module.rsplit('.').next().unwrap_or("").to_string()
+            } else {
+                alias
+            };
+            self.facts.imports.push(Import { line, module: module.clone(), alias: al, kind: IMPORT_MODULE, ..Import::default() });
+            if !except_first.is_empty() {
+                let concat = format!("{module}except{except_first}");
+                let cal = concat.rsplit('.').next().unwrap_or("").to_string();
+                self.facts.imports.push(Import { line, module: concat, alias: cal, kind: IMPORT_MODULE, ..Import::default() });
+            }
+        }
+    }
+
+    pub(crate) fn nim_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let raw = self.nim_source_line(line).to_string();
+        self.nim_emit_import_line(line, &raw);
+    }
+
+    pub(crate) fn nim_recovered_imports(&mut self, id: u32) {
+        let mut leaves = Vec::new();
+        self.cs_collect_leaves(id, &mut leaves);
+        let mut seen_lines = Vec::new();
+        for tok in leaves {
+            let txt = self.text_string(tok);
+            if matches!(txt.as_str(), "import" | "include" | "from") {
+                let line = self.line(tok);
+                if !seen_lines.contains(&line) {
+                    seen_lines.push(line);
+                    let raw = self.nim_source_line(line).to_string();
+                    self.nim_emit_import_line(line, &raw);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn nim_recovered_events(&mut self, id: u32) {
+        let mut leaves = Vec::new();
+        self.cs_collect_leaves(id, &mut leaves);
+        if leaves.is_empty() {
+            return;
+        }
+        let mut i = 0;
+        while i < leaves.len() {
+            let line = self.line(leaves[i]);
+            let start = i;
+            while i < leaves.len() && self.line(leaves[i]) == line {
+                i += 1;
+            }
+            let slice = &leaves[start..i];
+            // Find top-level `=` (not `==`, `!=`, `<=`, `>=`).
+            let mut depth = 0i32;
+            let mut eq_pos: Option<usize> = None;
+            for (k, &tok) in slice.iter().enumerate() {
+                let t = self.text_string(tok);
+                match t.as_str() {
+                    "(" | "[" | "{" => depth += 1,
+                    ")" | "]" | "}" => depth = (depth - 1).max(0),
+                    "=" | "+=" | "-=" | "*=" | "/=" | "&=" if depth == 0 && eq_pos.is_none() => {
+                        eq_pos = Some(k);
+                    }
+                    _ => {}
+                }
+            }
+            let collect_names = |toks: &[u32]| -> Vec<String> {
+                let mut parts = Vec::new();
+                let mut j = 0;
+                while j < toks.len() {
+                    let t = self.text_string(toks[j]);
+                    let k = self.kind(toks[j]);
+                    if k == "identifier" || matches!(t.as_str(), "true" | "false" | "nil" | "result" | "addr" | "cast") {
+                        let mut end = j;
+                        let mut name = t;
+                        while end + 2 < toks.len()
+                            && self.text_string(toks[end + 1]) == "."
+                            && self.kind(toks[end + 2]) == "identifier"
+                        {
+                            name.push('.');
+                            name.push_str(&self.text_string(toks[end + 2]));
+                            end += 2;
+                        }
+                        let mut out = String::from("[\"n\",");
+                        push_string(&mut out, &name);
+                        out.push(']');
+                        parts.push(out);
+                        j = end + 1;
+                    } else {
+                        j += 1;
+                    }
+                }
+                parts
+            };
+            if let Some(eq) = eq_pos {
+                let mut targets = Vec::new();
+                let mut j = 0;
+                while j < eq {
+                    let t = self.text_string(slice[j]);
+                    if matches!(t.as_str(), "var" | "let" | "const") {
+                        j += 1;
+                        continue;
+                    }
+                    if t == ":" {
+                        break;
+                    }
+                    if self.kind(slice[j]) == "identifier" {
+                        let mut end = j;
+                        let mut path = t;
+                        while end + 1 < eq {
+                            let nt = self.text_string(slice[end + 1]);
+                            if nt == "." && end + 2 < eq && self.kind(slice[end + 2]) == "identifier" {
+                                path.push('.');
+                                path.push_str(&self.text_string(slice[end + 2]));
+                                end += 2;
+                            } else if nt == "[" {
+                                let mut bd = 0i32;
+                                let mut m = end + 1;
+                                while m < eq {
+                                    let mt = self.text_string(slice[m]);
+                                    if mt == "[" { bd += 1; } else if mt == "]" { bd -= 1; if bd == 0 { break; } }
+                                    m += 1;
+                                }
+                                end = m;
+                            } else {
+                                break;
+                            }
+                        }
+                        targets.push(path);
+                        j = end + 1;
+                    } else {
+                        j += 1;
+                    }
+                }
+                let rhs = collect_names(&slice[eq + 1..]);
+                let val = match rhs.len() {
+                    0 => "0".to_string(),
+                    1 => rhs[0].clone(),
+                    _ => format!("[\"m\",[{}]]", rhs.join(",")),
+                };
+                if !targets.is_empty() {
+                    self.lexer_event(b'a', line, &targets, &val, false);
+                } else if val != "0" {
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            } else {
+                let parts = collect_names(slice);
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 {
+                        parts[0].clone()
+                    } else {
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn import(&mut self, id: u32) {
+        let kind = self.kind(id);
+        match kind {
+            "import_declaration" if self.kinds.family == Family::Go => self.go_import(id),
+            "import_declaration" if self.kinds.family == Family::Java => self.java_import(id),
+            // C# writes `using System.Collections.Generic;`, `using static
+            // System.Math;` and `using Alias = Some.Type;`. Every one of them
+            // was invisible: nothing matched `using_directive`, so a corpus of
+            // 22k files lost its imports on almost every file.
+            "using_directive" | "global_using_directive" => self.cs_using(id),
+            // `import org.gradle.api.Project` and `import io.ktor.http as kt`:
+            // the Kotlin grammar gives every one its own node, nothing matched
+            // it, and 2539 files of the kotlin corpus lost their import - most
+            // of them lost nothing else.
+            "import_header" => self.kt_import(id),
+            "package_header" => self.kt_package(id),
+            // Scala and Swift spell an import as a flat run of identifiers
+            // (`import java.io.Serializable`) or with selectors
+            // (`import a.b.{C, D}`), and neither had an arm: 147 files of the
+            // scala corpus lost every import.
+            "import_declaration" if self.facts.tag == "HS" => self.hs_import(id),
+            "import_declaration" if self.kinds.family == Family::Plain => self.scala_import(id),
+            "uses_clause" if self.facts.tag == "PAS" => {
+                for child in self.children(id) {
+                    if self.kind(child) == "dotted_name" {
+                        let module = self.text_string(child).to_ascii_lowercase();
+                        if !module.is_empty() {
+                            let alias = module.rsplit('.').next().unwrap_or(&module).to_string();
+                            let line = self.line(child);
+                            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_STAR, ..Import::default() });
+                        }
+                    }
+                }
+            }
+            "import_directive" | "require_statement" | "use_declaration" | "trait_use_declaration" | "include_expression" | "open_declaration" | "using_statement" => {
+                self.generic_path_import(id);
+            }
+            "import_statement" | "import_from_statement" => {
+                if self.facts.tag == "NIM" {
+                    self.nim_import(id);
+                } else if self.is_js() {
+                    self.js_import(id);
+                } else {
+                    self.python_import(id);
+                }
+            }
+            "export_statement" => {
+                // `export ... from "x"` re-exports; a plain `export` holds a
+                // declaration, which the walk reaches on its own; `export
+                // default <expr>` is the expression.
+                if self.child_of_kind(id, "string").is_some() {
+                    self.js_import(id);
+                } else if !self.children(id).into_iter().any(|child| {
+                    matches!(
+                        self.kind(child),
+                        "function_declaration" | "class_declaration" | "lexical_declaration" | "variable_declaration"
+                            | "generator_function_declaration" | "type_alias_declaration" | "interface_declaration"
+                    )
+                }) {
+                    self.expression_statement(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `import ("fmt"; str "strings")`: one import per spec, the module as
+    /// written and the alias the spec binds — an explicit name, or the last
+    /// path segment. Go gives all of them the import clause's line, as the
+    /// lexer does, because the clause is the statement.
+    pub(crate) fn go_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut specs = Vec::new();
+        let mut walk = vec![id];
+        while let Some(node) = walk.pop() {
+            for child in self.children(node) {
+                if self.kind(child) == "import_spec" {
+                    specs.push(child);
+                } else if matches!(self.kind(child), "import_spec_list") {
+                    walk.push(child);
+                }
+            }
+        }
+        for spec in specs {
+            let children = self.children(spec);
+            let Some(string) = children
+                .iter()
+                .copied()
+                .find(|&child| matches!(self.kind(child), "interpreted_string_literal" | "raw_string_literal"))
+            else {
+                continue;
+            };
+            let module = self.string_value(string);
+            let alias = children
+                .iter()
+                .copied()
+                .find(|&child| self.kind(child) == "identifier")
+                .map(|child| self.text_string(child))
+                .unwrap_or_else(|| module.rsplit('/').next().unwrap_or(&module).to_string());
+            self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+        }
+    }
+
+    /// `using System.Collections.Generic;` and its two variants.
+    ///
+    /// The lexer reads the same line and files the last segment as the alias
+    /// when no `as`-style name is spelled, so the alias is written here the same
+    /// way: the records have to mean the same thing for the guard to keep the
+    /// tree. Generic type arguments on an aliased type (`Dictionary<K, V>`) and
+    /// `global::` qualifiers are normalized to match the dotted module path.
+    pub(crate) fn hs_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let mut module = String::new();
+        let mut alias = String::new();
+        let mut after_as = false;
+        for child in self.children(id) {
+            match self.kind(child) {
+                "as" => after_as = true,
+                "module_name" => {
+                    let name = self.text_string(child);
+                    if after_as {
+                        alias = name;
+                    } else {
+                        module = name;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if module.is_empty() {
+            return;
+        }
+        if alias.is_empty() {
+            alias = module.rsplit('.').next().unwrap_or(&module).to_string();
+        }
+        self.facts.imports.push(Import { line, module, alias, kind: IMPORT_MODULE, ..Import::default() });
+    }
+
+    pub(crate) fn generic_path_import(&mut self, id: u32) {
+        let line = self.line(id);
+        let raw = self.text_string(id);
+        let mut strings: Vec<(usize, String)> = Vec::new();
+        let bytes = raw.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                let q = bytes[i];
+                let start = i;
+                i += 1;
+                let mut val = String::new();
+                while i < bytes.len() && bytes[i] != q {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 1;
+                    }
