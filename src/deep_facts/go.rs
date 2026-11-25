@@ -9278,3 +9278,323 @@ fn dotted_piece(text: &str) -> bool {
                             let mut name = String::from("[\"n\",");
                             push_string(&mut name, &callee_path);
                             name.push(']');
+                            parts.push(name);
+                        }
+                        parts.extend(init_parts);
+                        c_out = format!("[\"m\",[{}]]", parts.join(","));
+                    } else {
+                        let mut parts = vec![c_out];
+                        parts.extend(init_parts);
+                        c_out = format!("[\"m\",[{}]]", parts.join(","));
+                    }
+                }
+            }
+            c_out
+        };
+        // `new ClassHandlerObserver<TTarget>(action)`: a generic constructor
+        // names both its class and its type arguments in the one-pass reader's
+        // value, while the constructor call itself keeps only the runtime args.
+        if self.language.name == "csharp" && self.kind(id) == "object_creation" && self.kind(callee) == "generic_type" && args.is_some() {
+            if let Some(type_args) = self.child_of_kind(callee, "type_arguments") {
+                let targs = self.form(type_args);
+                if targs != "0" {
+                    let mut parts = Vec::new();
+                    let callee_path = self.path_of(callee);
+                    if !callee_path.is_empty() {
+                        let mut name = String::from("[\"n\",");
+                        push_string(&mut name, &callee_path);
+                        name.push(']');
+                        parts.push(name);
+                    }
+                    parts.push(targs);
+                    parts.push(out);
+                    out = format!("[\"m\",[{}]]", parts.join(","));
+                }
+            }
+        }
+        let _ = is_new;
+        let link = (index as u32, receiver);
+        (out, Some(link))
+    }
+
+    /// The called path and the receiver form: `f(x)` -> (`f`, `0`),
+    /// `a.b.c(x)` -> (`a.b.c`, `["n","a.b"]`), `A().b()` -> (`.b`,
+    /// `["c",0,0,[]]`) with the index of the `A` call the walk recorded.
+    pub(crate) fn call_target(&self, callee: u32, receiver_call: Option<String>) -> (String, String) {
+        match self.kind(callee) {
+            "subscript" | "subscript_expression" | "index_expression" if !self.path_of(callee).is_empty() => {
+                match self.children(callee).first().copied() {
+                    Some(inner) => self.call_target(inner, receiver_call),
+                    None => (String::new(), "0".to_string()),
+                }
+            }
+            // `.macOS("10.10")`: an implicit member has no receiver, and the
+            // call is named by the member alone. Read through the default arm
+            // it had no name at all, so the call the lexer records was missing.
+            "implicit_member_expression" => (self.member_name(callee), "0".to_string()),
+            // `s.go()` / `s->go()` in the C family: the grammar writes a field
+            // access as `field_expression`, and read through the default arm
+            // the call had no name at all.
+            // `new ExampleTest.ClassA(0)`: C# parses a qualified constructor
+            // type as `qualified_type`. Without splitting it here, `call_target`
+            // kept the dotted path and dropped the owner from the receiver slot.
+            "attribute" | "member_expression" | "member_access_expression" | "nullsafe_member_access_expression" | "member_access" | "null_aware_member"
+            | "conditional_member_access" | "navigation_expression" | "optional_chaining_expression"
+            | "field_expression" | "select" | "qualified_type"
+            | "member" | "safe_member" | "scope" | "scoped_property_access_expression" => {
+                let children = self.children(callee);
+                let name = self.member_name(callee);
+                let object = children.first().copied();
+                let receiver_path = object.map(|node| self.path_of(node)).unwrap_or_default();
+                let path = if receiver_path.is_empty() {
+                    format!(".{name}")
+                } else {
+                    format!("{receiver_path}.{name}")
+                };
+                let receiver = if !receiver_path.is_empty() && !receiver_path.starts_with('.') {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &receiver_path);
+                    out.push(']');
+                    out
+                } else {
+                    receiver_call.unwrap_or_else(|| "0".to_string())
+                };
+                (path, receiver)
+            }
+            // Scala spells a qualified type in a `new` as flat children
+            // (`new` / `java` / `.` / `util` / `.` / `ArrayList` /
+            // `type_arguments`). Reading only the first identifier named the
+            // call `java`, so every `new java.util.X[T](..)` lost its call.
+            "new_expression" if self.language.name == "scala" => {
+                let parts: Vec<String> = self
+                    .children(callee)
+                    .into_iter()
+                    .filter(|&child| matches!(self.kind(child), "identifier" | "type_identifier"))
+                    .map(|child| self.text_string(child))
+                    .collect();
+                let path = parts.join(".");
+                // The lexer writes a qualified constructor with the owner in
+                // the receiver slot (`c(n:java.util;[..])`), so split the dotted
+                // type the same way a `select` callee is split.
+                let receiver = if parts.len() > 1 {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &parts[..parts.len() - 1].join("."));
+                    out.push(']');
+                    out
+                } else {
+                    "0".to_string()
+                };
+                (path, receiver)
+            }
+            // The lexer records the scope of `a::b::f()` as the receiver.
+            "qualified_identifier" | "qualified_expression" if self.language.name == "cpp" => {
+                let path = self.path_of(callee);
+                match path.rsplit_once('.') {
+                    Some((owner, _)) => {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, owner);
+                        out.push(']');
+                        (path, out)
+                    }
+                    None => (path, "0".to_string()),
+                }
+            }
+            "call" | "call_expression" | "new_expression" => {
+                // `f()(...)`: the callee is an inner call, and the name is the
+                // inner call's own callee. It has to be looked for *inside*
+                // `callee`: a call node reaches this arm as its own callee when
+                // the grammar recovers a call with no operand, and recursing on
+                // the same index is an infinite descent that takes the process
+                // stack out (a four kilobyte fuzz file is enough).
+                let inner = self.children(callee).into_iter().find(|&child| {
+                    !matches!(self.kind(child), "(" | ")" | "argument_list" | "arguments" | "type_arguments" | "new")
+                });
+                match inner {
+                    Some(inner) => {
+                        let (path, _) = self.call_target(inner, None);
+                        (path, "0".to_string())
+                    }
+                    None => (String::new(), "0".to_string()),
+                }
+            }
+            _ => {
+                let mut path = self.path_of(callee);
+                // Recovery may wrap tokens before `(` (e.g. `_focus is object ? GetOrCreate`)
+                // into an `ERROR` or expression callee of an `invocation_expression`;
+                // the rightmost name before the argument list is the callee.
+                if path.is_empty() && self.language.name == "csharp" {
+                    let mut cur = callee;
+                    loop {
+                        let Some(last) = self
+                            .children(cur)
+                            .into_iter()
+                            .rev()
+                            .find(|&child| !self.is_layout(child))
+                        else {
+                            break;
+                        };
+                        let p = self.path_of(last);
+                        if !p.is_empty() {
+                            path = p;
+                            break;
+                        }
+                        if matches!(
+                            self.kind(last),
+                            "ERROR" | "conditional_expression" | "binary_expression" | "is_expression"
+                        ) {
+                            cur = last;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                let receiver = if path.is_empty() {
+                    receiver_call.unwrap_or_else(|| "0".to_string())
+                } else {
+                    "0".to_string()
+                };
+                (path, receiver)
+            }
+        }
+    }
+
+    /// The property name of an `a.b` node: the last leaf after the dot. It is
+    /// read by position, not by kind, because a member called `get` carries the
+    /// grammar's `get` kind and a private one carries `#`.
+    pub(super) fn member_name(&self, id: u32) -> String {
+        for &child in self.children(id).iter().rev() {
+            if self.node(child).first_child != NONE {
+                // Swift's `.some(...)` parses `some` as an `ERROR` node inside
+                // `implicit_member_expression` because `some` is also a keyword.
+                if matches!(self.kind(child), "ERROR" | "member_expression" | "method_call_tail") {
+                    let name = self.member_name(child);
+                    if !name.is_empty() {
+                        return name;
+                    }
+                }
+                continue;
+            }
+            let text = self.text(child);
+            if text.is_empty() {
+                continue;
+            }
+            if text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'#' || text[0] == b'$' || text[0] == b'`' {
+                return String::from_utf8_lossy(text).trim_start_matches('#').to_string();
+            }
+        }
+        String::new()
+    }
+
+    /// A dotted path, recording the calls on the way: `urlparse(x).netloc` has
+    /// a call under the attribute, and that call is a fact.
+    pub(crate) fn form_path(&mut self, id: u32) -> String {
+        let kind = self.kind(id);
+        // `A::B` as a value: the scope path is the name, `path_of` read only `A`.
+        let path = match kind {
+            "qualified_expression" if self.is_c() => self.c_path(id).unwrap_or_default(),
+            _ => self.path_of(id),
+        };
+        let children = self.children(id);
+        if !path.is_empty() && !path.starts_with('.') {
+            if matches!(kind, "attribute" | "member_expression" | "member_access" | "null_aware_member" | "conditional_member_access" | "subscript" | "subscript_expression" | "element_access" | "field_expression") {
+                if let Some(&object) = children.first() {
+                    // A receiver can be any expression; nothing is recorded for a
+                    // plain name, so this costs a walk and never a wrong fact.
+                    self.form(object);
+                }
+            }
+        }
+        // `name[len(prefix):]`: the index is an expression of its own.
+        if matches!(kind, "subscript" | "subscript_expression" | "element_access") {
+            for &child in children.iter().skip(1) {
+                if !self.is_layout(child) {
+                    self.form(child);
+                }
+            }
+        }
+        path
+    }
+
+    /// The line a call is written on. For `path\n  .replace(...)` that is the
+    /// line of `replace`, which is what a reader points at; Tree-sitter's node
+    /// start would say the line of `path`.
+    pub(crate) fn call_line(&self, callee: u32, call: u32) -> u32 {
+        match self.kind(callee) {
+            // `ParametersBuilder().apply { … }.build()`: a chain broken over
+            // lines is one navigation expression that starts on the first
+            // line, and the lexer files the call on the line its member name
+            // is written. Kotlin spells the member access `navigation_expression`
+            // and C# spells it `member_access`: a chain written over several
+            // lines - `RemoteExecutor.Invoke(x,\n  new Options { .. })
+            // .DisposeAsync();` - was dated to the receiver's first line, and the
+            // one-pass reader dates a call to its name (84 files).
+            "attribute" | "member_expression" | "navigation_expression" | "member_access"
+            | "conditional_member_access" | "selector_expression" | "field_access" | "optional_chaining_expression" => {
+                let children = self.children(callee);
+                if let Some(&name) = children.iter().rev().find(|&&child| {
+                    self.node(child).first_child == NONE && !self.is_layout(child)
+                }) {
+                    return self.line(name);
+                }
+                self.line(call)
+            }
+            _ => self.line(callee),
+        }
+    }
+
+    /// Whether a child of a binary, ternary or slice node is an operand: not
+    /// layout, or a word the layout filter took for a keyword (`type`, `class`,
+    /// `default`) that cannot be one of the operators this arm merges.
+    fn binary_operand(&self, child: u32) -> bool {
+        if !self.is_layout(child) {
+            return true;
+        }
+        let text = self.text_string(child);
+        let starts_a_word = text.as_bytes().first().is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_');
+        starts_a_word
+            && !matches!(
+                text.as_str(),
+                "in" | "instanceof" | "of" | "as" | "satisfies" | "typeof" | "void" | "delete" | "new" | "await" | "yield"
+            )
+    }
+
+    pub(crate) fn arguments(&mut self, list: u32) -> String {
+        if self.facts.tag == "LUA" && self.kind(list) == "call_arguments" {
+            self.delim_depth += 1;
+            let mut items: Vec<String> = Vec::new();
+            let ch = self.children(list);
+            if let Some(&first_c) = ch.first() {
+                let fk = self.kind(first_c);
+                if fk == "paren_arguments" {
+                    if let Some(el) = self.children(first_c).into_iter().find(|&c| self.kind(c) == "expression_list") {
+                        for ec in self.children(el) {
+                            let eck = self.kind(ec);
+                            if matches!(eck, "nil" | "true" | "false") {
+                                items.push(format!("[\"n\",\"{eck}\"]"));
+                            } else if matches!(eck, "string" | "number" | "...") {
+                                items.push("0".to_string());
+                            } else if !self.is_layout(ec) && eck != "," {
+                                let f = self.form(ec);
+                                items.push(if f.is_empty() { "0".to_string() } else { f });
+                            }
+                        }
+                    }
+                } else if fk == "string" {
+                    items.push("0".to_string());
+                } else {
+                    let f = self.form(first_c);
+                    items.push(if f.is_empty() { "0".to_string() } else { f });
+                }
+            }
+            self.delim_depth -= 1;
+            return format!("[{}]", items.join(","));
+        }
+        self.delim_depth += 1;
+        let mut out = "[".to_string();
+        let mut first = true;
+        for child in self.children(list) {
+            let kind = self.kind(child);
+            // Python's `...` is an anonymous token, so it reads as layout, but
+            // the one-pass lexer reads it as one argument of value 0: `type(...)`
+            // is `c(0;0;[0])` there and `c(0;0;[])` here. Every EllipsisType and
+            // every stub default of `...` fell back on the difference.
