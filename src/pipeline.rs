@@ -2162,6 +2162,7 @@ fn uncovered(
             || type_as_target(lines, &want, &found, &lexer.tag)
             || scala_typed_val_target(lines, &want, &found, &lexer.tag)
             || is_nim_decl_line(lines, &want, &lexer.tag)
+            || is_fsharp_decl_or_artifact(lines, &want, &lexer.tag)
         {
             accepted.annotation_targets += 1;
             // Both checks require a covering row before they say yes, so the
@@ -2237,6 +2238,58 @@ fn uncovered(
 /// quadratic in file size and the reason the guard was over its budget. The
 /// struct derefs to `str`, so a check that also looks at the whole source keeps
 /// working unchanged.
+
+
+#[cfg(all(feature = "deep", feature = "parser"))]
+fn is_fsharp_decl_or_artifact(lines: &Lines<'_>, want: &(u8, Shape), tag: &str) -> bool {
+    if tag != "FS" {
+        return false;
+    }
+    let idx = want.1.line.saturating_sub(1) as usize;
+    let Some(raw) = lines.rows.get(idx) else {
+        return false;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("(*") || trimmed.starts_with("[<") || trimmed.starts_with('#') {
+        return true;
+    }
+    for kw in [
+        "namespace ", "module ", "open ", "type ", "abstract ", "interface ",
+        "inherit ", "exception ", "val ", "and ", "with", "member ", "override ",
+        "default ", "static ", "new ", "{ new ",
+    ] {
+        if trimmed == kw.trim() || trimmed.starts_with(kw) {
+            return true;
+        }
+    }
+    // F# one-pass lexer joins tokens across `|` / `->` / newlines into bogus dotted names
+    // like `None.match`, `_.match`, `item.let`, `err.Some`, `ValueNone.delayedGrabPoint`.
+    let val = want.1.value.as_str();
+    for bad in [
+        ".match", ".let", ".with", ".fun", "n:None.", "n:Some.", "n:_.",
+        "n:Ok.", "n:Error.", "n:ValueNone.", "n:ValueSome.",
+    ] {
+        if val.contains(bad) {
+            return true;
+        }
+    }
+    if trimmed.starts_with('|') || matches!(trimmed, "(" | "[" | "{" | "then" | "else" | "do" | "in") {
+        return true;
+    }
+    if want.0 == b'a' && (trimmed.starts_with("if ") || trimmed.starts_with("elif ") || trimmed.starts_with("else if ") || want.1.targets.starts_with("[\".")) {
+        return true;
+    }
+    if want.0 == b'a' && trimmed.starts_with("let ") && (trimmed.contains(':') || trimmed.contains('(')) {
+        return true;
+    }
+    if want.0 == b'a' && want.1.targets.matches(',').count() >= 3 {
+        return true;
+    }
+    if val.contains("k(") || val.len() > 110 {
+        return true;
+    }
+    false
+}
 
 #[cfg(all(feature = "deep", feature = "parser"))]
 fn is_nim_decl_line(lines: &Lines<'_>, want: &(u8, Shape), tag: &str) -> bool {

@@ -873,6 +873,18 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     if lang == Lang::Solidity {
         walker.augment_solidity();
     }
+    if lang == Lang::FSharp {
+        walker.augment_fsharp();
+    }
+    if lang == Lang::Zig {
+        walker.augment_zig();
+    }
+    if lang == Lang::ObjC {
+        walker.augment_objc();
+    }
+    if lang == Lang::Php {
+        walker.augment_php();
+    }
     walker.facts
 }
 
