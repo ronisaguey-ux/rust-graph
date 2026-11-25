@@ -8958,3 +8958,323 @@ fn dotted_piece(text: &str) -> bool {
                 Some(value) => self.form(value),
                 None => "0".to_string(),
             },
+            // `"Foo" as NSString`: Swift's cast names the value and its target
+            // type, as the one-pass reader does; the default arm kept only the
+            // literal and dropped the type.
+            "cast" if self.language.name == "swift" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "as" | "is" | "?" | "!"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `x as Foo`, `x as? Foo.Bar`: Kotlin's cast names both the value
+            // and the target type to the one-pass reader; the shared unary arm
+            // kept only the operand and dropped the type.
+            "as_expression" | "is_expression" if self.is_kotlin() => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "as" | "is" | "!is" | "?"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            "lambda_literal" | "annotated_lambda" | "labeled_lambda" | "lambda_body" | "lambda_items" | "destructuring_parameter"
+                if self.is_kotlin() =>
+            {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| {
+                        !self.is_layout(child)
+                            && !matches!(
+                                self.kind(child),
+                                "{" | "}" | "(" | ")" | "->" | "," | ":" | ";" | "LINE_END" | "@"
+                            )
+                    })
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            "when_statement" | "when_subject" | "when_body" | "when_entry" if self.is_kotlin() => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| {
+                        !self.is_layout(child)
+                            && !matches!(
+                                self.kind(child),
+                                "when" | "(" | ")" | "val" | "var" | "=" | "{" | "}" | ";" | "LINE_END"
+                                    | "else" | "in" | "!in" | "is" | "!is" | "->" | ","
+                            )
+                    })
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `if #available(macOS 10.13, *) { values[#line] = f(.pi / 2) }`
+            // inside a closure: the condition is a value and so is every
+            // statement in the branch. The default arm read the condition
+            // through `expression_child` and dropped the branch, so the
+            // assignment written in an `if` lost its call - a `lazy var x: [Int
+            // : T] = { … }()` that gates a value on `#available` was the
+            // largest remaining swift file.
+            "if_statement" if self.language.name == "swift" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "if" | "else"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `val M = if (h <= 0) 0L else acc.cumulative(h-1)`: Scala's `if`
+            // is a value too, and the default arm read only its condition, so
+            // both branches (and the calls in them) left the CST's value.
+            "if_statement" if self.is_kotlin() || self.language.name == "scala" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "if" | "else"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `if (p) null else f()`: a branch is an `expression_statement`
+            // whose child may be a bare literal. The generic default only
+            // reads a child that has children, so a `null` branch became the
+            // constant 0 and the getter's merged value lost the name the lexer
+            // reads for it (`get() = if (…) null else f()`).
+            "expression_statement" if self.is_kotlin() => {
+                match self.children(id).into_iter().find(|&child| !self.is_layout(child)) {
+                    Some(child) => self.form(child),
+                    None => "0".to_string(),
+                }
+            }
+            "block" if self.is_kotlin() => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "{" | "}" | ";" | "LINE_END"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            "labeled_this" if self.is_kotlin() => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && self.kind(child) != "@")
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `var v = [1 : Foo(a: 1)]` inside a Swift closure: the statement
+            // binds a name and evaluates its initializer, and the lexer writes
+            // both as one merge. The default arm read no initializer at all, so
+            // the closure arm fell back to the statement's identifier leaves and
+            // every value in a `{ … }()` body was lost - the largest remaining
+            // swift file is six of them in a row (`lazy var x: [Int : T] = { var
+            // values = [ … ]; return values }()`).
+            "property_declaration" if self.language.name == "swift" => {
+                let children = self.children(id);
+                let value = children
+                    .iter()
+                    .position(|&child| self.kind(child) == "=")
+                    .and_then(|at| children.get(at + 1).copied());
+                let Some(value) = value else { return "0".to_string() };
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(name) = children.iter().copied().find(|&child| self.kind(child) == "identifier") {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &self.text_string(name));
+                    out.push(']');
+                    parts.push(out);
+                }
+                // `var values: [Int : URL] = [...]`: the lexer reads the
+                // declared type into the statement's value, so the names it
+                // spells are part of the read and leaving them out lost
+                // `Int`/`URL` off the one statement that declares both.
+                if let Some(colon) = children.iter().position(|&child| self.kind(child) == ":") {
+                    let end = children.iter().position(|&child| self.kind(child) == "=").unwrap_or(children.len());
+                    for &child in children.iter().take(end).skip(colon + 1) {
+                        if !self.is_layout(child) {
+                            self.swift_collect_idents(child, &mut parts);
+                        }
+                    }
+                }
+                let inner = self.form(value);
+                if inner != "0" {
+                    parts.push(inner);
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            // `val x = f()`: a property declaration inside an expression-valued
+            // lambda or block still evaluates its initializer, so `form` must
+            // walk the expression after `=` or `by` rather than stopping at
+            // `property_head` through the default child fallback.
+            "property_declaration" if self.is_kotlin() => {
+                let children = self.children(id);
+                match children
+                    .iter()
+                    .position(|&child| matches!(self.kind(child), "=" | "by"))
+                    .and_then(|at| children.get(at + 1).copied())
+                {
+                    Some(value) => self.form(value),
+                    None => "0".to_string(),
+                }
+            }
+            // `var y = $0.sorted()` / `var output = ""`: a Swift property
+            // declaration inside a closure still evaluates its initializer, and
+            // the lexer reads both the bound name and the initializer.
+            "property_declaration" if self.language.name == "swift" => {
+                let children = self.children(id);
+                let mut parts = Vec::new();
+                if let Some(pattern) = children.iter().copied().find(|&c| self.kind(c) == "pattern") {
+                    self.swift_collect_idents(pattern, &mut parts);
+                }
+                if let Some(at) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(value) = children[at + 1..].iter().copied().find(|&c| !self.is_layout(c)) {
+                        parts.push(self.form(value));
+                    }
+                }
+                match parts.len() {
+                    0 => "0".to_string(),
+                    1 => parts.remove(0),
+                    _ => format!("[\"m\",[{}]]", parts.join(",")),
+                }
+            }
+            "not_null_expression" if self.is_kotlin() => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
+            // `into: &thread`: Swift's `&` on an argument marks it inout, and
+            // the value is the operand itself. The one-pass lexer reads the
+            // bare name, so wrapping it as a merge left every inout argument
+            // a loss on the CST path only. `!` is the same: `!$Embedded` and
+            // `!foo` read the operand, and the default arm read nothing.
+            // Swift's other prefix operators are one more instance of the same
+            // rule: `-x`, `+x` and `~endOfTextOffset` all evaluate their
+            // operand, so the value is the operand and not the empty "0" the
+            // default arm wrote for the operator token it stopped on.
+            "prefix_expression" if self.language.name == "swift" && matches!(self.text_string(id).chars().next(), Some('&' | '!' | '~' | '-' | '+')) => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
+            // `unsafe (a, b)` (Swift 6.2): a marker on its operand, which is the
+            // value, as `&` and `!` are. The one-pass reader reads the operand.
+            // `x!`: the postfix force-unwrap is its operand, as the prefix `!` is.
+            "force_unwrap" if self.language.name == "swift" => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
+            "unsafe_expression" if self.language.name == "swift" => match self.expression_child(id) {
+                Some(child) => self.form(child),
+                None => "0".to_string(),
+            },
+            "not_operator" | "unary_operator" | "unary_expression" | "await" | "await_expression" | "yield" | "yield_expression"
+            | "typeof" | "void" | "non_null_expression" | "as_expression" | "satisfies_expression" | "type_assertion" | "delete_expression" => {
+                match self.expression_child(id) {
+                    Some(child) => {
+                        let inner = self.form(child);
+                        format!("[\"m\",[{inner}]]")
+                    }
+                    None => "0".to_string(),
+                }
+            }
+            // C# `index++` / `index--` inside a condition (`if (index++ != 0)`)
+            // is a `postfix_expression`; read its operand so the condition
+            // keeps the variable name.
+            "postfix_expression" if self.language.name == "csharp" => {
+                match self.expression_child(id) {
+                    Some(child) => {
+                        let inner = self.form(child);
+                        format!("[\"m\",[{inner}]]")
+                    }
+                    None => "0".to_string(),
+                }
+            }
+            // `f() ? "a" : "b"`: the condition and both branches are the value,
+            // as the one-pass reader merges them. The default arm read only the
+            // condition, so the branches (and any call in them) were lost.
+            // The grammar also files an optional type's `?` (`-> UInt8? in`) as a
+            // ternary; only a node with its `:` is a conditional.
+            "ternary" if self.language.name == "swift" && self.children(id).iter().any(|&child| self.kind(child) == ":") => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "?" | ":"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `a if p(x) else b`: the condition is an expression of its own and
+            // the call in it is a fact. The lexer's flow form reads the whole
+            // conditional, so the CST must too.
+            "conditional_expression" => {
+                let items: Vec<u32> = self.children(id).into_iter().filter(|&child| !self.is_layout(child)).collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `if (acc.hIndex > 0) acc.history(0) else acc.current`: Scala's
+            // `if_expression` is not a `conditional_expression`, so the default
+            // arm read only its first child (the condition) and every name and
+            // call in the branches was missing from the value the guard checks.
+            "if_statement" if self.language.name == "scala" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "if" | "else"))
+                    .collect();
+                match items.len() {
+                    0 => "0".to_string(),
+                    1 => self.form(items[0]),
+                    _ => self.merge_form(&items),
+                }
+            }
+            // `x match { case A => a; case B => b }`: Scala's `match_expression`
+            // has the scrutinee, the `match` keyword and the `match_block`, and
+            // the default arm read only the scrutinee. A binding initialised
+            // with a match wrote the constant 0 against the lexer's merge.
+            "match_expression" if self.language.name == "scala" => {
+                let items: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| !matches!(self.kind(child), "{" | "}"))
+                    .collect();
