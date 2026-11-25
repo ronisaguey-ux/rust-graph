@@ -10878,3 +10878,323 @@ fn dotted_piece(text: &str) -> bool {
                     arg_list.push(',');
                     arg_list.push_str(&trailing.join(","));
                     arg_list.push(']');
+                }
+            }
+        }
+        // `ResettableValue<(Int, Int) -> Bool>({ $0 == $1 })`: a generic
+        // specialization called with arguments is not a call to the lexer. It
+        // writes the type's names and the arguments' values as one value, so
+        // the form is that value and no `c`.
+        if self.language.name == "swift" && self.kind(callee) == "generic_specialization" && arg_list.len() > 2 {
+            let base = self.form(callee);
+            let inner = arg_list[1..arg_list.len() - 1].to_string();
+            let out = format!("[\"m\",[{base},{inner}]]");
+            return (out, Some((index as u32, receiver)));
+        }
+        // `Buf<Element>.create(n: 1)`: the lexer reads a member call on a
+        // specialized type as the type's names followed by an anonymous call.
+        if self.language.name == "swift"
+            && self.kind(callee) == "navigation_expression"
+            && self.children(callee).first().is_some_and(|&base| self.kind(base) == "generic_specialization")
+        {
+            let base = self.children(callee)[0];
+            let mut parts = Vec::new();
+            for child in self.children(base) {
+                if self.is_layout(child) || matches!(self.kind(child), "<" | ">" | ",") {
+                    continue;
+                }
+                let value = self.form(child);
+                if !value.is_empty() && value != "0" {
+                    parts.push(value);
+                } else if self.language.name == "csharp" {
+                    if let Some(word) = self.leaf_name(child) {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, &word);
+                        out.push(']');
+                        parts.push(out);
+                    }
+                }
+            }
+            parts.push(format!("[\"c\",{index},0,{arg_list}]"));
+            return (format!("[\"m\",[{}]]", parts.join(",")), Some((index as u32, "0".to_string())));
+        }
+        let mut out = if self.language.name == "csharp"
+            && self.kind(id) == "object_creation"
+            && matches!(self.kind(callee), "array_type" | "generic_type")
+            && args.is_none()
+        {
+            let mut parts = Vec::new();
+            let base = self.form(callee);
+            if base != "0" {
+                parts.push(base);
+            }
+            for child in children.iter().copied() {
+                if matches!(self.kind(child), "object_initializer" | "array_initializer" | "collection_initializer") {
+                    let init_form = self.form(child);
+                    if init_form != "0" {
+                        parts.push(init_form);
+                    }
+                }
+            }
+            match parts.len() {
+                0 => "0".to_string(),
+                1 => parts.remove(0),
+                _ => format!("[\"m\",[{}]]", parts.join(",")),
+            }
+        } else {
+            let mut c_out = format!("[\"c\",{index},{receiver},{arg_list}]");
+            if self.language.name == "csharp" && self.kind(id) == "object_creation" {
+                let mut init_parts = Vec::new();
+                for child in children.iter().copied() {
+                    if matches!(self.kind(child), "object_initializer" | "array_initializer" | "collection_initializer") {
+                        let init_form = self.form(child);
+                        if init_form != "0" {
+                            init_parts.push(init_form);
+                        }
+                    }
+                }
+                if !init_parts.is_empty() {
+                    if args.is_none() && self.kind(callee) != "generic_type" {
+                        let mut parts = Vec::new();
+                        let callee_path = self.path_of(callee);
+                        if !callee_path.is_empty() {
+                            let mut name = String::from("[\"n\",");
+                            push_string(&mut name, &callee_path);
+                            name.push(']');
+                            parts.push(name);
+                        }
+                        parts.extend(init_parts);
+                        c_out = format!("[\"m\",[{}]]", parts.join(","));
+                    } else {
+                        let mut parts = vec![c_out];
+                        parts.extend(init_parts);
+                        c_out = format!("[\"m\",[{}]]", parts.join(","));
+                    }
+                }
+            }
+            c_out
+        };
+        // `new ClassHandlerObserver<TTarget>(action)`: a generic constructor
+        // names both its class and its type arguments in the one-pass reader's
+        // value, while the constructor call itself keeps only the runtime args.
+        if self.language.name == "csharp" && self.kind(id) == "object_creation" && self.kind(callee) == "generic_type" && args.is_some() {
+            if let Some(type_args) = self.child_of_kind(callee, "type_arguments") {
+                let targs = self.form(type_args);
+                if targs != "0" {
+                    let mut parts = Vec::new();
+                    let callee_path = self.path_of(callee);
+                    if !callee_path.is_empty() {
+                        let mut name = String::from("[\"n\",");
+                        push_string(&mut name, &callee_path);
+                        name.push(']');
+                        parts.push(name);
+                    }
+                    parts.push(targs);
+                    parts.push(out);
+                    out = format!("[\"m\",[{}]]", parts.join(","));
+                }
+            }
+        }
+        let _ = is_new;
+        let link = (index as u32, receiver);
+        (out, Some(link))
+    }
+
+    /// The called path and the receiver form: `f(x)` -> (`f`, `0`),
+    /// `a.b.c(x)` -> (`a.b.c`, `["n","a.b"]`), `A().b()` -> (`.b`,
+    /// `["c",0,0,[]]`) with the index of the `A` call the walk recorded.
+    pub(crate) fn call_target(&self, callee: u32, receiver_call: Option<String>) -> (String, String) {
+        match self.kind(callee) {
+            "subscript" | "subscript_expression" | "index_expression" if !self.path_of(callee).is_empty() => {
+                match self.children(callee).first().copied() {
+                    Some(inner) => self.call_target(inner, receiver_call),
+                    None => (String::new(), "0".to_string()),
+                }
+            }
+            // `.macOS("10.10")`: an implicit member has no receiver, and the
+            // call is named by the member alone. Read through the default arm
+            // it had no name at all, so the call the lexer records was missing.
+            "implicit_member_expression" => (self.member_name(callee), "0".to_string()),
+            // `s.go()` / `s->go()` in the C family: the grammar writes a field
+            // access as `field_expression`, and read through the default arm
+            // the call had no name at all.
+            // `new ExampleTest.ClassA(0)`: C# parses a qualified constructor
+            // type as `qualified_type`. Without splitting it here, `call_target`
+            // kept the dotted path and dropped the owner from the receiver slot.
+            "attribute" | "member_expression" | "member_access_expression" | "nullsafe_member_access_expression" | "member_access" | "null_aware_member"
+            | "conditional_member_access" | "navigation_expression" | "optional_chaining_expression"
+            | "field_expression" | "select" | "qualified_type"
+            | "member" | "safe_member" | "scope" | "scoped_property_access_expression" => {
+                let children = self.children(callee);
+                let name = self.member_name(callee);
+                let object = children.first().copied();
+                let receiver_path = object.map(|node| self.path_of(node)).unwrap_or_default();
+                let path = if receiver_path.is_empty() {
+                    format!(".{name}")
+                } else {
+                    format!("{receiver_path}.{name}")
+                };
+                let receiver = if !receiver_path.is_empty() && !receiver_path.starts_with('.') {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &receiver_path);
+                    out.push(']');
+                    out
+                } else {
+                    receiver_call.unwrap_or_else(|| "0".to_string())
+                };
+                (path, receiver)
+            }
+            // Scala spells a qualified type in a `new` as flat children
+            // (`new` / `java` / `.` / `util` / `.` / `ArrayList` /
+            // `type_arguments`). Reading only the first identifier named the
+            // call `java`, so every `new java.util.X[T](..)` lost its call.
+            "new_expression" if self.language.name == "scala" => {
+                let parts: Vec<String> = self
+                    .children(callee)
+                    .into_iter()
+                    .filter(|&child| matches!(self.kind(child), "identifier" | "type_identifier"))
+                    .map(|child| self.text_string(child))
+                    .collect();
+                let path = parts.join(".");
+                // The lexer writes a qualified constructor with the owner in
+                // the receiver slot (`c(n:java.util;[..])`), so split the dotted
+                // type the same way a `select` callee is split.
+                let receiver = if parts.len() > 1 {
+                    let mut out = "[\"n\",".to_string();
+                    push_string(&mut out, &parts[..parts.len() - 1].join("."));
+                    out.push(']');
+                    out
+                } else {
+                    "0".to_string()
+                };
+                (path, receiver)
+            }
+            // The lexer records the scope of `a::b::f()` as the receiver.
+            "qualified_identifier" | "qualified_expression" if self.language.name == "cpp" => {
+                let path = self.path_of(callee);
+                match path.rsplit_once('.') {
+                    Some((owner, _)) => {
+                        let mut out = "[\"n\",".to_string();
+                        push_string(&mut out, owner);
+                        out.push(']');
+                        (path, out)
+                    }
+                    None => (path, "0".to_string()),
+                }
+            }
+            "call" | "call_expression" | "new_expression" => {
+                // `f()(...)`: the callee is an inner call, and the name is the
+                // inner call's own callee. It has to be looked for *inside*
+                // `callee`: a call node reaches this arm as its own callee when
+                // the grammar recovers a call with no operand, and recursing on
+                // the same index is an infinite descent that takes the process
+                // stack out (a four kilobyte fuzz file is enough).
+                let inner = self.children(callee).into_iter().find(|&child| {
+                    !matches!(self.kind(child), "(" | ")" | "argument_list" | "arguments" | "type_arguments" | "new")
+                });
+                match inner {
+                    Some(inner) => {
+                        let (path, _) = self.call_target(inner, None);
+                        (path, "0".to_string())
+                    }
+                    None => (String::new(), "0".to_string()),
+                }
+            }
+            _ => {
+                let mut path = self.path_of(callee);
+                // Recovery may wrap tokens before `(` (e.g. `_focus is object ? GetOrCreate`)
+                // into an `ERROR` or expression callee of an `invocation_expression`;
+                // the rightmost name before the argument list is the callee.
+                if path.is_empty() && self.language.name == "csharp" {
+                    let mut cur = callee;
+                    loop {
+                        let Some(last) = self
+                            .children(cur)
+                            .into_iter()
+                            .rev()
+                            .find(|&child| !self.is_layout(child))
+                        else {
+                            break;
+                        };
+                        let p = self.path_of(last);
+                        if !p.is_empty() {
+                            path = p;
+                            break;
+                        }
+                        if matches!(
+                            self.kind(last),
+                            "ERROR" | "conditional_expression" | "binary_expression" | "is_expression"
+                        ) {
+                            cur = last;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                let receiver = if path.is_empty() {
+                    receiver_call.unwrap_or_else(|| "0".to_string())
+                } else {
+                    "0".to_string()
+                };
+                (path, receiver)
+            }
+        }
+    }
+
+    /// The property name of an `a.b` node: the last leaf after the dot. It is
+    /// read by position, not by kind, because a member called `get` carries the
+    /// grammar's `get` kind and a private one carries `#`.
+    pub(super) fn member_name(&self, id: u32) -> String {
+        for &child in self.children(id).iter().rev() {
+            if self.node(child).first_child != NONE {
+                // Swift's `.some(...)` parses `some` as an `ERROR` node inside
+                // `implicit_member_expression` because `some` is also a keyword.
+                if matches!(self.kind(child), "ERROR" | "member_expression" | "method_call_tail") {
+                    let name = self.member_name(child);
+                    if !name.is_empty() {
+                        return name;
+                    }
+                }
+                continue;
+            }
+            let text = self.text(child);
+            if text.is_empty() {
+                continue;
+            }
+            if text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'#' || text[0] == b'$' || text[0] == b'`' {
+                return String::from_utf8_lossy(text).trim_start_matches('#').to_string();
+            }
+        }
+        String::new()
+    }
+
+    /// A dotted path, recording the calls on the way: `urlparse(x).netloc` has
+    /// a call under the attribute, and that call is a fact.
+    pub(crate) fn form_path(&mut self, id: u32) -> String {
+        let kind = self.kind(id);
+        // `A::B` as a value: the scope path is the name, `path_of` read only `A`.
+        let path = match kind {
+            "qualified_expression" if self.is_c() => self.c_path(id).unwrap_or_default(),
+            _ => self.path_of(id),
+        };
+        let children = self.children(id);
+        if !path.is_empty() && !path.starts_with('.') {
+            if matches!(kind, "attribute" | "member_expression" | "member_access" | "null_aware_member" | "conditional_member_access" | "subscript" | "subscript_expression" | "element_access" | "field_expression") {
+                if let Some(&object) = children.first() {
+                    // A receiver can be any expression; nothing is recorded for a
+                    // plain name, so this costs a walk and never a wrong fact.
+                    self.form(object);
+                }
+            }
+        }
+        // `name[len(prefix):]`: the index is an expression of its own.
+        if matches!(kind, "subscript" | "subscript_expression" | "element_access") {
+            for &child in children.iter().skip(1) {
+                if !self.is_layout(child) {
+                    self.form(child);
+                }
+            }
+        }
+        path
+    }
+
