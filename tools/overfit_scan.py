@@ -48,6 +48,41 @@ def corpus_repo_names(corpus: str) -> set[str]:
     return names
 
 
+KIND_LITERAL = re.compile(r'"([a-z][a-z0-9_]{2,60})"')
+SNAKE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def grammar_kinds(root: str) -> set[str]:
+    """Every snake_case string that appears in the grammar crates is a CST node kind."""
+    kinds = set()
+    for rel in ("crates", "src/deep"):
+        base = os.path.join(root, rel)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in sorted(dirnames) if d not in ("target", ".git")]
+            for name in filenames:
+                if not name.endswith(".rs"):
+                    continue
+                try:
+                    text = open(os.path.join(dirpath, name), encoding="utf-8",
+                                errors="replace").read()
+                except OSError:
+                    continue
+                kinds.update(KIND_LITERAL.findall(text))
+    return kinds
+
+
+def classify(literal: str, kinds: set[str]) -> str:
+    if " " in literal or "{" in literal:
+        return "message"
+    if literal in kinds:
+        return "cst_kind"
+    if SNAKE.match(literal):
+        return "orphan_kind"
+    return "source_identifier"
+
+
 def rust_files(root: str):
     for rel in SOURCES:
         base = os.path.join(root, rel)
@@ -60,7 +95,8 @@ def rust_files(root: str):
                     yield os.path.join(dirpath, name)
 
 
-def scan(df: dict, rare_max: int, repos: set[str]):
+def scan(df: dict, rare_max: int, repos: set[str], kinds: set[str] | None = None):
+    kinds = kinds or set()
     rows = []
     seen = set()
     for path in rust_files(ROOT):
@@ -89,6 +125,7 @@ def scan(df: dict, rare_max: int, repos: set[str]):
                 seen.add(key)
                 lowered = literal.lower()
                 rows.append({
+                    "kind": classify(literal, kinds),
                     "file": os.path.relpath(path, ROOT),
                     "line": number,
                     "literal": literal,
@@ -97,7 +134,8 @@ def scan(df: dict, rare_max: int, repos: set[str]):
                     "guard": guard,
                     "repo_named": any(name and name in lowered for name in repos),
                 })
-    rows.sort(key=lambda r: (not r["guard"], r["repo_named"], r["token_df"]))
+    order = {"source_identifier": 0, "orphan_kind": 1, "cst_kind": 2, "message": 3}
+    rows.sort(key=lambda r: (order.get(r["kind"], 9), not r["guard"], r["token_df"]))
     return rows
 
 
@@ -116,7 +154,8 @@ def main() -> int:
     data = json.load(open(args.df))
     df = data["tokens"]
     repos = corpus_repo_names(args.corpus)
-    rows = scan(df, args.rare, repos)
+    kinds = grammar_kinds(ROOT)
+    rows = scan(df, args.rare, repos, kinds)
 
     if args.json:
         print(json.dumps({"corpus_files": data["files"], "rare_max": args.rare,
@@ -124,8 +163,14 @@ def main() -> int:
         return 0
 
     guarded = [r for r in rows if r["guard"]]
+    import collections
+    buckets = collections.Counter(r["kind"] for r in rows)
     print(f"# corpus {data['files']} files, {len(df)} tokens; "
           f"{len(rows)} rare literals, {len(guarded)} of them used in a decision")
+    print("# buckets: " + ", ".join(f"{k}={v}" for k, v in buckets.most_common()))
+    print("#   cst_kind = a node kind our grammar defines (expected)")
+    print("#   orphan_kind = snake_case the grammar never emits (dead rule or leak)")
+    print("#   source_identifier = UPPER/camelCase compared against source text (overfit risk)")
     print(f"# {'file:line':52s} {'df':>5s} {'token':22s} literal")
     for row in rows[:args.max_rows]:
         mark = "*" if row["repo_named"] else " "

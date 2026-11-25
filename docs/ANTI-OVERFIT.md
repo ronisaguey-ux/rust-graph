@@ -6,26 +6,43 @@ exists in the language, or for a reason that exists in these repos".
 
 ## What the scanner found (2026-11-25)
 
-`tools/overfit_scan.py` reads every string literal used in a comparison in the
-parser and looks it up in a document-frequency index of the corpus
-(`tools/corpus_token_df.py`). 4,804 literals are rare (rarest token in <= 25 files);
-**1,134 of them are used in a decision**.
+`tools/overfit_scan.py` extracts every string literal used in a comparison and looks
+it up in a document-frequency index of the corpus (`tools/corpus_token_df.py`,
+110,096 files, 2.67M distinct tokens). Of 4,204 rare literals, 1,042 are used in a
+decision. Each one is classified, because "rare" alone is meaningless here:
 
-Three distinct smells, worst first:
+| class | findings | in a guard | meaning |
+|---|---:|---:|---|
+| `cst_kind` | 1,174 | 169 | a node kind our grammar defines - expected, harmless |
+| `orphan_kind` | 1,716 | 589 | snake_case our grammar never emits - dead rule or leak |
+| `source_identifier` | 601 | 250 | UPPER/camelCase vs source text - the overfit risk |
+| `message` | 713 | 34 | a sentence, not a decision |
 
-1. **Corpus-named literals.** A literal that spells a repository or one of its
-   exports - e.g. `lua_isuserdata`, `LUA_API`, `JEMALLOC_EXPORT` in
-   `src/deep_facts/c_family.rs`. These fire on one repo's headers, not on C.
-2. **Tree-sitter node names as heuristics.** `call_expression`,
-   `direct_declarator`, `parenthesized_declarator`, `designated_field`,
-   `nameof_expression`, `object_creation_expression` - grammar vocabulary borrowed
-   from one particular grammar and matched against our own CST. Generates rules that
-   only cover the files that happened to be in the corpus.
-3. **Absent-in-corpus literals.** `property_attributes`,
-   `specified_macro_item`, `bare_user_declaration`, `user_cast_head` appear in
-   **zero** corpus files: dead rules, kept because a round once added them and no
-   gate ever removed anything. Dead rules cost nothing today and will misfire the day
-   the language changes shape.
+The `source_identifier` bucket is dominated by **dialect names** - `TSX` (45 uses),
+`SWIFT` (31), `JSX` (23), `SCALA` (8), `OBJC` (3) in `src/parser.rs` - which are the
+program's own `Lang` selectors and legitimate. Real language keywords with low
+corpus frequency (`__attribute`, `willSet`) are also fine.
+
+**Genuine overfitting, the whole of it:**
+
+1. `src/deep_facts/c_family.rs:2335-2345` - `lua_isuserdata`, `LUA_API`,
+   `JEMALLOC_EXPORT`. Repo symbols from musl/redis/Lua headers, compared against
+   source text, present in **zero** corpus files. Pure fitting to a header we had.
+2. `crates/deep-grammars/src/batch_d/css.rs:578` - `#1a73e8`, a specific CSS colour.
+   A rule keyed on one hex value.
+3. 1,716 `orphan_kind` literals the grammar never emits - rules that cannot fire.
+   Dead weight, not damage, but they hide real rules in the noise and they misfire
+   the day a shape changes.
+
+That is the strip list. It is small, which is good news: the parser is not riddled
+with corpus knowledge, it is littered with dead vocabulary and three symbols.
+
+## Strip list (applied when both lanes are back)
+
+- `c_family.rs`: drop the three header symbols, re-measure c on the expanded corpus.
+- `css.rs`: replace the colour literal with a hex-colour shape (`#` + 3/6/8 hex).
+- `orphan_kind`: remove literals with no producer; a literal must be traceable to a
+  `Kind` the grammar defines, or to a keyword list, or it goes.
 
 ## The rules a lane must follow
 
