@@ -179,7 +179,7 @@ rust_graph_deep::grammar! { OBJC {
         | &("typedef" IDENT arguments) macro_enum_declaration
         | &(declaration_specifiers _declarator "{") function_definition
         | &(plain_type_name _declarator "{") user_function
-        | &(declaration_specifiers plain_type_name _declarator "{") static_user_function
+        | &("static" plain_type_name _declarator "{") static_user_function
         | objc_interface
         | objc_implementation
         | &("@protocol" IDENT (";" | ",")) objc_forward_declaration
@@ -192,7 +192,7 @@ rust_graph_deep::grammar! { OBJC {
         // one-pass reader - the macro's name, then the type and the name it
         // declares - and with no rule the macro was the whole item and the
         // declaration under it was recovered.
-        | &(IDENT (declaration_specifiers | plain_type_name) ["const" | "volatile"] _declarator) export_macro_declaration
+        | &(IDENT declaration_specifiers _declarator) export_macro_declaration
         | declaration_statement
         // `NS_ASSUME_NONNULL_BEGIN`, and every other bare macro that stands as
         // an item of its own: without this alternative the item reached the
@@ -213,7 +213,7 @@ rust_graph_deep::grammar! { OBJC {
     /// `FOUNDATION_EXPORT double VersionNumber;`: an export or visibility
     /// macro in front of a declaration. The macro is a name to the one-pass
     /// reader and the declaration follows it on the same line.
-    export_macro_declaration: IDENT (declaration_specifiers | plain_type_name) ["const" | "volatile"] (_init_declarator % ",") ";",
+    export_macro_declaration: IDENT declaration_specifiers (_init_declarator % ",") ";",
     /// `NS_ASSUME_NONNULL_BEGIN` on a line of its own: a bare macro with no
     /// arguments and no semicolon, which every modern Apple header opens and
     /// closes with. Nothing else at file scope is a single name, so the guard
@@ -226,7 +226,7 @@ rust_graph_deep::grammar! { OBJC {
     /// typedef'd return type. `declaration_specifiers` has no room for an
     /// unknown type name, so this shape - which AFNetworking and ReactiveObjC
     /// open a private helper with - was two error nodes.
-    static_user_function: declaration_specifiers plain_type_name _declarator compound_statement,
+    static_user_function: "static" plain_type_name _declarator compound_statement,
 
     declaration_statement: _user_type_declaration | &(declaration_specifiers plain_type_name _declarator) _qualified_user_declaration | _default_declaration,
     _qualified_user_declaration: declaration_specifiers plain_type_name (_init_declarator % ",") ";",
@@ -369,8 +369,7 @@ rust_graph_deep::grammar! { OBJC {
     protocol_list: "<" (protocol_name % ",") _gt,
     protocol_name: IDENT,
     _gt: ">" | GT_JOINED,
-    ivar_block: "{" _ivar_item* "}",
-    _ivar_item: &(IDENT arguments) macro_call_statement | ivar_declaration | ";",
+    ivar_block: "{" ivar_declaration* "}",
     ivar_declaration: (declaration_specifiers | plain_type_name) (_declarator % ",") ";",
     _interface_item: objc_method_declaration | objc_property_declaration | declaration_statement | ";",
 
