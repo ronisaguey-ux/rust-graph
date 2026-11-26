@@ -12478,3 +12478,323 @@ impl<'a> Walker<'a> {
             }
             "ERROR" if self.language.name == "csharp" => {
                 self.cs_recovered_calls(id);
+                self.cs_recovered_events(id);
+            }
+            "ERROR" if self.facts.tag == "ERL" => {
+                let _ = self.erl_recovered_calls(id);
+                self.erl_recovered_events(id);
+            }
+            "ERROR" if self.facts.tag == "NIM" => {
+                let _ = self.nim_recovered_calls(id);
+                self.nim_recovered_imports(id);
+                self.nim_recovered_events(id);
+            }
+            "expression_statement" if self.facts.tag == "LUA" => {
+                let children = self.children(id);
+                if let Some(atail) = children.iter().copied().find(|&c| self.kind(c) == "assignment_tail") {
+                    let line = self.line(id);
+                    let targets: Vec<String> = children
+                        .iter()
+                        .copied()
+                        .take_while(|&c| c != atail)
+                        .filter(|&c| !self.is_layout(c) && self.kind(c) != ",")
+                        .map(|n| {
+                            let p = self.path_of(n);
+                            if p.is_empty() { self.text_string(n) } else { p }
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !targets.is_empty() {
+                        let tname = targets[0].clone();
+                        let raw_tail = self.text_string(atail);
+                        if let Some((_, rhs)) = raw_tail.split_once('=') {
+                            let rhs_t = rhs.trim();
+                            if rhs_t.starts_with("require") {
+                                let bytes = rhs_t.as_bytes();
+                                let mut i = 0;
+                                while i < bytes.len() {
+                                    if bytes[i] == b'"' || bytes[i] == b'\'' {
+                                        let q = bytes[i];
+                                        i += 1;
+                                        let mut val = String::new();
+                                        while i < bytes.len() && bytes[i] != q {
+                                            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                                i += 1;
+                                            }
+                                            val.push(bytes[i] as char);
+                                            i += 1;
+                                        }
+                                        let alias = tname.rsplit(|c| c == '.' || c == ':').next().unwrap_or("").to_string();
+                                        if !val.is_empty() && !alias.is_empty() {
+                                            self.facts.imports.push(Import {
+                                                line,
+                                                module: val,
+                                                alias,
+                                                kind: IMPORT_MODULE,
+                                                ..Import::default()
+                                            });
+                                        }
+                                        break;
+                                    }
+                                    i += 1;
+                                }
+                            }
+                        }
+                        let mut vals: Vec<String> = Vec::new();
+                        if let Some(el) = self.children(atail).into_iter().find(|&c| self.kind(c) == "expression_list") {
+                            for ec in self.children(el) {
+                                let eck = self.kind(ec);
+                                if matches!(eck, "nil" | "true" | "false") {
+                                    vals.push(format!("[\"n\",\"{eck}\"]"));
+                                    continue;
+                                }
+                                if self.is_layout(ec) || eck == "," {
+                                    continue;
+                                }
+                                if eck == "function_expression" {
+                                    let lhs_is_index = children
+                                        .iter()
+                                        .copied()
+                                        .find(|&c| !self.is_layout(c) && c != atail)
+                                        .is_some_and(|n| self.kind(n) == "index");
+                                    if !lhs_is_index {
+                                        let sym = tname.rsplit(|c| c == '.' || c == ':').next().unwrap_or(&tname).to_string();
+                                        if !sym.is_empty() {
+                                            self.bound.push((ec, sym));
+                                        }
+                                    }
+                                }
+                                let f = self.form(ec);
+                                vals.push(if f.is_empty() { "0".to_string() } else { f });
+                            }
+                        }
+                        let val = if vals.is_empty() {
+                            "0".to_string()
+                        } else if vals.len() == 1 {
+                            vals.remove(0)
+                        } else {
+                            format!("[\"t\",[{}]]", vals.join(","))
+                        };
+                        self.lexer_event(b'a', line, &targets, &val, false);
+                    }
+                } else {
+                    self.expression_statement(id);
+                }
+            }
+            "expression_statement" => self.expression_statement(id),
+            "command_call" if matches!(self.facts.tag.as_str(), "RB" | "CR" | "NIM") => {
+                let val = self.form(id);
+                if !val.is_empty() && val != "0" {
+                    self.lexer_event(b'x', self.line(id), &[], &val, false);
+                }
+            }
+            "when_statement" | "elif_clause" | "of_clause" if self.facts.tag == "NIM" => {
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if matches!(ck, ":" | "suite" | "inline_suite" | "block_suite" | "elif_clause" | "else_clause") {
+                        break;
+                    }
+                    if matches!(ck, "when" | "elif" | "of" | ",") || self.is_layout(ch) {
+                        continue;
+                    }
+                    let _ = self.form(ch);
+                }
+            }
+            "discard_statement" | "yield_statement" | "inline_body" if self.facts.tag == "NIM" => {
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if matches!(ck, "discard" | "yield") || self.is_layout(ch) {
+                        continue;
+                    }
+                    let _ = self.form(ch);
+                }
+            }
+            "inline_statement" if self.facts.tag == "NIM" => {
+                if let Some(ch) = self.expression_child(id) {
+                    if self.kind(ch) != "command_call" {
+                        self.statement_node(id, ch);
+                    }
+                }
+            }
+            "if_statement" | "unless_statement" | "elsif_clause" | "case_statement" | "when_clause" | "while_statement" | "until_statement"
+                if self.facts.tag == "RB" =>
+            {
+                let line = self.line(id);
+                let mut parts = Vec::new();
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if matches!(ck, "body" | "else_clause" | "elsif_clause" | "when_clause" | "then_token" | "end") {
+                        break;
+                    }
+                    if matches!(ck, "if" | "unless" | "elsif" | "case" | "when" | "while" | "until") {
+                        continue;
+                    }
+                    if self.is_layout(ch) {
+                        continue;
+                    }
+                    let f = self.form(ch);
+                    if !f.is_empty() && f != "0" {
+                        parts.push(f);
+                    }
+                }
+                if parts.len() == 1 {
+                    self.lexer_event(b'x', line, &[], &parts[0], false);
+                } else if parts.len() > 1 {
+                    self.lexer_event(b'x', line, &[], &format!("[\"m\",[{}]]", parts.join(",")), false);
+                }
+            }
+            "multiple_assignment" if self.facts.tag == "RB" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    let mut targets = Vec::new();
+                    for &c in &children[..eq] {
+                        if self.is_layout(c) || self.kind(c) == "," {
+                            continue;
+                        }
+                        let p = self.path_of(c);
+                        if !p.is_empty() {
+                            targets.push(p);
+                        }
+                    }
+                    let mut vals = Vec::new();
+                    for &c in &children[eq + 1..] {
+                        if self.is_layout(c) || self.kind(c) == "," {
+                            continue;
+                        }
+                        let f = self.form(c);
+                        vals.push(if f.is_empty() { "0".to_string() } else { f });
+                    }
+                    if !targets.is_empty() && !vals.is_empty() {
+                        let val = if vals.len() == 1 {
+                            vals.remove(0)
+                        } else {
+                            format!("[\"t\",[{}]]", vals.join(","))
+                        };
+                        self.lexer_event(b'a', line, &targets, &val, false);
+                    }
+                }
+            }
+            "import_statement" | "include_statement" | "from_statement" if self.facts.tag == "NIM" => {
+                self.nim_import(id);
+            }
+            "value_declaration" if self.facts.tag == "NIM" => {
+                let children = self.children(id);
+                let eq = children.iter().position(|&c| self.kind(c) == "=");
+                let colon = children.iter().position(|&c| self.kind(c) == ":");
+                let end_names = colon.or(eq).unwrap_or(children.len());
+                let mut targets = Vec::new();
+                for &c in &children[..end_names] {
+                    if self.kind(c) == "identifier" {
+                        let name = self.text_string(c);
+                        if !name.is_empty() {
+                            targets.push(name);
+                        }
+                    }
+                }
+                if let Some(col) = colon {
+                    let stop = eq.unwrap_or(children.len());
+                    if let Some(ty) = children[col + 1..stop].iter().copied().find_map(|c| self.leaf_name(c)) {
+                        if ty.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                            for t in &targets {
+                                self.facts.vars.push((t.clone(), ty.clone()));
+                            }
+                        }
+                    }
+                }
+                if let Some(eq_idx) = eq {
+                    let line = self.line(id);
+                    if let Some(&rhs) = children[eq_idx + 1..].iter().find(|&&c| !self.is_layout(c)) {
+                        if self.kind(rhs) == "call" {
+                            if let Some(callee) = self.children(rhs).first().copied().and_then(|c| self.leaf_name(c)) {
+                                if callee.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                    for t in &targets {
+                                        self.facts.vars.push((t.clone(), callee.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        let val = self.form(rhs);
+                        if !targets.is_empty() {
+                            self.lexer_event(b'a', line, &targets, &val, false);
+                        }
+                    }
+                }
+            }
+            "include_statement" if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
+                let line = self.line(id);
+                let children = self.children(id);
+                let kw = children
+                    .first()
+                    .map(|&c| self.text_string(c))
+                    .filter(|k| matches!(k.as_str(), "include" | "extend" | "prepend"))
+                    .unwrap_or_else(|| "include".to_string());
+                let idx = self.push_call(kw, line);
+                let mut args = Vec::new();
+                for &c in children.iter().skip(1) {
+                    if !self.is_layout(c) {
+                        let v = self.form(c);
+                        if !v.is_empty() {
+                            args.push(v);
+                        }
+                    }
+                }
+                let val = format!("[\"c\",{idx},0,[{}]]", args.join(","));
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
+            "pragma_directive" if self.facts.tag == "SOL" => {
+                let raw = self.text_string(id);
+                if raw.contains('=') {
+                    let line = self.line(id);
+                    self.lexer_event(b'a', line, &["solidity".to_string()], "0", false);
+                } else {
+                    self.decl_statement(id);
+                }
+            }
+            "alias_declaration" if self.facts.tag == "CR" => {
+                let children = self.children(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(name) = children[..eq].iter().rev().find_map(|&c| self.leaf_name(c)) {
+                        let rhs = children[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                        let val = rhs.map(|c| {
+                            let f = self.form(c);
+                            if !f.is_empty() && f != "0" {
+                                f
+                            } else {
+                                let t = self.text_string(c).trim().replace("::", ".");
+                                if t.is_empty() {
+                                    "0".to_string()
+                                } else {
+                                    let mut o = String::from("[\"n\",");
+                                    push_string(&mut o, &t);
+                                    o.push(']');
+                                    o
+                                }
+                            }
+                        }).unwrap_or_else(|| "0".to_string());
+                        self.lexer_event(b'a', self.line(id), &[name], &val, false);
+                    }
+                }
+            }
+            "var_declaration" if self.facts.tag == "ZIG" => {
+                let children = self.children(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(name) = children[..eq].iter().rev().find_map(|&c| self.leaf_name(c)) {
+                        let rhs = children[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                        let val = rhs.map(|c| self.form(c)).filter(|v| !v.is_empty()).unwrap_or_else(|| "0".to_string());
+                        self.lexer_event(b'a', self.line(id), &[name], &val, false);
+                    }
+                }
+            }
+            "begin_block" if self.facts.tag == "AWK" => {
+                self.lexer_event(b'x', self.line(id), &[], "[\"n\",\"BEGIN\"]", false);
+            }
+            "end_block" if self.facts.tag == "AWK" => {
+                self.lexer_event(b'x', self.line(id), &[], "[\"n\",\"END\"]", false);
+            }
+            "print_statement" | "delete_statement" if self.facts.tag == "AWK" => {
+                self.decl_statement(id);
+            }
+            "pattern_rule" if self.facts.tag == "AWK" => {
+                if let Some(first) = self.children(id).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "block") {
+                    let val = self.form(first);
