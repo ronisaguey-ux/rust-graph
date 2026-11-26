@@ -170,6 +170,18 @@ impl<'a> Walker<'a> {
                 let value = format!("[\"m\",[{}]]", parts.join(","));
                 self.lexer_event(b'x', line, &[], &value, false);
             }
+            "objc_class_declaration" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = vec!["[\"n\",\"class\"]".to_string()];
+                for name in self.c_words_of(id) {
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, &name);
+                    form.push(']');
+                    parts.push(form);
+                }
+                let value = format!("[\"m\",[{}]]", parts.join(","));
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
             // `ShaderDesignerWindowController *windowController;` in an ivar
             // block is a declaration statement to the lexer.
             "ivar_declaration" => {
@@ -255,6 +267,25 @@ impl<'a> Walker<'a> {
             // `@property (nonatomic, strong) UILabel *label;`: the lexer reads
             // `property` as a call of that name, and the node was never read -
             // 155 one-loss files on the Objective-C corpus.
+            "objc_dynamic" => {
+                let names: Vec<String> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.kind(child) == "identifier")
+                    .map(|child| self.text_string(child))
+                    .collect();
+                if !names.is_empty() {
+                    let line = self.line(id);
+                    let mut parts = vec!["[\"n\",\"dynamic\"]".to_string()];
+                    for name in &names {
+                        let mut out = String::from("[\"n\",");
+                        push_string(&mut out, name);
+                        out.push(']');
+                        parts.push(out);
+                    }
+                    self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                }
+            }
             "objc_property_declaration" => {
                 let line = self.line(id);
                 let index = self.push_call("property".to_string(), line);
@@ -2103,7 +2134,11 @@ impl<'a> Walker<'a> {
         let kids: Vec<u32> = self
             .children(id)
             .into_iter()
-            .filter(|&child| !self.is_layout(child))
+            .filter(|&child| {
+                !self.is_layout(child)
+                    || (self.colon_follows(child)
+                        && self.text_string(child).bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+            })
             .collect();
         let (&receiver, selector_parts) = kids.split_first()?;
         // `[[Greeter alloc] initWithName:@"world"]`: a receiver that is itself
@@ -2129,7 +2164,7 @@ impl<'a> Walker<'a> {
             // A name with a `:` after it is a keyword part of the selector
             // (`insertObject:`); every other node is an argument of the part
             // before it.
-            if self.kind(kid) == "identifier" && self.colon_follows(kid) {
+            if self.children(kid).is_empty() && self.colon_follows(kid) {
                 selector.push_str(&self.text_string(kid));
                 selector.push(':');
             } else if selector.is_empty() {
