@@ -7333,6 +7333,102 @@ impl<'a> Walker<'a> {
             }
 
 
+            let mut val_json = String::from(r#"["m",["#);
+            for (ti, tok) in vals.iter().enumerate() {
+                if ti > 0 { val_json.push(','); }
+                val_json.push_str(tok);
+            }
+            val_json.push_str("]]");
+
+            let mut emitted_a: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
+            let cb = code.as_bytes();
+            let mut scan_from = 0usize;
+            while let Some(rel_ep) = code[scan_from..].find('=') {
+                let ep = scan_from + rel_ep;
+                scan_from = ep + 1;
+                let prev = if ep > 0 { cb[ep - 1] } else { 0 };
+                let next = if ep + 1 < cb.len() { cb[ep + 1] } else { 0 };
+                if matches!(prev, b'=' | b'!' | b'<' | b'>') || matches!(next, b'=' | b'>') { continue; }
+                let lhs = code[..ep].trim_end();
+                let mut tlists: Vec<Vec<String>> = Vec::new();
+                let lhs_no_assert = lhs.strip_prefix("assert ").unwrap_or(lhs).trim_start();
+                let lhs_unpct = lhs_no_assert.strip_prefix('%').unwrap_or(lhs_no_assert);
+                if (lhs_unpct.starts_with('{') && lhs_unpct.ends_with('}')) || (lhs_unpct.starts_with('[') && lhs_unpct.ends_with(']')) {
+                    let inner = &lhs_unpct[1..lhs_unpct.len() - 1];
+                    let mut list_full: Vec<String> = Vec::new();
+                    let mut list_nolit: Vec<String> = Vec::new();
+                    for part in inner.split(',') {
+                        let pt = part.trim();
+                        // Handle `key: val` inside map pattern `%{tuple: bdd}`
+                        if let Some((k, _)) = pt.split_once(':') {
+                            let kt = k.trim();
+                            if !kt.is_empty() && is_id_start(kt.as_bytes()[0]) && kt.bytes().all(is_id_cont) {
+                                tlists.push(vec![kt.to_string()]);
+                                list_full.push(kt.to_string());
+                                list_nolit.push(kt.to_string());
+                                continue;
+                            }
+                        }
+                        let clean = pt.strip_prefix(':').unwrap_or(pt);
+                        if !clean.is_empty() && is_id_start(clean.as_bytes()[0]) && clean.bytes().all(is_id_cont) {
+                            list_full.push(clean.to_string());
+                            if !matches!(clean, "true" | "false" | "nil") {
+                                list_nolit.push(clean.to_string());
+                            }
+                        }
+                    }
+                    if !list_full.is_empty() { tlists.push(list_full); }
+                    if !list_nolit.is_empty() { tlists.push(list_nolit); }
+                }
+                let lb = lhs.as_bytes();
+                let mut li = lb.len();
+                while li > 0 && is_id_cont(lb[li - 1]) { li -= 1; }
+                let nm = &lhs[li..];
+                if !nm.is_empty() && is_id_start(nm.as_bytes()[0]) {
+                    tlists.push(vec![nm.to_string()]);
+                }
+                for tlist in tlists {
+                    if emitted_a.insert(tlist.clone()) {
+                        let mut ev = format!(r#"["a",{ln32},["#);
+                        for (ti, nm) in tlist.iter().enumerate() {
+                            if ti > 0 { ev.push(','); }
+                            push_string(&mut ev, nm);
+                        }
+                        ev.push_str("],");
+                        ev.push_str(&val_json);
+                        ev.push_str(",0]");
+                        for &tsi in &target_syms {
+                            let sidx = safe_call_idx[tsi];
+                            if sidx == 0 {
+                                extra_events[tsi].push(ev.clone());
+                            } else {
+                                extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                            }
+                        }
+                    }
+                }
+            }
+            let ev_x = format!(r#"["x",{ln32},{val_json},0]"#);
+            for &tsi in &target_syms {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev_x.clone());
+                } else {
+                    extra_events[tsi].push(ev_x.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                }
+            }
+        }
+
+        for (si, evs) in extra_events.into_iter().enumerate() {
+            if evs.is_empty() { continue; }
+            let sym = &mut self.facts.symbols[si];
+            for ev in evs {
+                if !sym.events.is_empty() { sym.events.push(','); }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
+
     fn augment_clojure(&mut self) {
         let src_str = std::str::from_utf8(self.src).unwrap_or("");
         let lines: Vec<&str> = src_str.lines().collect();
