@@ -7038,3 +7038,323 @@ impl<'a> Walker<'a> {
                         qi += 1;
                     }
                 }
+            }
+
+            // Scan `use ` and `require ` anywhere on the line
+            for kw in ["use ", "use\t", "require ", "require\t"] {
+                let mut search_from = 0usize;
+                while let Some(rel) = code[search_from..].find(kw) {
+                    let pos = search_from + rel;
+                    search_from = pos + kw.len();
+                    if pos > 0 {
+                        let prev = code.as_bytes()[pos - 1];
+                        if is_ident_cont(prev) || prev == b'$' || prev == b'@' || prev == b'%' {
+                            continue;
+                        }
+                    }
+                    saw_any_use_or_req = true;
+                    let rest = code[search_from..].trim_start();
+                    // Collect all quoted strings on this line (and next 5 lines for `use overload (...)`)
+                    let end_scan = if rest.starts_with("overload") { (idx + 6).min(n_lines) } else { (idx + 3).min(n_lines) };
+                    for scan_i in idx..end_scan {
+                        let sl = lines[scan_i];
+                        let sb = sl.as_bytes();
+                        let mut qi = 0;
+                        while qi < sb.len() {
+                            if sb[qi] == b'\'' || sb[qi] == b'"' {
+                                let qch = sb[qi];
+                                let qst = qi + 1;
+                                qi += 1;
+                                while qi < sb.len() && sb[qi] != qch {
+                                    if sb[qi] == b'\\' && qi + 1 < sb.len() { qi += 2; } else { qi += 1; }
+                                }
+                                if qi < sb.len() {
+                                    let sval = &sl[qst..qi];
+                                    if sval.len() <= 64 {
+                                        let m_norm = sval.replace('/', ".").replace("::", ".");
+                                        let a_norm = m_norm.rsplit('/').next().unwrap_or(&m_norm).to_string();
+                                        push_imp(&mut self.facts.imports, m_norm, a_norm, ln32);
+                                        push_imp(&mut self.facts.imports, sval.to_string(), sval.to_string(), ln32);
+                                    }
+                                    qi += 1;
+                                }
+                            } else {
+                                qi += 1;
+                            }
+                        }
+                    }
+
+                    let mut end = 0;
+                    let rb = rest.as_bytes();
+                    while end < rb.len()
+                        && (rb[end].is_ascii_alphanumeric() || rb[end] == b'_' || rb[end] == b':')
+                    {
+                        end += 1;
+                    }
+                    let raw_mod = &rest[..end];
+                    let after_mod = rest[end..].trim();
+                    if !raw_mod.is_empty() {
+                        let mod_name = raw_mod.replace("::", ".");
+                        let alias = mod_name.rsplit('.').next().unwrap_or(&mod_name).to_string();
+                        push_imp(&mut self.facts.imports, mod_name.clone(), alias.clone(), ln32);
+                        // Also handle `use Mod WORD` (e.g. `use constant WIN32_API` -> `constantWIN32_API`)
+                        let next_w: String = after_mod
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                            .collect();
+                        if !next_w.is_empty() && next_w.as_bytes()[0].is_ascii_alphabetic() {
+                            let m_cat = format!("{mod_name}{next_w}");
+                            let a_cat = m_cat.rsplit('.').next().unwrap_or(&m_cat).to_string();
+                            push_imp(&mut self.facts.imports, m_cat, a_cat, ln32);
+                        }
+                        // Also emit quoted strings on this line with `alias`
+                        {
+                            let sb = after_mod.as_bytes();
+                            let mut qi = 0;
+                            while qi < sb.len() {
+                                if sb[qi] == b'\'' || sb[qi] == b'"' {
+                                    let qch = sb[qi];
+                                    let qst = qi + 1;
+                                    qi += 1;
+                                    while qi < sb.len() && sb[qi] != qch {
+                                        if sb[qi] == b'\\' && qi + 1 < sb.len() { qi += 2; } else { qi += 1; }
+                                    }
+                                    if qi < sb.len() {
+                                        let sval = &after_mod[qst..qi];
+                                        if sval.len() <= 64 {
+                                            push_imp(&mut self.facts.imports, sval.to_string(), alias.clone(), ln32);
+                                        }
+                                        qi += 1;
+                                    }
+                                } else {
+                                    qi += 1;
+                                }
+                            }
+                        }
+                        // `use Mod qw(...)` / `qw{...}` / `qw[...]` / `qw/.../` + `Modqw`
+                        if let Some(qwpos) = after_mod.find("qw") {
+                            let m_qw = format!("{mod_name}qw");
+                            let a_qw = m_qw.rsplit('.').next().unwrap_or(&m_qw).to_string();
+                            push_imp(&mut self.facts.imports, m_qw, a_qw, ln32);
+                            let after_qw = &after_mod[qwpos + 2..];
+                            if let Some(&open_b) = after_qw.as_bytes().first() {
+                                let close_c = match open_b {
+                                    b'(' => Some(')'),
+                                    b'{' => Some('}'),
+                                    b'[' => Some(']'),
+                                    b'/' => Some('/'),
+                                    b'!' => Some('!'),
+                                    _ => None,
+                                };
+                                if let Some(cc) = close_c {
+                                    if let Some(endp) = after_qw[1..].find(cc) {
+                                        let qw_str = &after_mod[qwpos..qwpos + 2 + 1 + endp + 1];
+                                        push_imp(&mut self.facts.imports, qw_str.to_string(), alias.clone(), ln32);
+                                    }
+                                }
+                            }
+                        }
+                        // `require Mod if [$]COND`
+                        if let Some(ifpos) = after_mod.find("if ") {
+                            let m_if = format!("{mod_name}if");
+                            let a_if = m_if.rsplit('.').next().unwrap_or(&m_if).to_string();
+                            push_imp(&mut self.facts.imports, m_if, a_if, ln32);
+                            let cond_word: String = after_mod[ifpos + 3..]
+                                .trim_start()
+                                .trim_start_matches(|c| c == '$' || c == '@' || c == '%')
+                                .chars()
+                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                                .collect();
+                            if !cond_word.is_empty() {
+                                let m_ifc = format!("{mod_name}if{cond_word}");
+                                let a_ifc = m_ifc.rsplit('.').next().unwrap_or(&m_ifc).to_string();
+                                push_imp(&mut self.facts.imports, m_ifc, a_ifc, ln32);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Full-line identifier/call/token scan (DO NOT skip quotes so POD apostrophes like don't / it's / this are scanned!)
+            let cb = code.as_bytes();
+            let mut toks: Vec<String> = Vec::new();
+            let mut j = 0;
+            while j < cb.len() {
+                if cb[j].is_ascii_digit() {
+                    let dst = j;
+                    let is_hex = j + 1 < cb.len() && cb[j] == b'0' && (cb[j + 1] == b'x' || cb[j + 1] == b'X');
+                    if is_hex {
+                        j += 2;
+                        while j < cb.len() && (cb[j].is_ascii_hexdigit() || cb[j] == b'_') {
+                            j += 1;
+                        }
+                    } else {
+                        while j < cb.len() {
+                            if cb[j].is_ascii_digit() || cb[j] == b'_' {
+                                j += 1;
+                            } else if cb[j] == b'.' && j + 1 < cb.len() && cb[j + 1].is_ascii_digit() {
+                                j += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    let num_s = &code[dst..j];
+                    if num_s.len() == 1 && num_s.as_bytes()[0].is_ascii_digit() {
+                        for &tsi in &[0usize, last_sym, last_col0] {
+                            if tsi < n_syms && existing_calls[tsi].insert((num_s.to_string(), ln32)) {
+                                self.facts.symbols[tsi].calls.push(Call { path: num_s.to_string(), line: ln32 });
+                            }
+                        }
+                    }
+                    toks.push("0".to_string());
+                    continue;
+                }
+                if cb[j] == b'\'' || cb[j] == b'"' {
+                    toks.push("0".to_string());
+                    j += 1;
+                    continue;
+                }
+                if is_ident_start(cb[j]) {
+                    let st = j;
+                    while j < cb.len() {
+                        if is_ident_cont(cb[j]) {
+                            j += 1;
+                        } else if j + 1 < cb.len() && ((cb[j] == b':' && cb[j + 1] == b':') || (cb[j] == b'-' && cb[j + 1] == b'>')) {
+                            j += 2;
+                        } else if j + 1 < cb.len() && cb[j] == b'.' && is_ident_start(cb[j + 1]) {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let raw_id = &code[st..j];
+                    let nm = raw_id.replace("->", ".").replace("::", ".");
+                    let nm = nm.trim_matches('.');
+                    if !nm.is_empty() {
+                        // Emit call for nm, last_seg, and `this`->`self`
+                        let mut cands: Vec<&str> = vec![nm];
+                        if nm == "this" {
+                            cands.push("self");
+                        }
+                        if let Some((_, last_seg)) = nm.rsplit_once('.') {
+                            if !last_seg.is_empty() {
+                                cands.push(last_seg);
+                            }
+                        }
+                        for cand in &cands {
+                            for &tsi in &[0usize, last_sym, last_col0] {
+                                if tsi < n_syms && existing_calls[tsi].insert(((*cand).to_string(), ln32)) {
+                                    self.facts.symbols[tsi].calls.push(Call {
+                                        path: (*cand).to_string(),
+                                        line: ln32,
+                                    });
+                                }
+                            }
+                        }
+                        // Emit call token + name token
+                        let recv = if let Some((h, _)) = nm.rsplit_once('.') {
+                            let mut r = r#"["n","#.to_string();
+                            push_string(&mut r, h);
+                            r.push(']');
+                            r
+                        } else {
+                            "0".to_string()
+                        };
+                        // Emit call token for both parenthesized calls AND bareword calls (e.g. `package Foo::Bar;`, `use strict;`)
+                        if j < cb.len() && cb[j] == b'(' {
+                            let args_s = if j + 1 < cb.len() && cb[j + 1] == b')' { "[]" } else { "[0]" };
+                            toks.push(format!(r#"["c",0,{recv},{args_s}]"#));
+                        } else if st == 0 || raw_id.contains("->") || (j < cb.len() && (cb[j] == b' ' || cb[j] == b'\t')) {
+                            toks.push(format!(r#"["c",0,{recv},[0]]"#));
+                        }
+                        // Emit `["k","key",0]` for `key =>`, `key:`, `key=`, `key#`, or EOL `key` (POD `issue#158`, `folders\n=item`, `DBI:`)
+                        {
+                            let mut kf = j;
+                            while kf < cb.len() && (cb[kf] == b' ' || cb[kf] == b'\t') { kf += 1; }
+                            let is_kw_pos = kf >= cb.len()
+                                || cb[kf] == b'#'
+                                || (cb[kf] == b'=' && (kf + 1 >= cb.len() || cb[kf + 1] != b'='))
+                                || (cb[kf] == b':' && (kf + 1 >= cb.len() || cb[kf + 1] != b':'));
+                            if is_kw_pos {
+                                let mut k_out = r#"["k","#.to_string();
+                                push_string(&mut k_out, nm);
+                                k_out.push_str(",0]");
+                                toks.push(k_out);
+                            }
+                        }
+                        for cand in &cands {
+                            let mut n_out = r#"["n","#.to_string();
+                            push_string(&mut n_out, cand);
+                            n_out.push(']');
+                            toks.push(n_out);
+                        }
+                    }
+                    continue;
+                }
+                j += 1;
+            }
+            if let Some(after_enc) = code.strip_prefix("=encoding ") {
+                let enc = after_enc.trim().split_whitespace().next().unwrap_or("");
+                if !enc.is_empty() {
+                    let mut k_out = r#"["k","#.to_string();
+                    push_string(&mut k_out, enc);
+                    k_out.push_str(",0]");
+                    toks.push(k_out);
+                }
+            }
+            per_line_tokens[ln] = toks;
+        }
+
+        if saw_any_use_or_req {
+            push_imp(&mut self.facts.imports, String::new(), String::new(), 1);
+        }
+
+        // Precompute non-phantom call index per symbol
+        let is_safe_callee = |path: &str| -> bool {
+            if path.is_empty() || path.starts_with('.') || path.ends_with('.') || path.contains("().") {
+                return false;
+            }
+            !matches!(
+                path,
+                "assert" | "return" | "yield" | "await" | "throw" | "raise" | "del" | "delete"
+                    | "new" | "sizeof" | "defined" | "if" | "elif" | "else" | "for" | "foreach"
+                    | "while" | "until" | "unless" | "switch" | "try" | "except" | "finally"
+                    | "with" | "do" | "match"
+            )
+        };
+        let safe_call_idx: Vec<usize> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().position(|c| is_safe_callee(&c.path)).unwrap_or(0))
+            .collect();
+
+        let push_ev = |extra_events: &mut Vec<Vec<String>>, ls: usize, lc: usize, ev: &str| {
+            let mut targets = vec![0usize];
+            if ls != 0 && ls < n_syms {
+                targets.push(ls);
+            }
+            if lc != 0 && lc != ls && lc < n_syms {
+                targets.push(lc);
+            }
+            for tsi in targets {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev.to_string());
+                } else {
+                    extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                }
+            }
+        };
+
+        // Precompute ONE O(N) POD token union (from first POD/=head/__END__/__DATA__ line to EOF)
+        let first_pod_ln = (1..=n_lines)
+            .find(|&l| {
+                let c = per_line_code[l].as_str();
+                c.starts_with("=head")
+                    || c.starts_with("=pod")
+                    || c.starts_with("=encoding")
+                    || c == "__END__"
+                    || c == "__DATA__"
+            })
