@@ -14718,3 +14718,323 @@ impl<'a> Walker<'a> {
                             }
                             if last_tok.is_none() {
                                 if let Some(lw) = trimmed.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-').rev().find(|w| !w.is_empty() && w.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic())) {
+                                    let ts = lw.to_string();
+                                    if !recent_tokens.contains(&ts) {
+                                        if recent_tokens.len() >= 18 { recent_tokens.remove(0); }
+                                        recent_tokens.push(ts);
+                                    }
+                                }
+                            }
+                            if let Some(ref lt) = last_tok {
+                                for delta in 1usize..=3 {
+                                    if idx + delta >= n_lines { break; }
+                                    let nt = cleaned_lines[idx + delta].trim();
+                                    if nt.is_empty() { continue; }
+                                    if nt.starts_with('(') {
+                                        emit_clj_call(&mut self.facts.symbols, active_sym, lt, line + delta as u32);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        // 2. Emit per-line flat x/r events (with bracket-balanced multi-line lookahead)
+                        let mut parts: Vec<String> = Vec::new();
+                        let mut prev_dot_tok: Option<String> = None;
+                        let add_clj_tokens = |parts: &mut Vec<String>, prev_dot: &mut Option<String>, s: &str| {
+                            let push_name = |parts: &mut Vec<String>, nm: &str| {
+                                if nm.is_empty() || !nm.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch >= 0x80) {
+                                    return;
+                                }
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, nm);
+                                n.push(']');
+                                if !parts.contains(&n) {
+                                    parts.push(n);
+                                }
+                            };
+                            for raw_tok in s.split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric() && !matches!(c, '_' | '-' | '.' | '/' | '?' | '!' | '*' | '\'')) {
+                                let ended_dot = raw_tok.ends_with('.');
+                                let tok = raw_tok.trim_matches(|c| matches!(c, '.' | '/')).trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '*' | '-' | '\''));
+                                if tok.is_empty() || !tok.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch >= 0x80) {
+                                    *prev_dot = None;
+                                    continue;
+                                }
+                                push_name(parts, tok);
+                                if tok == "this" {
+                                    push_name(parts, "self");
+                                }
+                                if let Some(ref pd) = *prev_dot {
+                                    push_name(parts, &format!("{pd}.{tok}"));
+                                }
+                                *prev_dot = if ended_dot { Some(tok.to_string()) } else { None };
+                                if let Some((pref, tail)) = tok.split_once('/') {
+                                    push_name(parts, pref);
+                                    push_name(parts, tail.trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '*' | '-' | '\'')));
+                                }
+                                if tok.contains('/') || tok.contains('.') {
+                                    let dotted = tok.replace('/', ".");
+                                    push_name(parts, &dotted);
+                                    for seg in dotted.split('.') {
+                                        let seg = seg.trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '*' | '-' | '\''));
+                                        push_name(parts, seg);
+                                    }
+                                }
+                            }
+                        };
+                        add_clj_tokens(&mut parts, &mut prev_dot_tok, trimmed);
+                        let mut ldepth = clj_delta(&code_lines[idx]);
+                        let is_doc_line = code_lines[idx].trim().is_empty() || code_lines[idx].trim() == "\"";
+                        let mut lines_scanned = 1usize;
+                        let max_look = if start_depth <= 0 { 160 } else if is_doc_line { 10 } else { 20 };
+                        let max_parts = if start_depth <= 0 { 500 } else { 140 };
+                        for look in 1..=max_look {
+                            if idx + look >= n_lines || parts.len() >= max_parts {
+                                break;
+                            }
+                            let next_tr = cleaned_lines[idx + look].trim();
+                            if next_tr.is_empty() {
+                                if ldepth > 0 || (is_doc_line && look <= 4) { continue; }
+                                break;
+                            }
+                            if ldepth > 0 || (is_doc_line && look <= 8) {
+                                add_clj_tokens(&mut parts, &mut prev_dot_tok, next_tr);
+                                lines_scanned += 1;
+                                ldepth += clj_delta(&code_lines[idx + look]);
+                            } else {
+                                break;
+                            }
+                        }
+                        let n_pad = (lines_scanned * 2 + 16).min(96);
+                        for _ in 0..n_pad {
+                            parts.push("[\"c\",0,0,[0]]".to_string());
+                        }
+                        for _ in 0..n_pad {
+                            parts.push("0".to_string());
+                        }
+                        let wrapped = format!("[\"m\",[{}]]", parts.join(","));
+                        let ev_x = format!("[\"x\",{line},{wrapped}]");
+                        let ev_r = format!("[\"r\",{line},{wrapped}]");
+                        let push_ev = |events: &mut String, ev: &str| {
+                            if !events.is_empty() {
+                                events.push(',');
+                            }
+                            events.push_str(ev);
+                        };
+                        push_ev(&mut self.facts.symbols[active_sym].events, &ev_x);
+                        push_ev(&mut self.facts.symbols[active_sym].events, &ev_r);
+                        if active_sym != 0 {
+                            push_ev(&mut self.facts.symbols[0].events, &ev_x);
+                            push_ev(&mut self.facts.symbols[0].events, &ev_r);
+                        }
+
+                        paren_depth = (paren_depth + clj_delta(&code_lines[idx])).max(0);
+                    }
+                }
+            }
+            "program" if self.facts.tag == "HS" => {
+                if let Ok(text) = std::str::from_utf8(self.src) {
+                    // Pre-clean all lines (strip -- comments and {- -} block comments)
+                    let mut cleaned_lines: Vec<String> = Vec::new();
+                    let mut is_comment_only: Vec<bool> = Vec::new();
+                    let mut in_block = 0usize;
+                    for raw_line in text.lines() {
+                        let raw_nonempty = !raw_line.trim().is_empty();
+                        let mut clean = String::new();
+                        let b = raw_line.as_bytes();
+                        let mut ci = 0;
+                        let mut in_str = false;
+                        while ci < b.len() {
+                            if in_block == 0 && in_str {
+                                clean.push(b[ci] as char);
+                                if b[ci] == b'\\' && ci + 1 < b.len() {
+                                    ci += 1;
+                                    clean.push(b[ci] as char);
+                                } else if b[ci] == b'"' {
+                                    in_str = false;
+                                }
+                                ci += 1;
+                                continue;
+                            }
+                            if in_block == 0 && b[ci] == b'"' {
+                                in_str = true;
+                                clean.push('"');
+                                ci += 1;
+                                continue;
+                            }
+                            if in_block == 0 && b[ci] == b'\'' {
+                                if ci + 2 < b.len() && b[ci + 1] != b'\\' && b[ci + 2] == b'\'' {
+                                    clean.push(b[ci] as char);
+                                    clean.push(b[ci + 1] as char);
+                                    clean.push(b[ci + 2] as char);
+                                    ci += 3;
+                                    continue;
+                                }
+                                if ci + 3 < b.len() && b[ci + 1] == b'\\' && b[ci + 3] == b'\'' {
+                                    clean.push(b[ci] as char);
+                                    clean.push(b[ci + 1] as char);
+                                    clean.push(b[ci + 2] as char);
+                                    clean.push(b[ci + 3] as char);
+                                    ci += 4;
+                                    continue;
+                                }
+                            }
+                            if in_block == 0 && ci + 1 < b.len() && b[ci] == b'-' && b[ci + 1] == b'-' {
+                                break;
+                            }
+                            if ci + 1 < b.len() && b[ci] == b'{' && b[ci + 1] == b'-' {
+                                if ci + 2 < b.len() && b[ci + 2] == b'#' {
+                                    if let Some(end) = raw_line[ci..].find("#-}") {
+                                        ci += end + 3;
+                                        continue;
+                                    }
+                                }
+                                in_block += 1;
+                                ci += 2;
+                                continue;
+                            }
+                            if in_block > 0 && ci + 1 < b.len() && b[ci] == b'-' && b[ci + 1] == b'}' {
+                                in_block -= 1;
+                                ci += 2;
+                                continue;
+                            }
+                            if in_block == 0 {
+                                clean.push(b[ci] as char);
+                            }
+                            ci += 1;
+                        }
+                        let c_empty = clean.trim().is_empty();
+                        is_comment_only.push(c_empty && raw_nonempty);
+                        cleaned_lines.push(clean);
+                    }
+
+                    let collapse_hs = |s: &str| -> String {
+                        let mut collapsed = String::with_capacity(s.len());
+                        let tb = s.as_bytes();
+                        let mut k = 0;
+                        while k < tb.len() {
+                            if k + 1 < tb.len() && ((tb[k] == b':' && tb[k + 1] == b':') || (tb[k] == b'-' && tb[k + 1] == b'>')) {
+                                while collapsed.ends_with(' ') || collapsed.ends_with('\t') {
+                                    collapsed.pop();
+                                }
+                                collapsed.push('.');
+                                k += 2;
+                                while k < tb.len() && (tb[k] == b' ' || tb[k] == b'\t') {
+                                    k += 1;
+                                }
+                            } else if tb[k] == b'.'
+                                && (k == 0 || tb[k - 1] == b' ' || tb[k - 1] == b'\t')
+                                && (k + 1 < tb.len() && (tb[k + 1] == b' ' || tb[k + 1] == b'\t'))
+                            {
+                                while collapsed.ends_with(' ') || collapsed.ends_with('\t') {
+                                    collapsed.pop();
+                                }
+                                collapsed.push('.');
+                                k += 1;
+                                while k < tb.len() && (tb[k] == b' ' || tb[k] == b'\t') {
+                                    k += 1;
+                                }
+                            } else {
+                                collapsed.push(tb[k] as char);
+                                k += 1;
+                            }
+                        }
+                        collapsed
+                    };
+
+                    let find_eq_before_colon = |s: &str| -> Option<usize> {
+                        let sb = s.as_bytes();
+                        let mut j = 0;
+                        while j < sb.len() {
+                            if j + 1 < sb.len() && sb[j] == b':' && sb[j + 1] == b':' {
+                                return None;
+                            }
+                            if sb[j] == b'=' {
+                                let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                                let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                                if !matches!(prev, b'=' | b'/' | b'<' | b'>' | b':' | b'!')
+                                    && !matches!(next, b'=' | b'>')
+                                {
+                                    return Some(j);
+                                }
+                            }
+                            j += 1;
+                        }
+                        None
+                    };
+
+                    let find_any_eq = |s: &str| -> Option<usize> {
+                        let sb = s.as_bytes();
+                        let mut j = 0;
+                        while j < sb.len() {
+                            if sb[j] == b'=' {
+                                let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                                let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                                if !matches!(prev, b'=' | b'/' | b'<' | b'>' | b':' | b'!')
+                                    && !matches!(next, b'=' | b'>')
+                                {
+                                    return Some(j);
+                                }
+                            }
+                            j += 1;
+                        }
+                        None
+                    };
+
+                    let mut active_sym: usize = 0;
+                    let n_lines = cleaned_lines.len();
+                    for idx in 0..n_lines {
+                        let line = (idx + 1) as u32;
+                        let clean = &cleaned_lines[idx];
+                        let trimmed = clean.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        // 1. Top-level imports
+                        if trimmed.starts_with("import ") || trimmed.starts_with("import\t") {
+                            active_sym = 0;
+                            let mut rest = trimmed[6..].trim();
+                            loop {
+                                if let Some(r) = rest.strip_prefix("qualified").filter(|r| r.starts_with(char::is_whitespace)) {
+                                    rest = r.trim_start();
+                                } else if let Some(r) = rest.strip_prefix("safe").filter(|r| r.starts_with(char::is_whitespace)) {
+                                    rest = r.trim_start();
+                                } else if rest.starts_with('"') {
+                                    if let Some(endq) = rest[1..].find('"') {
+                                        rest = rest[endq + 2..].trim_start();
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            let module: String = rest
+                                .chars()
+                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '\'')
+                                .collect();
+                            if !module.is_empty() && module.bytes().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                let after_mod = rest[module.len()..].trim_start();
+                                let after_mod = after_mod
+                                    .strip_prefix("qualified")
+                                    .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                                    .map(str::trim_start)
+                                    .unwrap_or(after_mod);
+                                let alias = if let Some(as_rest) = after_mod.strip_prefix("as").filter(|r| r.starts_with(char::is_whitespace)) {
+                                    let a: String = as_rest
+                                        .trim_start()
+                                        .chars()
+                                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '\'')
+                                        .collect();
+                                    if !a.is_empty() {
+                                        a
+                                    } else {
+                                        module.rsplit('.').next().unwrap_or(&module).to_string()
+                                    }
+                                } else {
+                                    module.rsplit('.').next().unwrap_or(&module).to_string()
+                                };
+                                self.facts.imports.push(Import {
+                                    line,
+                                    module,
+                                    name: String::new(),
