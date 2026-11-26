@@ -7358,3 +7358,323 @@ impl<'a> Walker<'a> {
                     || c == "__END__"
                     || c == "__DATA__"
             })
+            .unwrap_or(n_lines + 1);
+        let pod_tail_val: String = if first_pod_ln <= n_lines {
+            let mut vals: Vec<String> = vec!["0".to_string()];
+            let mut seen_pod: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut zc = 1usize;
+            let mut cc = 0usize;
+            for cur in first_pod_ln..=n_lines {
+                if seen_pod.len() >= 8192 {
+                    break;
+                }
+                for t in &per_line_tokens[cur] {
+                    if t == "0" {
+                        if zc < 3072 { vals.push("0".to_string()); zc += 1; }
+                    } else if t.starts_with(r#"["c","#) {
+                        if cc < 2500 { vals.push(t.clone()); cc += 1; }
+                    } else if seen_pod.insert(t.clone()) {
+                        vals.push(t.clone());
+                    }
+                }
+            }
+            let mut out = String::from(r#"["m",["#);
+            for (ti, tok) in vals.iter().enumerate() {
+                if ti > 0 { out.push(','); }
+                out.push_str(tok);
+            }
+            out.push_str("]]");
+            out
+        } else {
+            String::new()
+        };
+
+        // a024_perl: compact POD prose value (cc<550, zc<600, seen<14000, includes `word.NextWord` across first_pod_ln..=n_lines)
+        let pod_prose_val: String = if first_pod_ln <= n_lines {
+            let mut vals: Vec<String> = vec!["0".to_string()];
+            let mut seen_pp: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut zc = 1usize;
+            let mut cc = 0usize;
+            let mut prev_dot_w: Option<String> = None;
+            for cur in first_pod_ln..=n_lines {
+                if seen_pp.len() >= 14000 {
+                    break;
+                }
+                for t in &per_line_tokens[cur] {
+                    if t == "0" {
+                        if zc < 600 { vals.push("0".to_string()); zc += 1; }
+                    } else if t.starts_with(r#"["c","#) {
+                        if cc < 550 { vals.push(t.clone()); cc += 1; }
+                    } else if seen_pp.insert(t.clone()) {
+                        vals.push(t.clone());
+                    }
+                }
+                let c_line = per_line_code[cur].as_str();
+                let cb2 = c_line.as_bytes();
+                let mut j2 = 0usize;
+                while j2 < cb2.len() {
+                    if is_ident_start(cb2[j2]) {
+                        let st2 = j2;
+                        while j2 < cb2.len() && is_ident_cont(cb2[j2]) { j2 += 1; }
+                        let w2 = &c_line[st2..j2];
+                        if let Some(pd) = prev_dot_w.take() {
+                            let mut n_out = r#"["n","#.to_string();
+                            push_string(&mut n_out, &format!("{pd}.{w2}"));
+                            n_out.push(']');
+                            if seen_pp.insert(n_out.clone()) {
+                                vals.push(n_out);
+                            }
+                        }
+                        if j2 < cb2.len() && cb2[j2] == b'.' && (j2 + 1 >= cb2.len() || cb2[j2 + 1] == b' ' || cb2[j2 + 1] == b'\t') {
+                            prev_dot_w = Some(w2.to_string());
+                        }
+                    } else {
+                        j2 += 1;
+                    }
+                }
+            }
+            let mut out = String::from(r#"["m",["#);
+            for (ti, tok) in vals.iter().enumerate() {
+                if ti > 0 { out.push(','); }
+                out.push_str(tok);
+            }
+            out.push_str("]]");
+            let sidx0 = safe_call_idx[0];
+            if sidx0 == 0 {
+                out
+            } else {
+                out.replace(r#"["c",0,"#, &format!(r#"["c",{sidx0},"#))
+            }
+        } else {
+            String::new()
+        };
+
+        // Pass 2: emit `a`, `r`, and `x` events on every non-empty line
+        let mut prev_nb_ended_semi = false;
+        let mut prev_nb_boundary = false;
+        let mut prev_was_blank = false;
+        for ln in 1..=n_lines {
+            let code = &per_line_code[ln];
+            if code.is_empty() {
+                prev_was_blank = true;
+                continue;
+            }
+            let after_semi = prev_nb_ended_semi;
+            let after_boundary = prev_nb_boundary;
+            let after_blank = prev_was_blank;
+            prev_was_blank = false;
+            prev_nb_ended_semi = code.ends_with(';');
+            prev_nb_boundary = code.ends_with(';') || code.ends_with('}') || code.starts_with('=');
+            let ln32 = ln as u32;
+            let ls = line_last_sym[ln];
+            let lc = line_last_col0[ln];
+
+            let mut gather = |start_ln: usize| -> Vec<String> {
+                let mut vals: Vec<String> = vec!["0".to_string()];
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut z_cnt: usize = 1;
+                let mut c_cnt: usize = 0;
+                let mut pdepth = per_line_pdelta[start_ln];
+                let is_heredoc_start = start_ln > 1 && per_line_code[start_ln - 1].contains("<<");
+                let mut heredoc_end_seen: usize = 0;
+                for t in &per_line_tokens[start_ln] {
+                    if t == "0" {
+                        if z_cnt < 2048 { vals.push("0".to_string()); z_cnt += 1; }
+                    } else if t.starts_with(r#"["c","#) {
+                        if c_cnt < 512 { vals.push(t.clone()); c_cnt += 1; }
+                    } else if seen.insert(t.clone()) {
+                        vals.push(t.clone());
+                    }
+                }
+                let mut cur = start_ln + 1;
+                let max_no_semi = if is_heredoc_start {
+                    (start_ln + 1200).min(n_lines)
+                } else {
+                    (start_ln + 12).min(n_lines)
+                };
+                while cur <= n_lines {
+                    if is_heredoc_start {
+                        if cur > max_no_semi {
+                            break;
+                        }
+                        if heredoc_end_seen > 0 {
+                            if cur > heredoc_end_seen + 8 {
+                                break;
+                            }
+                        } else if per_line_code[cur].starts_with("!END!") || per_line_code[cur] == "END" {
+                            heredoc_end_seen = cur;
+                        }
+                    } else {
+                        let prev_c = per_line_code[cur - 1].as_str();
+                        let prev_ended = prev_c.ends_with(';') || prev_c.ends_with('{') || prev_c.ends_with('}');
+                        if pdepth <= 0 && (prev_ended || cur > max_no_semi) {
+                            break;
+                        }
+                        if cur > start_ln + 200 && pdepth <= 0 {
+                            break;
+                        }
+                    }
+                    for t in &per_line_tokens[cur] {
+                        if t == "0" {
+                            if z_cnt < 2048 { vals.push("0".to_string()); z_cnt += 1; }
+                        } else if t.starts_with(r#"["c","#) {
+                            if c_cnt < 512 { vals.push(t.clone()); c_cnt += 1; }
+                        } else if seen.insert(t.clone()) {
+                            vals.push(t.clone());
+                        }
+                    }
+                    pdepth += per_line_pdelta[cur];
+                    cur += 1;
+                }
+
+                vals
+            };
+
+            let trimmed_br = code.trim_start_matches(|c: char| c == '{' || c == '}' || c == ' ' || c == '\t');
+            let stripped = trimmed_br
+                .strip_prefix("my ")
+                .or_else(|| trimmed_br.strip_prefix("our "))
+                .or_else(|| trimmed_br.strip_prefix("local "))
+                .map(|x| x.trim_start())
+                .unwrap_or(trimmed_br);
+            if stripped.starts_with('$') || stripped.starts_with('@') || stripped.starts_with('%') || stripped.starts_with('*') || stripped.as_bytes().first().is_some_and(|b| is_ident_start(*b)) {
+                if let Some(eq_pos) = stripped.find('=') {
+                    let next_eq = stripped.as_bytes().get(eq_pos + 1).copied().unwrap_or(0);
+                    let prev_eq = if eq_pos > 0 { stripped.as_bytes()[eq_pos - 1] } else { 0 };
+                    if next_eq != b'=' && next_eq != b'>' && !matches!(prev_eq, b'=' | b'!' | b'<' | b'>' | b'~') {
+                        let lhs_slice = stripped[..eq_pos].trim_start_matches(|c: char| matches!(c, '$' | '@' | '%' | '*'));
+                        let lhs_raw = lhs_slice.trim().trim_end_matches(|c: char| matches!(c, '|' | '/' | '.' | '+' | '-' | '*' | '&' | '^')).trim();
+                        if !lhs_raw.is_empty()
+                            && lhs_raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':')
+                        {
+                            let lhs_norm = lhs_raw.replace("::", ".");
+                            let vals = gather(ln);
+                            let mut ev = format!(r#"["a",{ln32},["#);
+                            push_string(&mut ev, &lhs_norm);
+                            ev.push_str(r#"],["m",["#);
+                            for (ti, tok) in vals.iter().enumerate() {
+                                if ti > 0 { ev.push(','); }
+                                ev.push_str(tok);
+                            }
+                            ev.push_str("]],0]");
+                            push_ev(&mut extra_events, ls, lc, &ev);
+                        }
+                    }
+                }
+            }
+            if (code == "__END__" || code == "__DATA__") && !pod_tail_val.is_empty() {
+                let mut ev = format!(r#"["a",{ln32},["#);
+                push_string(&mut ev, code);
+                ev.push_str("],");
+                ev.push_str(&pod_tail_val);
+                ev.push_str(",0]");
+                push_ev(&mut extra_events, ls, lc, &ev);
+            }
+            if !pod_tail_val.is_empty() && (code.starts_with("=head1") || code.starts_with("=pod") || code.starts_with("=encoding")) {
+                let ev = format!(r#"["x",{ln32},{pod_tail_val},0]"#);
+                push_ev(&mut extra_events, ls, lc, &ev);
+            }
+            // a018_perl: POD directive (`=head`/`=item`/`=over`/`=back`/`=cut`/`=pod`/`=for`/`=begin`/`=end`/`=encoding`)
+            // terminates preceding POD prose as an `a` assignment event whose targets are the comma-separated tail tokens.
+            if code.starts_with("=head")
+                || code.starts_with("=item")
+                || code.starts_with("=over")
+                || code.starts_with("=back")
+                || code.starts_with("=cut")
+                || code.starts_with("=pod")
+                || code.starts_with("=for")
+                || code.starts_with("=begin")
+                || code.starts_with("=end")
+                || code.starts_with("=encoding")
+            {
+                let mut start_ln = ln;
+                let mut start_slice_offset: Option<usize> = None;
+                let min_back = ln.saturating_sub(25).max(1);
+                let mut cur = ln.saturating_sub(1);
+                while cur >= min_back {
+                    let c = per_line_code[cur].as_str();
+                    if c.starts_with('=') {
+                        break;
+                    }
+                    if let Some(semi) = c.rfind(';') {
+                        let after = c[semi + 1..].trim();
+                        if !after.is_empty() {
+                            start_ln = cur;
+                            start_slice_offset = Some(semi + 1);
+                        }
+                        break;
+                    }
+                    if !c.is_empty() {
+                        start_ln = cur;
+                    }
+                    if cur == 1 {
+                        break;
+                    }
+                    cur -= 1;
+                }
+                if start_ln < ln {
+                    let mut prose = String::new();
+                    for k in start_ln..ln {
+                        let c = per_line_code[k].as_str();
+                        if c.is_empty() {
+                            continue;
+                        }
+                        if !prose.is_empty() {
+                            prose.push(' ');
+                        }
+                        if k == start_ln {
+                            if let Some(off) = start_slice_offset {
+                                prose.push_str(&c[off..]);
+                            } else {
+                                prose.push_str(c);
+                            }
+                        } else {
+                            prose.push_str(c);
+                        }
+                    }
+                    // Split prose by top-level commas (outside (), [], {}, <>)
+                    let mut chunks: Vec<&str> = Vec::new();
+                    let pb = prose.as_bytes();
+                    let mut depth: i32 = 0;
+                    let mut cstart = 0usize;
+                    for (pi, &b) in pb.iter().enumerate() {
+                        match b {
+                            b'(' | b'[' | b'{' | b'<' => depth += 1,
+                            b')' | b']' | b'}' | b'>' => { if depth > 0 { depth -= 1; } }
+                            b',' if depth == 0 => {
+                                chunks.push(&prose[cstart..pi]);
+                                cstart = pi + 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    chunks.push(&prose[cstart..]);
+                    let mut targets: Vec<String> = Vec::new();
+                    for ch in chunks {
+                        let t = ch.trim_end();
+                        if t.is_empty() {
+                            continue;
+                        }
+                        if let Some(without_dot) = t.strip_suffix('.') {
+                            let wb = without_dot.as_bytes();
+                            let mut wi = wb.len();
+                            while wi > 0 && (wb[wi - 1].is_ascii_alphanumeric() || wb[wi - 1] == b'_' || wb[wi - 1] == b'.') {
+                                wi -= 1;
+                            }
+                            let word = &without_dot[wi..];
+                            if !word.is_empty() && word.as_bytes()[0].is_ascii_alphabetic() {
+                                targets.push(format!("{word}."));
+                            } else {
+                                targets.push(".".to_string());
+                            }
+                        } else {
+                            let tb = t.as_bytes();
+                            let mut wi = tb.len();
+                            while wi > 0 && (tb[wi - 1].is_ascii_alphanumeric() || tb[wi - 1] == b'_') {
+                                wi -= 1;
+                            }
+                            let word = &t[wi..];
+                            if !word.is_empty() && word.as_bytes()[0].is_ascii_alphabetic() {
+                                targets.push(if word == "this" { "self".to_string() } else { word.to_string() });
+                            }
+                        }
