@@ -9598,3 +9598,323 @@ impl<'a> Walker<'a> {
     }
 
     #[inline]
+    pub(crate) fn text(&self, id: u32) -> &'a [u8] {
+        let node = self.node(id);
+        &self.src[node.start as usize..node.end as usize]
+    }
+
+    pub(crate) fn text_string(&self, id: u32) -> String {
+        String::from_utf8_lossy(self.text(id)).into_owned()
+    }
+
+    pub(crate) fn line_of(&self, offset: u32) -> u32 {
+        match self.line_starts.binary_search(&offset) {
+            Ok(index) => index as u32 + 1,
+            Err(index) => index as u32,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn line(&self, id: u32) -> u32 {
+        self.line_of(self.node(id).start)
+    }
+
+    pub(crate) fn end_line(&self, id: u32) -> u32 {
+        self.line_of(self.node(id).end.saturating_sub(1))
+    }
+
+    pub(crate) fn children(&self, id: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut child = self.node(id).first_child;
+        while child != NONE {
+            out.push(child);
+            child = self.node(child).next_sibling;
+        }
+        out
+    }
+
+    pub(crate) fn child_of_kind(&self, id: u32, kind: &str) -> Option<u32> {
+        self.nth_child_of_kind(id, kind, 0)
+    }
+
+    /// The `nth` child of a kind, in order: Go writes a method's receiver list
+    /// before its parameter list, so the list a definition wants is the second.
+    pub(crate) fn nth_child_of_kind(&self, id: u32, kind: &str, nth: usize) -> Option<u32> {
+        let mut seen = 0;
+        let mut child = self.node(id).first_child;
+        while child != NONE {
+            if self.kind(child) == kind {
+                if seen == nth {
+                    return Some(child);
+                }
+                seen += 1;
+            }
+            child = self.node(child).next_sibling;
+        }
+        None
+    }
+
+    /// The text of a leaf that spells a name.
+    ///
+    /// The kind alone is not enough: a grammar gives a keyword reused as an
+    /// identifier its own kind (`match.group(...)` has an object of kind
+    /// `match`, `type` and `case` the same), and a name is what the source
+    /// says it is. A leaf whose text is an identifier is a name whatever label
+    /// the grammar put on it; punctuation, string literals and numbers are not.
+    /// The source text of a 1-based line, used to name a declaration whose
+    /// grammar node lost its head (`def this` in Scala).
+    fn scala_source_line(&self, line: u32) -> &str {
+        let start = self.line_starts.get(line.saturating_sub(1) as usize).copied().unwrap_or(0) as usize;
+        let end = self.line_starts.get(line as usize).copied().unwrap_or(self.src.len() as u32) as usize;
+        if start > end || end > self.src.len() {
+            return "";
+        }
+        std::str::from_utf8(&self.src[start..end]).unwrap_or("")
+    }
+
+    pub(crate) fn leaf_name(&self, id: u32) -> Option<String> {
+        let node = self.node(id);
+        if node.first_child != NONE {
+            return None;
+        }
+        let text = self.text(id);
+        let text = if self.language.name == "csharp" && text.starts_with(b"@") && text.len() > 1 && text[1] != b'"' {
+            &text[1..]
+        } else {
+            text
+        };
+        // Go and C# identifiers may be Unicode (`s.ƒ(s)`): a leaf that starts
+        // with a non-ASCII byte is the name, not a token to skip.
+        let unicode = matches!(self.language.name, "csharp" | "go");
+        let first = *text.first()?;
+        if !(first.is_ascii_alphabetic() || first == b'_' || (unicode && first >= 0x80)) {
+            return None;
+        }
+        if !text.iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$' || (unicode && *byte >= 0x80)
+        }) {
+            return None;
+        }
+        Some(String::from_utf8_lossy(text).into_owned())
+    }
+
+    pub(crate) fn has_kind(&self, id: u32, kinds: &[&str]) -> bool {
+        kinds.contains(&self.kind(id))
+    }
+
+    /// The first child that is neither punctuation nor a keyword we skip.
+    pub(crate) fn expression_child(&self, id: u32) -> Option<u32> {
+        self.children(id).into_iter().find(|&child| !self.is_layout(child))
+    }
+
+    /// Punctuation and keywords: nodes with no children whose text is not a
+    /// name. They never carry a value of their own.
+    pub(crate) fn is_layout(&self, id: u32) -> bool {
+        let node = self.node(id);
+        if node.first_child != NONE {
+            return false;
+        }
+        if matches!(self.facts.tag.as_str(), "RB" | "CR")
+            && matches!(
+                self.kind(id),
+                "instance_variable" | "class_variable" | "global_variable" | "simple_symbol" | "symbol" | "true" | "false" | "nil"
+            )
+        {
+            return false;
+        }
+        let text = self.text(id);
+        if text.is_empty() {
+            return true;
+        }
+        // A keyword's kind is its own spelling (`await`, `new`, `if`); an
+        // identifier's kind is `identifier`. That is what tells `await x` from
+        // `x` without a keyword list per language. A soft keyword is the
+        // exception: `match` spelled that way is a name unless the grammar
+        // built a statement out of it, and a statement is a node, not a leaf.
+        // `true` and `false` are literals, not punctuation: the lexer reads
+        // them as names (Rust) or constants, but never as nothing.
+        if matches!(
+            self.kind(id),
+            "identifier"
+                | "type_identifier"
+                | "property_identifier"
+                | "private_property_identifier"
+                | "field_identifier"
+                | "shorthand_property_identifier"
+                | "true"
+                | "false"
+                // `null` is a literal, not punctuation: the lexer writes it as
+                // the name `n:null`, so a return that read it as layout wrote
+                // the constant 0 and lost the value.
+                | "null"
+                // A number is a value, and Python writes `.01` with no digit
+                // before the dot: read as punctuation it left the record, so
+                // `time.sleep(.01)` formed as a call with no argument at all.
+                | "number"
+                | "integer"
+                | "float"
+                // Java writes a float with no digit before the dot (`.005`), so
+                // the character test below read it as punctuation and every
+                // call that took one lost the argument: `assertEquals(1.0, x,
+                // .005, "msg")` formed as `c(0;[0,c(8),0,0])` there and
+                // `c(0;[0,c(8),0])` here.
+                | "floating_point_literal"
+                // A regex literal is a value, not punctuation: the lexer
+                // writes it as the constant 0, and dropping it as layout lost
+                // one argument from every call that takes a regex
+                // (`arg.replace(/x/, 's')`, 69 js first-loss rows).
+                | "regex"
+                // C# `$"{...}"` is a single token leaf with no children; read as
+                // layout it was skipped by `arguments` and `merge_form` before
+                // `form` could parse its interpolation holes.
+                | "interpolated_string_literal"
+                | "self"
+                | "this"
+                | "super"
+                | "_"
+        ) {
+            return false;
+        }
+        // `{ type, value, line }`: in the JavaScript family a shorthand
+        // property whose name is a keyword in another position carries that
+        // keyword's kind and read as layout, so the property left the record.
+        // Python's `from` is a real keyword (`from x import y`) and must stay
+        // layout: reading it as a name cost 15 python files.
+        if matches!(self.language.name, "javascript" | "typescript" | "tsx")
+            && matches!(self.kind(id), "type" | "from" | "of" | "satisfies")
+        {
+            return false;
+        }
+        if self.kind(id).as_bytes() == text {
+            // Python spells its three constants as keywords, and the lexer
+            // reads each of them as a name: `default=True` is
+            // `["k","default",["n","True"]]`, not a constant. Dropping them as
+            // layout lost the keyword argument's value on every Python call.
+            if self.language.name == "python" && matches!(self.kind(id), "True" | "False" | "None") {
+                return false;
+            }
+            return !self.kinds.soft.contains(&self.kind(id));
+        }
+        // A Go raw string is one constant: it opens with a backtick, which this
+        // filter took for punctuation, so `f(`re`)` lost its only argument.
+        // Kotlin spells identifiers that way, and there the word is a name, not
+        // a value, so the character counts only for Go.
+        // A C# verbatim string opens with `@"` (or `$@"` / `@$"`) and a C#
+        // verbatim identifier opens with `@name`, both of which would be
+        // dropped as punctuation if not counted as values.
+        let raw_string = (text[0] == b'`' && matches!(self.kinds.family, Family::Go))
+            || (self.facts.tag == "LUA" && self.kind(id) == "string")
+            || (self.language.name == "csharp" && (text.starts_with(b"@\"") || (text[0] == b'@' && text.len() > 1 && (text[1].is_ascii_alphabetic() || text[1] == b'_'))));
+        !(text[0].is_ascii_alphanumeric() || text[0] == b'_' || text[0] == b'"' || text[0] == b'\'' || raw_string || (self.language.name == "csharp" && text[0] >= 0x80))
+    }
+
+    // -- frames and symbols -------------------------------------------------
+
+    pub(crate) fn frame(&self) -> &Frame {
+        self.stack.last().expect("the module frame is never popped")
+    }
+
+    pub(crate) fn add_symbol(&mut self, name: String, owner: String, kind: u8, line: u32, params: Vec<String>) -> usize {
+        let base = if owner.is_empty() { name.clone() } else { format!("{owner}.{name}") };
+        let taken = self.facts.symbols.iter().any(|symbol| symbol.key == base);
+        let key = if taken { format!("{base}@{line}") } else { base };
+        self.facts.symbols.push(Symbol { key, name, owner, kind, line, end_line: line, params, ..Symbol::default() });
+        self.facts.symbols.len() - 1
+    }
+
+    pub(crate) fn event(&mut self, text: &str) {
+        let symbol = self.frame().symbol;
+        let events = &mut self.facts.symbols[symbol].events;
+        if !events.is_empty() {
+            events.push(',');
+        }
+        events.push_str(text);
+    }
+
+    /// True when `id` is a call whose own callee is a name, so that the call it
+    /// records is the value the expression produces: `A()`, `new Foo()`,
+    /// `a.b()`. `f()()` records only `f`, and that value is what gets called,
+    /// not what the expression produces.
+    fn lua_collect_expr_lines(&self, id: u32, base_line: u32, out: &mut Vec<u32>) {
+        let k = self.kind(id);
+        if matches!(k, "function_definition" | "table_constructor" | "block" | "string") {
+            return;
+        }
+        let ln = self.line(id);
+        if ln > base_line {
+            out.push(ln);
+        }
+        for ch in self.children(id) {
+            if !self.is_layout(ch) {
+                self.lua_collect_expr_lines(ch, base_line, out);
+            }
+        }
+    }
+
+    pub(crate) fn named_call(&self, id: u32) -> bool {
+        if !matches!(
+            self.kind(id),
+            "call" | "call_expression" | "new_expression" | "invocation_expression"
+                | "object_creation" | "object_creation_expression"
+        ) {
+            return false;
+        }
+        match self.children(id).into_iter().find(|&child| {
+            !matches!(self.kind(child), "new" | "argument_list" | "arguments" | "type_arguments" | "(" | ")" | "?.")
+        }) {
+            Some(callee) => {
+                callee != id
+                    && !matches!(
+                        self.kind(callee),
+                        "call" | "call_expression" | "new_expression" | "invocation_expression"
+                            | "object_creation" | "object_creation_expression" | "generic_invocation"
+                            | "implicit_creation" | "conditional_invocation"
+                    )
+            }
+            None => false,
+        }
+    }
+
+    /// `Func<int, int> handler = x => x;` and `_creator = a => Make(a);`: a
+    /// binding whose value is a lambda holds a function, and the one-pass lexer
+    /// opens a symbol under the target's name. Nothing in the tree did, so every
+    /// such binding was a symbol the CST never declared.
+    pub(crate) fn cs_lambda_symbol(&mut self, id: u32) {
+        let children = self.children(id);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "lambda_expression") else {
+            return;
+        };
+        // `cfg.ShouldMapProperty = p => true;` has a `member_access` on the
+        // left of `=`, not a bare `identifier`, so read the rightmost name.
+        let Some(target) = children[..at]
+            .iter()
+            .rev()
+            .find(|&&child| matches!(self.kind(child), "identifier" | "member_access" | "field_access"))
+            .and_then(|&child| self.last_name(child))
+        else {
+            return;
+        };
+        if target.is_empty() {
+            return;
+        }
+        let line = self.line(id);
+        let owner = self.frame().class.clone();
+        self.add_symbol(target, String::new(), KIND_FUNCTION, line, Vec::new());
+    }
+
+    /// `handler = (a, b) => f(a, b);` and `cfg.P = x => x;`: in the C#
+    /// grammar `=>` has lower precedence than `=`, so a statement-level lambda
+    /// assignment parses as `lambda_expression(assignment_expression(lhs, =, params), =>, body)`.
+    /// Declare the target as `KIND_FUNCTION` to match the one-pass lexer.
+    pub(crate) fn cs_lambda_assignment_symbol(&mut self, id: u32) {
+        let Some(lhs) = self.children(id).into_iter().find(|&c| !self.is_layout(c)) else {
+            return;
+        };
+        if self.kind(lhs) != "assignment_expression" {
+            return;
+        }
+        let children = self.children(lhs);
+        let Some(at) = children.iter().position(|&child| self.kind(child) == "=") else {
+            return;
+        };
+        let Some(target) = children[..at]
