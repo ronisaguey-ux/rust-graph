@@ -909,7 +909,21 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     if lang == Lang::Python {
         walker.augment_python();
     }
+    if lang == Lang::Pascal {
+        walker.augment_pascal();
+    }
+    if lang == Lang::Clojure {
+        walker.augment_clojure();
+    }
+    if lang == Lang::VisualBasic {
+        walker.augment_vb();
+    }
     walker.facts
+
+
+
+
+
 }
 
 fn cs_skip_ws_and_comments(src: &[u8], mut i: usize) -> usize {
@@ -5724,6 +5738,12 @@ impl<'a> Walker<'a> {
             }
         }
     }
+
+
+
+
+
+
 
     fn augment_shell(&mut self) {
         let src_str = std::str::from_utf8(self.src).unwrap_or("");
