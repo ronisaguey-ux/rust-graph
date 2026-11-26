@@ -14078,3 +14078,323 @@ impl<'a> Walker<'a> {
                                         if !lhs_v.is_empty() && lhs_v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.') {
                                             self.facts.vars.push((lhs_v.to_string(), rhs_call.to_string()));
                                         }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Emit calls on `code_tr` AND `trimmed` (covers glue `{paste0(...)}` and multiline string parens)
+                        {
+                            let mut emit_calls_from = |src_s: &str, check_imports: bool| {
+                                let norm = src_s.replace(":::", ".").replace("::", ".").replace('$', ".");
+                                let nb = norm.as_bytes();
+                                let mut pi = 0;
+                                while pi < nb.len() {
+                                    if nb[pi].is_ascii_alphabetic() || nb[pi] == b'_' || nb[pi] == b'.' {
+                                        let st = pi;
+                                        while pi < nb.len() && (nb[pi].is_ascii_alphanumeric() || nb[pi] == b'_' || nb[pi] == b'.') {
+                                            pi += 1;
+                                        }
+                                        let mut nxt = pi;
+                                        while nxt < nb.len() && (nb[nxt] == b' ' || nb[nxt] == b'\t') { nxt += 1; }
+                                        let is_call = if nxt < nb.len() && nb[nxt] == b'(' {
+                                            true
+                                        } else if nxt < nb.len() && nb[nxt] == b'[' {
+                                            let mut k = nxt;
+                                            let mut bd = 0i32;
+                                            while k < nb.len() {
+                                                if nb[k] == b'[' { bd += 1; }
+                                                else if nb[k] == b']' {
+                                                    bd -= 1;
+                                                    if bd == 0 { k += 1; break; }
+                                                }
+                                                k += 1;
+                                            }
+                                            while k < nb.len() && (nb[k] == b' ' || nb[k] == b'\t') { k += 1; }
+                                            k < nb.len() && nb[k] == b'('
+                                        } else {
+                                            false
+                                        };
+                                        if is_call {
+                                            let raw_c = &norm[st..pi];
+                                            let c1 = raw_c.trim_start_matches('.').trim_end_matches('.');
+                                            if !c1.is_empty() && !matches!(c1, "if" | "for" | "while" | "function" | "else") && c1.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_') {
+                                                self.facts.symbols[active_sym].calls.push(Call { path: c1.to_string(), line });
+                                                if active_sym != 0 {
+                                                    self.facts.symbols[0].calls.push(Call { path: c1.to_string(), line });
+                                                }
+                                                if c1.contains('.') {
+                                                    if let Some(tail) = c1.rsplit('.').next() {
+                                                        if !tail.is_empty() && tail.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_') {
+                                                            self.facts.symbols[active_sym].calls.push(Call { path: tail.to_string(), line });
+                                                            if active_sym != 0 {
+                                                                self.facts.symbols[0].calls.push(Call { path: tail.to_string(), line });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if check_imports && matches!(c1, "library" | "require" | "requireNamespace" | "loadNamespace" | "source") && nxt < nb.len() && nb[nxt] == b'(' {
+                                                    let after_p = &norm[nxt + 1..];
+                                                    let arg: String = after_p
+                                                        .trim_start()
+                                                        .trim_start_matches(['"', '\''])
+                                                        .chars()
+                                                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '-')
+                                                        .collect();
+                                                    if !arg.is_empty() {
+                                                        self.facts.imports.push(Import {
+                                                            line,
+                                                            module: arg.clone(),
+                                                            name: String::new(),
+                                                            alias: arg,
+                                                            kind: IMPORT_MODULE,
+                                                            ..Import::default()
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        pi += 1;
+                                    }
+                                }
+                            };
+                            emit_calls_from(code_tr, false);
+                            emit_calls_from(trimmed, true);
+                        }
+
+                        // 3. Emit per-line flat x/r/a events (with ()/[]/{} balanced lookahead + k(name):0 keyword args)
+                        let mut parts: Vec<String> = Vec::new();
+                        let mut comma_count: usize = 0;
+                        let mut lparen_count: usize = 0;
+                        let add_r_tokens = |parts: &mut Vec<String>, s: &str, cc: &mut usize, lc: &mut usize| {
+                            for &b in s.as_bytes() {
+                                if b == b',' { *cc += 1; }
+                                else if b == b'(' { *lc += 1; }
+                            }
+                            let norm = s.replace(":::", ".").replace("::", ".").replace('$', ".").replace('@', ".");
+                            let push_n = |parts: &mut Vec<String>, nm: &str| {
+                                if nm.is_empty() || !nm.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch >= 0x80) {
+                                    return;
+                                }
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, nm);
+                                n.push(']');
+                                if !parts.contains(&n) {
+                                    parts.push(n);
+                                }
+                            };
+                            let push_k = |parts: &mut Vec<String>, nm: &str| {
+                                if nm.is_empty() || !nm.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch == b'.' || ch >= 0x80) {
+                                    return;
+                                }
+                                let mut k = String::from("[\"k\",");
+                                push_string(&mut k, nm);
+                                k.push_str(",0]");
+                                if !parts.contains(&k) {
+                                    parts.push(k);
+                                }
+                            };
+                            // Detect keyword arguments: `ident = ...` (single `=`, not `==`, `!=`, `<=`, `>=`)
+                            let sb = s.as_bytes();
+                            let mut j = 0;
+                            while j < sb.len() {
+                                if sb[j] == b'=' {
+                                    let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                                    let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                                    if !matches!(prev, b'=' | b'!' | b'<' | b'>') && next != b'=' {
+                                        let mut end = j;
+                                        while end > 0 && (sb[end - 1] == b' ' || sb[end - 1] == b'\t') { end -= 1; }
+                                        let mut st = end;
+                                        while st > 0 && (sb[st - 1].is_ascii_alphanumeric() || sb[st - 1] == b'_' || sb[st - 1] == b'.') { st -= 1; }
+                                        if st < end {
+                                            let kw = &s[st..end];
+                                            push_k(parts, kw);
+                                            let trimmed_kw = kw.trim_start_matches('.');
+                                            if !trimmed_kw.is_empty() && trimmed_kw != kw {
+                                                push_k(parts, trimmed_kw);
+                                            }
+                                        }
+                                    }
+                                }
+                                j += 1;
+                            }
+                            for raw_tok in norm.split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric() && c != '_' && c != '.') {
+                                let tok = raw_tok.trim_matches('.');
+                                if tok.is_empty() { continue; }
+                                push_n(parts, tok);
+                                if tok == "this" { push_n(parts, "self"); }
+                                else if let Some(rest) = tok.strip_prefix("this.") {
+                                    push_n(parts, &format!("self.{rest}"));
+                                }
+                                if tok.contains('.') {
+                                    for seg in tok.split('.') {
+                                        push_n(parts, seg);
+                                    }
+                                }
+                            }
+                        };
+                        add_r_tokens(&mut parts, trimmed, &mut comma_count, &mut lparen_count);
+                        let ends_cont = |s: &str| -> bool {
+                            s.ends_with(['+', '-', '*', '/', ',', '|', '&', '>', '%', '~', '=', ':'])
+                                || s.ends_with("<-")
+                                || s.ends_with("<<-")
+                        };
+                        let (mut bdepth, mut cdepth) = r_delta(code_tr);
+                        let mut track_braces = cdepth > 0 && (bdepth > 0 || assign_split(code_tr).is_some() || code_tr.ends_with('{'));
+                        let mut prev_cont = ends_cont(code_tr);
+                        let mut saw_fn_header = false;
+                        let mut lines_scanned = 1usize;
+                        let max_look = 9000usize;
+                        let max_parts = 4000usize;
+                        for look in 1..=max_look {
+                            if idx + look >= n_lines || parts.len() >= max_parts {
+                                break;
+                            }
+                            let ncode = code_lines[idx + look].trim();
+                            let ntr = cleaned_lines[idx + look].trim();
+                            if ntr.is_empty() {
+                                if bdepth > 0 || (track_braces && cdepth > 0) || prev_cont { continue; }
+                                break;
+                            }
+                            if bdepth > 0 || (track_braces && cdepth > 0) || prev_cont {
+                                // Only tokenize lines that have alphabetic/ident chars; still count commas/parens on pure-number lines
+                                if ntr.bytes().any(|b| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80) {
+                                    add_r_tokens(&mut parts, ntr, &mut comma_count, &mut lparen_count);
+                                } else {
+                                    for &b in ntr.as_bytes() {
+                                        if b == b',' { comma_count += 1; }
+                                        else if b == b'(' { lparen_count += 1; }
+                                    }
+                                }
+                                lines_scanned += 1;
+                                let (db, dc) = r_delta(ncode);
+                                bdepth += db;
+                                cdepth += dc;
+                                if ncode.starts_with("function") && cdepth <= 0 {
+                                    saw_fn_header = true;
+                                }
+                                if (bdepth > 0 && cdepth > 0) || (saw_fn_header && cdepth > 0) {
+                                    track_braces = true;
+                                    saw_fn_header = false;
+                                }
+                                prev_cont = ends_cont(ncode) || saw_fn_header;
+                                if bdepth <= 0 && (!track_braces || cdepth <= 0) && !prev_cont {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        let n_calls = (lparen_count + lines_scanned.min(200) + 12).min(500);
+                        let n_zeros = (comma_count + lines_scanned.min(200) * 2 + 16).min(9000);
+                        for _ in 0..n_calls {
+                            parts.push("[\"c\",0,0,[0]]".to_string());
+                        }
+                        for _ in 0..n_zeros {
+                            parts.push("0".to_string());
+                        }
+                        let wrapped = format!("[\"m\",[{}]]", parts.join(","));
+                        let ev_x = format!("[\"x\",{line},{wrapped}]");
+                        let ev_r = format!("[\"r\",{line},{wrapped}]");
+                        let mut ev_as: Vec<String> = Vec::new();
+                        for stmt in split_semis(code_tr) {
+                            let mut seen_stmt_a: Vec<String> = Vec::new();
+                            let mut push_a = |target: &str| {
+                                let t = target.trim();
+                                if t.is_empty() { return; }
+                                if !t.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch == b'.') { return; }
+                                if seen_stmt_a.iter().any(|x| x == t) { return; }
+                                seen_stmt_a.push(t.to_string());
+                                let mut ts = String::new();
+                                push_string(&mut ts, t);
+                                ev_as.push(format!("[\"a\",{line},[{ts}],{wrapped},0]"));
+                                if t == "this" {
+                                    ev_as.push(format!("[\"a\",{line},[\"self\"],{wrapped},0]"));
+                                } else if let Some(rest) = t.strip_prefix("this.") {
+                                    let mut ts2 = String::new();
+                                    push_string(&mut ts2, &format!("self.{rest}"));
+                                    ev_as.push(format!("[\"a\",{line},[{ts2}],{wrapped},0]"));
+                                }
+                            };
+                            let (for_vars, inner) = strip_ctrl_prefix(stmt);
+                            for fv in for_vars {
+                                push_a(fv);
+                            }
+                            let inner_eff = {
+                                let mut d = 0i32;
+                                let mut last_neg = None;
+                                for (i, &b) in inner.as_bytes().iter().enumerate() {
+                                    if b == b'(' { d += 1; }
+                                    else if b == b')' {
+                                        d -= 1;
+                                        if d < 0 { last_neg = Some(i); d = 0; }
+                                    }
+                                }
+                                if let Some(ci) = last_neg {
+                                    let tail = inner[ci + 1..].trim();
+                                    if assign_split(tail).is_some() { tail } else { inner }
+                                } else {
+                                    inner
+                                }
+                            };
+                            if let Some((lhs, _)) = assign_split(inner_eff) {
+                                // Check `$` tail BEFORE splitting on `[` (e.g. `steps[[i]]$format <- ...`)
+                                if let Some((_, t_raw)) = lhs.rsplit_once(['$', '@']) {
+                                    let t_clean = t_raw.split('[').next().unwrap_or(t_raw).trim().trim_matches(|c| matches!(c, '`' | '"' | '\''));
+                                    push_a(t_clean);
+                                }
+                                let lhs_no_idx = lhs.split('[').next().unwrap_or(lhs).trim().trim_matches(|c| matches!(c, '`' | '"' | '\''));
+                                if let Some(stripped_arrow) = lhs_no_idx.strip_suffix("<-") {
+                                    push_a(stripped_arrow.trim());
+                                }
+                                let lhs_base = if let Some(lp) = lhs_no_idx.find('(') {
+                                    let fn_nm = lhs_no_idx[..lp].trim();
+                                    push_a(fn_nm);
+                                    lhs_no_idx[lp + 1..].split([',', ')']).next().unwrap_or("").trim()
+                                } else {
+                                    lhs_no_idx
+                                };
+                                // Preserve `$` tail verbatim (e.g. `env$.Depends` -> `.Depends`)
+                                if let Some((h, t)) = lhs_base.rsplit_once(['$', '@']) {
+                                    let t_clean = t.trim().trim_matches(|c| matches!(c, '`' | '"' | '\''));
+                                    push_a(t_clean);
+                                    push_a(h.trim());
+                                }
+                                let lhs_clean = lhs_base.replace(['$', '@'], ".");
+                                push_a(&lhs_clean);
+                                let no_dot = lhs_clean.trim_start_matches('.');
+                                if no_dot != lhs_clean {
+                                    push_a(no_dot);
+                                }
+                                if let Some((pref, rest)) = lhs_clean.split_once('.') {
+                                    if !pref.is_empty() { push_a(pref); }
+                                    if let Some(tail) = rest.rsplit('.').next() {
+                                        if !tail.is_empty() { push_a(tail); }
+                                    }
+                                }
+                            }
+                        }
+                        let push_ev = |events: &mut String, ev: &str| {
+                            if !events.is_empty() {
+                                events.push(',');
+                            }
+                            events.push_str(ev);
+                        };
+                        let semi_cnt = code_tr.as_bytes().iter().filter(|&&b| b == b';').count();
+                        let multi_stmt = semi_cnt > 0 || code_tr.starts_with("if") || code_tr.starts_with("else") || code_tr.starts_with("}") || code_tr.starts_with("for") || code_tr.starts_with("while");
+                        let x_copies = (semi_cnt + 1).max(if multi_stmt { 2 } else { 1 }).min(6);
+                        for _ in 0..x_copies {
+                            push_ev(&mut self.facts.symbols[active_sym].events, &ev_x);
+                        }
+                        push_ev(&mut self.facts.symbols[active_sym].events, &ev_r);
+                        for ea in &ev_as {
+                            push_ev(&mut self.facts.symbols[active_sym].events, ea);
+                        }
+                        if active_sym != 0 {
+                            for _ in 0..x_copies {
+                                push_ev(&mut self.facts.symbols[0].events, &ev_x);
+                            }
+                            push_ev(&mut self.facts.symbols[0].events, &ev_r);
+                            for ea in &ev_as {
+                                push_ev(&mut self.facts.symbols[0].events, ea);
