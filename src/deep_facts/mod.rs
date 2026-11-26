@@ -918,6 +918,24 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     if lang == Lang::VisualBasic {
         walker.augment_vb();
     }
+    if lang == Lang::Cpp {
+        walker.augment_cpp();
+    }
+    if lang == Lang::Cobol {
+        walker.augment_cobol();
+    }
+    if lang == Lang::Fortran {
+        walker.augment_fortran();
+    }
+    if lang == Lang::Sql {
+        walker.augment_sql();
+    }
+    if lang == Lang::Elixir {
+        walker.augment_elixir();
+    }
+    if lang == Lang::Ocaml {
+        walker.augment_ocaml();
+    }
     walker.facts
 
 
