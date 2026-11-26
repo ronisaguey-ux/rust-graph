@@ -6341,6 +6341,164 @@ impl<'a> Walker<'a> {
             per_line_tokens[ln] = toks;
         }
 
+        // 3. Lowercase VB a/r/x event pass
+        let is_safe_callee = |path: &str| -> bool {
+            if path.is_empty() || path.starts_with('.') || path.ends_with('.') || path.contains("().") {
+                return false;
+            }
+            !matches!(
+                path,
+                "assert" | "return" | "yield" | "await" | "throw" | "if" | "elseif" | "else"
+                    | "for" | "while" | "select" | "try" | "catch" | "finally" | "with" | "do"
+                    | "not" | "and" | "or"
+            )
+        };
+        let safe_call_idx: Vec<usize> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| {
+                sym.calls
+                    .iter()
+                    .position(|c| is_safe_callee(&c.path) && c.line != sym.line && c.path != sym.name)
+                    .or_else(|| sym.calls.iter().position(|c| is_safe_callee(&c.path)))
+                    .unwrap_or(0)
+            })
+            .collect();
+        let mut extra_events: Vec<Vec<String>> = vec![Vec::new(); n_syms];
+
+        for ln in 1..=n_lines {
+            let code = per_line_code[ln].as_str();
+            if code.is_empty() { continue; }
+            let ln32 = ln as u32;
+            let mut inner_sym = 0usize;
+            let mut orig_inner_sym = 0usize;
+            for &(st, en, si) in &sym_spans {
+                if st > ln32 { break; }
+                if ln32 <= en {
+                    inner_sym = si;
+                    if si < orig_n_syms { orig_inner_sym = si; }
+                }
+            }
+            let mut target_syms: Vec<usize> = vec![0];
+            if orig_inner_sym != 0 && !target_syms.contains(&orig_inner_sym) { target_syms.push(orig_inner_sym); }
+            if inner_sym != 0 && !target_syms.contains(&inner_sym) { target_syms.push(inner_sym); }
+            if let Some(&(_, _, last_si)) = sym_spans.iter().rev().find(|&&(st, _, _)| st <= ln32) {
+                if !target_syms.contains(&last_si) { target_syms.push(last_si); }
+            }
+
+            let mut vals: Vec<String> = vec!["0".to_string()];
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let is_open_multi = per_line_pdelta[ln] > 0;
+            let z_cap = if is_open_multi { 3500 } else { 256 };
+            let c_cap = if is_open_multi { 2000 } else { 128 };
+            let mut zc = 1usize;
+            let mut cc = 0usize;
+            let mut pdepth = per_line_pdelta[ln];
+            for t in &per_line_tokens[ln] {
+                if t == "0" { if zc < z_cap { vals.push("0".to_string()); zc += 1; } }
+                else if t.starts_with(r#"["c","#) { if cc < c_cap { vals.push(t.clone()); cc += 1; } }
+                else if seen.insert(t.clone()) { vals.push(t.clone()); }
+            }
+            let mut cur = ln + 1;
+            let is_attr_start = code.starts_with('<') && code.ends_with('>');
+            let max_cur = (ln + if is_open_multi { 8000 } else if is_attr_start { 60 } else { 25 }).min(n_lines);
+            while cur <= max_cur {
+                let prev_c = per_line_code[cur - 1].as_str();
+                let attr_cont = is_attr_start && (prev_c.starts_with('<') && prev_c.ends_with('>'));
+                if pdepth <= 0 && !prev_c.ends_with(" _") && !attr_cont && cur > ln + 2 { break; }
+                if is_open_multi && !per_line_code[cur].is_empty() && zc < z_cap {
+                    vals.push("0".to_string());
+                    zc += 1;
+                }
+                for t in &per_line_tokens[cur] {
+                    if t == "0" { if zc < z_cap { vals.push("0".to_string()); zc += 1; } }
+                    else if t.starts_with(r#"["c","#) { if cc < c_cap { vals.push(t.clone()); cc += 1; } }
+                    else if seen.insert(t.clone()) { vals.push(t.clone()); }
+                }
+                pdepth += per_line_pdelta[cur];
+                cur += 1;
+            }
+            let mut val_json = String::from(r#"["m",["#);
+            for (ti, tok) in vals.iter().enumerate() {
+                if ti > 0 { val_json.push(','); }
+                val_json.push_str(tok);
+            }
+            val_json.push_str("]]");
+
+            {
+                let mut emitted_a: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut scan_from = 0usize;
+                while let Some(rel_ep) = code[scan_from..].find('=') {
+                    let ep = scan_from + rel_ep;
+                    scan_from = ep + 1;
+                    let prev = if ep > 0 { code.as_bytes()[ep - 1] } else { 0 };
+                    if matches!(prev, b'<' | b'>' | b'=') { continue; }
+                    let seg_start = code[..ep].rfind(':').map(|p| p + 1).unwrap_or(0);
+                    let lhs_full = code[seg_start..ep].trim_end().trim_end_matches(|c: char| matches!(c, '+' | '-' | '*' | '/' | '&')).trim_end();
+                    let mut cand_slices: Vec<&str> = vec![lhs_full];
+                    if let Some(before_as) = lhs_full.split(" as ").next() {
+                        let ba = before_as.trim_end();
+                        if ba != lhs_full { cand_slices.push(ba); }
+                    }
+                    if seg_start > 0 {
+                        let before_colon = code[..seg_start - 1].trim_end();
+                        if !before_colon.is_empty() { cand_slices.push(before_colon); }
+                    }
+                    for sl in cand_slices {
+                        let lb = sl.as_bytes();
+                        let mut li = lb.len();
+                        while li > 0 && (is_id_cont(lb[li - 1]) || lb[li - 1] == b'.') { li -= 1; }
+                        let nm = sl[li..].trim_matches('.').to_string();
+                        if !nm.is_empty() && is_id_start(nm.as_bytes()[0]) && emitted_a.insert(nm.clone()) {
+                            let mut ev = format!(r#"["a",{ln32},["#);
+                            push_string(&mut ev, &nm);
+                            ev.push_str("],");
+                            ev.push_str(&val_json);
+                            ev.push_str(",0]");
+                            for &tsi in &target_syms {
+                                let sidx = safe_call_idx[tsi];
+                                if sidx == 0 {
+                                    extra_events[tsi].push(ev.clone());
+                                } else {
+                                    extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if code.starts_with("return ") || code == "return" || code.contains(" return ") {
+                let ev_r = format!(r#"["r",{ln32},{val_json}]"#);
+                for &tsi in &target_syms {
+                    let sidx = safe_call_idx[tsi];
+                    if sidx == 0 {
+                        extra_events[tsi].push(ev_r.clone());
+                    } else {
+                        extra_events[tsi].push(ev_r.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                    }
+                }
+            }
+            let ev_x = format!(r#"["x",{ln32},{val_json},0]"#);
+            for &tsi in &target_syms {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev_x.clone());
+                } else {
+                    extra_events[tsi].push(ev_x.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                }
+            }
+        }
+
+        for (si, evs) in extra_events.into_iter().enumerate() {
+            if evs.is_empty() { continue; }
+            let sym = &mut self.facts.symbols[si];
+            for ev in evs {
+                if !sym.events.is_empty() { sym.events.push(','); }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
 
 
 
