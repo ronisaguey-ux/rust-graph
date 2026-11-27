@@ -1789,6 +1789,156 @@ impl<'a> Walker<'a> {
                         if p1 > p0 && trimmed[p0].is_ascii_alphabetic() {
                             let mname = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
                             if !self.facts.symbols.iter().any(|sym| sym.name == mname && sym.line == lno) {
+                                self.facts.symbols.push(Symbol {
+                                    key: mname.clone(),
+                                    name: mname,
+                                    owner: String::new(),
+                                    kind: 2,
+                                    line: lno,
+                                    end_line: lno,
+                                    ..Symbol::default()
+                                });
+                            }
+                        }
+                    }
+                }
+                if let Some(upos) = trimmed.windows(6).position(|w| w == b"use ::") {
+                    if upos == 0 || matches!(trimmed[upos - 1], b' ' | b'\t' | b')') {
+                        let rest_u = String::from_utf8_lossy(&trimmed[upos + 4..]);
+                        let stmt_u = rest_u.split(';').next().unwrap_or("").trim();
+                        if !stmt_u.is_empty() && !stmt_u.contains('{') && !stmt_u.contains('*') {
+                            if let Some((path_p, alias_p)) = stmt_u.split_once(" as ") {
+                                let module = path_p.trim().replace("::", ".");
+                                let alias = alias_p.trim().to_string();
+                                if !self.facts.imports.iter().any(|im| im.module == module && im.alias == alias) {
+                                    self.facts.imports.push(Import {
+                                        line: lno,
+                                        module,
+                                        name: String::new(),
+                                        alias,
+                                        kind: IMPORT_MODULE,
+                                        ..Import::default()
+                                    });
+                                }
+                            } else {
+                                let dotted = stmt_u.replace("::", ".");
+                                if let Some((mod_p, item_p)) = dotted.rsplit_once('.') {
+                                    if !self.facts.imports.iter().any(|im| im.module == mod_p && im.name == item_p) {
+                                        self.facts.imports.push(Import {
+                                            line: lno,
+                                            module: mod_p.to_string(),
+                                            name: item_p.to_string(),
+                                            alias: item_p.to_string(),
+                                            kind: IMPORT_MODULE,
+                                            ..Import::default()
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2c2. General `use path::item;` and `use path::{a, b};` import recovery (including lowercase module imports & brace trees).
+                if let Some(upos) = trimmed.windows(4).position(|w| w == b"use ") {
+                    let prev_ok = upos == 0 || matches!(trimmed[upos - 1], b' ' | b'\t' | b')');
+                    if prev_ok {
+                        let rest_u = String::from_utf8_lossy(&trimmed[upos + 4..]);
+                        let stmt_u = rest_u.split(';').next().unwrap_or("").trim();
+                        if !stmt_u.is_empty() && !stmt_u.contains('*') {
+                            if let (Some(lb), Some(rb)) = (stmt_u.find('{'), stmt_u.rfind('}')) {
+                                if rb > lb {
+                                    let prefix = stmt_u[..lb].trim().trim_end_matches("::").replace("::", ".");
+                                    let items = &stmt_u[lb + 1..rb];
+                                    for raw_it in items.split(',') {
+                                        let it = raw_it.trim();
+                                        if it.is_empty() || it == "self" { continue; }
+                                        let (iname, ialias) = if let Some((a, b)) = it.split_once(" as ") {
+                                            (a.trim().to_string(), b.trim().to_string())
+                                        } else {
+                                            (it.to_string(), it.to_string())
+                                        };
+                                        if !iname.is_empty() && iname.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                            if !self.facts.imports.iter().any(|im| im.module == prefix && im.name == iname) {
+                                                self.facts.imports.push(Import {
+                                                    line: lno,
+                                                    module: prefix.clone(),
+                                                    name: iname,
+                                                    alias: ialias,
+                                                    kind: IMPORT_MODULE,
+                                                    ..Import::default()
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if !stmt_u.contains('{') && !stmt_u.contains(" as ") {
+                                let dotted = stmt_u.replace("::", ".");
+                                if let Some((mod_p, item_p)) = dotted.rsplit_once('.') {
+                                    if !item_p.is_empty() && item_p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                        if item_p.as_bytes()[0].is_ascii_lowercase() {
+                                            if !self.facts.imports.iter().any(|im| im.module == dotted && im.name.is_empty() && im.alias == item_p) {
+                                                self.facts.imports.push(Import {
+                                                    line: lno,
+                                                    module: dotted.clone(),
+                                                    name: String::new(),
+                                                    alias: item_p.to_string(),
+                                                    kind: IMPORT_MODULE,
+                                                    ..Import::default()
+                                                });
+                                            }
+                                        } else if !self.facts.imports.iter().any(|im| im.module == mod_p && im.name == item_p) {
+                                            self.facts.imports.push(Import {
+                                                line: lno,
+                                                module: mod_p.to_string(),
+                                                name: item_p.to_string(),
+                                                alias: item_p.to_string(),
+                                                kind: IMPORT_MODULE,
+                                                ..Import::default()
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2d. `static <name>: <Type>;` (extern blocks & `thread_local!`) -> emit `event x` with `static`, name, type.
+                if (trimmed.starts_with(b"static ") || trimmed.starts_with(b"pub static ")) && trimmed.contains(&b':') && !trimmed.contains(&b'=') {
+                    let mut parts = vec!["[\"n\",\"static\"]".to_string()];
+                    let mut sk = 0usize;
+                    while sk < trimmed.len() {
+                        if trimmed[sk].is_ascii_alphabetic() || trimmed[sk] == b'_' {
+                            let s0 = sk;
+                            while sk < trimmed.len() && (trimmed[sk].is_ascii_alphanumeric() || trimmed[sk] == b'_') { sk += 1; }
+                            let id = String::from_utf8_lossy(&trimmed[s0..sk]);
+                            if !matches!(id.as_ref(), "pub" | "static" | "mut" | "const") {
+                                parts.push(format!("[\"n\",\"{id}\"]"));
+                            }
+                            continue;
+                        }
+                        sk += 1;
+                    }
+                    if parts.len() >= 3 {
+                        let ev = format!("[\"x\",{lno},[\"m\",[{}]]]", parts.join(","));
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+                if trimmed.starts_with(b"thread_local!") {
+                    // Scan single-line or short multi-line `thread_local! { static FOO: T = init; }`
+                    let mut tk = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + 13;
+                    let mut bdepth = 0usize;
+                    let mut parts = vec!["[\"n\",\"thread_local\"]".to_string(), "[\"n\",\"static\"]".to_string()];
+                    let mut cur_line = lno;
+                    while tk < n {
+                        if src[tk] == b'\n' { cur_line += 1; tk += 1; continue; }
+                        if src[tk] == b'{' { bdepth += 1; tk += 1; continue; }
+                        if src[tk] == b'}' {
+                            if bdepth <= 1 { break; }
                                 let mut parts: Vec<String> = Vec::new();
                                 let mut rk = 0usize;
                                 while rk < rhs.len() {
