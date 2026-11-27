@@ -694,6 +694,8 @@ fn tag(lang: Lang) -> &'static str {
         Lang::D => "D",
         Lang::FSharp => "FS",
         Lang::Ocaml => "ML",
+        Lang::Elm => "ELM",
+        Lang::Matlab => "M",
         Lang::Erlang => "ERL",
         Lang::Clojure => "CLJ",
         Lang::Tcl => "TCL",
@@ -834,6 +836,8 @@ pub fn lang_for_forced(tag: &str) -> Option<Lang> {
         "D" => Some(Lang::D),
         "FS" => Some(Lang::FSharp),
         "ML" => Some(Lang::Ocaml),
+        "ELM" => Some(Lang::Elm),
+        "M" => Some(Lang::Matlab),
         "ERL" => Some(Lang::Erlang),
         "CLJ" => Some(Lang::Clojure),
         "TCL" => Some(Lang::Tcl),
@@ -961,6 +965,12 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     }
     if lang == Lang::Julia {
         walker.augment_julia();
+    }
+    if lang == Lang::Elm {
+        walker.augment_elm();
+    }
+    if lang == Lang::Matlab {
+        walker.augment_matlab();
     }
     walker.facts
 
@@ -9390,10 +9400,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn augment_ocaml(&mut self) {
-        let src_str = std::str::from_utf8(self.src).unwrap_or("");
-        let lines: Vec<&str> = src_str.lines().collect();
-        let n_lines = lines.len();
     fn augment_matlab(&mut self) {
         let src_owned = String::from_utf8_lossy(self.src);
         let lines: Vec<&str> = src_owned.lines().collect();
@@ -10750,6 +10756,8 @@ impl<'a> Walker<'a> {
                 sym.events.push_str(&ev);
             }
         }
+    }
+
     fn augment_elm(&mut self) {
         let src_str = std::str::from_utf8(self.src).unwrap_or("");
         let lines: Vec<&str> = src_str.lines().collect();
@@ -11421,6 +11429,12 @@ impl<'a> Walker<'a> {
                 sym.events.push_str(&ev);
             }
         }
+    }
+
+    fn augment_ocaml(&mut self) {
+        let src_str = std::str::from_utf8(self.src).unwrap_or("");
+        let lines: Vec<&str> = src_str.lines().collect();
+        let n_lines = lines.len();
         if n_lines == 0 || self.facts.symbols.is_empty() {
             return;
         }
