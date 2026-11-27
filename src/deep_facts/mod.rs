@@ -4478,3 +4478,323 @@ impl<'a> Walker<'a> {
                                     self.facts.symbols.push(Symbol { key, name: sname, owner, kind: skind, line: lno, end_line: lno, ..Symbol::default() });
                                 }
                             }
+                        }
+                    }
+                }
+
+                // S8. Scala call scanning on lines with `(` (dotted & unqualified calls, including inside infix `->`, `+=`, `JArray(x.map(...))`).
+                if trimmed.contains(&b'(') && !trimmed.starts_with(b"def ") && !trimmed.starts_with(b"class ") && !trimmed.starts_with(b"case class ") {
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            let mut lk = rk;
+                            if lk < trimmed.len() && trimmed[lk] == b'[' {
+                                let mut bd = 1usize; lk += 1;
+                                while lk < trimmed.len() && bd > 0 {
+                                    if trimmed[lk] == b'[' { bd += 1; } else if trimmed[lk] == b']' { bd -= 1; }
+                                    lk += 1;
+                                }
+                            }
+                            if !full.is_empty() && lk < trimmed.len() && trimmed[lk] == b'('
+                                && !matches!(full.as_str(), "if" | "while" | "for" | "catch" | "match" | "case" | "def" | "class" | "new")
+                            {
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    if !sym.calls.iter().any(|c| c.line == lno && c.path == full) {
+                                        sym.calls.push(Call { path: full, line: lno });
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                }
+
+                // S10. Scala `private`/`protected`/`override`/`final` `val` expression fallback `event x` (when lexer sees modifier tokens).
+                if (trimmed.starts_with(b"private ") || trimmed.starts_with(b"protected ") || trimmed.starts_with(b"override ") || trimmed.starts_with(b"final "))
+                    && (trimmed.windows(4).any(|w| w == b"val ") || trimmed.windows(4).any(|w| w == b"var "))
+                {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    while rk < trimmed.len() {
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let id = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !id.is_empty() { parts.push(format!("[\"n\",\"{id}\"]")); }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if parts.len() >= 2 {
+                        let ev = format!("[\"x\",{lno},[\"m\",[{}]]]", parts.join(","));
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // S11. Scala `match {` expression scrutinee recovery.
+                if trimmed.windows(6).any(|w| w == b" match") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "while" | "for" | "match" | "case" | "try" | "catch" | "new" | "true" | "false" | "null" | "return" | "throw") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // S12. Scala `for (` / `for {` comprehension generator recovery.
+                if trimmed.starts_with(b"for ") || trimmed.starts_with(b"for(") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "while" | "for" | "match" | "case" | "try" | "catch" | "new" | "true" | "false" | "null" | "return" | "throw") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // S13. Scala `case ... =>` pattern arm expression recovery.
+                if trimmed.starts_with(b"case ") && trimmed.windows(2).any(|w| w == b"=>") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "while" | "for" | "match" | "case" | "try" | "catch" | "new" | "true" | "false" | "null" | "return" | "throw") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // S14. Scala `=>` lambda/closure expression recovery.
+                if !trimmed.starts_with(b"case ") && trimmed.windows(2).any(|w| w == b"=>") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "while" | "for" | "match" | "case" | "try" | "catch" | "new" | "true" | "false" | "null" | "return" | "throw") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // S15. Scala `<-` for-comprehension generator binding recovery.
+                if trimmed.windows(2).any(|w| w == b"<-") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "while" | "for" | "match" | "case" | "try" | "catch" | "new" | "true" | "false" | "null" | "return" | "throw") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // S16. Scala `+=` / `-=` / `++=` collection mutation statements.
+                if trimmed.windows(2).any(|w| w == b"+=" || w == b"-=") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "while" | "for" | "match" | "case" | "try" | "catch" | "new" | "true" | "false" | "null" | "return" | "throw") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // S17. Scala `return expr` statements.
+                if trimmed.starts_with(b"return ") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "while" | "for" | "match" | "case" | "try" | "catch" | "new" | "true" | "false" | "null" | "return" | "throw") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
