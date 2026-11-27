@@ -11155,20 +11155,218 @@ impl<'a> Walker<'a> {
                 if ch == b'=' {
                     let prev = if p > 0 { tb[p - 1] } else { 0 };
                     let next = if p + 1 < tb.len() { tb[p + 1] } else { 0 };
+                    if matches!(prev, b'=' | b'<' | b'>' | b'!') || next == b'=' { continue; }
+                    let mut rhs = tr[p + 1..].trim_start();
+                    if rhs.is_empty() && idx + 1 < n_lines {
+                        rhs = clean_lines[idx + 1].trim();
+                    }
+                    // Strip leading C cast `(Type)` or `(`
+                    while rhs.starts_with('(') {
+                        if let Some(rp) = rhs.find(')') {
+                            let after = rhs[rp + 1..].trim_start();
+                            if !after.is_empty() && is_id_start(after.as_bytes()[0]) {
+                                rhs = after;
+                                continue;
                             }
                         }
+                        break;
                     }
-                        let mut li = lb.len();
-                        if !tn.is_empty() && is_id_start(tn.as_bytes()[0]) {
+                    let rtok: String = rhs.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                    let rrest = rhs[rtok.len()..].trim_start();
+                    if !rtok.is_empty() && rtok.as_bytes()[0].is_ascii_uppercase() && rrest.starts_with('(') {
+                        // Strip `[...]` indexers in lhs so `v[i].iov_len` -> `v.iov_len`
+                        let lhs_raw = tr[..p].trim_end();
+                        let mut lhs_clean = String::with_capacity(lhs_raw.len());
+                        let mut bd = 0i32;
+                        for c in lhs_raw.chars() {
+                            if c == '[' { bd += 1; }
+                            else if c == ']' { bd = (bd - 1).max(0); }
+                            else if bd == 0 { lhs_clean.push(c); }
                         }
-                    }
-                }
-            }
+                        let lhs_clean = lhs_clean.replace("->", ".");
+                        let lb = lhs_clean.as_bytes();
+                        let mut li = lb.len();
+                        while li > 0 && (is_id_cont(lb[li - 1]) || lb[li - 1] == b'.') { li -= 1; }
+                        let tn = lhs_clean[li..].trim_matches('.');
+                        if !tn.is_empty() && is_id_start(tn.as_bytes()[0]) {
+                            self.facts.vars.push((tn.to_string(), rtok.clone()));
+                            if let Some((_, tail)) = tn.rsplit_once('.') {
+                                if !tail.is_empty() && is_id_start(tail.as_bytes()[0]) {
+                                    self.facts.vars.push((tail.to_string(), rtok.clone()));
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
+        // Pass 2: Full-file ObjC bracket message send scanner `[receiver sel]` / `[receiver k1:v1 k2:v2]`
+        // Join clean_lines with `\n` and map byte offsets to 1-based line numbers
+        let joined_src = clean_lines.join("\n");
+        let jb = joined_src.as_bytes();
+        let mut line_starts: Vec<usize> = vec![0];
+        for (idx, &ch) in jb.iter().enumerate() {
+            if ch == b'\n' { line_starts.push(idx + 1); }
+        }
+        let byte_to_line = |pos: usize| -> u32 {
+            let idx = line_starts.partition_point(|&s| s <= pos);
+            idx.max(1) as u32
+        };
+
+        // Scan every `[` ... `]` pair (outside strings) for ObjC message sends
+        let mut bstack: Vec<usize> = Vec::new();
+        let mut idx = 0usize;
+        let mut in_dq = false;
+        let mut in_sq = false;
+        while idx < jb.len() {
+            let ch = jb[idx];
+            if in_dq {
+                if ch == b'\\' && idx + 1 < jb.len() { idx += 2; continue; }
+                if ch == b'"' { in_dq = false; }
+                idx += 1;
+                continue;
+            }
+            if in_sq {
+                if ch == b'\\' && idx + 1 < jb.len() { idx += 2; continue; }
+                if ch == b'\'' { in_sq = false; }
+                idx += 1;
+                continue;
+            }
+            if ch == b'"' { in_dq = true; idx += 1; continue; }
+            if ch == b'\'' { in_sq = true; idx += 1; continue; }
+            if ch == b'[' {
+                bstack.push(idx);
+            } else if ch == b']' {
+                if let Some(open_pos) = bstack.pop() {
+                    if idx > open_pos + 1 && idx - open_pos < 8000 {
+                        let inner = &joined_src[open_pos + 1..idx];
+                        let ib = inner.as_bytes();
+                        // Collect top-level (depth 0) tokens AND last identifier at any depth
+                        let mut top_ids: Vec<(&str, bool, usize)> = Vec::new();
+                        let mut last_any_id: Option<(&str, usize)> = None;
+                        let mut d = 0i32;
+                        let mut k = 0usize;
+                        let mut sdq = false;
+                        let mut ssq = false;
+                        while k < ib.len() {
+                            let c = ib[k];
+                            if sdq {
+                                if c == b'\\' && k + 1 < ib.len() { k += 2; continue; }
+                                if c == b'"' { sdq = false; }
+                                k += 1; continue;
+                            }
+                            if ssq {
+                                if c == b'\\' && k + 1 < ib.len() { k += 2; continue; }
+                                if c == b'\'' { ssq = false; }
+                                k += 1; continue;
+                            }
+                            if c == b'"' { sdq = true; k += 1; continue; }
+                            if c == b'\'' { ssq = true; k += 1; continue; }
+                            if matches!(c, b'[' | b'(' | b'{') { d += 1; k += 1; continue; }
+                            if matches!(c, b']' | b')' | b'}') { d = (d - 1).max(0); k += 1; continue; }
+                            if is_id_start(c) {
+                                let s = k;
+                                k += 1;
+                                while k < ib.len() && is_id_cont(ib[k]) { k += 1; }
+                                let word = &inner[s..k];
+                                let mut kf = k;
+                                while kf < ib.len() && (ib[kf] == b' ' || ib[kf] == b'\t') { kf += 1; }
+                                let has_colon = kf < ib.len() && ib[kf] == b':' && !(kf + 1 < ib.len() && ib[kf + 1] == b':');
+                                if !has_colon {
+                                    last_any_id = Some((word, open_pos + 1 + s));
+                                }
+                                if d == 0 {
+                                    top_ids.push((word, has_colon, open_pos + 1 + s));
+                                }
+                                continue;
+                            }
+                            k += 1;
+                        }
+                        if let Some((lw, lpos)) = last_any_id {
+                            let call_ln = byte_to_line(open_pos);
+                            let l_ln = byte_to_line(lpos);
+                            for ln32 in [call_ln, l_ln] {
+                                let target_syms = targets_for_line(ln32);
+                                for &si in &target_syms {
+                                    if si < n_syms && existing_calls[si].insert((lw.to_string(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: lw.to_string(), line: ln32 });
+                                    }
+                                }
+                            }
+                        }
+                        let colon_parts: Vec<(&str, usize)> = top_ids.iter().filter(|x| x.1).map(|x| (x.0, x.2)).collect();
+                        if !colon_parts.is_empty() {
+                            let mut full_sel = String::new();
+                            for (w, _) in &colon_parts {
+                                full_sel.push_str(w);
+                                full_sel.push(':');
+                            }
+                            let call_ln = byte_to_line(open_pos);
+                            let first_ln = byte_to_line(colon_parts[0].1);
+                            for ln32 in [call_ln, first_ln] {
+                                let target_syms = targets_for_line(ln32);
+                                for &si in &target_syms {
+                                    if si < n_syms && existing_calls[si].insert((full_sel.clone(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: full_sel.clone(), line: ln32 });
+                                    }
+                                    if colon_parts.len() == 1 {
+                                        let w0 = colon_parts[0].0.to_string();
+                                        if si < n_syms && existing_calls[si].insert((w0.clone(), ln32)) {
+                                            self.facts.symbols[si].calls.push(Call { path: w0, line: ln32 });
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(&(last_w, last_has_colon, last_pos)) = top_ids.last() {
+                                if !last_has_colon {
+                                    let last_ln = byte_to_line(last_pos);
+                                    for ln32 in [call_ln, last_ln] {
+                                        let target_syms = targets_for_line(ln32);
+                                        for &si in &target_syms {
+                                            if si < n_syms && existing_calls[si].insert((last_w.to_string(), ln32)) {
+                                                self.facts.symbols[si].calls.push(Call { path: last_w.to_string(), line: ln32 });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if top_ids.len() >= 2 {
+                            // Zero-arg message send `[receiver selector]`
+                            let (sel, sel_pos) = (top_ids.last().unwrap().0, top_ids.last().unwrap().2);
+                            let call_ln = byte_to_line(open_pos);
+                            let sel_ln = byte_to_line(sel_pos);
+                            for ln32 in [call_ln, sel_ln] {
+                                let target_syms = targets_for_line(ln32);
+                                for &si in &target_syms {
+                                    if si < n_syms && existing_calls[si].insert((sel.to_string(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: sel.to_string(), line: ln32 });
+                                    }
+                                }
+                            }
+                        } else if top_ids.len() == 1 {
+                            // `[ [nested] selector ]` where receiver was a nested `[...]`
+                            let (sel, sel_pos) = (top_ids[0].0, top_ids[0].2);
+                            if inner.trim_start().starts_with('[') || inner.trim_start().starts_with('(') {
+                                let call_ln = byte_to_line(open_pos);
+                                let sel_ln = byte_to_line(sel_pos);
+                                for ln32 in [call_ln, sel_ln] {
+                                    let target_syms = targets_for_line(ln32);
+                                    for &si in &target_syms {
+                                        if si < n_syms && existing_calls[si].insert((sel.to_string(), ln32)) {
+                                            self.facts.symbols[si].calls.push(Call { path: sel.to_string(), line: ln32 });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        }
+
+        // Pass 3: Per-line paren calls, @selector(...) calls, and tokens
         let mut per_line_toks: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
         let mut per_line_pdelta: Vec<(i32, i32, i32)> = vec![(0, 0, 0); n_lines + 1];
         for (idx, cl) in clean_lines.iter().enumerate() {
