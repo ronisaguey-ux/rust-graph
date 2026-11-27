@@ -9402,6 +9402,327 @@ impl<'a> Walker<'a> {
 
     fn augment_matlab(&mut self) {
         let src_owned = String::from_utf8_lossy(self.src);
+    fn augment_haskell(&mut self) {
+        let src_owned = String::from_utf8_lossy(self.src);
+        let lines: Vec<&str> = src_owned.lines().collect();
+        let n_lines = lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+        let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'';
+
+        // Strip `--` line comments (when not part of operator like `-->`) and nested `{- ... -}` block comments
+        let mut clean_lines: Vec<String> = Vec::with_capacity(n_lines);
+        let mut block_depth = 0i32;
+        for raw_line in &lines {
+            let b = raw_line.as_bytes();
+            let mut out = String::with_capacity(b.len());
+            let mut i = 0usize;
+            let mut in_dq = false;
+            while i < b.len() {
+                if b[i] >= 0x80 {
+                    let ch = raw_line[i..].chars().next().unwrap();
+                    if block_depth == 0 { out.push(ch); }
+                    i += ch.len_utf8();
+                    continue;
+                }
+                if block_depth > 0 {
+                    if i + 1 < b.len() && b[i] == b'{' && b[i + 1] == b'-' {
+                        block_depth += 1;
+                        i += 2;
+                    } else if i + 1 < b.len() && b[i] == b'-' && b[i + 1] == b'}' {
+                        block_depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if in_dq {
+                    out.push(b[i] as char);
+                    if b[i] == b'\\' && i + 1 < b.len() && b[i + 1] < 0x80 {
+                        out.push(b[i + 1] as char);
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'"' { in_dq = false; }
+                    i += 1;
+                    continue;
+                }
+                if i + 1 < b.len() && b[i] == b'{' && b[i + 1] == b'-' {
+                    block_depth += 1;
+                    i += 2;
+                    continue;
+                }
+                if i + 1 < b.len() && b[i] == b'-' && b[i + 1] == b'-' {
+                    let after = if i + 2 < b.len() { b[i + 2] } else { b' ' };
+                    let before = if i > 0 { b[i - 1] } else { b' ' };
+                    if !matches!(after, b'!' | b'#' | b'$' | b'%' | b'&' | b'*' | b'+' | b'.' | b'/' | b'<' | b'=' | b'>' | b'?' | b'@' | b'\\' | b'^' | b'|' | b'~' | b':')
+                        && !matches!(before, b'!' | b'#' | b'$' | b'%' | b'&' | b'*' | b'+' | b'.' | b'/' | b'<' | b'=' | b'>' | b'?' | b'@' | b'\\' | b'^' | b'|' | b'~' | b':')
+                    {
+                        break;
+                    }
+                }
+                if b[i] == b'"' {
+                    in_dq = true;
+                    out.push('"');
+                    i += 1;
+                    continue;
+                }
+                out.push(b[i] as char);
+                i += 1;
+            }
+            clean_lines.push(out);
+        }
+
+        let mut fn_order: Vec<(u32, usize)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, s)| s.kind == KIND_FUNCTION)
+            .map(|(i, s)| (s.line, i))
+            .collect();
+        fn_order.sort_by_key(|&(st, _)| st);
+
+        let n_syms = self.facts.symbols.len();
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+
+        let targets_for_line = |ln32: u32| -> Vec<usize> {
+            let mut out = vec![0usize];
+            let pos = fn_order.partition_point(|&(st, _)| st <= ln32);
+            let st = pos.saturating_sub(2);
+            for &(_, si) in &fn_order[st..pos] {
+                if !out.contains(&si) { out.push(si); }
+            }
+            out
+        };
+
+        // Pass 1: Constructor vars (`lhs = UpperCase ...`, `lhs =\n UpperCase ...`, `lhs <- UpperCase ...`)
+        for (idx, cl) in clean_lines.iter().enumerate() {
+            let tr = cl.trim();
+            if tr.is_empty() { continue; }
+            let tb = tr.as_bytes();
+            for (p, &ch) in tb.iter().enumerate() {
+                if ch == b'=' {
+                    let prev = if p > 0 { tb[p - 1] } else { 0 };
+                    let next = if p + 1 < tb.len() { tb[p + 1] } else { 0 };
+                    if matches!(prev, b'=' | b'<' | b'>' | b'!' | b'/') || matches!(next, b'=' | b'>') { continue; }
+                    let mut rhs = tr[p + 1..].trim_start().trim_start_matches('(').trim_start();
+                    if rhs.is_empty() {
+                        for nxt_i in (idx + 1)..(idx + 4).min(n_lines) {
+                            let nt = clean_lines[nxt_i].trim();
+                            if !nt.is_empty() {
+                                rhs = nt.trim_start_matches('(').trim_start();
+                                break;
+                            }
+                        }
+                    }
+                    let rtok: String = rhs.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                    let rtail = rtok.rsplit('.').next().unwrap_or(&rtok);
+                    if !rtail.is_empty() && rtail.as_bytes()[0].is_ascii_uppercase() {
+                        let lhs = tr[..p].trim().trim_start_matches("let ").trim();
+                        let lb = lhs.as_bytes();
+                        let mut li = lb.len();
+                        while li > 0 && is_id_cont(lb[li - 1]) { li -= 1; }
+                        let tn = &lhs[li..];
+                        if !tn.is_empty() && is_id_start(tn.as_bytes()[0]) {
+                            self.facts.vars.push((tn.to_string(), rtail.to_string()));
+                        }
+                    }
+                }
+            }
+            if let Some((lhs_raw, rhs_raw)) = tr.split_once("<-") {
+                let rhs = rhs_raw.trim_start().trim_start_matches('(').trim_start();
+                let rtok: String = rhs.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                let rtail = rtok.rsplit('.').next().unwrap_or(&rtok);
+                if !rtail.is_empty() && rtail.as_bytes()[0].is_ascii_uppercase() {
+                    let lhs = lhs_raw.trim();
+                    let lb = lhs.as_bytes();
+                    let mut li = lb.len();
+                    while li > 0 && is_id_cont(lb[li - 1]) { li -= 1; }
+                    let tn = &lhs[li..];
+                    if !tn.is_empty() && is_id_start(tn.as_bytes()[0]) {
+                        self.facts.vars.push((tn.to_string(), rtail.to_string()));
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Token & call scanner per line
+        let mut per_line_toks: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
+        let mut per_line_pdelta: Vec<(i32, i32, i32)> = vec![(0, 0, 0); n_lines + 1];
+        let mut per_line_last_id: Vec<Option<String>> = vec![None; n_lines + 1];
+
+        for (idx, cl) in clean_lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            let tr = cl.trim();
+            if tr.is_empty() { continue; }
+            let target_syms = targets_for_line(ln32);
+            let cb = tr.as_bytes();
+            let mut toks: Vec<String> = Vec::new();
+            let mut dp = 0i32; let mut db = 0i32; let mut dc = 0i32;
+            let mut last_id: Option<String> = None;
+            let mut prev_id_on_line: Option<String> = None;
+            let mut prev2_id_on_line: Option<String> = None;
+            let mut j = 0usize;
+            while j < cb.len() {
+                if cb[j] == b'"' {
+                    toks.push("0".to_string());
+                    j += 1;
+                    while j < cb.len() && cb[j] != b'"' {
+                        if cb[j] == b'\\' && j + 1 < cb.len() { j += 2; } else { j += 1; }
+                    }
+                    if j < cb.len() { j += 1; }
+                    continue;
+                }
+                if cb[j] == b'\'' {
+                    // Char literal `'a'` or `'\n'` vs Template Haskell `'name` / `''Type`
+                    if j + 2 < cb.len() && cb[j + 1] != b'\\' && cb[j + 2] == b'\'' {
+                        toks.push("0".to_string());
+                        j += 3;
+                        continue;
+                    }
+                    if j + 3 < cb.len() && cb[j + 1] == b'\\' && cb[j + 3] == b'\'' {
+                        toks.push("0".to_string());
+                        j += 4;
+                        continue;
+                    }
+                    j += 1;
+                    continue;
+                }
+                if cb[j].is_ascii_digit() {
+                    while j < cb.len() && (cb[j].is_ascii_alphanumeric() || cb[j] == b'_' || cb[j] == b'.') { j += 1; }
+                    toks.push("0".to_string());
+                    continue;
+                }
+                if matches!(cb[j], b'(' | b')' | b'[' | b']' | b'{' | b'}') {
+                    match cb[j] {
+                        b'(' => dp += 1, b')' => dp -= 1,
+                        b'[' => db += 1, b']' => db -= 1,
+                        b'{' => dc += 1, b'}' => dc -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                    continue;
+                }
+                if is_id_start(cb[j]) {
+                    let st = j;
+                    j += 1;
+                    while j < cb.len() {
+                        if is_id_cont(cb[j]) {
+                            j += 1;
+                        } else if cb[j] == b'.' && j + 1 < cb.len() && is_id_start(cb[j + 1]) {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let raw_id = &tr[st..j];
+                    let base_id = raw_id.trim_end_matches('\'');
+                    let mut kf = j;
+                    while kf < cb.len() && (cb[kf] == b' ' || cb[kf] == b'\t') { kf += 1; }
+                    let is_kw = matches!(raw_id, "if" | "then" | "else" | "case" | "of" | "let" | "in" | "do" | "where" | "data" | "type" | "newtype" | "class" | "instance" | "module" | "import" | "deriving" | "forall" | "pattern" | "infix" | "infixl" | "infixr");
+                    let is_qual_fn = raw_id.rsplit_once('.').is_some_and(|(_, t)| !t.is_empty() && t.as_bytes()[0].is_ascii_lowercase());
+                    let next_arg_like = kf < cb.len() && (cb[kf] == b'(' || cb[kf] == b'\'' || cb[kf] == b'"' || cb[kf] == b'[' || (cb[kf].is_ascii_alphabetic() && raw_id.as_bytes()[0].is_ascii_lowercase()));
+                    if !is_kw && (is_qual_fn || next_arg_like) {
+                        let mut cands: Vec<&str> = vec![raw_id];
+                        if raw_id == "this" { cands.push("self"); }
+                        if base_id != raw_id && !base_id.is_empty() { cands.push(base_id); }
+                        if let Some((_, tail)) = raw_id.rsplit_once('.') {
+                            if !tail.is_empty() { cands.push(tail); }
+                        }
+                        for cand in cands {
+                            for &si in &target_syms {
+                                if si < n_syms && existing_calls[si].insert((cand.to_string(), ln32)) {
+                                    self.facts.symbols[si].calls.push(Call { path: cand.to_string(), line: ln32 });
+                                }
+                            }
+                        }
+                        let recv = if let Some((h, _)) = raw_id.rsplit_once('.') {
+                            let mut r = r#"["n","#.to_string();
+                            push_string(&mut r, h);
+                            r.push(']');
+                            r
+                        } else {
+                            "0".to_string()
+                        };
+                        let args_s = if kf < cb.len() && cb[kf] == b'(' && kf + 1 < cb.len() && cb[kf + 1] == b')' { "[]" } else { "[0]" };
+                        toks.push(format!(r#"["c",0,{recv},{args_s}]"#));
+                    } else if let Some((h, _)) = raw_id.rsplit_once('.') {
+                        let mut r = r#"["n","#.to_string();
+                        push_string(&mut r, h);
+                        r.push(']');
+                        toks.push(format!(r#"["c",0,{r},[0]]"#));
+                    }
+                    let mut n_out = r#"["n","#.to_string();
+                    push_string(&mut n_out, raw_id);
+                    n_out.push(']');
+                    toks.push(n_out);
+                    if raw_id == "this" {
+                        toks.push(r#"["n","self"]"#.to_string());
+                    }
+                    if base_id != raw_id && !base_id.is_empty() {
+                        let mut nb = r#"["n","#.to_string();
+                        push_string(&mut nb, base_id);
+                        nb.push(']');
+                        toks.push(nb);
+                    }
+                    if raw_id.contains('.') {
+                        for seg in raw_id.split('.') {
+                            if !seg.is_empty() && is_id_start(seg.as_bytes()[0]) {
+                                let mut ns = r#"["n","#.to_string();
+                                push_string(&mut ns, seg);
+                                ns.push(']');
+                                toks.push(ns);
+                            }
+                        }
+                    }
+                    if let Some(ref prev_w) = prev_id_on_line {
+                        let mut ng = r#"["n","#.to_string();
+                        push_string(&mut ng, &format!("{prev_w}.{raw_id}"));
+                        ng.push(']');
+                        toks.push(ng);
+                        if let Some(ref prev2_w) = prev2_id_on_line {
+                            let mut ng3 = r#"["n","#.to_string();
+                            push_string(&mut ng3, &format!("{prev2_w}.{prev_w}.{raw_id}"));
+                            ng3.push(']');
+                            toks.push(ng3);
+                        }
+                    }
+                    prev2_id_on_line = prev_id_on_line.take();
+                    prev_id_on_line = Some(raw_id.to_string());
+                    last_id = Some(raw_id.to_string());
+                    continue;
+                }
+                j += 1;
+            }
+            if tr.contains("] (") || tr.contains("](") {
+                for back in 1..=15 {
+                    if ln <= back { break; }
+                    let pl = clean_lines[ln - back - 1].trim();
+                    if let Some(bpos) = pl.find('[') {
+                        let before = pl[..bpos].trim_end();
+                        let bb = before.as_bytes();
+                        let mut bi = bb.len();
+                        while bi > 0 && is_id_cont(bb[bi - 1]) { bi -= 1; }
+                        let wid = &before[bi..];
+                        if !wid.is_empty() && is_id_start(wid.as_bytes()[0]) {
+                            for &si in &target_syms {
+                                if si < n_syms && existing_calls[si].insert((wid.to_string(), ln32)) {
+                                    self.facts.symbols[si].calls.push(Call { path: wid.to_string(), line: ln32 });
+                                }
+                            }
+                            break;
+                        }
         let lines: Vec<&str> = src_owned.lines().collect();
         let n_lines = lines.len();
         if n_lines == 0 || self.facts.symbols.is_empty() {
