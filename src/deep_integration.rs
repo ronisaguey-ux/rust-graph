@@ -120,6 +120,8 @@ pub enum Lang {
     Perl,
     Fortran,
     PowerShell,
+    Elm,
+    Matlab,
 }
 
 impl Lang {
@@ -170,6 +172,8 @@ impl Lang {
             Lang::Perl => &deep::batch_d::perl::PERL,
             Lang::Fortran => &deep::batch_f::fortran::FORTRAN,
             Lang::PowerShell => &deep::batch_f::powershell::POWERSHELL,
+            Lang::Elm => &deep::batch_f::elm::ELM,
+            Lang::Matlab => &deep::batch_f::matlab::MATLAB,
         }
     }
 }
