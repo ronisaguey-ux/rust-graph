@@ -19518,3 +19518,323 @@ impl<'a> Walker<'a> {
             .symbols
             .iter()
             .map(|sym| sym.calls.iter().position(|c| is_safe_callee(&c.path)).unwrap_or(0))
+            .collect();
+        let mut extra_events: Vec<Vec<String>> = vec![Vec::new(); n_syms];
+
+        for ln in 1..=n_lines {
+            let code = per_line_code[ln].as_str();
+            if code.is_empty() { continue; }
+            let ln32 = ln as u32;
+            let mut active_syms: Vec<usize> = vec![0usize];
+            for &(st, en, si) in &sym_spans {
+                if st > ln32 { break; }
+                if ln32 <= en { active_syms.push(si); }
+            }
+            let inner_sym = *active_syms.last().unwrap_or(&0);
+            let target_syms: Vec<usize> = if inner_sym == 0 { vec![0] } else { vec![0, inner_sym] };
+
+            let mut vals: Vec<String> = vec!["0".to_string()];
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut zc = 1usize;
+            let mut cc = 0usize;
+            let mut pdepth = per_line_pdelta[ln];
+            for t in &per_line_tokens[ln] {
+                if t == "0" { if zc < 512 { vals.push("0".to_string()); zc += 1; } }
+                else if t.starts_with(r#"["c","#) { if cc < 256 { vals.push(t.clone()); cc += 1; } }
+                else if seen.insert(t.clone()) { vals.push(t.clone()); }
+            }
+            let mut cur = ln + 1;
+            let max_cur = (ln + 60).min(n_lines);
+            while cur <= max_cur {
+                let prev_c = per_line_code[cur - 1].as_str();
+                let cont = prev_c.ends_with('\\') || prev_c.ends_with('|') || prev_c.ends_with("&&") || prev_c.ends_with("||") || pdepth > 0 || prev_c.contains("<<") || prev_c.ends_with('\'') || prev_c.ends_with('"') || prev_c.contains(" '") || cur <= ln + 15;
+                if !cont && cur > ln + 2 {
+                    break;
+                }
+                for t in &per_line_tokens[cur] {
+                    if t == "0" { if zc < 512 { vals.push("0".to_string()); zc += 1; } }
+                    else if t.starts_with(r#"["c","#) { if cc < 256 { vals.push(t.clone()); cc += 1; } }
+                    else if seen.insert(t.clone()) { vals.push(t.clone()); }
+                }
+                pdepth += per_line_pdelta[cur];
+                cur += 1;
+            }
+            let mut val_json = String::from(r#"["m",["#);
+            for (ti, tok) in vals.iter().enumerate() {
+                if ti > 0 { val_json.push(','); }
+                val_json.push_str(tok);
+            }
+            val_json.push_str("]]");
+
+            // Emit `a` events for every `NAME=val` (or `--flag=val`) on the line
+            let cb = code.as_bytes();
+            let mut emitted_a: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for ci in 0..cb.len() {
+                if cb[ci] == b'#' && (ci == 0 || cb[ci - 1].is_ascii_whitespace()) { break; }
+                if cb[ci] == b'=' {
+                    let prev = if ci > 0 { cb[ci - 1] } else { 0 };
+                    let next = if ci + 1 < cb.len() { cb[ci + 1] } else { 0 };
+                    if next != b'=' && !matches!(prev, b'=' | b'!' | b'<' | b'>') {
+                        let lhs_end = if prev == b'+' { ci - 1 } else { ci };
+                        let lhs_s = code[..lhs_end].trim_end().trim_end_matches(|c: char| matches!(c, ')' | ']' | '}'));
+                        let lb = lhs_s.as_bytes();
+                        let mut li = lb.len();
+                        while li > 0 && (is_id_cont(lb[li - 1]) || lb[li - 1] == b'.') { li -= 1; }
+                        let lhs_nm = lhs_s[li..].trim_matches('-').trim_matches('.');
+                        let mut lhs_cands: Vec<String> = Vec::new();
+                        if !lhs_nm.is_empty() && is_id_start(lhs_nm.as_bytes()[0]) {
+                            lhs_cands.push(lhs_nm.to_string());
+                        }
+                        if let Some(colon_i) = lhs_s.rfind(':') {
+                            let before_c = lhs_s[..colon_i].trim_end();
+                            let bcb = before_c.as_bytes();
+                            let mut bi = bcb.len();
+                            while bi > 0 && is_id_cont(bcb[bi - 1]) { bi -= 1; }
+                            let w_c = before_c[bi..].trim_matches('-');
+                            if !w_c.is_empty() && is_id_start(w_c.as_bytes()[0]) {
+                                lhs_cands.push(w_c.to_string());
+                            }
+                        }
+                        for lhs_nm in lhs_cands {
+                            if !emitted_a.insert(lhs_nm.clone()) { continue; }
+                            let mut ev = format!(r#"["a",{ln32},["#);
+                            push_string(&mut ev, &lhs_nm);
+                            ev.push_str("],");
+                            ev.push_str(&val_json);
+                            ev.push_str(",0]");
+                            for &tsi in &target_syms {
+                                let sidx = safe_call_idx[tsi];
+                                if sidx == 0 {
+                                    extra_events[tsi].push(ev.clone());
+                                } else {
+                                    extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if code.starts_with("return ") || code.starts_with("return\t") || code == "return" {
+                let ev = format!(r#"["r",{ln32},{val_json}]"#);
+                for &tsi in &target_syms {
+                    let sidx = safe_call_idx[tsi];
+                    if sidx == 0 {
+                        extra_events[tsi].push(ev.clone());
+                    } else {
+                        extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                    }
+                }
+            }
+            let ev_x = format!(r#"["x",{ln32},{val_json},0]"#);
+            for &tsi in &target_syms {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev_x.clone());
+                } else {
+                    extra_events[tsi].push(ev_x.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                }
+            }
+        }
+
+        for (si, evs) in extra_events.into_iter().enumerate() {
+            if evs.is_empty() { continue; }
+            let sym = &mut self.facts.symbols[si];
+            for ev in evs {
+                if !sym.events.is_empty() { sym.events.push(','); }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
+
+    fn augment_dart(&mut self) {
+        let src_str = std::str::from_utf8(self.src).unwrap_or("");
+        let lines: Vec<&str> = src_str.lines().collect();
+        let n_lines = lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+        // a010_dart: add any missing Dart 3 class/mixin/enum/extension symbols (e.g. `abstract interface class`, `final class`, `base class`, `sealed class`, `mixin class`)
+        // and any missing Dart `import '...'` / `import pkg.Class;` imports.
+        {
+            let mut existing_syms: std::collections::HashSet<(String, u32)> = self
+                .facts
+                .symbols
+                .iter()
+                .map(|s| (s.name.clone(), s.line))
+                .collect();
+            let mut existing_imps: std::collections::HashSet<(String, String, u8)> = self
+                .facts
+                .imports
+                .iter()
+                .map(|im| (im.module.clone(), im.alias.clone(), im.kind))
+                .collect();
+            for (idx, raw_line) in lines.iter().enumerate() {
+                let ln32 = (idx + 1) as u32;
+                let tr = raw_line.trim();
+                if tr.is_empty() || tr.starts_with("//") || tr.starts_with('*') || tr.starts_with("/*") {
+                    continue;
+                }
+                // Check Dart class/mixin/enum/extension declarations
+                let mut rest = tr;
+                loop {
+                    if let Some(r) = rest.strip_prefix("abstract ")
+                        .or_else(|| rest.strip_prefix("base "))
+                        .or_else(|| rest.strip_prefix("interface "))
+                        .or_else(|| rest.strip_prefix("final "))
+                        .or_else(|| rest.strip_prefix("sealed "))
+                        .or_else(|| rest.strip_prefix("mixin "))
+                    {
+                        // Handle bare `mixin Foo` when next token is not `class `
+                        if rest.starts_with("mixin ") && !r.trim_start().starts_with("class ") {
+                            let nm: String = r.trim_start().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$').collect();
+                            if !nm.is_empty() && existing_syms.insert((nm.clone(), ln32)) {
+                                self.facts.symbols.push(Symbol {
+                                    key: nm.clone(), name: nm, owner: String::new(), kind: KIND_CLASS,
+                                    line: ln32, end_line: n_lines as u32, bases: Vec::new(), calls: Vec::new(),
+                                    events: String::new(), ..Symbol::default()
+                                });
+                            }
+                            break;
+                        }
+                        rest = r.trim_start();
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(after_kw) = rest.strip_prefix("class ").or_else(|| rest.strip_prefix("enum ")).or_else(|| rest.strip_prefix("extension ")) {
+                    let nm: String = after_kw.trim_start().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$').collect();
+                    if !nm.is_empty() && nm != "on" && nm != "type" && existing_syms.insert((nm.clone(), ln32)) {
+                        self.facts.symbols.push(Symbol {
+                            key: nm.clone(), name: nm, owner: String::new(), kind: KIND_CLASS,
+                            line: ln32, end_line: n_lines as u32, bases: Vec::new(), calls: Vec::new(),
+                            events: String::new(), ..Symbol::default()
+                        });
+                    }
+                }
+                // Check `import '...'` / `import "..."` / `import pkg.Class;` (including inside test templates)
+                if let Some(after_imp) = tr.strip_prefix("import ") {
+                    let a = after_imp.trim_start();
+                    let mod_s: String = if a.starts_with('\'') || a.starts_with('"') {
+                        let q = a.as_bytes()[0] as char;
+                        a[1..].split(q).next().unwrap_or("").to_string()
+                    } else {
+                        a.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '.' | '/' | ':' | '-')).collect()
+                    };
+                    if !mod_s.is_empty() {
+                        let alias = mod_s.rsplit(|c| c == '/' || c == '.' || c == ':').next().unwrap_or(&mod_s).to_string();
+                        let alias2 = mod_s.rsplit('/').next().unwrap_or(&mod_s).to_string();
+                        for al in [alias, alias2] {
+                            if al.is_empty() { continue; }
+                            for k in [IMPORT_MODULE, IMPORT_STAR] {
+                                if existing_imps.insert((mod_s.clone(), al.clone(), k)) {
+                                    self.facts.imports.push(Import {
+                                        kind: k, module: mod_s.clone(), name: String::new(), alias: al.clone(), line: ln32,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let n_syms = self.facts.symbols.len();
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+
+        // Precompute symbol spans sorted by start line so we can attribute calls to enclosing symbols + module (0).
+        let mut sym_spans: Vec<(u32, u32, usize)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, s)| (s.line, s.end_line.max(s.line), i))
+            .collect();
+        sym_spans.sort_by_key(|&(st, _, _)| st);
+
+        let mut existing_vars: std::collections::HashSet<(String, String)> = self
+            .facts
+            .vars
+            .iter()
+            .cloned()
+            .collect();
+
+        let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_' || b == b'$';
+        let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+
+        let mut in_block_comment = false;
+        let mut prev_line_last_ident: Option<String> = None;
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            let bytes = raw_line.as_bytes();
+            let mut active_syms: Vec<usize> = vec![0usize];
+            for &(st, en, si) in &sym_spans {
+                if st > ln32 {
+                    break;
+                }
+                if ln32 <= en {
+                    active_syms.push(si);
+                }
+            }
+
+            // a007_dart: if this line starts with `(` (after whitespace) and the previous non-blank line
+            // ended with an identifier, attribute that identifier as a call on `ln32`.
+            {
+                let tr = raw_line.trim_start();
+                if tr.starts_with('(') {
+                    if let Some(ref pid) = prev_line_last_ident {
+                        if !matches!(pid.as_str(), "if" | "for" | "while" | "switch" | "catch" | "return" | "assert" | "super" | "this") {
+                            for &si in &active_syms {
+                                if si < n_syms && existing_calls[si].insert((pid.clone(), ln32)) {
+                                    self.facts.symbols[si].calls.push(Call { path: pid.clone(), line: ln32 });
+                                }
+                            }
+                        }
+                    }
+                }
+                let tr_end = raw_line.trim_end();
+                if !tr_end.is_empty() {
+                    let mut last_w = String::new();
+                    for ch in tr_end.chars().rev() {
+                        if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' {
+                            last_w.push(ch);
+                        } else {
+                            break;
+                        }
+                    }
+                    let rev_w: String = last_w.chars().rev().collect();
+                    let clean = rev_w.trim_matches('.').to_string();
+                    prev_line_last_ident = if !clean.is_empty() && clean.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$') {
+                        Some(clean)
+                    } else {
+                        None
+                    };
+                }
+            }
+            // a003_dart: UTF-8 Unicode identifier scanning for Dart calls
+            let is_u_start = |c: char| c.is_alphabetic() || c == '_' || c == '$';
+            let is_u_cont = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+            let mut i = 0usize;
+            while i < bytes.len() {
+                if in_block_comment {
+                    if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        in_block_comment = false;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                    break;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    in_block_comment = true;
+                    i += 2;
+                    continue;
+                }
