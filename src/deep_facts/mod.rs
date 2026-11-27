@@ -1278,3 +1278,323 @@ fn cs_strip_primary_constructors(src: &[u8]) -> Option<Vec<u8>> {
                                     }
                                     if &src[w_start..k] == b"where" {
                                         break;
+                                    }
+                                    continue;
+                                }
+                                k += 1;
+                            }
+                        }
+                        // Advance past optional `where` constraints to confirm `{` body.
+                        while k < src.len() {
+                            if let Some(next) = cs_skip_string_or_char(src, k) {
+                                k = next;
+                                continue;
+                            }
+                            if src.get(k..k + 2) == Some(b"//") || src.get(k..k + 2) == Some(b"/*") {
+                                k = cs_skip_ws_and_comments(src, k);
+                                continue;
+                            }
+                            if src[k] == b'{' {
+                                spans.extend(local_spans);
+                                break;
+                            }
+                            if src[k] == b';' || src[k] == b'}' {
+                                break;
+                            }
+                            k += 1;
+                        }
+                    }
+                }
+            }
+        }
+        prev_word = word;
+    }
+
+    if spans.is_empty() {
+        return None;
+    }
+    let mut patched = src.to_vec();
+    for (start, end) in spans {
+        if end == start + 2 && &src[start..end] == b"[]" {
+            patched[start] = b'"';
+            patched[start + 1] = b'"';
+            continue;
+        }
+        if end == start + 1 && src[start] == b'[' {
+            let after_ws = cs_skip_ws_and_comments(src, cs_skip_balanced(src, start, b'[', b']').unwrap_or(end));
+            if src.get(after_ws) != Some(&b'=') {
+                patched[start] = b'(';
+                continue;
+            }
+        }
+        if end == start + 1 && src[start] == b']' {
+            let after_ws = cs_skip_ws_and_comments(src, end);
+            if src.get(after_ws) != Some(&b'=') {
+                patched[start] = b')';
+                continue;
+            }
+        }
+        for byte in &mut patched[start..end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    }
+    Some(patched)
+}
+
+impl<'a> Walker<'a> {
+    pub(crate) fn new(src: &'a [u8], tree: &'a Cst, lang: Lang) -> Self {
+        let mut facts = Facts { tag: tag(lang).to_string(), ..Facts::default() };
+        facts.symbols.push(Symbol { key: "<module>".into(), kind: KIND_MODULE, line: 1, ..Symbol::default() });
+        Walker {
+            src,
+            orig_src: src,
+            nodes: &tree.nodes,
+            language: lang.language(),
+            kinds: kinds(lang),
+            line_starts: line_starts(src),
+            facts,
+            stack: vec![Frame { node: tree.root, symbol: 0, class: String::new(), receiver: String::new(), container: false, defines: None }],
+            bound: Vec::new(),
+            consumed: Vec::new(),
+            macro_prefix: None,
+            statement_lines: std::collections::HashMap::new(),
+            call_texts: std::collections::HashMap::new(),
+            in_kotlin_expr_body: false,
+            delim_depth: 0,
+            go_literal_frames: std::collections::HashMap::new(),
+        }
+    }
+
+    fn augment_rust(&mut self) {
+        let src = self.orig_src;
+        let n = src.len();
+        let mut li = 0usize;
+        let mut lno = 1u32;
+        let mut in_block_comment = 0usize;
+        while li < n {
+            let line_start = li;
+            while li < n && src[li] != b'\n' {
+                li += 1;
+            }
+            let raw = &src[line_start..li];
+            // Track nested `/* ... */` block comments and strip `//` line comments.
+            let mut code_end = raw.len();
+            let mut k = 0usize;
+            let mut in_str = false;
+            let line_starts_in_comment = in_block_comment > 0;
+            while k < raw.len() {
+                if in_block_comment > 0 {
+                    if k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'*' {
+                        in_block_comment += 1;
+                        k += 2;
+                        continue;
+                    }
+                    if k + 1 < raw.len() && raw[k] == b'*' && raw[k + 1] == b'/' {
+                        in_block_comment -= 1;
+                        k += 2;
+                        continue;
+                    }
+                    k += 1;
+                    continue;
+                }
+                if raw[k] == b'"' && (k == 0 || raw[k - 1] != b'\\') {
+                    in_str = !in_str;
+                    k += 1;
+                    continue;
+                }
+                if !in_str && k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'/' {
+                    code_end = k;
+                    break;
+                }
+                if !in_str && k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'*' {
+                    in_block_comment += 1;
+                    k += 2;
+                    continue;
+                }
+                k += 1;
+            }
+            if line_starts_in_comment && raw.windows(2).any(|w| w == b"::") && raw.contains(&b'(') {
+                // 3a44. Recover `Type::method(` calls inside `/*! ... */` doc-comment code blocks when an earlier glob `*/` closed lexer's block comment.
+                let mut rk = 0usize;
+                while rk < raw.len() {
+                    if raw[rk].is_ascii_uppercase() {
+                        let r0 = rk;
+                        while rk < raw.len() && (raw[rk].is_ascii_alphanumeric() || raw[rk] == b'_') { rk += 1; }
+                        if rk + 2 < raw.len() && raw[rk] == b':' && raw[rk + 1] == b':' {
+                            let ty = String::from_utf8_lossy(&raw[r0..rk]).to_string();
+                            rk += 2;
+                            let m0 = rk;
+                            while rk < raw.len() && (raw[rk].is_ascii_alphanumeric() || raw[rk] == b'_') { rk += 1; }
+                            if rk > m0 && rk < raw.len() && raw[rk] == b'(' {
+                                let m = String::from_utf8_lossy(&raw[m0..rk]);
+                                let full = format!("{ty}.{m}");
+                                if let Some(sym) = self.facts.symbols.get_mut(0) {
+                                    if !sym.calls.iter().any(|c| c.line == lno && c.path == full) {
+                                        sym.calls.push(Call { path: full, line: lno });
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    rk += 1;
+                }
+            }
+            if !line_starts_in_comment {
+                let code = &raw[..code_end];
+                let trimmed = {
+                    let mut t0 = 0;
+                    while t0 < code.len() && matches!(code[t0], b' ' | b'\t') { t0 += 1; }
+                    &code[t0..]
+                };
+                let owner_idx = self
+                    .facts
+                    .symbols
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .filter(|(_, sym)| sym.line <= lno && lno <= sym.end_line)
+                    .max_by_key(|(_, sym)| sym.line)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
+
+                // 1. Recover missing `fn <name>(` symbols (including `default fn`, `unsafe fn`, etc.).
+                if let Some(fpos) = trimmed.windows(3).position(|w| w == b"fn ") {
+                    let prev_ok = fpos == 0 || matches!(trimmed[fpos - 1], b' ' | b'\t' | b')');
+                    if prev_ok {
+                        let mut p0 = fpos + 3;
+                        while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                        let mut p1 = p0;
+                        while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                        if p1 > p0 && trimmed[p0].is_ascii_alphabetic() {
+                            let fname = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                            if !self.facts.symbols.iter().any(|sym| sym.name == fname && sym.line == lno) {
+                                // Find closing brace end_line for this fn body
+                                let mut eline = lno;
+                                let mut bk = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + p1;
+                                while bk < n && !matches!(src[bk], b'{' | b';') {
+                                    if src[bk] == b'\n' { eline += 1; }
+                                    bk += 1;
+                                }
+                                if bk < n && src[bk] == b'{' {
+                                    let mut depth = 1usize;
+                                    bk += 1;
+                                    while bk < n && depth > 0 {
+                                        match src[bk] {
+                                            b'\n' => eline += 1,
+                                            b'{' => depth += 1,
+                                            b'}' => depth -= 1,
+                                            _ => {}
+                                        }
+                                        bk += 1;
+                                    }
+                                }
+                                let owner = self.facts.symbols.get(owner_idx).map(|s| s.key.clone()).unwrap_or_default();
+                                let key = if owner.is_empty() { fname.clone() } else { format!("{owner}.{fname}") };
+                                self.facts.symbols.push(Symbol {
+                                    key,
+                                    name: fname,
+                                    owner,
+                                    kind: 1,
+                                    line: lno,
+                                    end_line: eline,
+                                    ..Symbol::default()
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // 1b. Recover missing `struct`/`enum`/`trait`/`type`/`macro_rules!` symbols (for attribute/macro-gated definitions).
+                for &(kw, sym_kind) in &[
+                    (b"struct " as &[u8], 2u8),
+                    (b"enum ", 2u8),
+                    (b"trait ", 2u8),
+                    (b"type ", 2u8),
+                    (b"macro_rules! ", 1u8),
+                ] {
+                    if let Some(kpos) = trimmed.windows(kw.len()).position(|w| w == kw) {
+                        let prev_ok = kpos == 0 || matches!(trimmed[kpos - 1], b' ' | b'\t' | b')');
+                        if prev_ok {
+                            let mut p0 = kpos + kw.len();
+                            while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                            let mut p1 = p0;
+                            while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                            if p1 > p0 && trimmed[p0].is_ascii_alphabetic() {
+                                let sname = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                                if !self.facts.symbols.iter().any(|sym| sym.name == sname && sym.line == lno) {
+                                    let mut eline = lno;
+                                    let mut bk = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + p1;
+                                    while bk < n && !matches!(src[bk], b'{' | b';') {
+                                        if src[bk] == b'\n' { eline += 1; }
+                                        bk += 1;
+                                    }
+                                    if bk < n && src[bk] == b'{' {
+                                        let mut depth = 1usize;
+                                        bk += 1;
+                                        while bk < n && depth > 0 {
+                                            match src[bk] {
+                                                b'\n' => eline += 1,
+                                                b'{' => depth += 1,
+                                                b'}' => depth -= 1,
+                                                _ => {}
+                                            }
+                                            bk += 1;
+                                        }
+                                    }
+                                    let owner = self.facts.symbols.get(owner_idx).map(|s| s.key.clone()).unwrap_or_default();
+                                    let key = if owner.is_empty() { sname.clone() } else { format!("{owner}.{sname}") };
+                                    self.facts.symbols.push(Symbol {
+                                        key,
+                                        name: sname,
+                                        owner,
+                                        kind: sym_kind,
+                                        line: lno,
+                                        end_line: eline,
+                                        ..Symbol::default()
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Struct destructuring `let Path { ... } = expr;`:
+                //    - Emit `event x` with struct `Path` + rhs names (fixes `let Self { ... } = self;`).
+                //    - If renamed fields `field: var` appear inside `{...}`, emit `event a` with first field name as target.
+                if trimmed.starts_with(b"let ") && trimmed.contains(&b'{') && trimmed.contains(&b'=') {
+                    if let (Some(lb), Some(eq_p)) = (trimmed.iter().position(|&b| b == b'{'), trimmed.iter().rposition(|&b| b == b'=')) {
+                        if eq_p > lb && !matches!(trimmed[eq_p - 1], b'=' | b'!' | b'<' | b'>') {
+                            let path_str = String::from_utf8_lossy(&trimmed[4..lb]).trim().replace("::", ".");
+                            let rhs = &trimmed[eq_p + 1..];
+                            let mut parts: Vec<String> = Vec::new();
+                            let mut rhs_parts: Vec<String> = Vec::new();
+                            if !path_str.is_empty() && path_str.as_bytes()[0].is_ascii_alphabetic() {
+                                parts.push(format!("[\"n\",\"{path_str}\"]"));
+                            }
+                            let mut rk = 0usize;
+                            while rk < rhs.len() {
+                                if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
+                                    let r0 = rk;
+                                    while rk < rhs.len() && (rhs[rk].is_ascii_alphanumeric() || rhs[rk] == b'_' || rhs[rk] == b'.') { rk += 1; }
+                                    let id = String::from_utf8_lossy(&rhs[r0..rk]).trim_matches('.').to_string();
+                                    if !id.is_empty() {
+                                        let atom = if rk < rhs.len() && rhs[rk] == b'(' {
+                                            if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == id).unwrap_or_else(|| {
+                                                    sym.calls.push(Call { path: id.clone(), line: lno });
+                                                    sym.calls.len() - 1
+                                                });
+                                                format!("[\"c\",{cidx},0,[0]]")
+                                            } else {
+                                                format!("[\"n\",\"{id}\"]")
+                                            }
+                                        } else {
+                                            format!("[\"n\",\"{id}\"]")
+                                        };
+                                        parts.push(atom.clone());
+                                        rhs_parts.push(atom);
+                                    }
+                                    continue;
