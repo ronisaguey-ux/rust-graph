@@ -34558,3 +34558,323 @@ impl<'a> Walker<'a> {
                 let frame = self.stack.pop().expect("a frame to pop");
                 if let Some(index) = frame.defines {
                     self.facts.symbols[index].end_line = self.end_line(id);
+                }
+            }
+            return;
+        }
+        // `(a) => f(a)`: the body is an expression, not a block, so nothing in
+        // the walk below would read it. It is this function's return value.
+        if kind == "arrow_function" && self.frame().node == id {
+            if let Some(&body) = self.children(id).last() {
+                if !matches!(self.kind(body), "statement_block" | "block") {
+                    let line = self.line(id);
+                    let value = self.form(body);
+                    self.event(&format!("[\"r\",{line},{value}]"));
+                }
+            }
+        }
+        if self.is_rust() {
+            self.leave_rust(id);
+        }
+        if matches!(
+            kind,
+            "if_statement"
+                | "guard_statement"
+                | "for_statement"
+                | "for_in_statement"
+                | "foreach_statement"
+                | "while_statement"
+                | "lock_statement"
+                | "do_statement"
+                | "try_statement"
+                | "switch_statement"
+                | "match_statement"
+                | "with_statement"
+        ) {
+            self.event("[\"j\"]");
+            if kind == "do_statement" {
+                if let Some(cond) = self
+                    .children(id)
+                    .into_iter()
+                    .rev()
+                    .find(|&c| !self.is_layout(c) && !matches!(self.kind(c), "statement_block" | "block"))
+                {
+                    let value = self.form(cond);
+                    if value != "0" {
+                        let line = self.line(cond);
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
+                }
+            }
+        }
+        if self.frame().node != id {
+            return;
+        }
+        let frame = self.stack.pop().expect("a frame to pop");
+        if let Some(index) = frame.defines {
+            self.facts.symbols[index].end_line = self.end_line(id);
+        }
+    }
+
+    pub(crate) fn is_js(&self) -> bool {
+        self.kinds.family == Family::Js
+    }
+
+    /// `true` for Kotlin: it is the only grammar here whose imports table
+    /// carries the package clause, and the walk needs to know before it reads
+    /// `property_declaration`, which Swift also uses.
+    /// The ObjC method declarations the CST could not hold: a line that opens
+    /// with `-` or `+` and is a declaration (no body) is read as `x` with its
+    /// words, and only where no other reader wrote an event.
+    /// The tree-sitter Scala grammar gives a nested import no node: `import`
+    /// inside a class or object body comes back as an ERROR whose `import`
+    /// child has no children, and the rest of the line is read as expressions.
+    /// The one-pass reader still files the import, so every file with one lost
+    /// its line (76 files, one row each, in the scala corpus). Read those
+    /// imports off the source, the way the Objective-C declarations are, and
+    /// spell them exactly as the lexer does.
+    fn scala_import_lines(&mut self) {
+        let taken: std::collections::HashSet<u32> = self.facts.imports.iter().map(|imp| imp.line).collect();
+        let count = self.line_starts.len();
+        for index in 0..count {
+            let start = self.line_starts[index] as usize;
+            let end = self.line_starts.get(index + 1).map(|&at| at as usize).unwrap_or(self.src.len());
+            let line = index as u32 + 1;
+            if taken.contains(&line) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&self.src[start..end]);
+            let trimmed = text.trim();
+            let Some(rest) = trimmed.strip_prefix("import ").map(str::trim) else { continue };
+            if let Some(open) = rest.find('{') {
+                let prefix = rest[..open].trim_end_matches('.').trim().to_string();
+                let Some(close) = rest[open..].find('}').map(|at| open + at) else { continue };
+                for selector in rest[open + 1..close].split(',') {
+                    let selector = selector.trim();
+                    if selector.is_empty() {
+                        continue;
+                    }
+                    let (name, alias) = match selector.split_once("=>") {
+                        Some((name, alias)) => (name.trim().to_string(), alias.trim().to_string()),
+                        None => (selector.to_string(), selector.to_string()),
+                    };
+                    self.facts.imports.push(Import {
+                        line,
+                        module: prefix.clone(),
+                        name,
+                        alias,
+                        kind: IMPORT_MODULE,
+                        ..Import::default()
+                    });
+                }
+            } else {
+                let module = rest.trim_end_matches(';').trim().to_string();
+                let alias = module.rsplit('.').next().unwrap_or("").to_string();
+                self.facts.imports.push(Import {
+                    line,
+                    module,
+                    name: String::new(),
+                    alias,
+                    kind: IMPORT_MODULE,
+                    ..Import::default()
+                });
+            }
+        }
+    }
+
+    fn objc_method_lines(&mut self) {
+        // A tree with an unbalanced end can leave the walk with no frame, and
+        // an event needs one to belong to: the module's own frame is restored
+        // for the pass and dropped again after it.
+        let restored = self.stack.is_empty();
+        if restored {
+            self.stack.push(Frame {
+                node: 0,
+                symbol: 0,
+                class: String::new(),
+                receiver: String::new(),
+                container: false,
+                defines: None,
+            });
+        }
+        let mut taken: Vec<u32> = Vec::new();
+        for symbol in &self.facts.symbols {
+            let text = &symbol.events;
+            for marker in ["[\"x\",", "[\"a\","] {
+                let mut at = 0;
+                while let Some(found) = text[at..].find(marker) {
+                    let start = at + found + marker.len();
+                    let digits: String = text[start..].chars().take_while(|ch| ch.is_ascii_digit()).collect();
+                    if let Ok(line) = digits.parse::<u32>() {
+                        taken.push(line);
+                    }
+                    at = start;
+                }
+            }
+        }
+        let count = self.line_starts.len();
+        for index in 0..count {
+            let start = self.line_starts[index] as usize;
+            let end = self.line_starts.get(index + 1).map(|&at| at as usize).unwrap_or(self.src.len());
+            let line = index as u32 + 1;
+            if taken.contains(&line) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&self.src[start..end]);
+            let trimmed = text.trim();
+            // `@import Foundation;`: a module import is one statement to the
+            // lexer - the keyword and the module - and the grammar gives it no
+            // node at all, so every one in every header was a loss.
+            if let Some(rest) = trimmed.strip_prefix("@import") {
+                let module = rest.trim().trim_end_matches(';').trim();
+                if !module.is_empty() {
+                    let mut value = String::from("[\"m\",[[\"n\",\"import\"],[\"n\",");
+                    push_string(&mut value, module);
+                    value.push_str("]]]");
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                continue;
+            }
+            // `@class A, B;` / `@synthesize window = _window;`: forward and
+            // synthesized declarations are one statement to the lexer, and the
+            // grammar has no node for either.
+            for (prefix, keyword) in [("@class", "class"), ("@synthesize", "synthesize")] {
+                let Some(rest) = trimmed.strip_prefix(prefix) else { continue };
+                let names: Vec<String> = rest
+                    .trim()
+                    .trim_end_matches(';')
+                    .split(',')
+                    .map(|part| part.split('=').next().unwrap_or("").trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    // `RACSequence<__covariant ValueType>` is a class name and
+                    // the type parameters it forwards, which the one-pass reader
+                    // files as three names in a row. Kept whole, the recorded
+                    // name held the angle brackets and no row matched.
+                    .flat_map(|name| {
+                        let mut parts = vec![name.clone()];
+                        if let Some(open) = name.find('<') {
+                            let base = name[..open].trim().to_string();
+                            let inner = name[open + 1..].trim_end_matches('>');
+                            parts = vec![base];
+                            parts.extend(
+                                inner
+                                    .split(',')
+                                    // `__covariant ValueType` is two names to the
+                                    // one-pass reader: the variance word and the
+                                    // parameter, written with a space between.
+                                    .flat_map(|part| part.split_whitespace().map(str::to_string))
+                                    .filter(|part| !part.is_empty()),
+                            );
+                        }
+                        parts
+                    })
+                    .collect();
+                if names.is_empty() {
+                    break;
+                }
+                let name_form = |text: &str| {
+                    let mut form = String::from("[\"n\",");
+                    push_string(&mut form, text);
+                    form.push(']');
+                    form
+                };
+                let mut parts: Vec<String> = Vec::new();
+                if names.len() > 1 {
+                    parts.push(format!("[\"m\",[{}]]", [name_form(keyword), name_form(&names[0])].join(",")));
+                    for name in &names[1..] {
+                        parts.push(name_form(name));
+                    }
+                } else {
+                    parts.push(format!(
+                        "[\"m\",[{}]]",
+                        [name_form(keyword), name_form(&names[0])].join(",")
+                    ));
+                }
+                let value = if parts.len() > 1 {
+                    format!("[\"t\",[{}]]", parts.join(","))
+                } else {
+                    parts.pop().unwrap()
+                };
+                self.lexer_event(b'x', line, &[], &value, false);
+                break;
+            }
+            if trimmed.starts_with("@class") || trimmed.starts_with("@synthesize") {
+                continue;
+            }
+            // `@property (nonatomic, readonly, getter=isWindow) BOOL isWindow;`:
+            // the grammar hands many of these back as macro calls, so the arm
+            // never fires and the line lost the call the lexer writes. Read from
+            // the line: the attribute list is the call's arguments (an
+            // assignment attribute is a keyword argument) and the type and name
+            // follow it.
+            if let Some(rest) = trimmed.strip_prefix("@property") {
+                let rest = rest.trim();
+                let mut attributes: Vec<String> = Vec::new();
+                let mut after = rest;
+                if let Some(open) = rest.find('(') {
+                    if let Some(close) = rest[open..].find(')') {
+                        let inside = &rest[open + 1..open + close];
+                        for item in inside.split(',') {
+                            let item = item.trim();
+                            if item.is_empty() {
+                                continue;
+                            }
+                            match item.find('=') {
+                                Some(at) => {
+                                    let key = item[..at].trim();
+                                    let value = item[at + 1..].trim();
+                                    let mut form = String::from("[\"k\",");
+                                    push_string(&mut form, key);
+                                    form.push_str(",[\"n\",");
+                                    push_string(&mut form, value);
+                                    form.push_str("]]");
+                                    attributes.push(form);
+                                }
+                                None => {
+                                    let mut form = String::from("[\"n\",");
+                                    push_string(&mut form, item);
+                                    form.push(']');
+                                    attributes.push(form);
+                                }
+                            }
+                        }
+                        after = &rest[open + close + 1..];
+                    }
+                }
+                let mut words: Vec<String> = Vec::new();
+                let mut word = String::new();
+                for ch in after.chars() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        word.push(ch);
+                    } else if !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                if !word.is_empty() {
+                    words.push(word);
+                }
+                if !words.is_empty() {
+                    let index = self.push_call("property".to_string(), line);
+                    let call = format!("[\"c\",{index},0,[{}]]", attributes.join(","));
+                    let mut parts = vec![call];
+                    for word in &words {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, word);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                    let value = format!("[\"m\",[{}]]", parts.join(","));
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                continue;
+            }
+            let mut chars = trimmed.chars();
+            let sign = match chars.next() {
+                Some(ch @ ('-' | '+')) => ch,
+                _ => continue,
+            };
+            let _ = sign;
+            match chars.next() {
+                Some(' ') | Some('(') => {}
+                _ => continue,
+            }
