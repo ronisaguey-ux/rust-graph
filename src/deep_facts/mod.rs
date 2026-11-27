@@ -9394,6 +9394,345 @@ impl<'a> Walker<'a> {
         let src_str = std::str::from_utf8(self.src).unwrap_or("");
         let lines: Vec<&str> = src_str.lines().collect();
         let n_lines = lines.len();
+    fn augment_matlab(&mut self) {
+        let src_owned = String::from_utf8_lossy(self.src);
+        let lines: Vec<&str> = src_owned.lines().collect();
+        let n_lines = lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+        let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80;
+        let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+
+        // Strip `%` line comments and `%{ ... %}` block comments outside double AND single-quoted strings
+        // Preserve multi-byte UTF-8 characters verbatim (slice raw_line instead of `b[i] as char`).
+        let mut clean_lines: Vec<String> = Vec::with_capacity(n_lines);
+        let mut in_block = false;
+        for raw_line in &lines {
+            let b = raw_line.as_bytes();
+            let mut out = String::with_capacity(b.len());
+            let mut i = 0usize;
+            let mut in_dq = false;
+            let mut in_sq = false;
+            let mut prev_nonws: u8 = 0;
+            while i < b.len() {
+                if in_block {
+                    if i + 1 < b.len() && b[i] == b'%' && b[i + 1] == b'}' {
+                        in_block = false;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if b[i] >= 0x80 {
+                    let ch = raw_line[i..].chars().next().unwrap();
+                    out.push(ch);
+                    prev_nonws = b[i];
+                    i += ch.len_utf8();
+                    continue;
+                }
+                if in_dq {
+                    out.push(b[i] as char);
+                    if b[i] == b'\\' && i + 1 < b.len() && b[i + 1] < 0x80 {
+                        out.push(b[i + 1] as char);
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'"' { in_dq = false; prev_nonws = b'"'; }
+                    i += 1;
+                    continue;
+                }
+                if in_sq {
+                    out.push(b[i] as char);
+                    if b[i] == b'\'' {
+                        if i + 1 < b.len() && b[i + 1] == b'\'' {
+                            out.push('\'');
+                            i += 2;
+                            continue;
+                        }
+                        in_sq = false;
+                        prev_nonws = b'\'';
+                    }
+                    i += 1;
+                    continue;
+                }
+                if i + 1 < b.len() && b[i] == b'%' && b[i + 1] == b'{' {
+                    in_block = true;
+                    i += 2;
+                    continue;
+                }
+                if b[i] == b'%' {
+                    break;
+                }
+                if b[i] == b'"' {
+                    in_dq = true;
+                    out.push('"');
+                    i += 1;
+                    continue;
+                }
+                if b[i] == b'\'' {
+                    let is_transpose = prev_nonws.is_ascii_alphanumeric()
+                        || matches!(prev_nonws, b'_' | b')' | b']' | b'}' | b'.' | b'\'');
+                    if !is_transpose && b[i + 1..].contains(&b'\'') {
+                        in_sq = true;
+                    }
+                    out.push('\'');
+                    prev_nonws = b'\'';
+                    i += 1;
+                    continue;
+                }
+                if b[i] != b' ' && b[i] != b'\t' {
+                    prev_nonws = b[i];
+                }
+                out.push(b[i] as char);
+                i += 1;
+            }
+            clean_lines.push(out);
+        }
+
+        // Helper to extract MATLAB LHS target(s) from one comma-part before `=`
+        let extract_lhs_target = |part: &str| -> Vec<String> {
+            let mut res: Vec<String> = Vec::new();
+            let mut p = part.trim();
+            let p_no_op = p.trim_end_matches(|c| matches!(c, '+' | '-' | '*' | '/' | '&' | '|' | '^' | '\\')).trim_end();
+            let had_dot_op = p_no_op.ends_with('.') && !p_no_op.ends_with("..");
+            p = if had_dot_op { p_no_op[..p_no_op.len() - 1].trim_end() } else { p_no_op };
+            let dot_op_after_paren = had_dot_op && (p.ends_with(')') || p.ends_with('}'));
+            if let Some(close_pos) = p.rfind([')', '}']) {
+                let after = p[close_pos + 1..].trim();
+                if after.starts_with('.') && after.len() > 1 && is_id_start(after.as_bytes()[1]) {
+                    let field: String = after.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                    if !field.is_empty() {
+                        res.push(field.clone());
+                    }
+                    let before = p[..close_pos].split(['(', '{']).next().unwrap_or("").trim_end();
+                    let bb = before.as_bytes();
+                    let mut bi = bb.len();
+                    while bi > 0 && (is_id_cont(bb[bi - 1]) || bb[bi - 1] == b'.') { bi -= 1; }
+                    let base = before[bi..].trim_matches('.');
+                    if !base.is_empty() && is_id_start(base.as_bytes()[0]) {
+                        res.push(format!("{base}{field}"));
+                    }
+                    let inside = p[..close_pos].trim_end();
+                    let ib = inside.as_bytes();
+                    let mut ii = ib.len();
+                    while ii > 0 && (is_id_cont(ib[ii - 1]) || ib[ii - 1] == b'.') { ii -= 1; }
+                    let in_id = inside[ii..].trim_matches('.');
+                    if !in_id.is_empty() && is_id_start(in_id.as_bytes()[0]) {
+                        let cand = format!("{in_id}{field}");
+                        if !res.contains(&cand) { res.push(cand); }
+                    }
+                    return res;
+                }
+            }
+            while p.ends_with(')') || p.ends_with('}') {
+                let close_ch = p.as_bytes()[p.len() - 1];
+                let open_ch = if close_ch == b')' { b'(' } else { b'{' };
+                let pb = p.as_bytes();
+                let mut d = 0i32;
+                let mut open_pos = None;
+                for k in (0..pb.len()).rev() {
+                    if pb[k] == close_ch { d += 1; }
+                    else if pb[k] == open_ch {
+                        d -= 1;
+                        if d == 0 { open_pos = Some(k); break; }
+                    }
+                }
+                if let Some(op) = open_pos {
+                    p = p[..op].trim_end();
+                } else {
+                    break;
+                }
+            }
+            let pb = p.as_bytes();
+            let mut li = pb.len();
+            while li > 0 && (is_id_cont(pb[li - 1]) || pb[li - 1] == b'.') { li -= 1; }
+            let raw_tok = &p[li..];
+            let tok = raw_tok.trim_end_matches('.');
+            if !tok.is_empty() && (is_id_start(tok.as_bytes()[0]) || (tok.starts_with('.') && tok.len() > 1 && is_id_start(tok.as_bytes()[1]))) {
+                let p_norm: String = tok
+                    .split('.')
+                    .map(|seg| if seg == "this" { "self" } else { seg })
+                    .collect::<Vec<_>>()
+                    .join(".");
+                res.push(p_norm);
+                if had_dot_op {
+                    res.push(format!("{tok}."));
+                } else if raw_tok.ends_with('.') && !raw_tok.ends_with("..") {
+                    res.push(raw_tok.to_string());
+                }
+            }
+            if dot_op_after_paren && !res.iter().any(|x| x == ".") {
+                res.push(".".to_string());
+            }
+            res
+        };
+
+        // 1. Symbols: `classdef`, `function`, and `name = lambda ...`
+        // Also simulate `Blocks::End` stack (only bare `end` pops!) to know the exact lexer-active function on every line.
+        let mut existing_syms: std::collections::HashSet<(String, String, u8, u32)> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|s| (s.name.clone(), s.owner.clone(), s.kind, s.line))
+            .collect();
+        let mut existing_keys: std::collections::HashSet<String> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|s| s.key.clone())
+            .collect();
+        let mut active_class: Option<String> = None;
+        let mut block_depth: i32 = 0;
+        let mut class_depth: Option<i32> = None;
+        // Stack of (kind_is_fn: Option<usize>) for Blocks::End simulation
+        let mut lexer_scope_stack: Vec<Option<usize>> = Vec::new();
+        let mut per_line_lexer_fn: Vec<usize> = vec![0; n_lines + 1];
+
+        for (idx, cl) in clean_lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            let cur_active_fn = lexer_scope_stack.iter().rev().find_map(|&x| x).unwrap_or(0);
+            per_line_lexer_fn[ln] = cur_active_fn;
+            let tr = cl.trim();
+            if tr.is_empty() { continue; }
+
+            if let Some(rest) = tr.strip_prefix("classdef").filter(|r| r.is_empty() || r.starts_with([' ', '\t', '('])) {
+                let mut r = rest.trim_start();
+                if r.starts_with('(') {
+                    let mut d = 0i32;
+                    let mut pos = 0usize;
+                    for (ci, ch) in r.char_indices() {
+                        if ch == '(' { d += 1; }
+                        else if ch == ')' { d -= 1; if d == 0 { pos = ci + 1; break; } }
+                    }
+                    r = r[pos..].trim_start();
+                }
+                let cname: String = r.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                if !cname.is_empty() && is_id_start(cname.as_bytes()[0]) {
+                    let mut bases: Vec<String> = Vec::new();
+                    if let Some((_, bpart)) = r[cname.len()..].split_once('<') {
+                        for seg in bpart.split('&') {
+                            let bt: String = seg.trim().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                            let btail = bt.rsplit('.').next().unwrap_or(&bt);
+                            if !btail.is_empty() && is_id_start(btail.as_bytes()[0]) {
+                                bases.push(btail.to_string());
+                            }
+                        }
+                    }
+                    if existing_syms.insert((cname.clone(), String::new(), KIND_CLASS, ln32)) {
+                        let key = if existing_keys.insert(cname.clone()) { cname.clone() } else { format!("{cname}@{ln32}") };
+                        self.facts.symbols.push(Symbol {
+                            key, name: cname.clone(), owner: String::new(), kind: KIND_CLASS,
+                            line: ln32, end_line: n_lines as u32, bases, calls: Vec::new(),
+                            events: String::new(), ..Symbol::default()
+                        });
+                    }
+                    active_class = Some(cname);
+                    class_depth = Some(block_depth);
+                }
+                block_depth += 1;
+                lexer_scope_stack.push(None);
+                continue;
+            }
+
+            if let Some(rest) = tr.strip_prefix("function").filter(|r| r.starts_with([' ', '\t', '['])) {
+                let mut hdr = rest.trim().to_string();
+                let mut look = idx + 1;
+                while hdr.trim_end().ends_with("...") && look < n_lines && look <= idx + 6 {
+                    hdr = hdr.trim_end().trim_end_matches("...").to_string();
+                    hdr.push(' ');
+                    hdr.push_str(clean_lines[look].trim());
+                    look += 1;
+                }
+                let after_eq = if let Some(ep) = hdr.find('=') {
+                    &hdr[ep + 1..]
+                } else {
+                    hdr.as_str()
+                };
+                let after_eq = after_eq.trim_start();
+                let fname_raw: String = after_eq
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                    .collect();
+                let fname = fname_raw.rsplit('.').next().unwrap_or(&fname_raw).to_string();
+                let mut pushed_si: Option<usize> = None;
+                if !fname.is_empty() && is_id_start(fname.as_bytes()[0]) {
+                    let mut params: Vec<String> = Vec::new();
+                    if let Some(lp) = after_eq.find('(') {
+                        if let Some(rp) = after_eq[lp + 1..].find(')') {
+                            for p in after_eq[lp + 1..lp + 1 + rp].split(',') {
+                                let pt = p.trim();
+                                if !pt.is_empty() && is_id_start(pt.as_bytes()[0]) && pt.bytes().all(is_id_cont) {
+                                    params.push(pt.to_string());
+                                }
+                            }
+                        }
+                    }
+                    let owner = active_class.clone().unwrap_or_default();
+                    let owners: Vec<String> = if owner.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        vec![owner, String::new()]
+                    };
+                    for own in owners {
+                        if existing_syms.insert((fname.clone(), own.clone(), KIND_FUNCTION, ln32)) {
+                            let base_key = if own.is_empty() { fname.clone() } else { format!("{own}.{fname}") };
+                            let key = if existing_keys.insert(base_key.clone()) { base_key } else { format!("{base_key}@{ln32}") };
+                            let si = self.facts.symbols.len();
+                            self.facts.symbols.push(Symbol {
+                                key, name: fname.clone(), owner: own, kind: KIND_FUNCTION,
+                                line: ln32, end_line: n_lines as u32, params: params.clone(),
+                                bases: Vec::new(), calls: Vec::new(),
+                                events: String::new(), ..Symbol::default()
+                            });
+                            if pushed_si.is_none() { pushed_si = Some(si); }
+                        }
+                    }
+                }
+                block_depth += 1;
+                // Only open a new lexer function scope if we aren't already inside an unclosed block, or push onto stack
+                if let Some(si) = pushed_si {
+                    if lexer_scope_stack.is_empty() {
+                        lexer_scope_stack.push(Some(si));
+                    } else {
+                        // In Blocks::End, if a function appears while inside an unclosed `if` (e.g. Octave `endif`),
+                        // the lexer may keep the outer function open, so keep existing stack and push None
+                        lexer_scope_stack.push(Some(si));
+                    }
+                    per_line_lexer_fn[ln] = si;
+                }
+                continue;
+            }
+
+            if let Some((lhs_l, rhs_l)) = tr.split_once('=') {
+                if !rhs_l.starts_with('=') && !lhs_l.ends_with(['=', '~', '<', '>', '!']) {
+                    let rt = rhs_l.trim_start();
+                    if rt.strip_prefix("lambda").is_some_and(|r| r.is_empty() || !is_id_cont(r.as_bytes()[0])) {
+                        let lt = lhs_l.trim_end();
+                        let lb = lt.as_bytes();
+                        let mut li = lb.len();
+                        while li > 0 && is_id_cont(lb[li - 1]) { li -= 1; }
+                        let lname = &lt[li..];
+                        if !lname.is_empty() && is_id_start(lname.as_bytes()[0]) {
+                            if existing_syms.insert((lname.to_string(), String::new(), KIND_FUNCTION, ln32)) {
+                                let key = if existing_keys.insert(lname.to_string()) { lname.to_string() } else { format!("{lname}@{ln32}") };
+                                self.facts.symbols.push(Symbol {
+                                    key, name: lname.to_string(), owner: String::new(), kind: KIND_FUNCTION,
+                                    line: ln32, end_line: n_lines as u32, bases: Vec::new(), calls: Vec::new(),
+                                    events: String::new(), ..Symbol::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Track Blocks::End (only bare `end` pops lexer_scope_stack; `endfunction`/`endif` do NOT!)
+            let first_w: &str = tr.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+            if matches!(first_w, "if" | "for" | "while" | "switch" | "try" | "parfor") {
+                block_depth += 1;
         if n_lines == 0 || self.facts.symbols.is_empty() {
             return;
         }
