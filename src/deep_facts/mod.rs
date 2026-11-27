@@ -972,6 +972,12 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     if lang == Lang::Matlab {
         walker.augment_matlab();
     }
+    if lang == Lang::Erlang {
+        walker.augment_erlang();
+    }
+    if lang == Lang::Haskell {
+        walker.augment_haskell();
+    }
     walker.facts
 
 
@@ -9400,8 +9406,8 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn augment_matlab(&mut self) {
-        let src_owned = String::from_utf8_lossy(self.src);
+
+
     fn augment_haskell(&mut self) {
         let src_owned = String::from_utf8_lossy(self.src);
         let lines: Vec<&str> = src_owned.lines().collect();
@@ -10044,6 +10050,8 @@ impl<'a> Walker<'a> {
                 sym.events.push_str(&ev);
             }
         }
+    }
+
     fn augment_erlang(&mut self) {
         let src_owned = String::from_utf8_lossy(self.src);
         let lines: Vec<&str> = src_owned.lines().collect();
@@ -10420,6 +10428,10 @@ impl<'a> Walker<'a> {
                 sym.events.push_str(&ev);
             }
         }
+    }
+
+    fn augment_matlab(&mut self) {
+        let src_owned = String::from_utf8_lossy(self.src);
         let lines: Vec<&str> = src_owned.lines().collect();
         let n_lines = lines.len();
         if n_lines == 0 || self.facts.symbols.is_empty() {
