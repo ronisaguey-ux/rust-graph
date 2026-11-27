@@ -15038,3 +15038,323 @@ impl<'a> Walker<'a> {
             };
             let emit_hs_lhs = |lhs_str: &str, emit_a: &mut dyn FnMut(&[String])| {
                 let tlist = extract_hs_targets(lhs_str);
+                emit_a(&tlist);
+                if let Some(last) = tlist.last() { emit_a(&[last.clone()]); }
+                let stripped = lhs_str
+                    .trim()
+                    .trim_start_matches('$')
+                    .trim()
+                    .trim_start_matches("let ")
+                    .trim()
+                    .trim_start_matches("pattern ")
+                    .trim();
+                let first_w: String = stripped.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '\'').collect();
+                if !first_w.is_empty() && is_id_start(first_w.as_bytes()[0]) {
+                    emit_a(&[first_w.clone()]);
+                    if let Some(last) = tlist.last() {
+                        if last != &first_w && (stripped.contains('[') || stripped.contains('(')) {
+                            emit_a(&[format!("{first_w}{last}")]);
+                        }
+                    }
+                }
+                // Strip `[...]` before extracting words so `(headCells :: F [Blocks])` -> `headCells.F`
+                let mut no_br = String::with_capacity(stripped.len());
+                let mut bd = 0i32;
+                for ch in stripped.chars() {
+                    if ch == '[' { bd += 1; }
+                    else if ch == ']' { bd = (bd - 1).max(0); }
+                    else if bd == 0 { no_br.push(ch); }
+                }
+                let words: Vec<&str> = no_br
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                    .filter(|w| !w.is_empty() && is_id_start(w.as_bytes()[0]))
+                    .collect();
+                if let Some(last) = tlist.last() {
+                    emit_a(&[format!(".{last}")]);
+                }
+                if words.len() >= 2 {
+                    let n = words.len();
+                    emit_a(&[format!("{}.{}", words[n - 2], words[n - 1])]);
+                    emit_a(&[format!(".{}.{}", words[n - 2], words[n - 1])]);
+                }
+                if words.len() >= 3 {
+                    let n = words.len();
+                    emit_a(&[format!("{}.{}.{}", words[n - 3], words[n - 2], words[n - 1])]);
+                }
+            };
+            if let Some(pos) = tr.find("<-") {
+                emit_hs_lhs(&tr[..pos], &mut emit_a);
+            }
+            let tb = tr.as_bytes();
+            for (p, &ch) in tb.iter().enumerate() {
+                if ch == b'=' {
+                    let prev = if p > 0 { tb[p - 1] } else { 0 };
+                    let next = if p + 1 < tb.len() { tb[p + 1] } else { 0 };
+                    let is_bind = prev == b'>' && p >= 2 && tb[p - 2] == b'>';
+                    if is_bind || (!matches!(prev, b'=' | b'<' | b'>' | b':' | b'!' | b'.') && !matches!(next, b'=' | b'>')) {
+                        let lhs_end = if is_bind { p - 2 } else if prev == b'/' { p - 1 } else { p };
+                        emit_hs_lhs(&tr[..lhs_end], &mut emit_a);
+                    }
+                } else if ch == b':' && tr.contains("->") {
+                    let prev = if p > 0 { tb[p - 1] } else { 0 };
+                    let next = if p + 1 < tb.len() { tb[p + 1] } else { 0 };
+                    if prev != b':' && next != b':' {
+                        let tlist = extract_hs_targets(&tr[..p]);
+                        if let Some(last) = tlist.last() { emit_a(&[last.clone()]); }
+                    }
+                }
+            }
+            // Multi-line record pattern `{ f1 = ..., f2 = ... } <-`
+            if tr.starts_with('{') && tr.contains('=') {
+                let mut rec_fields: Vec<String> = Vec::new();
+                for off in 0..=6 {
+                    if ln + off > n_lines { break; }
+                    let rl = clean_lines[ln + off - 1].trim();
+                    if let Some(eqp) = rl.find('=') {
+                        let prev = if eqp > 0 { rl.as_bytes()[eqp - 1] } else { 0 };
+                        let next = if eqp + 1 < rl.len() { rl.as_bytes()[eqp + 1] } else { 0 };
+                        if !matches!(prev, b'=' | b'<' | b'>' | b'!') && !matches!(next, b'=' | b'>') {
+                            let lpart = rl[..eqp].trim().trim_start_matches(['{', ',']).trim();
+                            let w: String = lpart.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '\'').collect();
+                            if !w.is_empty() && is_id_start(w.as_bytes()[0]) {
+                                rec_fields.push(w);
+                            }
+                        }
+                    }
+                    if rl.contains("<-") {
+                        if rec_fields.len() >= 2 {
+                            emit_a(&rec_fields);
+                        }
+                        break;
+                    }
+                }
+            }
+            // `->` or multi-line guard (`[...`) followed within 6 lines by `let <id> =` or `do <id> <-`
+            if tr.ends_with("->") || (tr.starts_with('_') && tr.contains('[')) {
+                for off in 1..=6 {
+                    if ln + off > n_lines { break; }
+                    let nl = clean_lines[ln + off - 1].trim();
+                    if nl.is_empty() { continue; }
+                    if let Some(rest) = nl.strip_prefix("let ") {
+                        let w: String = rest.trim_start().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '\'').collect();
+                        if !w.is_empty() && is_id_start(w.as_bytes()[0]) {
+                            emit_a(&[w]);
+                        }
+                        break;
+                    }
+                    if let Some(pos) = nl.find("<-") {
+                        let lhs_do = nl[..pos].trim().trim_start_matches("do ").trim();
+                        let w: String = lhs_do.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '\'').collect();
+                        if !w.is_empty() && is_id_start(w.as_bytes()[0]) {
+                            emit_a(&[w]);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            let ev_r = format!(r#"["r",{ln32},{val_json}]"#);
+            let ev_x = format!(r#"["x",{ln32},{val_json},0]"#);
+            for &tsi in &target_syms {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev_r.clone());
+                    extra_events[tsi].push(ev_x.clone());
+                } else {
+                    let rep = format!(r#"["c",{sidx},"#);
+                    extra_events[tsi].push(ev_r.replace(r#"["c",0,"#, &rep));
+                    extra_events[tsi].push(ev_x.replace(r#"["c",0,"#, &rep));
+                }
+            }
+        }
+
+        for (si, evs) in extra_events.into_iter().enumerate() {
+            if evs.is_empty() { continue; }
+            let sym = &mut self.facts.symbols[si];
+            for ev in evs {
+                if !sym.events.is_empty() { sym.events.push(','); }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
+
+    fn augment_erlang(&mut self) {
+        let src_owned = String::from_utf8_lossy(self.src);
+        let lines: Vec<&str> = src_owned.lines().collect();
+        let n_lines = lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+        let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'@';
+
+        // Strip `%` comments outside double-quoted / triple-quoted strings and single-quoted atoms
+        let mut clean_lines: Vec<String> = Vec::with_capacity(n_lines);
+        let mut in_dq = false;
+        let mut in_tq = false;
+        let mut in_sq = false;
+        for raw_line in &lines {
+            let b = raw_line.as_bytes();
+            let mut out = String::with_capacity(b.len());
+            let mut i = 0usize;
+            while i < b.len() {
+                if b[i] >= 0x80 {
+                    let ch = raw_line[i..].chars().next().unwrap();
+                    out.push(ch);
+                    i += ch.len_utf8();
+                    continue;
+                }
+                if in_tq {
+                    if i + 2 < b.len() && b[i] == b'"' && b[i + 1] == b'"' && b[i + 2] == b'"' {
+                        out.push_str("\"\"\"");
+                        in_tq = false;
+                        i += 3;
+                    } else {
+                        out.push(b[i] as char);
+                        i += 1;
+                    }
+                    continue;
+                }
+                if in_dq {
+                    out.push(b[i] as char);
+                    if b[i] == b'\\' && i + 1 < b.len() && b[i + 1] < 0x80 {
+                        out.push(b[i + 1] as char);
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'"' { in_dq = false; }
+                    i += 1;
+                    continue;
+                }
+                if in_sq {
+                    out.push(b[i] as char);
+                    if b[i] == b'\\' && i + 1 < b.len() && b[i + 1] < 0x80 {
+                        out.push(b[i + 1] as char);
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'\'' { in_sq = false; }
+                    i += 1;
+                    continue;
+                }
+                if b[i] == b'$' && i + 1 < b.len() {
+                    out.push('$');
+                    if b[i + 1] == b'\\' && i + 2 < b.len() && b[i + 2] < 0x80 {
+                        out.push(b[i + 1] as char);
+                        out.push(b[i + 2] as char);
+                        i += 3;
+                    } else if b[i + 1] < 0x80 {
+                        out.push(b[i + 1] as char);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if b[i] == b'%' { break; }
+                if i + 2 < b.len() && b[i] == b'"' && b[i + 1] == b'"' && b[i + 2] == b'"' {
+                    in_tq = true;
+                    out.push_str("\"\"\"");
+                    i += 3;
+                    continue;
+                }
+                if b[i] == b'"' { in_dq = true; out.push('"'); i += 1; continue; }
+                if b[i] == b'\'' { in_sq = true; out.push('\''); i += 1; continue; }
+                out.push(b[i] as char);
+                i += 1;
+            }
+            clean_lines.push(out);
+        }
+
+        // Build sorted list of existing function symbols for enclosing-function lookup
+        let mut fn_order: Vec<(u32, usize)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, s)| s.kind == KIND_FUNCTION)
+            .map(|(i, s)| (s.line, i))
+            .collect();
+        fn_order.sort_by_key(|&(st, _)| st);
+
+        let n_syms = self.facts.symbols.len();
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+
+        // Track lines that already have events in module 0 or enclosing fn
+        let mut existing_ev_lines: Vec<std::collections::HashSet<u32>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| {
+                let mut set = std::collections::HashSet::new();
+                let b = sym.events.as_bytes();
+                let mut k = 0usize;
+                while k + 5 < b.len() {
+                    if b[k] == b'[' && b[k + 1] == b'"' && matches!(b[k + 2], b'a' | b'r' | b'x') && b[k + 3] == b'"' && b[k + 4] == b',' {
+                        let mut p = k + 5;
+                        let mut num = 0u32;
+                        let mut any = false;
+                        while p < b.len() && b[p].is_ascii_digit() {
+                            num = num.saturating_mul(10).saturating_add((b[p] - b'0') as u32);
+                            any = true;
+                            p += 1;
+                        }
+                        if any { set.insert(num); }
+                        k = p;
+                    } else {
+                        k += 1;
+                    }
+                }
+                set
+            })
+            .collect();
+
+        let targets_for_line = |ln32: u32| -> Vec<usize> {
+            let mut out = vec![0usize];
+            let pos = fn_order.partition_point(|&(st, _)| st <= ln32);
+            if pos > 0 {
+                out.push(fn_order[pos - 1].1);
+            }
+            out
+        };
+
+        // Pass 1: Call scanner (`ident(` and `mod:func(`) + token collector per line
+        let mut per_line_toks: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
+        let mut per_line_has_eq: Vec<bool> = vec![false; n_lines + 1];
+        let mut per_line_eq_lhs: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
+        let mut prev_call_id: Option<String> = None;
+        let mut prev_raw_last_id: Option<String> = None;
+
+        for (idx, cl) in clean_lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            let tr = cl.trim();
+            if tr.is_empty() { continue; }
+            let target_syms = targets_for_line(ln32);
+            let cb = tr.as_bytes();
+            let mut toks: Vec<String> = Vec::new();
+            let mut j = 0usize;
+            while j < cb.len() {
+                if j + 2 < cb.len() && cb[j] == b'"' && cb[j + 1] == b'"' && cb[j + 2] == b'"' {
+                    toks.push("0".to_string());
+                    j += 3;
+                    continue;
+                }
+                if cb[j] == b'"' {
+                    toks.push("0".to_string());
+                    j += 1;
+                    while j < cb.len() && cb[j] != b'"' {
+                        if cb[j] == b'\\' && j + 1 < cb.len() { j += 2; } else { j += 1; }
+                    }
+                    if j < cb.len() { j += 1; }
+                    continue;
+                }
+                if cb[j] == b'\'' {
+                    toks.push("0".to_string());
+                    j += 1;
