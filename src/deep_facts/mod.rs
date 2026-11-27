@@ -891,9 +891,6 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     if lang == Lang::Solidity {
         walker.augment_solidity();
     }
-    if lang == Lang::ObjC {
-        walker.augment_objc();
-    }
     if lang == Lang::Php {
         walker.augment_php();
     }
@@ -977,6 +974,9 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     }
     if lang == Lang::Haskell {
         walker.augment_haskell();
+    }
+    if lang == Lang::ObjC {
+        walker.augment_objc_full();
     }
     walker.facts
 
@@ -4614,7 +4614,16 @@ impl<'a> Walker<'a> {
                             && rhs_call.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
                             && after_c.starts_with('(')
                         {
-                            let lhs_norm = lhs.split('[').next().unwrap_or(lhs).replace(" -> ", ".").replace("->", ".");
+                            let mut lhs_nobr = String::with_capacity(lhs.len());
+                    {
+                        let mut bd = 0i32;
+                        for c in lhs.chars() {
+                            if c == '[' { bd += 1; }
+                            else if c == ']' { bd = (bd - 1).max(0); }
+                            else if bd == 0 { lhs_nobr.push(c); }
+                        }
+                    }
+                    let lhs_norm = lhs_nobr.replace(" -> ", ".").replace("->", ".");
                             if let Some(lw) = lhs_norm.split_whitespace().last() {
                                 let lv = lw.trim_start_matches(['*', '&', '$', '(']).trim_end_matches(['.', ')']);
                                 if !lv.is_empty() && lv.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) {
@@ -4683,7 +4692,9 @@ impl<'a> Walker<'a> {
             let mut add_call = |c: &str| {
                 let c1 = c.trim_start_matches('.').trim_end_matches('.');
                 if c1.is_empty() || is_pipe_kw(c1) { return; }
-                if !c1.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_') { return; }
+                let first_ok = c1.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_')
+                    || (c1.bytes().next().is_some_and(|ch| ch.is_ascii_digit()) && c1.bytes().any(|ch| ch.is_ascii_alphabetic()));
+                if !first_ok { return; }
                 let c_mapped = if c1 == "this" { "self" } else { c1 };
                 if !line_calls.iter().any(|x| x == c_mapped) {
                     line_calls.push(c_mapped.to_string());
@@ -4723,6 +4734,40 @@ impl<'a> Walker<'a> {
                     } else {
                         pi += 1;
                     }
+                }
+            }
+            // Digit-starting `$var` calls (e.g. `$2dhampm $AMPMind`)
+            {
+                let tb = tr.as_bytes();
+                let mut k = 0;
+                while k < tb.len() {
+                    if tb[k] == b'$' && k + 1 < tb.len() && tb[k + 1].is_ascii_digit() {
+                        let st = k + 1;
+                        let mut e = st;
+                        while e < tb.len() && (tb[e].is_ascii_alphanumeric() || tb[e] == b'_') { e += 1; }
+                        if e > st && tb[st..e].iter().any(|b| b.is_ascii_alphabetic()) {
+                            add_call(&tr[st..e]);
+                        }
+                        k = e;
+                    } else {
+                        k += 1;
+                    }
+                }
+            }
+            // Previous non-comment line ending in identifier followed by `(` on this line
+            if tr.starts_with('(') && idx > 0 {
+                let mut p_idx = idx;
+                while p_idx > 0 {
+                    p_idx -= 1;
+                    let pt = lines[p_idx].trim();
+                    if pt.is_empty() || pt.starts_with('#') { continue; }
+                    if let Some(lw) = pt.split_whitespace().last() {
+                        let lw = lw.trim_start_matches(['$', '|', '&', '(', '[']);
+                        if !lw.is_empty() && lw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                            add_call(lw);
+                        }
+                    }
+                    break;
                 }
             }
             for c in &line_calls {
@@ -4823,7 +4868,16 @@ impl<'a> Walker<'a> {
                     }
                 }
                 let s_dot_sp = s_dot.replace(". ", ".");
-                let norm = format!("{s_dot} {collapsed} {s_dot_sp}");
+                let mut s_no_br = String::with_capacity(s_dot.len());
+                {
+                    let mut bd = 0i32;
+                    for c in s_dot.chars() {
+                        if c == '[' { bd += 1; }
+                        else if c == ']' { bd = (bd - 1).max(0); }
+                        else if bd == 0 { s_no_br.push(c); }
+                    }
+                }
+                let norm = format!("{s_dot} {collapsed} {s_dot_sp} {s_no_br}");
                 for raw_tok in norm.split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric() && !matches!(c, '_' | '.')) {
                     let tok = raw_tok.trim_matches('.');
                     if tok.is_empty() { continue; }
@@ -4872,9 +4926,9 @@ impl<'a> Walker<'a> {
             let mut prev_cont = tcl_cont(tr) || in_dq || tr.contains("%TYPE%") || tr.contains("%COMPILEDDEFS%");
             let mut prev_last_word = last_tok_of(tr);
             let mut lines_scanned = 1usize;
-            let max_look = if n_lines > 20000 { if in_dq || tr.contains("\\\"") { 300usize } else { 40usize } } else { 200usize };
+            let max_look = if n_lines > 20000 { if in_dq || tr.contains("\\\"") { 300usize } else { 40usize } } else { 450usize };
             for look in 1..=max_look {
-                if idx + look >= n_lines || base_parts.len() >= (if in_dq || tr.contains("\\\"") { 900 } else { 500 }) {
+                if idx + look >= n_lines || base_parts.len() >= (if n_lines > 20000 { 900 } else { 1400 }) {
                     break;
                 }
                 let ntr = lines[idx + look].trim();
@@ -4893,6 +4947,7 @@ impl<'a> Walker<'a> {
                     lines_scanned += 1;
                     depth += tcl_delta(ntr);
                     if has_unclosed_dq(ntr) { in_dq = !in_dq; }
+                    if ntr.contains("\\\"") { in_dq = true; }
                     prev_ended_dot = ntr.ends_with('.');
                     prev_cont = tcl_cont(ntr) || in_dq;
                     let lw = last_tok_of(ntr);
@@ -4907,12 +4962,17 @@ impl<'a> Walker<'a> {
             // If still inside an unclosed `"` string (e.g. giant magic tables with unescaped `"`),
             // scan forward for `$ident` interpolations only until the closing unescaped `"` (zero bloat!).
             let unescaped_dq_in_tr = has_unclosed_dq(tr) || tr.contains("\\\"");
-            if in_dq || (n_lines > 20000 && unescaped_dq_in_tr) {
+            if in_dq || unescaped_dq_in_tr {
                 let start_scan = idx + 1;
-                let end_scan = (idx + 12000).min(n_lines);
+                let end_scan = (idx + if n_lines > 20000 { 12000 } else { 1800 }).min(n_lines);
                 for sidx in start_scan..end_scan {
                     let sl = lines[sidx];
-                    if sl.contains('$') {
+                    if n_lines <= 20000 && base_parts.len() < 1600 {
+                        let slt = sl.trim();
+                        if !slt.is_empty() && !slt.starts_with('#') {
+                            add_tcl_tokens(&mut base_parts, slt, &mut lparen_count, &mut space_count);
+                        }
+                    } else if sl.contains('$') {
                         let sb = sl.as_bytes();
                         let mut k = 0;
                         while k < sb.len() {
@@ -4926,7 +4986,7 @@ impl<'a> Walker<'a> {
                                     let mut n = String::from("[\"n\",");
                                     push_string(&mut n, var_nm);
                                     n.push(']');
-                                    if !base_parts.contains(&n) && base_parts.len() < 1200 {
+                                    if !base_parts.contains(&n) && base_parts.len() < 1600 {
                                         base_parts.push(n);
                                     }
                                 }
@@ -4935,9 +4995,8 @@ impl<'a> Walker<'a> {
                             }
                         }
                     }
-                    // Also check for `BS` / `\` escapes or closing unescaped `"`
+                    if base_parts.len() >= 1600 { break; }
                     if has_unclosed_dq(sl) && sidx > idx + 10 {
-                        // Still allow scanning if `\"` appeared; break once a plain closing `"` is found
                         if !sl.contains("\\\"") {
                             break;
                         }
@@ -4945,11 +5004,11 @@ impl<'a> Walker<'a> {
                 }
             }
             let n_calls = if in_dq || unescaped_dq_in_tr {
-                260
+                600
             } else if n_lines > 20000 {
                 if lines_scanned > 1 { (lparen_count + lines_scanned + 10).min(64) } else { (lparen_count + 6).min(18) }
             } else if lines_scanned > 1 {
-                (lparen_count + lines_scanned + 24).min(110)
+                (lparen_count + lines_scanned + 40).min(260)
             } else {
                 (lparen_count + 24).min(48)
             };
@@ -4984,6 +5043,14 @@ impl<'a> Walker<'a> {
                     a_targets.push(first_w.to_string());
                 }
             }
+            if let Some((before_arr, _)) = tr.split_once("<-") {
+                if let Some(lw) = before_arr.split_whitespace().last() {
+                    let lv = lw.trim_start_matches(['$', '{']).trim_end_matches('}');
+                    if !lv.is_empty() && lv.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) && !a_targets.iter().any(|x| x == lv) {
+                        a_targets.push(lv.to_string());
+                    }
+                }
+            }
             for seg in tr.split(';') {
                 let sb = seg.as_bytes();
                 let mut eq_i = None;
@@ -5009,7 +5076,16 @@ impl<'a> Walker<'a> {
                     for op in ["+", "-", "*", "/", "%", "|", "&", "^", "<<", ">>"] {
                         if let Some(s) = lhs.strip_suffix(op) { lhs = s.trim(); break; }
                     }
-                    let lhs_norm = lhs.split('[').next().unwrap_or(lhs).replace(" -> ", ".").replace("->", ".");
+                    let mut lhs_nobr = String::with_capacity(lhs.len());
+                    {
+                        let mut bd = 0i32;
+                        for c in lhs.chars() {
+                            if c == '[' { bd += 1; }
+                            else if c == ']' { bd = (bd - 1).max(0); }
+                            else if bd == 0 { lhs_nobr.push(c); }
+                        }
+                    }
+                    let lhs_norm = lhs_nobr.replace(" -> ", ".").replace("->", ".");
                     if let Some(lw) = lhs_norm.split_whitespace().last() {
                         let l0 = lw.trim_start_matches(['*', '&', '$', '(', '{', '\\', '"', '\'']).trim_end_matches(['.', ')', '}']);
                         let l_base = l0.split('.').next().unwrap_or(l0).trim();
@@ -5046,6 +5122,33 @@ impl<'a> Walker<'a> {
                 }
             }
 
+            if tr.contains("/*") {
+                for la in 1..=5 {
+                    if idx + la >= n_lines { break; }
+                    let ntr = lines[idx + la].trim();
+                    if ntr.is_empty() || ntr.starts_with("/*") || ntr.starts_with('*') || ntr.starts_with('#') { continue; }
+                    add_tcl_tokens(&mut base_parts, ntr, &mut lparen_count, &mut space_count);
+                    if let Some((lhs_raw, rhs_raw)) = ntr.split_once('=') {
+                        if !lhs_raw.ends_with(['=', '!', '<', '>']) && !rhs_raw.starts_with('=') {
+                            let mut lhs_nb = String::with_capacity(lhs_raw.len());
+                            let mut bd = 0i32;
+                            for c in lhs_raw.chars() {
+                                if c == '[' { bd += 1; }
+                                else if c == ']' { bd = (bd - 1).max(0); }
+                                else if bd == 0 { lhs_nb.push(c); }
+                            }
+                            let lhs_n = lhs_nb.replace(" -> ", ".").replace("->", ".");
+                            if let Some(lw) = lhs_n.split_whitespace().last() {
+                                let l0 = lw.trim_start_matches(['*', '&', '$', '(', '{']).trim_end_matches(['.', ')', '}']);
+                                if !l0.is_empty() && l0.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) && !a_targets.iter().any(|x| x == l0) {
+                                    a_targets.push(l0.to_string());
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
             let push_ev = |events: &mut String, ev: &str| {
                 if !events.is_empty() { events.push(','); }
                 events.push_str(ev);
@@ -5067,6 +5170,10 @@ impl<'a> Walker<'a> {
                 if tr.contains(';') || (n_lines < 20000 && (tr.contains('[') || tr.contains('(') || tr.contains("{}") || tr.contains("::") || tr.starts_with("if") || tr.starts_with("else") || tr.starts_with('}'))) {
                     push_ev(&mut self.facts.symbols[si].events, &x_ev);
                     push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                    if tr.len() > 200 {
+                        push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                        push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                    }
                 }
                 push_ev(&mut self.facts.symbols[si].events, &format!("[\"r\",{line},{wrapped}]"));
                 for t in &a_targets {
@@ -7620,7 +7727,7 @@ impl<'a> Walker<'a> {
                 if pdepth <= 0 && cur > ln + 4 { break; }
                 for t in &per_line_tokens[cur] {
                     if t == "0" { if zc < 256 { vals.push("0".to_string()); zc += 1; } }
-                    else if t.starts_with(r#"["c","#) { if cc < 128 { vals.push(t.clone()); cc += 1; } }
+                    else if t.starts_with(r#"["c","#) { if cc < 512 { vals.push(t.clone()); cc += 1; } }
                     else if seen.insert(t.clone()) { vals.push(t.clone()); }
                 }
                 pdepth += per_line_pdelta[cur];
@@ -10905,7 +11012,8 @@ impl<'a> Walker<'a> {
 
 
 
-    fn augment_haskell(&mut self) {
+
+    fn augment_objc_full(&mut self) {
         let src_owned = String::from_utf8_lossy(self.src);
         let lines: Vec<&str> = src_owned.lines().collect();
         let n_lines = lines.len();
@@ -10913,29 +11021,27 @@ impl<'a> Walker<'a> {
             return;
         }
         let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
-        let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'';
+        let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
 
-        // Strip `--` line comments (when not part of operator like `-->`) and nested `{- ... -}` block comments
+        // Strip `//` and `/* ... */` comments outside strings
         let mut clean_lines: Vec<String> = Vec::with_capacity(n_lines);
-        let mut block_depth = 0i32;
+        let mut in_block = false;
         for raw_line in &lines {
             let b = raw_line.as_bytes();
             let mut out = String::with_capacity(b.len());
             let mut i = 0usize;
             let mut in_dq = false;
+            let mut in_sq = false;
             while i < b.len() {
                 if b[i] >= 0x80 {
                     let ch = raw_line[i..].chars().next().unwrap();
-                    if block_depth == 0 { out.push(ch); }
+                    if !in_block { out.push(ch); }
                     i += ch.len_utf8();
                     continue;
                 }
-                if block_depth > 0 {
-                    if i + 1 < b.len() && b[i] == b'{' && b[i + 1] == b'-' {
-                        block_depth += 1;
-                        i += 2;
-                    } else if i + 1 < b.len() && b[i] == b'-' && b[i + 1] == b'}' {
-                        block_depth -= 1;
+                if in_block {
+                    if i + 1 < b.len() && b[i] == b'*' && b[i + 1] == b'/' {
+                        in_block = false;
                         i += 2;
                     } else {
                         i += 1;
@@ -10953,32 +11059,64 @@ impl<'a> Walker<'a> {
                     i += 1;
                     continue;
                 }
-                if i + 1 < b.len() && b[i] == b'{' && b[i + 1] == b'-' {
-                    block_depth += 1;
-                    i += 2;
-                    continue;
-                }
-                if i + 1 < b.len() && b[i] == b'-' && b[i + 1] == b'-' {
-                    let after = if i + 2 < b.len() { b[i + 2] } else { b' ' };
-                    let before = if i > 0 { b[i - 1] } else { b' ' };
-                    if !matches!(after, b'!' | b'#' | b'$' | b'%' | b'&' | b'*' | b'+' | b'.' | b'/' | b'<' | b'=' | b'>' | b'?' | b'@' | b'\\' | b'^' | b'|' | b'~' | b':')
-                        && !matches!(before, b'!' | b'#' | b'$' | b'%' | b'&' | b'*' | b'+' | b'.' | b'/' | b'<' | b'=' | b'>' | b'?' | b'@' | b'\\' | b'^' | b'|' | b'~' | b':')
-                    {
-                        break;
+                if in_sq {
+                    out.push(b[i] as char);
+                    if b[i] == b'\\' && i + 1 < b.len() && b[i + 1] < 0x80 {
+                        out.push(b[i + 1] as char);
+                        i += 2;
+                        continue;
                     }
-                }
-                if b[i] == b'"' {
-                    in_dq = true;
-                    out.push('"');
+                    if b[i] == b'\'' { in_sq = false; }
                     i += 1;
                     continue;
                 }
+                if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'/' { break; }
+                if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'*' {
+                    in_block = true;
+                    i += 2;
+                    continue;
+                }
+                if b[i] == b'"' { in_dq = true; out.push('"'); i += 1; continue; }
+                if b[i] == b'\'' { in_sq = true; out.push('\''); i += 1; continue; }
                 out.push(b[i] as char);
                 i += 1;
             }
             clean_lines.push(out);
         }
 
+        // Pass 0: `NS_ENUM(...)` / `NS_OPTIONS(...)` function-like macro symbols (must run BEFORE fn_order)
+        {
+            let mut ex_syms: std::collections::HashSet<(String, u32)> = self
+                .facts
+                .symbols
+                .iter()
+                .map(|s| (s.name.clone(), s.line))
+                .collect();
+            let mut ex_keys: std::collections::HashSet<String> = self
+                .facts
+                .symbols
+                .iter()
+                .map(|s| s.key.clone())
+                .collect();
+            for (idx, cl) in clean_lines.iter().enumerate() {
+                let tr = cl.trim();
+                let ln32 = (idx + 1) as u32;
+                for mname in ["NS_ENUM", "NS_OPTIONS"] {
+                    if tr.contains(&format!("{mname}(")) || tr.contains(&format!("{mname} (")) {
+                        if ex_syms.insert((mname.to_string(), ln32)) {
+                            let key = if ex_keys.insert(mname.to_string()) { mname.to_string() } else { format!("{mname}@{ln32}") };
+                            self.facts.symbols.push(Symbol {
+                                key, name: mname.to_string(), owner: String::new(), kind: KIND_FUNCTION,
+                                line: ln32, end_line: n_lines as u32, bases: Vec::new(), calls: Vec::new(),
+                                events: String::new(), ..Symbol::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sorted function/method symbols by start line for enclosing-symbol lookup
         let mut fn_order: Vec<(u32, usize)> = self
             .facts
             .symbols
@@ -11008,7 +11146,7 @@ impl<'a> Walker<'a> {
             out
         };
 
-        // Pass 1: Constructor vars (`lhs = UpperCase ...`, `lhs =\n UpperCase ...`, `lhs <- UpperCase ...`)
+        // Pass 1: Constructor/macro vars (`lhs = UpperCase(`) preserving dotted LHS (`v[i].iov_len = (size_t)MIN(...)`)
         for (idx, cl) in clean_lines.iter().enumerate() {
             let tr = cl.trim();
             if tr.is_empty() { continue; }
@@ -11017,53 +11155,22 @@ impl<'a> Walker<'a> {
                 if ch == b'=' {
                     let prev = if p > 0 { tb[p - 1] } else { 0 };
                     let next = if p + 1 < tb.len() { tb[p + 1] } else { 0 };
-                    if matches!(prev, b'=' | b'<' | b'>' | b'!' | b'/') || matches!(next, b'=' | b'>') { continue; }
-                    let mut rhs = tr[p + 1..].trim_start().trim_start_matches('(').trim_start();
-                    if rhs.is_empty() {
-                        for nxt_i in (idx + 1)..(idx + 4).min(n_lines) {
-                            let nt = clean_lines[nxt_i].trim();
-                            if !nt.is_empty() {
-                                rhs = nt.trim_start_matches('(').trim_start();
-                                break;
                             }
                         }
                     }
-                    let rtok: String = rhs.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
-                    let rtail = rtok.rsplit('.').next().unwrap_or(&rtok);
-                    if !rtail.is_empty() && rtail.as_bytes()[0].is_ascii_uppercase() {
-                        let lhs = tr[..p].trim().trim_start_matches("let ").trim();
-                        let lb = lhs.as_bytes();
                         let mut li = lb.len();
-                        while li > 0 && is_id_cont(lb[li - 1]) { li -= 1; }
-                        let tn = &lhs[li..];
                         if !tn.is_empty() && is_id_start(tn.as_bytes()[0]) {
-                            self.facts.vars.push((tn.to_string(), rtail.to_string()));
                         }
                     }
                 }
             }
-            if let Some((lhs_raw, rhs_raw)) = tr.split_once("<-") {
-                let rhs = rhs_raw.trim_start().trim_start_matches('(').trim_start();
-                let rtok: String = rhs.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
-                let rtail = rtok.rsplit('.').next().unwrap_or(&rtok);
-                if !rtail.is_empty() && rtail.as_bytes()[0].is_ascii_uppercase() {
-                    let lhs = lhs_raw.trim();
-                    let lb = lhs.as_bytes();
-                    let mut li = lb.len();
-                    while li > 0 && is_id_cont(lb[li - 1]) { li -= 1; }
-                    let tn = &lhs[li..];
-                    if !tn.is_empty() && is_id_start(tn.as_bytes()[0]) {
-                        self.facts.vars.push((tn.to_string(), rtail.to_string()));
                     }
                 }
             }
         }
 
-        // Pass 2: Token & call scanner per line
         let mut per_line_toks: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
         let mut per_line_pdelta: Vec<(i32, i32, i32)> = vec![(0, 0, 0); n_lines + 1];
-        let mut per_line_last_id: Vec<Option<String>> = vec![None; n_lines + 1];
-
         for (idx, cl) in clean_lines.iter().enumerate() {
             let ln = idx + 1;
             let ln32 = ln as u32;
@@ -11073,9 +11180,6 @@ impl<'a> Walker<'a> {
             let cb = tr.as_bytes();
             let mut toks: Vec<String> = Vec::new();
             let mut dp = 0i32; let mut db = 0i32; let mut dc = 0i32;
-            let mut last_id: Option<String> = None;
-            let mut prev_id_on_line: Option<String> = None;
-            let mut prev2_id_on_line: Option<String> = None;
             let mut j = 0usize;
             while j < cb.len() {
                 if cb[j] == b'"' {
@@ -11088,17 +11192,6 @@ impl<'a> Walker<'a> {
                     continue;
                 }
                 if cb[j] == b'\'' {
-                    // Char literal `'a'` or `'\n'` vs Template Haskell `'name` / `''Type`
-                    if j + 2 < cb.len() && cb[j + 1] != b'\\' && cb[j + 2] == b'\'' {
-                        toks.push("0".to_string());
-                        j += 3;
-                        continue;
-                    }
-                    if j + 3 < cb.len() && cb[j + 1] == b'\\' && cb[j + 3] == b'\'' {
-                        toks.push("0".to_string());
-                        j += 4;
-                        continue;
-                    }
                     j += 1;
                     continue;
                 }
@@ -11110,7 +11203,6 @@ impl<'a> Walker<'a> {
                 if matches!(cb[j], b'(' | b')' | b'[' | b']' | b'{' | b'}') {
                     match cb[j] {
                         b'(' => dp += 1, b')' => dp -= 1,
-                        b'[' => db += 1, b']' => db -= 1,
                         b'{' => dc += 1, b'}' => dc -= 1,
                         _ => {}
                     }
@@ -11130,33 +11222,12 @@ impl<'a> Walker<'a> {
                         }
                     }
                     let raw_id = &tr[st..j];
-                    let base_id = raw_id.trim_end_matches('\'');
                     let mut kf = j;
                     while kf < cb.len() && (cb[kf] == b' ' || cb[kf] == b'\t') { kf += 1; }
-                    let is_kw = matches!(raw_id, "if" | "then" | "else" | "case" | "of" | "let" | "in" | "do" | "where" | "data" | "type" | "newtype" | "class" | "instance" | "module" | "import" | "deriving" | "forall" | "pattern" | "infix" | "infixl" | "infixr");
-                    let is_qual_fn = raw_id.rsplit_once('.').is_some_and(|(_, t)| !t.is_empty() && t.as_bytes()[0].is_ascii_lowercase());
-                    let next_arg_like = kf < cb.len() && (cb[kf] == b'(' || cb[kf] == b'\'' || cb[kf] == b'"' || cb[kf] == b'[' || (cb[kf].is_ascii_alphabetic() && raw_id.as_bytes()[0].is_ascii_lowercase()));
-                    if !is_kw && (is_qual_fn || next_arg_like) {
-                        let mut cands: Vec<&str> = vec![raw_id];
-                        if raw_id == "this" { cands.push("self"); }
-                        if base_id != raw_id && !base_id.is_empty() { cands.push(base_id); }
-                        if let Some((_, tail)) = raw_id.rsplit_once('.') {
-                            if !tail.is_empty() { cands.push(tail); }
                         }
-                        for cand in cands {
-                            for &si in &target_syms {
-                                if si < n_syms && existing_calls[si].insert((cand.to_string(), ln32)) {
-                                    self.facts.symbols[si].calls.push(Call { path: cand.to_string(), line: ln32 });
                                 }
                             }
                         }
-                        let recv = if let Some((h, _)) = raw_id.rsplit_once('.') {
-                            let mut r = r#"["n","#.to_string();
-                            push_string(&mut r, h);
-                            r.push(']');
-                            r
-                        } else {
-                            "0".to_string()
                         };
                         let args_s = if kf < cb.len() && cb[kf] == b'(' && kf + 1 < cb.len() && cb[kf + 1] == b')' { "[]" } else { "[0]" };
                         toks.push(format!(r#"["c",0,{recv},{args_s}]"#));
@@ -17271,14 +17342,11 @@ impl<'a> Walker<'a> {
             let mut cc = 0usize;
             let mut prev_dot_w: Option<String> = None;
             for cur in first_pod_ln..=n_lines {
-                if seen_pp.len() >= 14000 {
                     break;
                 }
                 for t in &per_line_tokens[cur] {
                     if t == "0" {
-                        if zc < 600 { vals.push("0".to_string()); zc += 1; }
                     } else if t.starts_with(r#"["c","#) {
-                        if cc < 550 { vals.push(t.clone()); cc += 1; }
                     } else if seen_pp.insert(t.clone()) {
                         vals.push(t.clone());
                     }
@@ -17291,12 +17359,6 @@ impl<'a> Walker<'a> {
                         let st2 = j2;
                         while j2 < cb2.len() && is_ident_cont(cb2[j2]) { j2 += 1; }
                         let w2 = &c_line[st2..j2];
-                        if let Some(pd) = prev_dot_w.take() {
-                            let mut n_out = r#"["n","#.to_string();
-                            push_string(&mut n_out, &format!("{pd}.{w2}"));
-                            n_out.push(']');
-                            if seen_pp.insert(n_out.clone()) {
-                                vals.push(n_out);
                             }
                         }
                         if j2 < cb2.len() && cb2[j2] == b'.' && (j2 + 1 >= cb2.len() || cb2[j2 + 1] == b' ' || cb2[j2 + 1] == b'\t') {
@@ -17444,9 +17506,6 @@ impl<'a> Walker<'a> {
                 ev.push_str(",0]");
                 push_ev(&mut extra_events, ls, lc, &ev);
             }
-            if !pod_tail_val.is_empty() && (code.starts_with("=head1") || code.starts_with("=pod") || code.starts_with("=encoding")) {
-                let ev = format!(r#"["x",{ln32},{pod_tail_val},0]"#);
-                push_ev(&mut extra_events, ls, lc, &ev);
             }
             // a018_perl: POD directive (`=head`/`=item`/`=over`/`=back`/`=cut`/`=pod`/`=for`/`=begin`/`=end`/`=encoding`)
             // terminates preceding POD prose as an `a` assignment event whose targets are the comma-separated tail tokens.
@@ -17463,7 +17522,6 @@ impl<'a> Walker<'a> {
             {
                 let mut start_ln = ln;
                 let mut start_slice_offset: Option<usize> = None;
-                let min_back = ln.saturating_sub(25).max(1);
                 let mut cur = ln.saturating_sub(1);
                 while cur >= min_back {
                     let c = per_line_code[cur].as_str();
@@ -17626,7 +17684,6 @@ impl<'a> Walker<'a> {
             // a023_perl: inline `=` inside POD (e.g. `my $tx = ...;`, `WHERE age = ?`, `PERL5OPT=...`)
             // following POD prose without a `;` is parsed by the lexer as an `a` event starting on the
             // prose line with targets = `[<prose comma-tail tokens>, <lhs var>]`.
-            if ln >= first_pod_ln && !code.starts_with('=') && !code.starts_with('#') {
                 // Find first standalone `=` (not ==, =>, =~, !=, <=, >=, |=, /=, .=, +=, -=, *=, &=, ^=)
                 let cb_eq = code.as_bytes();
                 let mut eq_pos_opt: Option<usize> = None;
@@ -17653,7 +17710,6 @@ impl<'a> Walker<'a> {
                 if let Some(eq_p) = eq_pos_opt {
                     let mut start_ln = ln;
                     let mut start_slice_offset: Option<usize> = None;
-                    let min_back = ln.saturating_sub(20).max(1);
                     let mut cur = ln.saturating_sub(1);
                     while cur >= min_back {
                         let c = per_line_code[cur].as_str();
