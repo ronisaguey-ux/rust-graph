@@ -17906,6 +17906,25 @@ impl<'a> Walker<'a> {
                     }
                     continue;
                 }
+                if cb[j] == b'$' && j + 1 < cb.len() && cb[j + 1].is_ascii_digit() {
+                    let st = j + 1;
+                    let mut e = st;
+                    while e < cb.len() && cb[e].is_ascii_digit() { e += 1; }
+                    let dstr = &code[st..e];
+                    let mut n_out = r#"["n","#.to_string();
+                    push_string(&mut n_out, dstr);
+                    n_out.push(']');
+                    toks.push(n_out);
+                    for cln in [ln32, ln32.saturating_sub(1).max(1)] {
+                        for &tsi in &[0usize, last_sym, last_col0] {
+                            if tsi < n_syms && existing_calls[tsi].insert((dstr.to_string(), cln)) {
+                                self.facts.symbols[tsi].calls.push(Call { path: dstr.to_string(), line: cln });
+                            }
+                        }
+                    }
+                    j = e;
+                    continue;
+                }
                 j += 1;
             }
             if let Some(after_enc) = code.strip_prefix("=encoding ") {
@@ -18011,11 +18030,14 @@ impl<'a> Walker<'a> {
             let mut cc = 0usize;
             let mut prev_dot_w: Option<String> = None;
             for cur in first_pod_ln..=n_lines {
+                if seen_pp.len() >= 16000 {
                     break;
                 }
                 for t in &per_line_tokens[cur] {
                     if t == "0" {
+                        if zc < 1500 { vals.push("0".to_string()); zc += 1; }
                     } else if t.starts_with(r#"["c","#) {
+                        if cc < 2000 { vals.push(t.clone()); cc += 1; }
                     } else if seen_pp.insert(t.clone()) {
                         vals.push(t.clone());
                     }
@@ -18028,6 +18050,26 @@ impl<'a> Walker<'a> {
                         let st2 = j2;
                         while j2 < cb2.len() && is_ident_cont(cb2[j2]) { j2 += 1; }
                         let w2 = &c_line[st2..j2];
+                        let is_pod_dir = st2 == 1 && cb2[0] == b'=';
+                        if !is_pod_dir {
+                            if let Some(pd) = prev_dot_w.take() {
+                                let mut n_out = r#"["n","#.to_string();
+                                push_string(&mut n_out, &format!("{pd}.{w2}"));
+                                n_out.push(']');
+                                if seen_pp.insert(n_out.clone()) {
+                                    vals.push(n_out);
+                                }
+                            }
+                        }
+                        if let Some(upos) = w2.find('_') {
+                            if upos > 0 && upos + 1 < w2.len() {
+                                let suf = &w2[upos..];
+                                let mut ns = r#"["n","#.to_string();
+                                push_string(&mut ns, suf);
+                                ns.push(']');
+                                if seen_pp.insert(ns.clone()) {
+                                    vals.push(ns);
+                                }
                             }
                         }
                         if j2 < cb2.len() && cb2[j2] == b'.' && (j2 + 1 >= cb2.len() || cb2[j2 + 1] == b' ' || cb2[j2 + 1] == b'\t') {
@@ -18058,12 +18100,21 @@ impl<'a> Walker<'a> {
         let mut prev_nb_ended_semi = false;
         let mut prev_nb_boundary = false;
         let mut prev_was_blank = false;
+        let mut in_pod = false;
+        let is_pod_dir = |s: &str| -> bool {
+            s.starts_with("=head") || s.starts_with("=pod") || s.starts_with("=over")
+                || s.starts_with("=item") || s.starts_with("=back") || s.starts_with("=cut")
+                || s.starts_with("=for") || s.starts_with("=begin") || s.starts_with("=end")
+                || s.starts_with("=encoding")
+        };
         for ln in 1..=n_lines {
             let code = &per_line_code[ln];
             if code.is_empty() {
                 prev_was_blank = true;
                 continue;
             }
+            if code.starts_with("=cut") { in_pod = false; }
+            else if is_pod_dir(code) || code == "__END__" || code == "__DATA__" { in_pod = true; }
             let after_semi = prev_nb_ended_semi;
             let after_boundary = prev_nb_boundary;
             let after_blank = prev_was_blank;
@@ -18167,6 +18218,43 @@ impl<'a> Walker<'a> {
                     }
                 }
             }
+            if stripped.starts_with('(') {
+                if let Some(rp) = stripped.find(')') {
+                    let after_rp = stripped[rp + 1..].trim_start();
+                    if after_rp.starts_with('=') && !after_rp.starts_with("==") && !after_rp.starts_with("=>") {
+                        let inner = &stripped[1..rp];
+                        let mut ltargets: Vec<String> = Vec::new();
+                        for part in inner.split(',') {
+                            let pt = part.trim()
+                                .strip_prefix("my ").or_else(|| part.trim().strip_prefix("our ")).or_else(|| part.trim().strip_prefix("local "))
+                                .unwrap_or(part.trim())
+                                .trim_start_matches(|c: char| matches!(c, '$' | '@' | '%' | '*' | '\\' | ' '))
+                                .trim();
+                            let nm: String = pt.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':').collect();
+                            let nm = nm.replace("::", ".");
+                            let nm = nm.trim_matches('.');
+                            if !nm.is_empty() {
+                                ltargets.push(nm.to_string());
+                            }
+                        }
+                        if !ltargets.is_empty() {
+                            let vals = gather(ln);
+                            let mut ev = format!(r#"["a",{ln32},["#);
+                            for (ti, t) in ltargets.iter().enumerate() {
+                                if ti > 0 { ev.push(','); }
+                                push_string(&mut ev, t);
+                            }
+                            ev.push_str(r#"],["m",["#);
+                            for (ti, tok) in vals.iter().enumerate() {
+                                if ti > 0 { ev.push(','); }
+                                ev.push_str(tok);
+                            }
+                            ev.push_str("]],0]");
+                            push_ev(&mut extra_events, ls, lc, &ev);
+                        }
+                    }
+                }
+            }
             if (code == "__END__" || code == "__DATA__") && !pod_tail_val.is_empty() {
                 let mut ev = format!(r#"["a",{ln32},["#);
                 push_string(&mut ev, code);
@@ -18175,6 +18263,54 @@ impl<'a> Walker<'a> {
                 ev.push_str(",0]");
                 push_ev(&mut extra_events, ls, lc, &ev);
             }
+            if !pod_prose_val.is_empty() && (
+                code.starts_with("=head") || code.starts_with("=pod") || code.starts_with("=encoding") || code.starts_with("=back")
+                || (in_pod && after_semi && !is_pod_dir(code) && !code.starts_with('#'))
+            ) {
+                let ev = format!(r#"["x",{ln32},{pod_prose_val},0]"#);
+                extra_events[0].push(ev);
+            }
+            // Direct `}>` prose line inside POD (e.g. `C<$dbh-E<gt>{PrintError}> attribute is off, ... DBI.`)
+            if in_pod && !pod_prose_val.is_empty() && code.contains("}>") {
+                if let Some(rpos) = code.rfind("}>") {
+                    let mut bprose = code[rpos + 2..].trim().to_string();
+                    let max_k = (ln + 15).min(n_lines);
+                    for k in (ln + 1)..=max_k {
+                        let ck = per_line_code[k].as_str();
+                        if is_pod_dir(ck) { break; }
+                        if ck.is_empty() { continue; }
+                        if !bprose.is_empty() { bprose.push(' '); }
+                        bprose.push_str(ck);
+                    }
+                    let mut bt: Vec<String> = Vec::new();
+                    for ch in bprose.split(',') {
+                        let t = ch.trim_end();
+                        if let Some(wd) = t.strip_suffix('.') {
+                            let wb = wd.as_bytes();
+                            let mut wi = wb.len();
+                            while wi > 0 && (wb[wi - 1].is_ascii_alphanumeric() || wb[wi - 1] == b'_') { wi -= 1; }
+                            let w = &wd[wi..];
+                            if !w.is_empty() && w.as_bytes()[0].is_ascii_alphabetic() { bt.push(format!("{w}.")); }
+                        } else {
+                            let tb = t.as_bytes();
+                            let mut wi = tb.len();
+                            while wi > 0 && (tb[wi - 1].is_ascii_alphanumeric() || tb[wi - 1] == b'_') { wi -= 1; }
+                            let w = &t[wi..];
+                            if !w.is_empty() && w.as_bytes()[0].is_ascii_alphabetic() { bt.push(w.to_string()); }
+                        }
+                    }
+                    if !bt.is_empty() {
+                        let mut ev3 = format!(r#"["a",{ln32},["#);
+                        for (ti, t) in bt.iter().enumerate() {
+                            if ti > 0 { ev3.push(','); }
+                            push_string(&mut ev3, t);
+                        }
+                        ev3.push_str("],");
+                        ev3.push_str(&pod_prose_val);
+                        ev3.push_str(",0]");
+                        extra_events[0].push(ev3);
+                    }
+                }
             }
             // a018_perl: POD directive (`=head`/`=item`/`=over`/`=back`/`=cut`/`=pod`/`=for`/`=begin`/`=end`/`=encoding`)
             // terminates preceding POD prose as an `a` assignment event whose targets are the comma-separated tail tokens.
@@ -18191,6 +18327,7 @@ impl<'a> Walker<'a> {
             {
                 let mut start_ln = ln;
                 let mut start_slice_offset: Option<usize> = None;
+                let min_back = ln.saturating_sub(120).max(1);
                 let mut cur = ln.saturating_sub(1);
                 while cur >= min_back {
                     let c = per_line_code[cur].as_str();
@@ -18343,6 +18480,85 @@ impl<'a> Walker<'a> {
                         }
                         ev.push_str("]],0]");
                         push_ev(&mut extra_events, st_ls, st_lc, &ev);
+                        if !pod_prose_val.is_empty() && (code.starts_with("=head") || code.starts_with("=over") || code.starts_with("=back") || code.starts_with("=cut")) {
+                            let mut ev2 = format!(r#"["a",{},["#, start_ln as u32);
+                            for (ti, t) in targets.iter().enumerate() {
+                                if ti > 0 { ev2.push(','); }
+                                push_string(&mut ev2, t);
+                            }
+                            ev2.push_str("],");
+                            ev2.push_str(&pod_prose_val);
+                            ev2.push_str(",0]");
+                            extra_events[0].push(ev2);
+                        }
+                        if !pod_prose_val.is_empty() && code.starts_with("=head") {
+                            let sq_min = ln.saturating_sub(110).max(1);
+                            let mut q_in = false;
+                            let mut q_start = ln;
+                            let mut qc = ln.saturating_sub(1);
+                            while qc >= sq_min {
+                                let c = per_line_code[qc].as_str();
+                                let sq_cnt = c.bytes().filter(|&b| b == b'\'').count();
+                                if sq_cnt % 2 == 1 { q_in = !q_in; }
+                                if !q_in && c.contains(';') { break; }
+                                if !c.is_empty() && !is_pod_dir(c) { q_start = qc; }
+                                if qc == sq_min { break; }
+                                qc -= 1;
+                            }
+                            if q_start < start_ln {
+                                let mut qprose = String::new();
+                                for k in q_start..ln {
+                                    let c = per_line_code[k].as_str();
+                                    if c.is_empty() || is_pod_dir(c) { continue; }
+                                    if !qprose.is_empty() { qprose.push(' '); }
+                                    qprose.push_str(c);
+                                }
+                                let mut qchunks: Vec<&str> = Vec::new();
+                                let qpb = qprose.as_bytes();
+                                let mut qd = 0i32;
+                                let mut qs = false;
+                                let mut qcs = 0usize;
+                                for (pi, &b) in qpb.iter().enumerate() {
+                                    if b == b'\'' { qs = !qs; continue; }
+                                    if qs { continue; }
+                                    match b {
+                                        b'(' | b'[' | b'{' | b'<' => qd += 1,
+                                        b')' | b']' | b'}' | b'>' => { if qd > 0 { qd -= 1; } }
+                                        b',' if qd == 0 => { qchunks.push(&qprose[qcs..pi]); qcs = pi + 1; }
+                                        _ => {}
+                                    }
+                                }
+                                qchunks.push(&qprose[qcs..]);
+                                let mut qt: Vec<String> = Vec::new();
+                                for ch in qchunks {
+                                    let t = ch.trim_end();
+                                    if let Some(wd) = t.strip_suffix('.') {
+                                        let wb = wd.as_bytes();
+                                        let mut wi = wb.len();
+                                        while wi > 0 && (wb[wi - 1].is_ascii_alphanumeric() || wb[wi - 1] == b'_') { wi -= 1; }
+                                        let w = &wd[wi..];
+                                        if !w.is_empty() && w.as_bytes()[0].is_ascii_alphabetic() { qt.push(format!("{w}.")); }
+                                    } else {
+                                        let tb = t.as_bytes();
+                                        let mut wi = tb.len();
+                                        while wi > 0 && (tb[wi - 1].is_ascii_alphanumeric() || tb[wi - 1] == b'_') { wi -= 1; }
+                                        let w = &t[wi..];
+                                        if !w.is_empty() && w.as_bytes()[0].is_ascii_alphabetic() { qt.push(w.to_string()); }
+                                    }
+                                }
+                                if !qt.is_empty() && qt != targets {
+                                    let mut ev4 = format!(r#"["a",{},["#, q_start as u32);
+                                    for (ti, t) in qt.iter().enumerate() {
+                                        if ti > 0 { ev4.push(','); }
+                                        push_string(&mut ev4, t);
+                                    }
+                                    ev4.push_str("],");
+                                    ev4.push_str(&pod_prose_val);
+                                    ev4.push_str(",0]");
+                                    extra_events[0].push(ev4);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -18353,6 +18569,55 @@ impl<'a> Walker<'a> {
             // a023_perl: inline `=` inside POD (e.g. `my $tx = ...;`, `WHERE age = ?`, `PERL5OPT=...`)
             // following POD prose without a `;` is parsed by the lexer as an `a` event starting on the
             // prose line with targets = `[<prose comma-tail tokens>, <lhs var>]`.
+            if in_pod && !is_pod_dir(code) && !code.starts_with('#') {
+                // Quoted `k1=v1;k2=v2` inside POD (e.g. `$driver_dsn = 'db=test;port=42';`)
+                if !pod_prose_val.is_empty() && code.contains('\'') && code.contains('=') && code.contains(';') {
+                    if let (Some(q1), Some(q2)) = (code.find('\''), code.rfind('\'')) {
+                        if q2 > q1 + 2 {
+                            let inner_q = &code[q1 + 1..q2];
+                            let mut q_start_ln = ln;
+                            let mut q_in = true;
+                            let mut qc = ln.saturating_sub(1);
+                            let qmin = ln.saturating_sub(40).max(1);
+                            while qc >= qmin {
+                                let c = per_line_code[qc].as_str();
+                                if is_pod_dir(c) { break; }
+                                let sq_cnt = c.bytes().filter(|&b| b == b'\'').count();
+                                if !q_in && c.contains(';') { break; }
+                                if !c.is_empty() && !c.starts_with('#') { q_start_ln = qc; }
+                                if sq_cnt % 2 == 1 { q_in = !q_in; }
+                                if qc == qmin { break; }
+                                qc -= 1;
+                            }
+                            for (si_q, seg_q) in inner_q.split(';').enumerate() {
+                                if let Some((kl, vl)) = seg_q.split_once('=') {
+                                    let kt = kl.trim();
+                                    let vt = vl.trim();
+                                    if !kt.is_empty() && kt.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                        let mut evq = format!(r#"["a",{ln32},["#);
+                                        push_string(&mut evq, kt);
+                                        evq.push_str("],");
+                                        evq.push_str(&pod_prose_val);
+                                        evq.push_str(",0]");
+                                        extra_events[0].push(evq);
+                                        if si_q == 0 && q_start_ln < ln {
+                                            let mut evq2 = format!(r#"["a",{},["#, q_start_ln as u32);
+                                            push_string(&mut evq2, kt);
+                                            if !vt.is_empty() && vt.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                                evq2.push_str(r#"],["n","#);
+                                                push_string(&mut evq2, vt);
+                                                evq2.push_str("],0]");
+                                            } else {
+                                                evq2.push_str("],0,0]");
+                                            }
+                                            extra_events[0].push(evq2);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 // Find first standalone `=` (not ==, =>, =~, !=, <=, >=, |=, /=, .=, +=, -=, *=, &=, ^=)
                 let cb_eq = code.as_bytes();
                 let mut eq_pos_opt: Option<usize> = None;
@@ -18379,6 +18644,7 @@ impl<'a> Walker<'a> {
                 if let Some(eq_p) = eq_pos_opt {
                     let mut start_ln = ln;
                     let mut start_slice_offset: Option<usize> = None;
+                    let min_back = ln.saturating_sub(120).max(1);
                     let mut cur = ln.saturating_sub(1);
                     while cur >= min_back {
                         let c = per_line_code[cur].as_str();
