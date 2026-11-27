@@ -2089,6 +2089,156 @@ impl<'a> Walker<'a> {
                         if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
                             let r0 = rk;
                             while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_') { rk += 1; }
+                            let id = String::from_utf8_lossy(&trimmed[r0..rk]);
+                            if !matches!(id.as_ref(), "dyn" | "as" | "mut" | "ref") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == id).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: id.to_string(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},0,[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{id}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    let ev = format!("[\"x\",{lno},[\"m\",[{}]]]", parts.join(","));
+                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                        if !sym.events.is_empty() { sym.events.push(','); }
+                        sym.events.push_str(&ev);
+                    }
+                }
+
+                // 3a3. Closure range/iterator `let <target> = ... |x| ...` (possibly multi-line):
+                // emit `event a` with `["c", cidx, 0, [closure_params...]]` so `map(|_| ...)`, `map(|x| ...)` preserve param names.
+                if trimmed.starts_with(b"let ") && trimmed.contains(&b'=') && !trimmed.contains(&b'{') {
+                    let mut p0 = 4usize;
+                    while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                    if trimmed[p0..].starts_with(b"mut ") { p0 += 4; while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; } }
+                    let mut p1 = p0;
+                    while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                    if p1 > p0 {
+                        let target = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                        if let Some(eq_rel) = trimmed[p1..].iter().position(|&b| b == b'=') {
+                            let eq_abs = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + p1 + eq_rel;
+                            // Scan up to `;` (bounded to 400 bytes) for closure `|param|`
+                            let scan_end = (eq_abs + 400).min(n);
+                            let slice = &src[eq_abs + 1..scan_end];
+                            let stmt_end = slice.iter().position(|&b| b == b';').unwrap_or(slice.len());
+                            let stmt_s = &slice[..stmt_end];
+                            if let Some(bar1) = stmt_s.iter().position(|&b| b == b'|') {
+                                if let Some(bar2_rel) = stmt_s[bar1 + 1..].iter().position(|&b| b == b'|') {
+                                    if bar2_rel > 0 && bar2_rel < 40 && !stmt_s[bar1 + 1..bar1 + 1 + bar2_rel].contains(&b'\n') {
+                                        let inside = String::from_utf8_lossy(&stmt_s[bar1 + 1..bar1 + 1 + bar2_rel]);
+                                        let mut cparams: Vec<String> = Vec::new();
+                                        for part in inside.split(',') {
+                                            let pt = part.trim().trim_start_matches("mut ").split(':').next().unwrap_or("").trim();
+                                            if !pt.is_empty() && (pt == "_" || pt.as_bytes()[0].is_ascii_alphabetic() || pt.as_bytes()[0] == b'_') {
+                                                cparams.push(format!("[\"n\",\"{pt}\"]"));
+                                            }
+                                        }
+                                        if !cparams.is_empty() {
+                                            if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                let cidx = sym.calls.iter().position(|c| c.line == lno).unwrap_or_else(|| {
+                                                    sym.calls.push(Call { path: "map".to_string(), line: lno });
+                                                    sym.calls.len() - 1
+                                                });
+                                                let arg_expr = if cparams.len() == 1 {
+                                                    cparams.remove(0)
+                                                } else {
+                                                    format!("[\"m\",[{}]]", cparams.join(","))
+                                                };
+                                                let ev = format!("[\"a\",{lno},[\"{target}\"],[\"c\",{cidx},0,[{arg_expr}]],0]");
+                                                if !sym.events.is_empty() { sym.events.push(','); }
+                                                sym.events.push_str(&ev);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3a4. `..self.<field>[.method()]` range-to bounds in slice indexing & method calls (`self.buf.get_unchecked(..self.filled)`, `out.get_mut(..self.sign.len())`).
+                if let Some(rp) = trimmed.windows(7).position(|w| w == b"..self.") {
+                    let f0 = rp + 7;
+                    let mut f1 = f0;
+                    while f1 < trimmed.len() && (trimmed[f1].is_ascii_alphanumeric() || trimmed[f1] == b'_') { f1 += 1; }
+                    if f1 > f0 {
+                        let field = String::from_utf8_lossy(&trimmed[f0..f1]).to_string();
+                        // Check if followed by `.method(`
+                        let mut field_method: Option<String> = None;
+                        if f1 < trimmed.len() && trimmed[f1] == b'.' {
+                            let m0 = f1 + 1;
+                            let mut m1 = m0;
+                            while m1 < trimmed.len() && (trimmed[m1].is_ascii_alphanumeric() || trimmed[m1] == b'_') { m1 += 1; }
+                            if m1 > m0 && m1 < trimmed.len() && trimmed[m1] == b'(' {
+                                field_method = Some(String::from_utf8_lossy(&trimmed[m0..m1]).to_string());
+                            }
+                        }
+                        // Find receiver before `[` or `.method(`
+                        let (recv, call_path) = if let Some(lb) = trimmed[..rp].iter().rposition(|&b| b == b'[' || b == b'(') {
+                            let mut r0 = lb;
+                            while r0 > 0 && (trimmed[r0 - 1].is_ascii_alphanumeric() || trimmed[r0 - 1] == b'_' || trimmed[r0 - 1] == b'.') { r0 -= 1; }
+                            let full_before = String::from_utf8_lossy(&trimmed[r0..lb]).trim_matches('.').to_string();
+                            if trimmed[lb] == b'(' {
+                                if let Some((rv, _m)) = full_before.rsplit_once('.') {
+                                    (rv.to_string(), full_before)
+                                } else {
+                                    (full_before.clone(), full_before)
+                                }
+                            } else {
+                                (full_before, "index".to_string())
+                            }
+                        } else {
+                            (String::new(), "index".to_string())
+                        };
+                        let recv_val = if !recv.is_empty() { format!("[\"n\",\"{recv}\"]") } else { "0".to_string() };
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == call_path).unwrap_or_else(|| {
+                                sym.calls.push(Call { path: call_path.clone(), line: lno });
+                                sym.calls.len() - 1
+                            });
+                            let bound_expr = if let Some(fm) = field_method {
+                                let fm_path = format!("{field}.{fm}");
+                                let fcidx = sym.calls.iter().position(|c| c.line == lno && c.path == fm_path).unwrap_or_else(|| {
+                                    sym.calls.push(Call { path: fm_path.clone(), line: lno });
+                                    sym.calls.len() - 1
+                                });
+                                format!("[\"c\",{fcidx},[\"n\",\"{field}\"],[]]")
+                            } else {
+                                format!("[\"n\",\"{field}\"]")
+                            };
+                            let cval = format!("[\"c\",{cidx},{recv_val},[[\"m\",[0,{bound_expr}]]]]");
+                            if trimmed.starts_with(b"let ") && trimmed.contains(&b'=') {
+                                let mut t0 = 4usize;
+                                while t0 < trimmed.len() && matches!(trimmed[t0], b' ' | b'\t') { t0 += 1; }
+                                if trimmed[t0..].starts_with(b"mut ") { t0 += 4; while t0 < trimmed.len() && matches!(trimmed[t0], b' ' | b'\t') { t0 += 1; } }
+                                let mut t1 = t0;
+                                while t1 < trimmed.len() && (trimmed[t1].is_ascii_alphanumeric() || trimmed[t1] == b'_') { t1 += 1; }
+                                if t1 > t0 {
+                                    let tgt = String::from_utf8_lossy(&trimmed[t0..t1]).to_string();
+                                    let ev = format!("[\"a\",{lno},[\"{tgt}\"],{cval},0]");
+                                    if !sym.events.is_empty() { sym.events.push(','); }
+                                    sym.events.push_str(&ev);
+                                }
+                            } else {
+                                let ev = format!("[\"x\",{lno},{cval}]");
+                                if !sym.events.is_empty() { sym.events.push(','); }
+                                sym.events.push_str(&ev);
+                            }
+                        }
+                    }
+                }
+
+                // 3a5. Multi-line `let <target> = unsafe { ... }` block expression (preserves const generics like `N` and inner calls).
+                if trimmed.starts_with(b"let ") && trimmed.windows(8).any(|w| w == b"unsafe {") && !trimmed.contains(&b'}') {
+                    let mut p0 = 4usize;
                                 let mut parts: Vec<String> = Vec::new();
                                 let mut rk = 0usize;
                                 while rk < rhs.len() {
