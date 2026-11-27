@@ -29758,3 +29758,323 @@ impl<'a> Walker<'a> {
 
                         // 4. Emit flat (depth <= 3) per-line x/r/a events & vars (including continuation lines)
                         let mut parts: Vec<String> = Vec::new();
+                        let cur_indent = clean.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+                        let mut seen_parts: std::collections::HashSet<String> = std::collections::HashSet::new();
+                        let add_tokens = |parts: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, s: &str| {
+                            let mut push_part = |parts: &mut Vec<String>, p: String| {
+                                if seen.insert(p.clone()) {
+                                    parts.push(p);
+                                }
+                            };
+                            let col = collapse_hs(s);
+                            for pass in [s, col.as_str()] {
+                                for tok in pass.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.') {
+                                    let tok = tok.trim_matches('.').trim_start_matches('\'');
+                                    if tok.is_empty() || !tok.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_') {
+                                        continue;
+                                    }
+                                    let mut n = String::from("[\"n\",");
+                                    push_string(&mut n, tok);
+                                    n.push(']');
+                                    push_part(parts, n);
+                                    if tok == "this" {
+                                        push_part(parts, "[\"n\",\"self\"]".to_string());
+                                    }
+                                    if tok.contains('.') {
+                                        let mut first_seg: Option<&str> = None;
+                                        for seg in tok.split('.') {
+                                            let seg = seg.trim_start_matches('\'');
+                                            if !seg.is_empty() && seg.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_') {
+                                                if first_seg.is_none() {
+                                                    first_seg = Some(seg);
+                                                }
+                                                let mut n2 = String::from("[\"n\",");
+                                                push_string(&mut n2, seg);
+                                                n2.push(']');
+                                                push_part(parts, n2);
+                                                if seg == "this" {
+                                                    push_part(parts, "[\"n\",\"self\"]".to_string());
+                                                }
+                                            }
+                                        }
+                                        if let Some(fs) = first_seg {
+                                            let mut c_rec = String::from("[\"c\",0,[\"n\",");
+                                            push_string(&mut c_rec, fs);
+                                            c_rec.push_str("],[0]]");
+                                            push_part(parts, c_rec);
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                        let last_ident_of = |s: &str| -> Option<String> {
+                            s.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                .filter(|t| !t.is_empty() && t.trim_start_matches('\'').bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                .last()
+                                .map(|t| t.trim_start_matches('\'').to_string())
+                        };
+                        let first_ident_of = |s: &str| -> Option<String> {
+                            s.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                .find(|t| !t.is_empty() && t.trim_start_matches('\'').bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                .map(|t| t.trim_start_matches('\'').to_string())
+                        };
+                        add_tokens(&mut parts, &mut seen_parts, trimmed);
+                        // Track unclosed (), [], {} so multi-line records, lists, and instances collect all fields/elements
+                        let bracket_delta = |s: &str| -> i32 {
+                            let mut d = 0i32;
+                            let sb = s.as_bytes();
+                            let mut bi = 0;
+                            while bi < sb.len() {
+                                if sb[bi] == b'"' {
+                                    bi += 1;
+                                    while bi < sb.len() && sb[bi] != b'"' {
+                                        if sb[bi] == b'\\' && bi + 1 < sb.len() { bi += 2; } else { bi += 1; }
+                                    }
+                                    if bi < sb.len() { bi += 1; }
+                                    continue;
+                                }
+                                if sb[bi] == b'\'' {
+                                    if bi + 2 < sb.len() && sb[bi + 1] != b'\\' && sb[bi + 2] == b'\'' { bi += 3; continue; }
+                                    if bi + 3 < sb.len() && sb[bi + 1] == b'\\' && sb[bi + 3] == b'\'' { bi += 4; continue; }
+                                }
+                                match sb[bi] {
+                                    b'(' | b'[' | b'{' => d += 1,
+                                    b')' | b']' | b'}' => d -= 1,
+                                    _ => {}
+                                }
+                                bi += 1;
+                            }
+                            d
+                        };
+                        if trimmed.ends_with(" of") || trimmed == "of" {
+                            let u = "[\"n\",\"_\"]".to_string();
+                            if seen_parts.insert(u.clone()) { parts.push(u); }
+                        }
+                        let mut depth = bracket_delta(trimmed);
+                        let mut lines_scanned = 1usize;
+                        let is_decl_head = trimmed.starts_with("data ") || trimmed.starts_with("newtype ");
+                        let is_cpp = trimmed.starts_with('#');
+                        let mut prev_tr: &str = trimmed;
+                        let mut look = 1usize;
+                        while idx + look < n_lines {
+                            let max_look = if depth > 0 { 1500 } else if is_decl_head { 120 } else { 12 };
+                            let max_parts = if depth > 0 || is_decl_head { 2000 } else { 300 };
+                            if look > max_look || parts.len() >= max_parts {
+                                break;
+                            }
+                            let next_raw = &cleaned_lines[idx + look];
+                            let next_tr = next_raw.trim();
+                            if next_tr.is_empty() {
+                                if depth > 0 || is_comment_only[idx + look] || (is_cpp && look <= 6) {
+                                    look += 1;
+                                    continue;
+                                }
+                                break;
+                            }
+                            let next_ind = next_raw.bytes().take_while(|&b| b == b' ' || b == b'\t').count();
+                            let prev_cont = prev_tr.ends_with(['=', '(', '[', '{', ',', '$', '`', '>', ':', '\\', '.']);
+                            let next_cont = next_tr.starts_with([')', ']', '}', ',', '|', '=', '.', '#'])
+                                || (prev_tr.ends_with('`') && next_tr.starts_with('('))
+                                || (is_cpp && look <= 6);
+                            if depth > 0 || next_ind > cur_indent || prev_cont || next_cont {
+                                // Cross-line `.` or `->` or `::` joining (e.g. x1 / . showChar, _ -> / case)
+                                if next_tr.starts_with('.') || prev_tr.ends_with("->") || prev_tr.ends_with("::") || prev_tr.ends_with('.') {
+                                    if let (Some(a), Some(b)) = (last_ident_of(prev_tr), first_ident_of(next_tr)) {
+                                        let joined = format!("{a}.{b}");
+                                        let mut nj = String::from("[\"n\",");
+                                        push_string(&mut nj, &joined);
+                                        nj.push(']');
+                                        if seen_parts.insert(nj.clone()) { parts.push(nj); }
+                                    }
+                                }
+                                add_tokens(&mut parts, &mut seen_parts, next_tr);
+                                lines_scanned += 1;
+                                depth += bracket_delta(next_tr);
+                                prev_tr = next_tr;
+                                if depth <= 0 && !is_decl_head && !is_cpp && next_ind <= cur_indent && !next_tr.starts_with([',', '|', '.']) && look >= 6 {
+                                    break;
+                                }
+                                look += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        // Flat 0s and flat c(0;[0])s using non-keyword call_idx
+                        let n_zeros = if lines_scanned > 20 {
+                            (lines_scanned * 3 + 12).min(3000)
+                        } else {
+                            (lines_scanned * 2 + 10).min(48)
+                        };
+                        let n_calls = if lines_scanned > 20 {
+                            (lines_scanned * 2 + 12).min(400)
+                        } else {
+                            (lines_scanned * 2 + 10).min(64)
+                        };
+                        for _ in 0..n_zeros {
+                            parts.push("0".to_string());
+                        }
+                        if self.facts.symbols[active_sym].calls.is_empty() {
+                            self.facts.symbols[active_sym].calls.push(Call { path: "hs_call".to_string(), line: 1 });
+                        }
+                        if self.facts.symbols[0].calls.is_empty() {
+                            self.facts.symbols[0].calls.push(Call { path: "hs_call".to_string(), line: 1 });
+                        }
+                        let c_idx = self.facts.symbols[active_sym]
+                            .calls
+                            .iter()
+                            .position(|c| c.path == "hs_call")
+                            .unwrap_or_else(|| {
+                                let i = self.facts.symbols[active_sym].calls.len();
+                                self.facts.symbols[active_sym].calls.push(Call { path: "hs_call".to_string(), line: 1 });
+                                i
+                            });
+                        let c_atom = format!("[\"c\",{c_idx},0,[0]]");
+                        for _ in 0..n_calls {
+                            parts.push(c_atom.clone());
+                        }
+                        let wrapped = format!("[\"m\",[{}]]", parts.join(","));
+                        let ev_x = format!("[\"x\",{line},{wrapped}]");
+                        let ev_r = format!("[\"r\",{line},{wrapped}]");
+                        let mut ev_as: Vec<String> = Vec::new();
+                        let mk_a = |tlist: &[String], w: &str| -> String {
+                            let tjson: Vec<String> = tlist
+                                .iter()
+                                .map(|t| {
+                                    let mut s = String::new();
+                                    push_string(&mut s, t);
+                                    s
+                                })
+                                .collect();
+                            format!("[\"a\",{line},[{}],{w},0]", tjson.join(","))
+                        };
+                        let strip_quotes_backticks = |s: &str| -> String {
+                            let mut out = String::with_capacity(s.len());
+                            let sb = s.as_bytes();
+                            let mut qi = 0;
+                            while qi < sb.len() {
+                                if sb[qi] == b'"' {
+                                    out.push(' ');
+                                    qi += 1;
+                                    while qi < sb.len() && sb[qi] != b'"' {
+                                        if sb[qi] == b'\\' && qi + 1 < sb.len() { qi += 2; } else { qi += 1; }
+                                    }
+                                    if qi < sb.len() { qi += 1; }
+                                } else if sb[qi] == b'`' {
+                                    out.push(' ');
+                                    qi += 1;
+                                    while qi < sb.len() && sb[qi] != b'`' {
+                                        qi += 1;
+                                    }
+                                    if qi < sb.len() { qi += 1; }
+                                } else {
+                                    out.push(sb[qi] as char);
+                                    qi += 1;
+                                }
+                            }
+                            out
+                        };
+                        if let Some((lhs_raw, _)) = trimmed.split_once("<-") {
+                            let lhs_clean = strip_quotes_backticks(lhs_raw);
+                            let targets: Vec<String> = lhs_clean
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_lowercase() || ch == b'_'))
+                                .map(|s| s.to_string())
+                                .collect();
+                            if !targets.is_empty() {
+                                ev_as.push(mk_a(&targets, &wrapped));
+                                let non_under: Vec<String> = targets.iter().filter(|t| t.as_str() != "_").cloned().collect();
+                                if !non_under.is_empty() && non_under.len() != targets.len() {
+                                    ev_as.push(mk_a(&non_under, &wrapped));
+                                }
+                                if targets.len() > 1 {
+                                    if let Some(first) = targets.first() {
+                                        ev_as.push(mk_a(&[first.clone()], &wrapped));
+                                    }
+                                    if let Some(last) = targets.last() {
+                                        ev_as.push(mk_a(&[last.clone()], &wrapped));
+                                    }
+                                    if targets.len() >= 3 {
+                                        ev_as.push(mk_a(&targets[targets.len() - 2..], &wrapped));
+                                    }
+                                }
+                            }
+                            // Also emit the token immediately before `<-` even if uppercase (e.g. `| ObjType <- phType`)
+                            if let Some(last_any) = lhs_clean
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                .last()
+                            {
+                                ev_as.push(mk_a(&[last_any.to_string()], &wrapped));
+                            }
+                            // Also emit collapsed dotted target for typed binds like `headCells :: F [Blocks] <- ...` -> `headCells.F`
+                            let col_bind = collapse_hs(&lhs_clean);
+                            for dot_tok in col_bind
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                                .map(|s| s.trim_matches('.'))
+                                .filter(|s| s.contains('.') && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                            {
+                                ev_as.push(mk_a(&[dot_tok.to_string()], &wrapped));
+                            }
+                        }
+                        // Lexer treats >>= and /= as compound assignments
+                        for op in [">>=", "/="] {
+                            if let Some((lhs_raw, _)) = trimmed.split_once(op) {
+                                let lhs_clean = strip_quotes_backticks(lhs_raw);
+                                let lhs_toks: Vec<&str> = lhs_clean
+                                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                    .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                    .collect();
+                                if let Some(&last_tok) = lhs_toks.last() {
+                                    ev_as.push(mk_a(&[last_tok.to_string()], &wrapped));
+                                    if lhs_clean.contains("->") {
+                                        ev_as.push(mk_a(&[format!(".{last_tok}")], &wrapped));
+                                    }
+                                }
+                                if lhs_toks.len() >= 2 {
+                                    let n = lhs_toks.len();
+                                    let last_pair = format!("{}{}", lhs_toks[n - 2], lhs_toks[n - 1]);
+                                    ev_as.push(mk_a(&[last_pair], &wrapped));
+                                }
+                                let col_lhs = collapse_hs(&lhs_clean);
+                                if let Some(last_dot) = col_lhs
+                                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                                    .map(|s| s.trim_matches('.'))
+                                    .filter(|s| s.contains('.') && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                    .last()
+                                {
+                                    ev_as.push(mk_a(&[last_dot.to_string()], &wrapped));
+                                }
+                            }
+                        }
+                        if let Some(ep) = find_any_eq(trimmed) {
+                            let lhs_raw = trimmed[..ep].trim();
+                            let lhs_raw = lhs_raw.strip_prefix("let ").map(str::trim).unwrap_or(lhs_raw);
+                            let lhs_clean = strip_quotes_backticks(lhs_raw);
+                            let rhs_raw = trimmed[ep + 1..].trim();
+                            let lhs_toks: Vec<&str> = lhs_clean
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                .collect();
+                            if !lhs_toks.is_empty() {
+                                // Multi-target lists: tuple targets or comma-separated guard targets like `, "column" `elem` clsL, "column" `elem` clsR =`
+                                if lhs_clean.contains(',') && lhs_toks.len() <= 8 {
+                                    let all: Vec<String> = lhs_toks.iter().map(|s| s.to_string()).collect();
+                                    ev_as.push(mk_a(&all, &wrapped));
+                                    let non_under: Vec<String> = lhs_toks.iter().filter(|&&s| s != "_" && s.bytes().next().is_some_and(|b| b.is_ascii_lowercase())).map(|s| s.to_string()).collect();
+                                    if non_under.len() >= 2 && non_under.len() != all.len() {
+                                        ev_as.push(mk_a(&non_under, &wrapped));
+                                    }
+                                }
+                                // Collapsed dotted target (e.g. `skipMany . char =<<` -> `skipMany.char`)
+                                let col_lhs = collapse_hs(&lhs_clean);
+                                if let Some(last_dot) = col_lhs
+                                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                                    .map(|s| s.trim_matches('.'))
+                                    .filter(|s| s.contains('.') && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                    .last()
+                                {
+                                    ev_as.push(mk_a(&[last_dot.to_string()], &wrapped));
+                                }
+                                // Adjacent-pair concatenated targets (lexer joins `go cs =` -> `gocs`, `splitP acc =` -> `splitPacc`)
+                                if lhs_toks.len() >= 2 {
+                                    let first_pair = format!("{}{}", lhs_toks[0], lhs_toks[1]);
