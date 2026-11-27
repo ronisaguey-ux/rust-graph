@@ -540,6 +540,17 @@ const NIM_DEFS: &[Def] = &[
 ];
 const NIM_CALLS: &[&str] = &["call", "command_call"];
 
+const GROOVY_DEFS: &[Def] = &[
+    Def { kind: "class_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "interface_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "trait_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "enum_declaration", name: &["identifier"], params: None, params_nth: 0, name_last: false, receiver: false, container: true },
+    Def { kind: "definition", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: true, receiver: false, container: false },
+    Def { kind: "field_or_method", name: &["identifier"], params: Some("parameter_list"), params_nth: 0, name_last: true, receiver: false, container: false },
+];
+const GROOVY_CALLS: &[&str] = &["call", "constructor_call"];
+const GROOVY_IMPORTS: &[&str] = &[];
+
 fn kinds(lang: Lang) -> Kinds {
     match lang {
         Lang::Python => {
@@ -628,6 +639,9 @@ fn kinds(lang: Lang) -> Kinds {
         }
         Lang::Nim => {
             Kinds { definitions: NIM_DEFS, calls: NIM_CALLS, imports: &[], soft: &[], family: Family::Plain }
+        }
+        Lang::Groovy => {
+            Kinds { definitions: GROOVY_DEFS, calls: GROOVY_CALLS, imports: GROOVY_IMPORTS, soft: &[], family: Family::Plain }
         }
         // The other grammars have no definition table here yet; the walk still
         // returns a record with the module symbol, which is what the caller
@@ -16067,6 +16081,95 @@ impl<'a> Walker<'a> {
                 self.lexer_event(b'x', line, &[], &value, false);
             }
         }
+        if kind == "instance_variable_declaration" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let kids = self.children(id);
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(&var_node) = kids.first() {
+                let raw = self.text_string(var_node);
+                let stripped = raw.trim_start_matches('@');
+                if !stripped.is_empty() {
+                    let mut vf = String::from("[\"n\",");
+                    push_string(&mut vf, &format!("self.{stripped}"));
+                    vf.push(']');
+                    parts.push(vf);
+                }
+            }
+            // Helper to format a slice of children representing a Crystal `_type`
+            // (where `generic_arguments` wraps each arg in `type_argument`).
+            fn emit_cr_type(w: &mut Walker, nodes: &[u32]) -> String {
+                let mut out: Vec<String> = Vec::new();
+                let mut i = 0usize;
+                while i < nodes.len() {
+                    let c = nodes[i];
+                    let ck = w.kind(c);
+                    if ck == "type_argument" {
+                        let tkids = w.children(c);
+                        let f = emit_cr_type(w, &tkids);
+                        if !f.is_empty() {
+                            out.push(f);
+                        }
+                    } else if ck == "type_path" {
+                        let tname = w.text_string(c);
+                        if i + 1 < nodes.len() && w.kind(nodes[i + 1]) == "generic_arguments" {
+                            let idx = w.push_call(tname, w.line(c));
+                            let gkids = w.children(nodes[i + 1]);
+                            let mut args = Vec::new();
+                            for gc in gkids {
+                                if w.kind(gc) == "type_argument" {
+                                    let tk = w.children(gc);
+                                    let f = emit_cr_type(w, &tk);
+                                    if !f.is_empty() {
+                                        args.push(f);
+                                    }
+                                }
+                            }
+                            out.push(format!("[\"c\",{idx},0,[{}]]", args.join(",")));
+                            i += 2;
+                            continue;
+                        } else if !tname.is_empty() {
+                            let mut f = String::from("[\"n\",");
+                            push_string(&mut f, &tname);
+                            f.push(']');
+                            out.push(f);
+                        }
+                    }
+                    i += 1;
+                }
+                match out.len() {
+                    0 => String::new(),
+                    1 => out.remove(0),
+                    _ => format!("[\"m\",[{}]]", out.join(",")),
+                }
+            }
+            let type_form = emit_cr_type(self, &kids[1..]);
+            if !type_form.is_empty() {
+                parts.push(type_form);
+            }
+            if !parts.is_empty() {
+                let val = if parts.len() == 1 {
+                    parts.remove(0)
+                } else {
+                    format!("[\"m\",[{}]]", parts.join(","))
+                };
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
+            return;
+        }
+        if kind == "annotation_definition" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let idx = self.push_call("annotation".to_string(), line);
+            let cname = self.children(id).into_iter().find(|&c| matches!(self.kind(c), "constant" | "scope")).map(|c| self.text_string(c)).unwrap_or_default();
+            let val = if cname.is_empty() {
+                format!("[\"c\",{idx},0,[]]")
+            } else {
+                let mut arg = String::from("[\"n\",");
+                push_string(&mut arg, &cname);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
+            };
+            self.lexer_event(b'x', line, &[], &val, false);
+        }
         if kind == "lib_definition" && self.facts.tag == "CR" {
             let line = self.line(id);
             let idx = self.push_call("lib".to_string(), line);
@@ -16084,9 +16187,31 @@ impl<'a> Walker<'a> {
         if kind == "fun_declaration" && self.facts.tag == "CR" {
             let line = self.line(id);
             let idx = self.push_call("fun".to_string(), line);
-            let fname = self.children(id).into_iter().find(|&c| self.kind(c) == "identifier").map(|c| self.text_string(c)).unwrap_or_default();
+            let children = self.children(id);
+            let fname = children.iter().copied().find(|&c| self.kind(c) == "identifier").map(|c| self.text_string(c)).unwrap_or_default();
+            let colon_pos = children.iter().position(|&c| self.kind(c) == ":");
+            let ret_type = colon_pos.and_then(|pos| {
+                children[pos + 1..].iter().copied().find(|&c| !self.is_layout(c))
+            });
             let val = if fname.is_empty() {
                 format!("[\"c\",{idx},0,[]]")
+            } else if let Some(rt) = ret_type {
+                let rt_text = self.text_string(rt);
+                let rt_form = if !rt_text.is_empty() && rt_text.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                    let mut rf = String::from("[\"n\",");
+                    push_string(&mut rf, rt_text.trim_end_matches('*').trim());
+                    rf.push(']');
+                    rf
+                } else {
+                    let f = self.form(rt);
+                    if f.is_empty() { "0".to_string() } else { f }
+                };
+                let mut arg = String::from("[\"k\",");
+                push_string(&mut arg, &fname);
+                arg.push(',');
+                arg.push_str(&rt_form);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
             } else {
                 let mut arg = String::from("[\"n\",");
                 push_string(&mut arg, &fname);
@@ -16094,11 +16219,89 @@ impl<'a> Walker<'a> {
                 format!("[\"c\",{idx},0,[{arg}]]")
             };
             self.lexer_event(b'x', line, &[], &val, false);
+            if let Some(rt) = ret_type {
+                if !fname.is_empty() && self.text_string(id).trim().ends_with('*') {
+                    self.lexer_event(b'a', line, &[fname], "0", false);
+                }
+            }
         }
         if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
-            self.open_definition(id, def);
-            if self.language.name == "csharp" && !def.container {
-                self.cs_arrow_body(id, self.line(id));
+            if self.facts.tag == "GROOVY"
+                && kind == "field_or_method"
+                && self.child_of_kind(id, "parameter_list").is_none()
+            {
+                if let Some(init) = self.child_of_kind(id, "initializer") {
+                    let line = self.line(id);
+                    let children = self.children(id);
+                    let init_pos = children.iter().position(|&c| c == init).unwrap_or(children.len());
+                    let target = children[..init_pos]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&c| self.kind(c) == "identifier")
+                        .map(|c| self.text_string(c));
+                    if let (Some(target), Some(rhs)) = (
+                        target,
+                        self.children(init).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "="),
+                    ) {
+                        let ctor = if self.kind(rhs) == "constructor_call" {
+                            Some(rhs)
+                        } else if self.kind(rhs) == "call" {
+                            self.children(rhs).first().copied().filter(|&c| self.kind(c) == "constructor_call")
+                        } else {
+                            None
+                        };
+                        if let Some(ctor) = ctor {
+                            if let Some(t) = self.children(ctor).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "new") {
+                                let cname = if self.kind(t) == "call" {
+                                    self.children(t).first().copied().and_then(|c| self.leaf_name(c))
+                                } else {
+                                    self.leaf_name(t)
+                                };
+                                if let Some(cname) = cname {
+                                    self.facts.vars.push((target.clone(), cname));
+                                }
+                            }
+                        } else if self.kind(rhs) == "call" {
+                            if let Some(callee) = self.children(rhs).first().copied().and_then(|c| self.leaf_name(c)) {
+                                if callee.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                    self.facts.vars.push((target.clone(), callee));
+                                }
+                            }
+                        }
+                        let val = self.form(rhs);
+                        self.lexer_event(b'a', line, &[target], &val, false);
+                    }
+                    return;
+                }
+            } else {
+                self.open_definition(id, def);
+                if self.language.name == "csharp" && !def.container {
+                    self.cs_arrow_body(id, self.line(id));
+                }
+                return;
+            }
+        }
+        if self.facts.tag == "GROOVY" && kind == "annotation" {
+            let line = self.line(id);
+            let names: Vec<String> = self
+                .children(id)
+                .into_iter()
+                .filter(|&c| self.kind(c) == "identifier")
+                .map(|c| self.text_string(c))
+                .collect();
+            if !names.is_empty() {
+                let full = names.join(".");
+                if let Some(arg_list) = self.child_of_kind(id, "argument_list") {
+                    let idx = self.push_call(full, line);
+                    let args = self.arguments(arg_list);
+                    self.lexer_event(b'x', line, &[], &format!("[\"c\",{idx},0,{args}]"), false);
+                } else {
+                    let mut val = String::from("[\"n\",");
+                    push_string(&mut val, &full);
+                    val.push(']');
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
             }
             return;
         }
@@ -17034,6 +17237,48 @@ impl<'a> Walker<'a> {
                     self.expression_statement(id);
                 }
             }
+            "expression_statement" if self.facts.tag == "GROOVY" => {
+                if let Some(assign) = self.child_of_kind(id, "assignment") {
+                    let line = self.line(assign);
+                    let children = self.children(assign);
+                    if let Some(eq_pos) = children.iter().position(|&c| self.kind(c) == "=") {
+                        let lhs = children[..eq_pos].iter().copied().find(|&c| !self.is_layout(c));
+                        let rhs = children[eq_pos + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                        if let (Some(lhs), Some(rhs)) = (lhs, rhs) {
+                            let target = self.text_string(lhs);
+                            let ctor = if self.kind(rhs) == "constructor_call" {
+                                Some(rhs)
+                            } else if self.kind(rhs) == "call" {
+                                self.children(rhs).first().copied().filter(|&c| self.kind(c) == "constructor_call")
+                            } else {
+                                None
+                            };
+                            if let Some(ctor) = ctor {
+                                if let Some(t) = self.children(ctor).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "new") {
+                                    let cname = if self.kind(t) == "call" {
+                                        self.children(t).first().copied().and_then(|c| self.leaf_name(c))
+                                    } else {
+                                        self.leaf_name(t)
+                                    };
+                                    if let Some(cname) = cname {
+                                        self.facts.vars.push((target.clone(), cname));
+                                    }
+                                }
+                            } else if self.kind(rhs) == "call" {
+                                if let Some(callee) = self.children(rhs).first().copied().and_then(|c| self.leaf_name(c)) {
+                                    if callee.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                        self.facts.vars.push((target.clone(), callee));
+                                    }
+                                }
+                            }
+                            let val = self.form(rhs);
+                            self.lexer_event(b'a', line, &[target], &val, false);
+                            return;
+                        }
+                    }
+                }
+                self.expression_statement(id);
+            }
             "expression_statement" => self.expression_statement(id),
             "command_call" if matches!(self.facts.tag.as_str(), "RB" | "CR" | "NIM") => {
                 let val = self.form(id);
@@ -17195,6 +17440,107 @@ impl<'a> Walker<'a> {
                 let val = format!("[\"c\",{idx},0,[{}]]", args.join(","));
                 self.lexer_event(b'x', line, &[], &val, false);
             }
+            "import_declaration" if self.facts.tag == "GROOVY" => {
+                let line = self.line(id);
+                if let Some(dn) = self.child_of_kind(id, "dotted_name") {
+                    let module = self.text_string(dn);
+                    let children = self.children(id);
+                    let star = children.iter().any(|&c| self.kind(c) == "*");
+                    let alias = if star {
+                        String::new()
+                    } else if let Some(as_pos) = children.iter().position(|&c| self.kind(c) == "as") {
+                        children[as_pos + 1..]
+                            .iter()
+                            .copied()
+                            .find(|&c| self.kind(c) == "identifier")
+                            .map(|c| self.text_string(c))
+                            .unwrap_or_default()
+                    } else {
+                        module.rsplit('.').next().unwrap_or(&module).to_string()
+                    };
+                    if !module.is_empty() {
+                        self.facts.imports.push(Import {
+                            line,
+                            module,
+                            name: String::new(),
+                            alias,
+                            kind: if star { IMPORT_STAR } else { Import::default().kind },
+                            ..Import::default()
+                        });
+                    }
+                }
+            }
+            "field_or_method" if self.facts.tag == "GROOVY" && self.child_of_kind(id, "initializer").is_some() => {
+                let line = self.line(id);
+                let children = self.children(id);
+                if let Some(init_pos) = children.iter().position(|&c| self.kind(c) == "initializer") {
+                    let target = children[..init_pos]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&c| self.kind(c) == "identifier")
+                        .map(|c| self.text_string(c));
+                    let init = children[init_pos];
+                    if let (Some(target), Some(rhs)) = (
+                        target,
+                        self.children(init).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "="),
+                    ) {
+                        let ctor = if self.kind(rhs) == "constructor_call" {
+                            Some(rhs)
+                        } else if self.kind(rhs) == "call" {
+                            self.children(rhs).first().copied().filter(|&c| self.kind(c) == "constructor_call")
+                        } else {
+                            None
+                        };
+                        if let Some(ctor) = ctor {
+                            if let Some(t) = self.children(ctor).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "new") {
+                                let cname = if self.kind(t) == "call" {
+                                    self.children(t).first().copied().and_then(|c| self.leaf_name(c))
+                                } else {
+                                    self.leaf_name(t)
+                                };
+                                if let Some(cname) = cname {
+                                    self.facts.vars.push((target.clone(), cname));
+                                }
+                            }
+                        }
+                        let val = self.form(rhs);
+                        self.lexer_event(b'a', line, &[target], &val, false);
+                    }
+                }
+            }
+            "annotation" if self.facts.tag == "GROOVY" => {
+                let line = self.line(id);
+                let names: Vec<String> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&c| self.kind(c) == "identifier")
+                    .map(|c| self.text_string(c))
+                    .collect();
+                if !names.is_empty() {
+                    let full = names.join(".");
+                    if let Some(arg_list) = self.child_of_kind(id, "argument_list") {
+                        let idx = self.push_call(full, line);
+                        let args = self.arguments(arg_list);
+                        self.lexer_event(b'x', line, &[], &format!("[\"c\",{idx},0,{args}]"), false);
+                    } else {
+                        let mut val = String::from("[\"n\",");
+                        push_string(&mut val, &full);
+                        val.push(']');
+                        self.lexer_event(b'x', line, &[], &val, false);
+                    }
+                }
+            }
+            "package_declaration" if self.facts.tag == "GROOVY" => {
+                let line = self.line(id);
+                if let Some(dn) = self.child_of_kind(id, "dotted_name") {
+                    let path = self.text_string(dn);
+                    let mut val = String::from("[\"m\",[[\"n\",\"package\"],[\"n\",");
+                    push_string(&mut val, &path);
+                    val.push_str("]]]");
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
             "pragma_directive" if self.facts.tag == "SOL" => {
                 let raw = self.text_string(id);
                 if raw.contains('=') {
@@ -17225,6 +17571,11 @@ impl<'a> Walker<'a> {
                                 }
                             }
                         }).unwrap_or_else(|| "0".to_string());
+                        let val = if self.text_string(id).trim().ends_with('*') && val != "0" {
+                            let mut m = String::from("[\"m\",["); m.push_str(&val); m.push_str(",[\"n\",\"end\"]]]"); m
+                        } else {
+                            val
+                        };
                         self.lexer_event(b'a', self.line(id), &[name], &val, false);
                     }
                 }
