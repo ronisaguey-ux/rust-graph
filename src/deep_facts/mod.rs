@@ -33598,3 +33598,323 @@ impl<'a> Walker<'a> {
             }
             "param_declaration" if self.facts.tag == "PS1" => {
                 let line = self.line(id);
+                self.push_call("param".to_string(), line);
+            }
+            "local_declaration" if self.facts.tag == "LUA" => {
+                self.lua_local_declaration(id);
+            }
+            "if_statement" | "elseif_clause" | "while_statement" if self.facts.tag == "LUA" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                let mut cond_nodes: Vec<u32> = Vec::new();
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if matches!(ck, "then" | "do" | "block" | "elseif_clause" | "else_clause" | "end") {
+                        break;
+                    }
+                    if matches!(ck, "if" | "elseif" | "while") {
+                        continue;
+                    }
+                    if matches!(ck, "nil" | "true" | "false") {
+                        parts.push(format!("[\"n\",\"{ck}\"]"));
+                        continue;
+                    }
+                    if self.is_layout(ch) {
+                        continue;
+                    }
+                    cond_nodes.push(ch);
+                    let f = self.form(ch);
+                    if !f.is_empty() && f != "0" {
+                        parts.push(f);
+                    }
+                }
+                let full_val = if parts.len() == 1 {
+                    Some(parts[0].clone())
+                } else if parts.len() > 1 {
+                    Some(format!("[\"m\",[{}]]", parts.join(",")))
+                } else {
+                    None
+                };
+                if let Some(ref fv) = full_val {
+                    self.lexer_event(b'x', line, &[], fv, false);
+                    let mut extra_lines: Vec<u32> = Vec::new();
+                    for &cn in &cond_nodes {
+                        self.lua_collect_expr_lines(cn, line, &mut extra_lines);
+                    }
+                    extra_lines.sort_unstable();
+                    extra_lines.dedup();
+                    for ln in extra_lines {
+                        self.lexer_event(b'x', ln, &[], fv, false);
+                    }
+                }
+            }
+            "repeat_statement" if self.facts.tag == "LUA" => {
+                let mut saw_until = false;
+                for ch in self.children(id) {
+                    let ck = self.kind(ch);
+                    if ck == "until" {
+                        saw_until = true;
+                        continue;
+                    }
+                    if saw_until && !self.is_layout(ch) {
+                        let f = if matches!(ck, "nil" | "true" | "false") {
+                            format!("[\"n\",\"{ck}\"]")
+                        } else {
+                            self.form(ch)
+                        };
+                        if !f.is_empty() && f != "0" {
+                            self.lexer_event(b'x', self.line(ch), &[], &f, false);
+                        }
+                        break;
+                    }
+                }
+            }
+            "for_numeric" if self.facts.tag == "LUA" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                for c in self.children(id) {
+                    let ck = self.kind(c);
+                    if matches!(ck, "for" | "do" | "end" | "block" | "=" | ",") || self.is_layout(c) {
+                        continue;
+                    }
+                    let f = self.form(c);
+                    parts.push(if f.is_empty() { "0".to_string() } else { f });
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 {
+                        parts.remove(0)
+                    } else {
+                        format!("[\"t\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "for_generic" if self.facts.tag == "LUA" => {
+                let line = self.line(id);
+                let mut parts: Vec<String> = Vec::new();
+                for c in self.children(id) {
+                    let ck = self.kind(c);
+                    if ck == "namelist" {
+                        for nc in self.children(c) {
+                            if let Some(n) = self.leaf_name(nc) {
+                                parts.push(format!("[\"n\",\"{n}\"]"));
+                            }
+                        }
+                    } else if ck == "expression_list" {
+                        for ec in self.children(c) {
+                            let eck = self.kind(ec);
+                            if self.is_layout(ec) || eck == "," {
+                                continue;
+                            }
+                            let f = self.form(ec);
+                            parts.push(if f.is_empty() { "0".to_string() } else { f });
+                        }
+                    }
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 {
+                        parts.remove(0)
+                    } else {
+                        format!("[\"t\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "call" if self.facts.tag == "LUA" => {
+                let ch = self.children(id);
+                if ch.first().map(|&c| self.text(c)) == Some(b"require") {
+                    let line = self.line(id);
+                    if let Some(ca) = self.child_of_kind(id, "call_arguments") {
+                        let raw = self.text_string(ca);
+                        let bytes = raw.as_bytes();
+                        let mut i = 0;
+                        while i < bytes.len() {
+                            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                                let q = bytes[i];
+                                i += 1;
+                                let mut val = String::new();
+                                while i < bytes.len() && bytes[i] != q {
+                                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                        i += 1;
+                                    }
+                                    val.push(bytes[i] as char);
+                                    i += 1;
+                                }
+                                if !val.is_empty() {
+                                    let alias = val.rsplit('/').next().unwrap_or("").to_string();
+                                    if !self.facts.imports.iter().any(|imp| imp.line == line && imp.module == val && imp.kind == IMPORT_STAR) {
+                                        self.facts.imports.push(Import {
+                                            line,
+                                            module: val,
+                                            alias,
+                                            kind: IMPORT_STAR,
+                                            ..Import::default()
+                                        });
+                                    }
+                                }
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                }
+                if !self.call_texts.contains_key(&id) {
+                    let _ = self.form(id);
+                }
+            }
+            _ if matches!(self.facts.tag.as_str(), "R" | "SOL" | "DART" | "RB" | "PHP" | "LUA" | "CR" | "PS1" | "FS" | "ZIG" | "AWK" | "PAS")
+                && self.kinds.calls.contains(&kind)
+                && !self.call_texts.contains_key(&id) =>
+            {
+                let _ = self.form(id);
+            }
+            // `val x = f()`: a Scala val/var is not a definition node the walk
+            // opens, so nothing formed the initializer and every call written
+            // there (`new Array[T](n)`) was missing from the call table. Form
+            // only the value after `=` - the type and modifiers are not calls.
+            "val_definition" if self.language.name == "scala" => {
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.text_string(child) == "=") {
+                    if let Some(&value) = children.get(at + 1) {
+                        let form = self.form(value);
+                        // The one-pass reader files a `val`/`var` with an
+                        // initialiser as an `a` event naming the bound
+                        // identifier. Reading only the value left every member
+                        // of a trait/object body without that event: the CST
+                        // folded the whole body into one `x` on the header
+                        // line, so every binding lost its line (21 rows in
+                        // AnsiColor.scala alone).
+                        // The binders are the identifiers before the type
+                        // annotation: `var a, b: T = …` declares both, and a
+                        // type annotation (`val A: RecordType = …`) puts
+                        // another identifier after the colon, which is not a
+                        // binder (21 rows in RecordType.scala). Only the first
+                        // was read, so `b` was missing from every such line.
+                        let colon = children[..at].iter().position(|&child| self.text_string(child) == ":").unwrap_or(at);
+                        let names: Vec<String> = children[..colon]
+                            .iter()
+                            .filter(|&&child| self.kind(child) == "identifier")
+                            .map(|&child| self.text_string(child))
+                            .collect();
+                        if !names.is_empty() {
+                            let line = self.line(id);
+                            // The lexer also binds a val whose initialiser is a
+                            // constructor call to the class it builds
+                            // (`val bldr = new JLSBuilder(..)` binds `bldr` to
+                            // `JLSBuilder`). Reading only the event left every
+                            // such typed member as a variable the CST missed.
+                            if let Some(class) = self.constructed(value) {
+                                for name in &names {
+                                    self.facts.vars.push((name.clone(), class.clone()));
+                                }
+                            }
+                            self.lexer_event(b'a', line, &names, &form, false);
+                        }
+                    }
+                }
+            }
+            // `(x: T) => self.apply(x)`: Scala's lambda body is an expression,
+            // and nothing formed it, so every call written there was missing
+            // from the call table. A nested lambda is visited on its own.
+            "lambda_expression" if self.language.name == "scala" => {
+                let mut calls = Vec::new();
+                self.scala_calls_in_lambda(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            // `Assert.Throws<X>(() => new Foo());`: a lambda's expression body
+            // holds a call, and no arm read the node, so every call written in
+            // a lambda passed as an argument was missing from the CST's record
+            // (C# corpus: the largest remaining call cluster, 44 files). A
+            // block body is walked by the generic walk and needs nothing here.
+            "lambda_expression" if self.facts.tag == "CS" => {
+                if let Some(body) = self.cs_expression_body(id) {
+                    self.form(body);
+                }
+            }
+            // Scala's `def f(): T = expr` writes the body as a `def_body` whose
+            // child is the expression itself. Nothing read that node, so a call
+            // in an expression-bodied def never reached the record.
+            "def_body" => self.expression_statement(id),
+            // Erlang writes a function's expressions under one `body`, separated
+            // by commas. Reading only the first left every later call out of the
+            // record (`A = f(), B:g().` recorded `f` and neither remote call).
+            "body" if self.facts.tag == "ERL" => {
+                let kids: Vec<u32> = self.children(id).into_iter().filter(|&c| !self.is_layout(c) && !matches!(self.kind(c), "," | ".")).collect();
+                for (ki, &child) in kids.iter().enumerate() {
+                    if self.kind(child) == "ERROR" {
+                        if let Some(&next) = kids.get(ki + 1) {
+                            if matches!(self.kind(next), "paren_expression" | "call_arguments" | "parameter_group" | "(") {
+                                let mut leaves = Vec::new();
+                                self.cs_collect_leaves(child, &mut leaves);
+                                if let Some(&last_tok) = leaves.iter().rev().find(|&&t| self.erl_leaf_name(t).is_some()) {
+                                    if let Some(nm) = self.erl_leaf_name(last_tok) {
+                                        let _ = self.push_call(nm, self.line(last_tok));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.statement_node(child, child);
+                }
+            }
+            "attribute" if self.facts.tag == "ERL" => {
+                let attr_name = self
+                    .child_of_kind(id, "attribute_name")
+                    .map(|c| self.text_string(c))
+                    .unwrap_or_default();
+                if matches!(attr_name.as_str(), "define" | "if" | "elif" | "record") {
+                    if let Some(grp) = self.child_of_kind(id, "attribute_group") {
+                        if let Some(args) = self.child_of_kind(grp, "attribute_arguments") {
+                            let exprs: Vec<u32> = self
+                                .children(args)
+                                .into_iter()
+                                .filter(|&c| !self.is_layout(c) && self.kind(c) != ",")
+                                .collect();
+                            for &expr in &exprs {
+                                let _ = self.form(expr);
+                            }
+                        }
+                    }
+                }
+            }
+            // After a parse error inside an Erlang function body, recovery pops back to `forms`
+            // and parses the next call `foo(Args);` as a `function_head` with `function_name`
+            // and `parameter_group` followed by `ERROR MISSING` for `->` and `body`. When there
+            // is no `->` / `body`, it is a call, not a function clause header.
+            "function_head" if self.facts.tag == "ERL" => {
+                let has_arrow = self.children(id).into_iter().any(|c| matches!(self.kind(c), "->" | "body"));
+                if !has_arrow {
+                    if let (Some(fname), Some(_pg)) = (
+                        self.child_of_kind(id, "function_name"),
+                        self.child_of_kind(id, "parameter_group"),
+                    ) {
+                        let name = self.text_string(fname).trim_matches('\'').to_string();
+                        if !name.is_empty() {
+                            self.push_call(name, self.line(fname));
+                        }
+                    }
+                }
+            }
+            "parameter_group" if self.facts.tag == "ERL" => {
+                let pline = self.line(id);
+                let mut parts = Vec::new();
+                if let Some(params) = self.child_of_kind(id, "parameters") {
+                    for expr in self.children(params) {
+                        if !self.is_layout(expr) && self.kind(expr) != "," {
+                            let v = self.form(expr);
+                            if !v.is_empty() && v != "0" {
+                                parts.push(v);
+                            }
+                        }
+                    }
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 {
+                        parts.remove(0)
+                    } else {
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', pline, &[], &val, false);
+                }
