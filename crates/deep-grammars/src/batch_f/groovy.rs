@@ -85,6 +85,7 @@ rust_graph_deep::grammar! { GROOVY {
         KW_DEF = "def",
         KW_CLASS = "class",
         KW_INTERFACE = "interface",
+        KW_TRAIT = "trait",
         KW_ENUM = "enum",
         KW_EXTENDS = "extends",
         KW_IMPLEMENTS = "implements",
@@ -93,6 +94,7 @@ rust_graph_deep::grammar! { GROOVY {
         KW_PRIVATE = "private",
         KW_PUBLIC = "public",
         KW_PROTECTED = "protected",
+        KW_ABSTRACT = "abstract",
         KW_RETURN = "return",
         KW_IF = "if",
         KW_ELSE = "else",
@@ -130,9 +132,10 @@ rust_graph_deep::grammar! { GROOVY {
         | import_declaration
         | class_declaration
         | interface_declaration
+        | trait_declaration
         | enum_declaration
         | annotation
-        | &("def" IDENT) definition
+        | &("def" (IDENT | STRING)) definition
         | if_statement
         | for_statement
         | while_statement
@@ -151,6 +154,7 @@ rust_graph_deep::grammar! { GROOVY {
 
     class_declaration: "class" _name [type_parameters] [class_heritage] class_body,
     interface_declaration: "interface" _name [type_parameters] [class_heritage] class_body,
+    trait_declaration: "trait" _name [type_parameters] [class_heritage] class_body,
     enum_declaration: "enum" _name ["implements" _type ("," _type)*] enum_body,
     class_heritage: _heritage_clause*,
     _heritage_clause: "extends" _type | "implements" _type ("," _type)*,
@@ -158,7 +162,7 @@ rust_graph_deep::grammar! { GROOVY {
     enum_body: "{" [enum_item ("," enum_item)*] "}",
     enum_item: _name [argument_list],
 
-    _member: &("def" IDENT) definition | field_or_method,
+    _member: &("def" (IDENT | STRING)) definition | field_or_method,
     /// `def f(...)`, `def x = 1`, `String name = 'x'` and `int size()` all have
     /// the shape `[def] type? name` and are told apart by their tail.
     definition: ["def"] modifier* _head_type [_head_type] [_definition_tail],
@@ -166,8 +170,8 @@ rust_graph_deep::grammar! { GROOVY {
     /// an initializer, or neither. The head is shared because a constructor
     /// (`Foo(`) and a typed field (`String name =`) differ only after the name.
     field_or_method: modifier* _head_type [_head_type] [_definition_tail],
-    modifier: "static" | "final" | "private" | "public" | "protected",
-    _head_type: IDENT | "void" | "int" | "long" | "double" | "boolean" | "String",
+    modifier: "static" | "final" | "private" | "public" | "protected" | "abstract",
+    _head_type: IDENT | STRING | "void" | "int" | "long" | "double" | "boolean" | "String",
     _definition_tail: parameter_list block | initializer,
     initializer: "=" _expression,
 
@@ -341,6 +345,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"def" => KW_DEF,
         b"class" => KW_CLASS,
         b"interface" => KW_INTERFACE,
+        b"trait" => KW_TRAIT,
         b"enum" => KW_ENUM,
         b"extends" => KW_EXTENDS,
         b"implements" => KW_IMPLEMENTS,
@@ -349,6 +354,7 @@ fn keyword(text: &[u8]) -> Kind {
         b"private" => KW_PRIVATE,
         b"public" => KW_PUBLIC,
         b"protected" => KW_PROTECTED,
+        b"abstract" => KW_ABSTRACT,
         b"return" => KW_RETURN,
         b"if" => KW_IF,
         b"else" => KW_ELSE,

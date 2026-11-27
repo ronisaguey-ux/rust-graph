@@ -148,6 +148,7 @@ rust_graph_deep::grammar! { CRYSTAL {
         STAR = "*",
         STARSTAR = "**",
         SLASH = "/",
+        SLASHSLASH = "//",
         PERCENT = "%",
         PIPE = "|",
         AMP = "&",
@@ -227,7 +228,7 @@ rust_graph_deep::grammar! { CRYSTAL {
     method_definition: [visibility] ["abstract"] "def" method_name [parameters] [":" _type] body "end",
     visibility: "private" | "protected",
     method_name: ["self" "."] _method_ident,
-    _method_ident: IDENT,
+    _method_ident: IDENT | "for" | "in" | "next" | "break" | "type" | "class" | "of" | "as",
     parameters: "(" (_parameter %? ",") ")",
     _parameter: ["*" | "**" | "&"] parameter_name [":" _type] ["=" _expression@assign],
     parameter_name: IDENT | INSTANCE_VAR | CLASS_VAR,
@@ -280,13 +281,13 @@ rust_graph_deep::grammar! { CRYSTAL {
         cmp: left "<" | ">" | "<=" | ">=" => binary,
         shift: left "<<" | ">>" => binary,
         add: left "+" | "-" => binary,
-        mul: left "*" | "/" | "%" => binary,
+        mul: left "*" | "/" | "//" | "%" => binary,
         exp: right "**" => binary,
         unary: prefix "!" | "-" | "+" | "~" => unary,
         block: postfix brace_block => call_with_block,
         do_block: postfix do_block => call_with_block,
         call: postfix arguments => call,
-        index: postfix subscript => element_reference,
+        index: postfix subscript ["?"] => element_reference,
         member: postfix "." _property => member,
         scope: postfix "::" CONSTANT => scope,
 
@@ -327,7 +328,7 @@ rust_graph_deep::grammar! { CRYSTAL {
 
     generic_arguments: "(" (type_argument %? ",") ")",
     type_argument: _name ":" _type | _type,
-    _type: type_path [_type_tail],
+    _type: type_path _type_tail*,
     type_path: (_name | CONSTANT) ("::" CONSTANT)*,
     _type_tail: union_type | nilable_type | pointer_type | generic_arguments,
     union_type: "|" _type,
@@ -370,6 +371,7 @@ pub fn lex(c: &mut Cursor) -> Kind {
         }
         b'%' if !ends_operand(c.previous()) && percent_delimiter(c.peek_at(1)) => percent_literal(c),
         b'<' if c.peek_at(1) == b'<' && !ends_operand(c.previous()) && heredoc_start(c) => heredoc(c),
+        b'/' if c.peek_at(1) == b'/' && ends_operand(c.previous()) => { c.bump_n(2); SLASHSLASH }
         b'/' if c.peek_at(1) != b'=' && !ends_operand(c.previous()) => {
             if regex(c) {
                 REGEX
