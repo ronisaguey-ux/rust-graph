@@ -1639,28 +1639,166 @@ impl<'a> Walker<'a> {
                             let eq = p1 + eq_rel;
                             if eq + 1 < trimmed.len() && !matches!(trimmed[eq + 1], b'=' | b'>') {
                                 let rhs = &trimmed[eq + 1..];
+                                let mut targets_syms = vec![owner_idx];
+                                if let Some(oi) = outer_fn_idx {
+                                    targets_syms.push(oi);
+                                }
+                                for &si in &targets_syms {
+                                    let mut parts: Vec<String> = Vec::new();
+                                    let mut rk = 0usize;
+                                    while rk < rhs.len() {
+                                        if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
+                                            let r0 = rk;
+                                            while rk < rhs.len() {
+                                                if rhs[rk].is_ascii_alphanumeric() || rhs[rk] == b'_' || rhs[rk] == b'.' {
+                                                    rk += 1;
+                                                } else if rk + 1 < rhs.len() && rhs[rk] == b':' && rhs[rk + 1] == b':' {
+                                                    rk += 2;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            let full = String::from_utf8_lossy(&rhs[r0..rk]).replace("::", ".");
+                                            let full = full.trim_matches('.').to_string();
+                                            if !full.is_empty() && !matches!(full.as_str(), "as" | "mut" | "ref" | "unsafe" | "true" | "false" | "const") {
+                                                if rk < rhs.len() && rhs[rk] == b'(' {
+                                                    let (recv_str, call_path) = if let Some((rv, _m)) = full.rsplit_once('.') {
+                                                        (format!("[\"n\",\"{rv}\"]"), full.clone())
+                                                    } else {
+                                                        ("0".to_string(), full.clone())
+                                                    };
+                                                    if let Some(sym) = self.facts.symbols.get_mut(si) {
+                                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == call_path).unwrap_or_else(|| {
+                                                            sym.calls.push(Call { path: call_path.clone(), line: lno });
+                                                            sym.calls.len() - 1
+                                                        });
+                                                        parts.push(format!("[\"c\",{cidx},{recv_str},[0]]"));
+                                                    }
+                                                } else {
+                                                    parts.push(format!("[\"n\",\"{full}\"]"));
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        rk += 1;
+                                    }
+                                    let val = if parts.is_empty() {
+                                        "0".to_string()
+                                    } else if parts.len() == 1 {
+                                        parts.remove(0)
+                                    } else {
+                                        format!("[\"m\",[{}]]", parts.join(","))
+                                    };
+                                    let ev = format!("[\"a\",{lno},[\"{target}\"],{val},0]");
+                                    if let Some(sym) = self.facts.symbols.get_mut(si) {
+                                        if !sym.events.is_empty() { sym.events.push(','); }
+                                        sym.events.push_str(&ev);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Also mirror standalone call statements inside nested `fn` to enclosing outer fn.
+                if let Some(oi) = outer_fn_idx {
+                    if !trimmed.starts_with(b"let ") && trimmed.contains(&b'(') {
+                        let mut parts: Vec<String> = Vec::new();
+                        let mut rk = 0usize;
+                        while rk < trimmed.len() {
+                            if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                                let r0 = rk;
+                                while rk < trimmed.len() {
+                                    if trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.' {
+                                        rk += 1;
+                                    } else if rk + 1 < trimmed.len() && trimmed[rk] == b':' && trimmed[rk + 1] == b':' {
+                                        rk += 2;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                let full = String::from_utf8_lossy(&trimmed[r0..rk]).replace("::", ".");
+                                let full = full.trim_matches('.').to_string();
+                                if !full.is_empty() && rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv_str = if let Some((rv, _)) = full.rsplit_once('.') {
+                                        format!("[\"n\",\"{rv}\"]")
+                                    } else {
+                                        "0".to_string()
+                                    };
+                                    if let Some(sym) = self.facts.symbols.get_mut(oi) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv_str},[0]]"));
+                                    }
+                                } else if !full.is_empty() && !matches!(full.as_str(), "unsafe" | "return" | "if" | "else" | "match" | "as" | "mut" | "ref") {
+                                    parts.push(format!("[\"n\",\"{full}\"]"));
+                                }
+                                continue;
+                            }
+                            rk += 1;
+                        }
+                        if !parts.is_empty() {
+                            let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                            let ev = format!("[\"x\",{lno},{val}]");
+                            if let Some(sym) = self.facts.symbols.get_mut(oi) {
+                                if !sym.events.is_empty() { sym.events.push(','); }
+                                sym.events.push_str(&ev);
+                            }
+                        }
+                    }
+                }
+
+                // 2b. Slice pattern `let [..] = expr;` -> emit `event a` with target `".."`.
+                if trimmed.starts_with(b"let [") && trimmed.contains(&b'=') {
+                    if let (Some(rb), Some(eq_p)) = (trimmed.iter().position(|&b| b == b']'), trimmed.iter().rposition(|&b| b == b'=')) {
+                        if eq_p > rb && trimmed[5..rb].windows(2).any(|w| w == b"..") {
+                            let rhs = &trimmed[eq_p + 1..];
+                            let mut rparts: Vec<String> = Vec::new();
+                            let mut rk = 0usize;
+                            while rk < rhs.len() {
+                                if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
+                                    let r0 = rk;
+                                    while rk < rhs.len() && (rhs[rk].is_ascii_alphanumeric() || rhs[rk] == b'_') { rk += 1; }
+                                    let id = String::from_utf8_lossy(&rhs[r0..rk]);
+                                    if !matches!(id.as_ref(), "as" | "mut" | "ref") {
+                                        rparts.push(format!("[\"n\",\"{id}\"]"));
+                                    }
+                                    continue;
+                                }
+                                rk += 1;
+                            }
+                            let val = if rparts.is_empty() { "0".to_string() } else if rparts.len() == 1 { rparts.remove(0) } else { format!("[\"m\",[{}]]", rparts.join(",")) };
+                            let ev = format!("[\"a\",{lno},[\"..\"],{val},0]");
+                            if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                if !sym.events.is_empty() { sym.events.push(','); }
+                                sym.events.push_str(&ev);
+                            }
+                        }
+                    }
+                }
+
+                // 2c. Recover `pub mod <name>;` (kind 2) and global `use ::path::Item;` / `use ::path as alias;`.
+                if let Some(mpos) = trimmed.windows(4).position(|w| w == b"mod ") {
+                    let prev_ok = mpos == 0 || matches!(trimmed[mpos - 1], b' ' | b'\t' | b')');
+                    if prev_ok {
+                        let mut p0 = mpos + 4;
+                        while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                        let mut p1 = p0;
+                        while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                        if p1 > p0 && trimmed[p0].is_ascii_alphabetic() {
+                            let mname = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                            if !self.facts.symbols.iter().any(|sym| sym.name == mname && sym.line == lno) {
                                 let mut parts: Vec<String> = Vec::new();
                                 let mut rk = 0usize;
                                 while rk < rhs.len() {
                                     if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
                                         let r0 = rk;
-                                        while rk < rhs.len() && (rhs[rk].is_ascii_alphanumeric() || rhs[rk] == b'_') { rk += 1; }
-                                        let id = String::from_utf8_lossy(&rhs[r0..rk]);
-                                        if !matches!(id.as_ref(), "as" | "mut" | "ref" | "unsafe" | "true" | "false") {
-                                            parts.push(format!("[\"n\",\"{id}\"]"));
                                         }
                                         continue;
                                     }
                                     rk += 1;
                                 }
-                                let val = if parts.is_empty() {
-                                    "0".to_string()
-                                } else if parts.len() == 1 {
-                                    parts.remove(0)
-                                } else {
-                                    format!("[\"m\",[{}]]", parts.join(","))
-                                };
-                                let ev = format!("[\"a\",{lno},[\"{target}\"],{val},0]");
                                 if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
                                     if !sym.events.is_empty() { sym.events.push(','); }
                                     sym.events.push_str(&ev);
