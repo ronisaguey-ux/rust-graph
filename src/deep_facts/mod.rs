@@ -22078,3 +22078,323 @@ impl<'a> Walker<'a> {
             for cand in [last_started, prev_started, last_named, last_named_col0, first_local_fn_col0, last_local_fn_col0] {
                 if cand != 0 && !t.contains(&cand) {
                     t.push(cand);
+                }
+            }
+            if !t.contains(&0) {
+                t.push(0);
+            }
+        }
+
+        let mut existing_imports: std::collections::HashSet<(String, String)> = self
+            .facts
+            .imports
+            .iter()
+            .map(|im| (im.module.clone(), im.alias.clone()))
+            .collect();
+        let mut existing_vars: std::collections::HashSet<(String, String)> = self
+            .facts
+            .vars
+            .iter()
+            .cloned()
+            .collect();
+
+        let n_syms = self.facts.symbols.len();
+        let mut extra_events: Vec<Vec<String>> = vec![Vec::new(); n_syms];
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+
+        let is_ident_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_ident_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+        let push_call_to = |syms: &mut Vec<Symbol>,
+                            ecalls: &mut Vec<std::collections::HashSet<(String, u32)>>,
+                            si: usize,
+                            path: String,
+                            line: u32| -> usize {
+            if !ecalls[si].contains(&(path.clone(), line)) {
+                ecalls[si].insert((path.clone(), line));
+                syms[si].calls.push(Call { path, line });
+                syms[si].calls.len() - 1
+            } else {
+                syms[si]
+                    .calls
+                    .iter()
+                    .position(|c| c.path == path && c.line == line)
+                    .unwrap_or(0)
+            }
+        };
+
+        // Pass 1: per-line token/call extraction (tracking long-bracket strings `[=[ ... ]=]`)
+        let mut per_line_tokens: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
+        let mut per_line_code: Vec<String> = vec![String::new(); n_lines + 1];
+        let mut per_line_brace_delta: Vec<i32> = vec![0; n_lines + 1];
+        let mut per_line_paren_delta: Vec<i32> = vec![0; n_lines + 1];
+        let mut per_line_calls: Vec<Vec<(String, usize)>> = vec![Vec::new(); n_lines + 1];
+
+        let mut long_str_eqs: Option<usize> = None; // Some(k) when inside `[==...==[`
+        let mut in_long_comment: Option<usize> = None;
+
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            let targets = &line_targets[ln];
+            let bytes = raw_line.as_bytes();
+
+            // Check if we're in a long comment `--[=[ ... ]=]`
+            if let Some(eqs) = in_long_comment {
+                let mut close = String::from("]");
+                for _ in 0..eqs { close.push('='); }
+                close.push(']');
+                if raw_line.contains(&close) {
+                    in_long_comment = None;
+                }
+                continue;
+            }
+
+            // Detect start of `--[=[` long comment
+            if long_str_eqs.is_none() {
+                let trimmed = raw_line.trim_start();
+                if let Some(after_dash) = trimmed.strip_prefix("--[") {
+                    let eqs = after_dash.bytes().take_while(|&b| b == b'=').count();
+                    if after_dash.as_bytes().get(eqs) == Some(&b'[') {
+                        let mut close = String::from("]");
+                        for _ in 0..eqs { close.push('='); }
+                        close.push(']');
+                        if !after_dash[eqs + 1..].contains(&close) {
+                            in_long_comment = Some(eqs);
+                        }
+                        continue;
+                    }
+                }
+                if trimmed.starts_with("--") {
+                    continue;
+                }
+            }
+
+            // Determine code slice (don't strip `--` or quotes when inside a long string `[=[ ... ]=]`)
+            let mut code_end = bytes.len();
+            let mut bdelta: i32 = 0;
+            let mut pdelta: i32 = 0;
+            let started_in_long = long_str_eqs.is_some();
+
+            {
+                let mut q: u8 = 0;
+                let mut i = 0;
+                while i < bytes.len() {
+                    if let Some(eqs) = long_str_eqs {
+                        if bytes[i] == b']' {
+                            let mut j = i + 1;
+                            let mut cnt = 0;
+                            while j < bytes.len() && bytes[j] == b'=' && cnt < eqs {
+                                j += 1;
+                                cnt += 1;
+                            }
+                            if cnt == eqs && j < bytes.len() && bytes[j] == b']' {
+                                long_str_eqs = None;
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    let b = bytes[i];
+                    if q != 0 {
+                        if b == b'\\' && i + 1 < bytes.len() {
+                            i += 2;
+                            continue;
+                        }
+                        if b == q {
+                            q = 0;
+                        }
+                    } else {
+                        if b == b'"' || b == b'\'' {
+                            q = b;
+                        } else if b == b'[' {
+                            let mut j = i + 1;
+                            while j < bytes.len() && bytes[j] == b'=' {
+                                j += 1;
+                            }
+                            if j < bytes.len() && bytes[j] == b'[' {
+                                long_str_eqs = Some(j - (i + 1));
+                                i = j + 1;
+                                continue;
+                            }
+                        } else if b == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+                            if i + 2 < bytes.len() && bytes[i + 2] == b'[' {
+                                let mut j = i + 3;
+                                while j < bytes.len() && bytes[j] == b'=' { j += 1; }
+                                if j < bytes.len() && bytes[j] == b'[' {
+                                    let eqs = j - (i + 3);
+                                    let mut close = String::from("]");
+                                    for _ in 0..eqs { close.push('='); }
+                                    close.push(']');
+                                    if let Some(rel) = raw_line[j + 1..].find(&close) {
+                                        i = j + 1 + rel + close.len();
+                                        continue;
+                                    }
+                                }
+                            }
+                            code_end = i;
+                            break;
+                        } else if b == b'{' {
+                            bdelta += 1;
+                        } else if b == b'}' {
+                            bdelta -= 1;
+                        } else if b == b'(' {
+                            pdelta += 1;
+                        } else if b == b')' {
+                            pdelta -= 1;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+
+            per_line_brace_delta[ln] = bdelta;
+            per_line_paren_delta[ln] = pdelta;
+
+            let code = raw_line[..code_end].trim();
+            if code.is_empty() {
+                continue;
+            }
+            per_line_code[ln] = code.to_string();
+
+            // Imports: `local alias = require("mod")` / `require 'mod'`
+            if !started_in_long {
+                if let Some(req_pos) = code.find("require") {
+                    let after = code[req_pos + 7..].trim_start();
+                    let after = after.strip_prefix('(').map(|x| x.trim_start()).unwrap_or(after);
+                    if let Some(q) = after.as_bytes().first().copied().filter(|&b| b == b'"' || b == b'\'') {
+                        let rest = &after[1..];
+                        if let Some(end_q) = rest.find(q as char) {
+                            let module = rest[..end_q].to_string();
+                            if !module.is_empty() {
+                                let before = code[..req_pos].trim_end();
+                                let alias = if let Some(lhs) = before.strip_suffix('=') {
+                                    let lhs = lhs.trim();
+                                    let lhs = lhs.strip_prefix("local ").map(|x| x.trim()).unwrap_or(lhs);
+                                    if lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                        lhs.to_string()
+                                    } else {
+                                        String::new()
+                                    }
+                                } else {
+                                    String::new()
+                                };
+                                if !existing_imports.contains(&(module.clone(), alias.clone())) {
+                                    existing_imports.insert((module.clone(), alias.clone()));
+                                    self.facts.imports.push(Import {
+                                        line: ln32,
+                                        module,
+                                        name: String::new(),
+                                        alias,
+                                        kind: IMPORT_MODULE,
+                                        ..Import::default()
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Scan calls and identifiers on the line (inside long strings, do NOT skip quotes!)
+            let cb = code.as_bytes();
+            let mut toks: Vec<String> = Vec::new();
+            let mut lcalls: Vec<(String, usize)> = Vec::new();
+            let mut i = 0;
+            while i < cb.len() {
+                if !started_in_long && (cb[i] == b'"' || cb[i] == b'\'') {
+                    let q = cb[i];
+                    i += 1;
+                    while i < cb.len() && cb[i] != q {
+                        if cb[i] == b'\\' && i + 1 < cb.len() {
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    if i < cb.len() {
+                        i += 1;
+                    }
+                    toks.push("0".to_string());
+                    continue;
+                }
+                if is_ident_start(cb[i]) {
+                    let start = i;
+                    while i < cb.len() && is_ident_cont(cb[i]) {
+                        i += 1;
+                    }
+                    let mut full_end = i;
+                    let mut j = i;
+                    while j + 1 < cb.len() && (cb[j] == b'.' || cb[j] == b':') && is_ident_start(cb[j + 1]) {
+                        j += 1;
+                        while j < cb.len() && is_ident_cont(cb[j]) {
+                            j += 1;
+                        }
+                        full_end = j;
+                    }
+                    let full_str = &code[start..full_end];
+                    let norm_path = full_str.replace(':', ".");
+                    let mut k = full_end;
+                    while k < cb.len() && (cb[k] == b' ' || cb[k] == b'\t') {
+                        k += 1;
+                    }
+                    // Also handle indexed calls like `conf_constants.TYP_CHECKS[typ](value)`
+                    let mut indexed_call = false;
+                    if !started_in_long && k < cb.len() && cb[k] == b'[' {
+                        let mut m = k + 1;
+                        let mut bd = 1i32;
+                        while m < cb.len() && bd > 0 {
+                            if cb[m] == b'[' { bd += 1; }
+                            else if cb[m] == b']' { bd -= 1; }
+                            m += 1;
+                        }
+                        while m < cb.len() && (cb[m] == b' ' || cb[m] == b'\t') { m += 1; }
+                        if m < cb.len() && cb[m] == b'(' {
+                            indexed_call = true;
+                        }
+                    }
+                    let is_func_decl_name = !started_in_long && start >= 9 && code[..start].trim_end().ends_with("function");
+                    let next_line_starts_paren = started_in_long
+                        && k >= cb.len()
+                        && idx + 1 < lines.len()
+                        && lines[idx + 1].trim_start().starts_with('(');
+                    let is_call = !is_func_decl_name
+                        && (indexed_call
+                            || next_line_starts_paren
+                            || (k < cb.len()
+                                && (cb[k] == b'(' || (!started_in_long && (cb[k] == b'{' || cb[k] == b'"' || cb[k] == b'\'')))));
+                    if is_call && !matches!(norm_path.as_str(), "if" | "elseif" | "while" | "until" | "return" | "function" | "local" | "and" | "or" | "not" | "then" | "do" | "end") {
+                        let mut primary_idx = 0usize;
+                        for (ti, &tsi) in targets.iter().enumerate() {
+                            let ci = push_call_to(&mut self.facts.symbols, &mut existing_calls, tsi, norm_path.clone(), ln32);
+                            if ti == 0 {
+                                primary_idx = ci;
+                            }
+                        }
+                        lcalls.push((norm_path.clone(), primary_idx));
+                        let recv = if let Some((h, _)) = norm_path.rsplit_once('.') {
+                            let mut r = "[\"n\",".to_string();
+                            push_string(&mut r, h);
+                            r.push(']');
+                            r
+                        } else {
+                            "0".to_string()
+                        };
+                        let empty_args = k < cb.len() && cb[k] == b'(' && k + 1 < cb.len() && cb[k + 1] == b')';
+                        let args_str = if empty_args { "[]" } else { "[0]" };
+                        // Use index 0 so the call form is valid in EVERY target symbol
+                        toks.push(format!(r#"["c",0,{recv},{args_str}]"#));
+                        // If this is a leading `.method(` or `:method(` on a continuation line, also emit call with previous line's trailing path as receiver
+                        if start >= 1 && (cb[start - 1] == b'.' || cb[start - 1] == b':') && code[..start - 1].trim().is_empty() && ln > 1 {
+                            let prev = per_line_code[ln - 1].trim_end();
+                            let pb = prev.as_bytes();
+                            let mut pe = pb.len();
+                            while pe > 0 && (pb[pe - 1].is_ascii_alphanumeric() || pb[pe - 1] == b'_' || pb[pe - 1] == b'.') {
+                                pe -= 1;
