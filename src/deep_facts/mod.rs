@@ -1330,6 +1330,12 @@ impl<'a> Walker<'a> {
             stack: vec![Frame { node: tree.root, symbol: 0, class: String::new(), receiver: String::new(), container: false, defines: None }],
             bound: Vec::new(),
             consumed: Vec::new(),
+            macro_prefix: None,
+            statement_lines: std::collections::HashMap::new(),
+            call_texts: std::collections::HashMap::new(),
+            in_kotlin_expr_body: false,
+            delim_depth: 0,
+            go_literal_frames: std::collections::HashMap::new(),
         }
     }
 
@@ -1863,12 +1869,6 @@ impl<'a> Walker<'a> {
                 li += 1;
                 lno += 1;
             }
-            macro_prefix: None,
-            statement_lines: std::collections::HashMap::new(),
-            call_texts: std::collections::HashMap::new(),
-            in_kotlin_expr_body: false,
-            delim_depth: 0,
-            go_literal_frames: std::collections::HashMap::new(),
         }
     }
 
@@ -16488,32 +16488,73 @@ impl<'a> Walker<'a> {
                     word_forms.push((*wline, None, "0".to_string(), false));
                 }
             } else {
-                // Handle array element like env(FOO), RunTimes(command), hooks($curName)
-                if let Some((base, rest)) = w.split_once('(') {
-                    let clean = Self::tcl_clean_name(base);
-                    if Self::tcl_is_ident(&clean) {
-                        let cid = self.push_call(clean.clone(), *wline);
-                        let inner = rest.trim_end_matches(')');
-                        let arg_form = if let Some(vn) = Self::tcl_var_name(inner) {
-                            let mut an = String::from("[\"n\",");
-                            push_string(&mut an, &vn);
-                            an.push(']');
-                            an
-                        } else {
-                            let ic = Self::tcl_clean_name(inner);
-                            if Self::tcl_is_ident(&ic) {
-                                let mut an = String::from("[\"n\",");
-                                push_string(&mut an, &ic);
-                                an.push(']');
-                                an
-                            } else {
-                                "0".to_string()
+                // Handle array elements & parenthesized expr calls like env(FOO),
+                // int(rand()*62), ($end-$begin)/double($nosteps), Tcl_GetAssocData(...)
+                if w.contains('(') {
+                    let wb = w.as_bytes();
+                    let mut k = 0usize;
+                    let mut first_call: Option<(String, String)> = None;
+                    let mut call_forms: Vec<String> = Vec::new();
+                    while k < wb.len() {
+                        if wb[k].is_ascii_alphabetic() || wb[k] == b'_' || wb[k] == b':' {
+                            let start = k;
+                            while k < wb.len() && (wb[k].is_ascii_alphanumeric() || wb[k] == b'_' || wb[k] == b':') {
+                                k += 1;
                             }
+                            if k < wb.len() && wb[k] == b'(' {
+                                let raw_name = &w[start..k];
+                                let clean = Self::tcl_clean_name(raw_name);
+                                if Self::tcl_is_ident(&clean) {
+                                    let cid = self.push_call(clean.clone(), *wline);
+                                    // Find matching close paren for arg preview
+                                    let mut d = 1usize;
+                                    let mut end = k + 1;
+                                    while end < wb.len() && d > 0 {
+                                        if wb[end] == b'(' { d += 1; } else if wb[end] == b')' { d -= 1; }
+                                        end += 1;
+                                    }
+                                    let inner = if end > k + 1 && d == 0 { &w[k + 1..end - 1] } else { "" };
+                                    let arg_form = if let Some(vn) = Self::tcl_var_name(inner) {
+                                        let mut an = String::from("[\"n\",");
+                                        push_string(&mut an, &vn);
+                                        an.push(']');
+                                        an
+                                    } else {
+                                        let ic = Self::tcl_clean_name(inner);
+                                        if Self::tcl_is_ident(&ic) {
+                                            let mut an = String::from("[\"n\",");
+                                            push_string(&mut an, &ic);
+                                            an.push(']');
+                                            an
+                                        } else {
+                                            "0".to_string()
+                                        }
+                                    };
+                                    let f = format!("[\"c\",{cid},0,[{arg_form}]]");
+                                    if first_call.is_none() {
+                                        first_call = Some((clean, f.clone()));
+                                    }
+                                    call_forms.push(f);
+                                }
+                            }
+                            continue;
+                        }
+                        k += 1;
+                    }
+                    if let Some((_clean, _)) = first_call {
+                        let form = if call_forms.len() == 1 {
+                            call_forms.remove(0)
+                        } else {
+                            format!("[\"m\",[{}]]", call_forms.join(","))
                         };
-                        let form = format!("[\"c\",{cid},0,[{arg_form}]]");
-                        word_forms.push((*wline, Some(clean), form, true));
+                        word_forms.push((*wline, None, form, true));
                     } else {
-                        word_forms.push((*wline, None, "0".to_string(), false));
+                        let tail_id = w.rsplit(')').next().and_then(|t| {
+                            let s = t.rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':').next().unwrap_or("");
+                            let c = Self::tcl_clean_name(s);
+                            if Self::tcl_is_ident(&c) { Some(c) } else { None }
+                        });
+                        word_forms.push((*wline, tail_id, "0".to_string(), w.starts_with('(')));
                     }
                 } else {
                     // Handle -flag, hyphenated words (amazon-s3), and slash/dot paths (tcl/httpd)
@@ -16551,14 +16592,26 @@ impl<'a> Walker<'a> {
                         "instanceof", "sizeof", "return", "my", "local", "let", "var", "const", "final",
                         "mut", "ref", "unsafe", "defer", "go", "our", "pub",
                     ];
-                    if !is_flag && TCL_NOISE.contains(&clean.as_str()) {
+                    let tail_ident = if Self::tcl_is_ident(&clean) {
+                        Some(clean.clone())
+                    } else if w.as_bytes().last().is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                        segs.last().cloned()
+                    } else {
+                        None
+                    };
+                    if !is_flag && tail_ident.as_deref().is_some_and(|t| TCL_NOISE.contains(&t)) {
                         // Reference lexer skips NOISE words and does not trigger juxtaposed calls on preceding words
                         word_forms.push((*wline, None, "0".to_string(), false));
-                    } else if Self::tcl_is_ident(&clean) {
-                        // A -flag starts with '-', which is Op('-') so it does NOT trigger a call on the preceding word
-                        word_forms.push((*wline, Some(clean), seg_form, !is_flag));
-                    } else {
+                    } else if let Some(ident) = tail_ident {
+                        let ident = if ident == "this" { "self".to_string() } else { ident };
+                        // A -flag or %d / \n starts with an operator byte so it does NOT trigger a call on the preceding word,
+                        // but its trailing ident CAN open a juxtaposed call on the following word.
                         let is_val = !is_flag && w.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+                        word_forms.push((*wline, Some(ident), seg_form, is_val));
+                    } else {
+                        let is_val = !is_flag
+                            && (w.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+                                || (w.starts_with('@') && !segs.is_empty()));
                         word_forms.push((*wline, None, seg_form, is_val));
                     }
                 }
@@ -16600,7 +16653,11 @@ impl<'a> Walker<'a> {
             } else if let Some(cname) = ident_opt {
                 if next_is_val {
                     let cid = self.push_call(cname.clone(), wline);
-                    acc = format!("[\"c\",{cid},0,[{acc}]]");
+                    if idx > 0 && form_str != "0" {
+                        acc = format!("[\"m\",[{form_str},[\"c\",{cid},0,[{acc}]]]]");
+                    } else {
+                        acc = format!("[\"c\",{cid},0,[{acc}]]");
+                    }
                 } else {
                     let next_is_bracket = idx + 1 < word_forms.len()
                         && word_forms[idx + 1].0 == wline
@@ -16652,6 +16709,47 @@ impl<'a> Walker<'a> {
                 if !val.is_empty() && val != "0" {
                     self.lexer_event(b'x', cline, &[], &val, false);
                 }
+                for (wl, w) in &words {
+                        if !w.starts_with('"') && !w.starts_with('{') && !w.starts_with('[') {
+                            if let Some(ep) = w.find('=') {
+                                let prev_b = if ep > 0 { w.as_bytes()[ep - 1] } else { 0 };
+                                let next_b = w.as_bytes().get(ep + 1).copied().unwrap_or(0);
+                                if ep > 0 && !matches!(prev_b, b'=' | b'!' | b'<' | b'>') && next_b != b'=' {
+                                    let lhs_part = &w[..ep];
+                                    if let Some(tseg) = lhs_part
+                                        .rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                                        .find(|t| !t.is_empty())
+                                    {
+                                        let t = Self::tcl_clean_name(tseg);
+                                        if Self::tcl_is_ident(&t) {
+                                            let rhs_str = &w[ep + 1..];
+                                            let rv = if !rhs_str.is_empty() {
+                                                let r = self.tcl_eval_words(&[(*wl, rhs_str.to_string())], *wl, depth + 1);
+                                                if r.is_empty() { "0".to_string() } else { r }
+                                            } else {
+                                                "0".to_string()
+                                            };
+                                            self.lexer_event(b'a', *wl, &[t], &rv, false);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(eq_pos) = words.iter().position(|w| w.1 == "=") {
+                    if eq_pos > 0 {
+                        let lhs = Self::tcl_clean_name(&words[eq_pos - 1].1);
+                        if Self::tcl_is_ident(&lhs) {
+                            let rhs_val = if eq_pos + 1 < words.len() {
+                                let v = self.tcl_eval_words(&words[eq_pos + 1..], words[eq_pos].0, depth + 1);
+                                if v.is_empty() { "0".to_string() } else { v }
+                            } else {
+                                "0".to_string()
+                            };
+                            self.lexer_event(b'a', words[eq_pos].0, &[lhs], &rhs_val, false);
+                        }
+                    }
+                }
             }
         }
     }
@@ -16670,9 +16768,29 @@ impl<'a> Walker<'a> {
             return;
         }
         let args_braced = words.get(2).is_some_and(|&c| self.kind(c) == "braced_word");
+        let args_has_nested = words.get(2).is_some_and(|&c| {
+            if self.kind(c) != "braced_word" {
+                return false;
+            }
+            let t = self.text_string(c);
+            t.len() >= 2 && t.starts_with('{') && t[1..t.len() - 1].contains('{')
+        });
         let body_braced = words.len() >= 4 && words.last().is_some_and(|&c| self.kind(c) == "braced_word");
-        if !args_braced || !body_braced {
+        if !args_braced || !body_braced || args_has_nested {
+            if raw_name.starts_with("::") {
+                self.push_call(format!("proc.{sym_name}"), line);
+            } else if !args_braced {
+                self.push_call(sym_name.clone(), line);
+            }
             self.push_call("proc".to_string(), line);
+            if !body_braced && args_braced {
+                if let Some(&arg_node) = words.get(2) {
+                    let raw_args = self.text_string(arg_node);
+                    if raw_args.starts_with('{') && raw_args.ends_with('}') && raw_args.len() >= 2 {
+                        self.tcl_scan_script(&raw_args[1..raw_args.len() - 1], self.line(arg_node), 1);
+                    }
+                }
+            }
         }
         let sym = self.add_symbol(sym_name, String::new(), KIND_FUNCTION, line, Vec::new());
         self.stack.push(Frame {
@@ -18202,6 +18320,128 @@ impl<'a> Walker<'a> {
                 }
                 let val = format!("[\"c\",{idx},0,[{}]]", args.join(","));
                 self.lexer_event(b'x', line, &[], &val, false);
+            }
+            "foreach_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                if let Some(var) = self.child_of_kind(id, "variable") {
+                    let target = self
+                        .text_string(var)
+                        .trim_start_matches(|ch| matches!(ch, '$' | '@' | '%' | '#'))
+                        .replace("::", ".");
+                    let rhs = self
+                        .child_of_kind(id, "paren_expression")
+                        .map(|p| self.form(p))
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| "0".to_string());
+                    if !target.is_empty() {
+                        self.lexer_event(b'a', line, &[target], &rhs, false);
+                    }
+                }
+            }
+            "return_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                let val = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&c| !self.is_layout(c) && !matches!(self.kind(c), "return" | ";"))
+                    .map(|c| self.form(c))
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| "0".to_string());
+                self.lexer_event(b'r', line, &[], &val, false);
+            }
+            "my_declaration" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                let children = self.children(id);
+                if let Some(eq_pos) = children.iter().position(|&c| self.kind(c) == "=") {
+                    let mut targets = Vec::new();
+                    for &c in &children[..eq_pos] {
+                        if self.kind(c) == "variable" {
+                            let t = self.text_string(c).trim_start_matches(|ch| matches!(ch, '$' | '@' | '%' | '#')).replace("::", ".");
+                            if !t.is_empty() { targets.push(t); }
+                        } else if self.kind(c) == "variable_declarator" {
+                            for sub in self.children(c) {
+                                if self.kind(sub) == "variable" {
+                                    let t = self.text_string(sub).trim_start_matches(|ch| matches!(ch, '$' | '@' | '%' | '#')).replace("::", ".");
+                                    if !t.is_empty() { targets.push(t); }
+                                } else if self.kind(sub) == "paren_variables" {
+                                    for pv in self.children(sub) {
+                                        if self.kind(pv) == "variable" {
+                                            let t = self.text_string(pv).trim_start_matches(|ch| matches!(ch, '$' | '@' | '%' | '#')).replace("::", ".");
+                                            if !t.is_empty() { targets.push(t); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let rhs = children[eq_pos + 1..].iter().copied().find(|&c| !self.is_layout(c) && self.kind(c) != ";");
+                    if !targets.is_empty() {
+                        let val = rhs.map(|r| self.form(r)).filter(|v| !v.is_empty()).unwrap_or_else(|| "0".to_string());
+                        self.lexer_event(b'a', line, &targets, &val, false);
+                    }
+                }
+            }
+            "print_statement" | "list_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                if let Some(first) = self.children(id).into_iter().find(|&c| !self.is_layout(c)) {
+                    let kw = self.text_string(first);
+                    if !kw.is_empty() {
+                        let idx = self.push_call(kw, line);
+                        let mut args = Vec::new();
+                        for c in self.children(id).into_iter().skip(1) {
+                            if !self.is_layout(c) && !matches!(self.kind(c), "," | ";") {
+                                let v = self.form(c);
+                                if !v.is_empty() {
+                                    args.push(v);
+                                }
+                            }
+                        }
+                        let val = format!("[\"c\",{idx},0,[{}]]", args.join(","));
+                        self.lexer_event(b'x', line, &[], &val, false);
+                    }
+                }
+            }
+            "package_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                let idx = self.push_call("package".to_string(), line);
+                let arg = self
+                    .child_of_kind(id, "module_name")
+                    .map(|mn| format!("[\"n\",\"{}\"]", self.text_string(mn).replace("::", ".")))
+                    .unwrap_or_default();
+                let val = if arg.is_empty() {
+                    format!("[\"c\",{idx},0,[]]")
+                } else {
+                    format!("[\"c\",{idx},0,[{arg}]]")
+                };
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
+            "use_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                if let Some(mn) = self.child_of_kind(id, "module_name") {
+                    let module = self.text_string(mn).replace("::", ".");
+                    let alias = module.rsplit('.').next().unwrap_or(&module).to_string();
+                    if !module.is_empty() {
+                        self.facts.imports.push(Import {
+                            line,
+                            module,
+                            name: String::new(),
+                            alias,
+                            ..Import::default()
+                        });
+                    }
+                } else if let Some(st) = self.child_of_kind(id, "string") {
+                    let raw = self.text_string(st);
+                    let module = raw.trim_matches(|c| c == '"' || c == '\'').to_string();
+                    if !module.is_empty() {
+                        self.facts.imports.push(Import {
+                            line,
+                            module: module.clone(),
+                            name: String::new(),
+                            alias: module,
+                            ..Import::default()
+                        });
+                    }
+                }
             }
             "import_declaration" if self.facts.tag == "GROOVY" => {
                 let line = self.line(id);
