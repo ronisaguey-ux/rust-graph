@@ -9278,3 +9278,323 @@ impl<'a> Walker<'a> {
                     if trimmed_code[rk].is_ascii_alphabetic() || trimmed_code[rk] == b'_' {
                         let r0 = rk;
                         while rk < trimmed_code.len() && (trimmed_code[rk].is_ascii_alphanumeric() || trimmed_code[rk] == b'_' || trimmed_code[rk] == b'.') { rk += 1; }
+                        let full = String::from_utf8_lossy(&trimmed_code[r0..rk]).trim_matches('.').to_string();
+                        if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "guard" | "while" | "for" | "in" | "switch" | "case" | "return" | "throw" | "try" | "await" | "as" | "is" | "true" | "false" | "nil" | "defer") {
+                            if rk < trimmed_code.len() && trimmed_code[rk] == b'(' {
+                                let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                        sym.calls.len() - 1
+                                    });
+                                    parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                }
+                            }
+                            parts.push(format!("[\"n\",\"{full}\"]"));
+                        }
+                        continue;
+                    }
+                    rk += 1;
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                    let ev = format!("[\"x\",{lno},{val}]");
+                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                        if !sym.events.is_empty() { sym.events.push(','); }
+                        sym.events.push_str(&ev);
+                    }
+                }
+            }
+
+            // 6w. Swift continuation method chains `.method(...)`.
+            if trimmed_code.starts_with(b".") && trimmed_code.contains(&b'(') {
+                let mut parts: Vec<String> = Vec::new();
+                let mut rk = 0usize;
+                let mut instr = false;
+                while rk < trimmed_code.len() {
+                    if trimmed_code[rk] == b'"' && (rk == 0 || trimmed_code[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                    if instr { rk += 1; continue; }
+                    if trimmed_code[rk].is_ascii_alphabetic() || trimmed_code[rk] == b'_' {
+                        let r0 = rk;
+                        while rk < trimmed_code.len() && (trimmed_code[rk].is_ascii_alphanumeric() || trimmed_code[rk] == b'_' || trimmed_code[rk] == b'.') { rk += 1; }
+                        let full = String::from_utf8_lossy(&trimmed_code[r0..rk]).trim_matches('.').to_string();
+                        if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "guard" | "while" | "for" | "in" | "switch" | "case" | "return" | "throw" | "try" | "await" | "as" | "is" | "true" | "false" | "nil" | "defer") {
+                            if rk < trimmed_code.len() && trimmed_code[rk] == b'(' {
+                                let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                        sym.calls.len() - 1
+                                    });
+                                    parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                }
+                            }
+                            parts.push(format!("[\"n\",\"{full}\"]"));
+                        }
+                        continue;
+                    }
+                    rk += 1;
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                    let ev = format!("[\"x\",{lno},{val}]");
+                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                        if !sym.events.is_empty() { sym.events.push(','); }
+                        sym.events.push_str(&ev);
+                    }
+                }
+            }
+
+            // 6x. Swift closure `$0` shorthand expressions.
+            if trimmed_code.windows(2).any(|w| w == b"$0" || w == b"$1") {
+                let mut parts: Vec<String> = Vec::new();
+                let mut rk = 0usize;
+                let mut instr = false;
+                while rk < trimmed_code.len() {
+                    if trimmed_code[rk] == b'"' && (rk == 0 || trimmed_code[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                    if instr { rk += 1; continue; }
+                    if trimmed_code[rk].is_ascii_alphabetic() || trimmed_code[rk] == b'_' {
+                        let r0 = rk;
+                        while rk < trimmed_code.len() && (trimmed_code[rk].is_ascii_alphanumeric() || trimmed_code[rk] == b'_' || trimmed_code[rk] == b'.') { rk += 1; }
+                        let full = String::from_utf8_lossy(&trimmed_code[r0..rk]).trim_matches('.').to_string();
+                        if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "guard" | "while" | "for" | "in" | "switch" | "case" | "return" | "throw" | "try" | "await" | "as" | "is" | "true" | "false" | "nil" | "defer") {
+                            if rk < trimmed_code.len() && trimmed_code[rk] == b'(' {
+                                let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                        sym.calls.len() - 1
+                                    });
+                                    parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                }
+                            }
+                            parts.push(format!("[\"n\",\"{full}\"]"));
+                        }
+                        continue;
+                    }
+                    rk += 1;
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                    let ev = format!("[\"x\",{lno},{val}]");
+                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                        if !sym.events.is_empty() { sym.events.push(','); }
+                        sym.events.push_str(&ev);
+                    }
+                }
+            }
+
+            // 6y. Swift nil-coalescing `??` expressions.
+            if trimmed_code.windows(2).any(|w| w == b"??") {
+                let mut parts: Vec<String> = Vec::new();
+                let mut rk = 0usize;
+                let mut instr = false;
+                while rk < trimmed_code.len() {
+                    if trimmed_code[rk] == b'"' && (rk == 0 || trimmed_code[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                    if instr { rk += 1; continue; }
+                    if trimmed_code[rk].is_ascii_alphabetic() || trimmed_code[rk] == b'_' {
+                        let r0 = rk;
+                        while rk < trimmed_code.len() && (trimmed_code[rk].is_ascii_alphanumeric() || trimmed_code[rk] == b'_' || trimmed_code[rk] == b'.') { rk += 1; }
+                        let full = String::from_utf8_lossy(&trimmed_code[r0..rk]).trim_matches('.').to_string();
+                        if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "guard" | "while" | "for" | "in" | "switch" | "case" | "return" | "throw" | "try" | "await" | "as" | "is" | "true" | "false" | "nil" | "defer") {
+                            if rk < trimmed_code.len() && trimmed_code[rk] == b'(' {
+                                let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                        sym.calls.len() - 1
+                                    });
+                                    parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                }
+                            }
+                            parts.push(format!("[\"n\",\"{full}\"]"));
+                        }
+                        continue;
+                    }
+                    rk += 1;
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                    let ev = format!("[\"x\",{lno},{val}]");
+                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                        if !sym.events.is_empty() { sym.events.push(','); }
+                        sym.events.push_str(&ev);
+                    }
+                }
+            }
+
+            // 6z. Swift `typealias` / `associatedtype` symbol recovery.
+            for kw in &[b"typealias " as &[u8], b"associatedtype "] {
+                if let Some(kpos) = trimmed_code.windows(kw.len()).position(|w| w == *kw) {
+                    if kpos == 0 || matches!(trimmed_code[kpos - 1], b' ' | b'\t') {
+                        let mut p0 = kpos + kw.len();
+                        while p0 < trimmed_code.len() && matches!(trimmed_code[p0], b' ' | b'\t') { p0 += 1; }
+                        let mut p1 = p0;
+                        while p1 < trimmed_code.len() && (trimmed_code[p1].is_ascii_alphanumeric() || trimmed_code[p1] == b'_') { p1 += 1; }
+                        if p1 > p0 && trimmed_code[p0].is_ascii_alphabetic() {
+                            let sname = String::from_utf8_lossy(&trimmed_code[p0..p1]).to_string();
+                            if !self.facts.symbols.iter().any(|sym| sym.name == sname && sym.line == lno) {
+                                let owner = self.facts.symbols.get(owner_idx).map(|s| s.key.clone()).unwrap_or_default();
+                                let key = if owner.is_empty() { sname.clone() } else { format!("{owner}.{sname}") };
+                                self.facts.symbols.push(Symbol { key, name: sname, owner, kind: 2, line: lno, end_line: lno, ..Symbol::default() });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 7. Swift optional-chaining assignment `a?.prop = val` -> emit `event a` on `prop`.
+            if let Some(qp) = trimmed_code.windows(2).position(|w| w == b"?.") {
+                let mut p0 = qp + 2;
+                let mut p1 = p0;
+                while p1 < trimmed_code.len() && (trimmed_code[p1].is_ascii_alphanumeric() || trimmed_code[p1] == b'_') { p1 += 1; }
+                if p1 > p0 {
+                    let mut eq = p1;
+                    while eq < trimmed_code.len() && matches!(trimmed_code[eq], b' ' | b'\t') { eq += 1; }
+                    if eq < trimmed_code.len() && trimmed_code[eq] == b'=' && (eq + 1 >= trimmed_code.len() || !matches!(trimmed_code[eq + 1], b'=' | b'>')) {
+                        let prop = String::from_utf8_lossy(&trimmed_code[p0..p1]).to_string();
+                        let ev = format!("[\"a\",{lno},[\"{prop}\"],0,0]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+            }
+
+            if li < n && src[li] == b'\n' {
+                li += 1;
+                lno += 1;
+            }
+        }
+    }
+
+    fn augment_ruby(&mut self) {
+        let text = String::from_utf8_lossy(self.src);
+        let mut cleaned_lines: Vec<String> = Vec::new();
+        let mut code_lines: Vec<String> = Vec::new();
+        for raw_line in text.lines() {
+            let mut clean = String::with_capacity(raw_line.len());
+            let mut code = String::with_capacity(raw_line.len());
+            let chars: Vec<char> = raw_line.chars().collect();
+            let mut q: Option<char> = None;
+            let mut i = 0;
+            while i < chars.len() {
+                let ch = chars[i];
+                if let Some(qc) = q {
+                    clean.push(ch);
+                    if ch == '\\' && i + 1 < chars.len() {
+                        i += 1;
+                        clean.push(chars[i]);
+                        code.push(' ');
+                    } else if ch == qc {
+                        q = None;
+                        code.push(qc);
+                    } else {
+                        code.push(' ');
+                    }
+                } else {
+                    if ch == '#' && !(i + 1 < chars.len() && chars[i + 1] == '{') {
+                        break;
+                    }
+                    if ch == '"' || ch == '\'' || (ch == '`' && !(i > 0 && chars[i - 1] == '$')) {
+                        q = Some(ch);
+                        code.push(ch);
+                    } else {
+                        code.push(ch);
+                    }
+                    clean.push(ch);
+                }
+                i += 1;
+            }
+            cleaned_lines.push(clean);
+            code_lines.push(code);
+        }
+
+        let n_lines = cleaned_lines.len();
+        let is_pipe_kw = |w: &str| -> bool {
+            matches!(w, "if" | "for" | "while" | "switch" | "catch")
+        };
+        let is_any_rb_kw = |w: &str| -> bool {
+            let tail = w.rsplit('.').next().unwrap_or(w);
+            matches!(
+                tail,
+                "if" | "for" | "while" | "switch" | "catch" | "unless" | "until" | "case" | "when"
+                    | "elsif" | "else" | "def" | "class" | "module" | "end" | "begin" | "rescue"
+                    | "ensure" | "do" | "and" | "or" | "not" | "return" | "raise"
+                    | "yield" | "break" | "next" | "redo" | "retry" | "super" | "defined?"
+                    | "true" | "false" | "nil" | "self" | "alias" | "private" | "protected"
+                    | "public" | "require" | "require_relative" | "include" | "extend"
+            )
+        };
+
+        // Pass 1: Add missing Ruby symbols
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let code_tr = code_lines[idx].trim();
+            for (kw, kind) in [("class ", 2u8), ("module ", 2u8)] {
+                if let Some(r) = code_tr.strip_prefix(kw) {
+                    let r = r.trim_start();
+                    if !r.starts_with("<<") {
+                        let raw_tok: String = r
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | ':'))
+                            .collect();
+                        let base = raw_tok.rsplit(':').next().unwrap_or(&raw_tok);
+                        if !base.is_empty() && base.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                            let exists = self.facts.symbols.iter().any(|s| s.line == line && s.name == base);
+                            if !exists {
+                                self.add_symbol(base.to_string(), String::new(), kind, line, Vec::new());
+                            }
+                        }
+                    }
+                }
+            }
+            let rest = if let Some(r) = code_tr.strip_prefix("def ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code_tr.strip_prefix("private def ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code_tr.strip_prefix("protected def ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code_tr.strip_prefix("public def ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code_tr.strip_prefix("module_function def ") {
+                Some(r.trim_start())
+            } else {
+                None
+            };
+            if let Some(r) = rest {
+                let raw_tok: String = r
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '.' | ':' | '?' | '!' | '='))
+                    .collect();
+                let mut candidates: Vec<String> = Vec::new();
+                if let Some((recv, rest_op)) = r.split_once('.') {
+                    let rt = recv.trim();
+                    if !rt.is_empty()
+                        && rt.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        && rest_op.starts_with(['[', '=', '+', '-', '*', '/', '<', '>', '!', '~', '|', '&', '^'])
+                    {
+                        candidates.push(rt.to_string());
+                    }
+                }
+                let base = raw_tok.rsplit(['.', ':']).next().unwrap_or(&raw_tok);
+                if !base.is_empty() && base.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                    candidates.push(base.to_string());
+                    if let Some(stripped) = base.strip_suffix('=') {
+                        if !stripped.is_empty() {
+                            candidates.push(stripped.to_string());
+                        }
+                    }
+                }
+                for cand in candidates {
+                    let exists = self.facts.symbols.iter().any(|s| s.line == line && s.name == cand);
+                    if !exists {
+                        self.add_symbol(cand, String::new(), 1, line, Vec::new());
+                    }
+                }
+            }
+            if let Some((lhs, rhs)) = code_tr.split_once('=') {
+                let rhs_t = rhs.trim_start();
+                if rhs_t.starts_with("lambda") || rhs_t.starts_with("proc") || rhs_t.starts_with("->") {
+                    let lhs_t = lhs.trim();
