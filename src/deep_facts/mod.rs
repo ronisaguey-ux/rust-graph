@@ -5758,3 +5758,323 @@ impl<'a> Walker<'a> {
                 }
             }
 
+            // 6d. Swift general `let`/`var` single- or multi-line array/call initializers (including `static let`, `private let`).
+            if let Some(lpos) = trimmed_code.windows(4).position(|w| w == b"let " || w == b"var ") {
+                let prev_ok = lpos == 0 || matches!(trimmed_code[lpos - 1], b' ' | b'\t');
+                if prev_ok && trimmed_code[lpos + 4..].contains(&b'=') && !trimmed_code.starts_with(b"if ") && !trimmed_code.starts_with(b"guard ") && !trimmed_code.starts_with(b"while ") {
+                    let mut p0 = lpos + 4;
+                    while p0 < trimmed_code.len() && matches!(trimmed_code[p0], b' ' | b'\t') { p0 += 1; }
+                    let mut p1 = p0;
+                    while p1 < trimmed_code.len() && (trimmed_code[p1].is_ascii_alphanumeric() || trimmed_code[p1] == b'_') { p1 += 1; }
+                    if p1 > p0 && (trimmed_code[p0].is_ascii_alphabetic() || trimmed_code[p0] == b'_') {
+                        let target = String::from_utf8_lossy(&trimmed_code[p0..p1]).to_string();
+                        if let Some(eq_rel) = trimmed_code[p1..].iter().position(|&b| b == b'=') {
+                            let eq = p1 + eq_rel;
+                            if eq + 1 < trimmed_code.len() && trimmed_code[eq + 1] != b'=' {
+                                let rhs = &trimmed_code[eq + 1..];
+                                let mut parts: Vec<String> = Vec::new();
+                                let mut rk = 0usize;
+                                while rk < rhs.len() {
+                                    if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
+                                        let r0 = rk;
+                                        while rk < rhs.len() && (rhs[rk].is_ascii_alphanumeric() || rhs[rk] == b'_' || rhs[rk] == b'.') { rk += 1; }
+                                        let full = String::from_utf8_lossy(&rhs[r0..rk]).trim_matches('.').to_string();
+                                        if !full.is_empty() && !matches!(full.as_str(), "as" | "is" | "try" | "await" | "true" | "false" | "nil") {
+                                            if rk < rhs.len() && rhs[rk] == b'(' {
+                                                let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                                        sym.calls.len() - 1
+                                                    });
+                                                    parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                                }
+                                            }
+                                            parts.push(format!("[\"n\",\"{full}\"]"));
+                                        }
+                                        continue;
+                                    }
+                                    rk += 1;
+                                }
+                                if !parts.is_empty() {
+                                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                                    let ev = format!("[\"a\",{lno},[\"{target}\"],{val},0]");
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        if !sym.events.is_empty() { sym.events.push(','); }
+                                        sym.events.push_str(&ev);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 6e. Swift `guard let` / `if let` multi-binding unwrapping (e.g. `guard a == b, let trust = ... else`).
+            if (trimmed_code.starts_with(b"guard ") || trimmed_code.starts_with(b"if ")) && trimmed_code.windows(4).any(|w| w == b"let ") {
+                let mut tgts: Vec<String> = Vec::new();
+                let mut parts: Vec<String> = Vec::new();
+                let mut rk = 0usize;
+                while rk < trimmed_code.len() {
+                    if trimmed_code[rk..].starts_with(b"let ") && (rk == 0 || !trimmed_code[rk - 1].is_ascii_alphanumeric()) {
+                        let mut t0 = rk + 4;
+                        while t0 < trimmed_code.len() && matches!(trimmed_code[t0], b' ' | b'\t') { t0 += 1; }
+                        let mut t1 = t0;
+                        while t1 < trimmed_code.len() && (trimmed_code[t1].is_ascii_alphanumeric() || trimmed_code[t1] == b'_') { t1 += 1; }
+                        if t1 > t0 {
+                            let t = String::from_utf8_lossy(&trimmed_code[t0..t1]).to_string();
+                            tgts.push(format!("\"{t}\""));
+                        }
+                        rk = t1;
+                        continue;
+                    }
+                    if trimmed_code[rk].is_ascii_alphabetic() || trimmed_code[rk] == b'_' {
+                        let r0 = rk;
+                        while rk < trimmed_code.len() && (trimmed_code[rk].is_ascii_alphanumeric() || trimmed_code[rk] == b'_' || trimmed_code[rk] == b'.') { rk += 1; }
+                        let full = String::from_utf8_lossy(&trimmed_code[r0..rk]).trim_matches('.').to_string();
+                        if !full.is_empty() && !matches!(full.as_str(), "guard" | "if" | "else" | "let" | "var" | "as" | "is" | "try" | "await" | "true" | "false" | "nil") {
+                            parts.push(format!("[\"n\",\"{full}\"]"));
+                        }
+                        continue;
+                    }
+                    rk += 1;
+                }
+                if !tgts.is_empty() && !parts.is_empty() {
+                    let ev = format!("[\"a\",{lno},[{}],[\"m\",[{}]],0]", tgts.join(","), parts.join(","));
+                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                        if !sym.events.is_empty() { sym.events.push(','); }
+                        sym.events.push_str(&ev);
+                    }
+                }
+            }
+
+            // 6g. Swift string interpolation `\(call(...))` and unqualified uppercase/helper call recovery (`String(...)`, `printTypeName(...)`).
+            if trimmed_code.windows(2).any(|w| w == b"\\(") {
+                let mut sk = 0usize;
+                while sk + 2 < trimmed_code.len() {
+                    if trimmed_code[sk] == b'\\' && trimmed_code[sk + 1] == b'(' {
+                        sk += 2;
+                        let mut pd = 1usize;
+                        while sk < trimmed_code.len() && pd > 0 {
+                            if trimmed_code[sk] == b'(' { pd += 1; sk += 1; continue; }
+                            if trimmed_code[sk] == b')' { pd -= 1; sk += 1; continue; }
+                            if trimmed_code[sk].is_ascii_alphabetic() || trimmed_code[sk] == b'_' {
+                                let r0 = sk;
+                                while sk < trimmed_code.len() && (trimmed_code[sk].is_ascii_alphanumeric() || trimmed_code[sk] == b'_' || trimmed_code[sk] == b'.') { sk += 1; }
+                                let full = String::from_utf8_lossy(&trimmed_code[r0..sk]).trim_matches('.').to_string();
+                                if !full.is_empty() && sk < trimmed_code.len() && trimmed_code[sk] == b'(' {
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        if !sym.calls.iter().any(|c| c.line == lno && c.path == full) {
+                                            sym.calls.push(Call { path: full, line: lno });
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            sk += 1;
+                        }
+                        continue;
+                    }
+                    sk += 1;
+                }
+            }
+
+            // 6h. Swift standalone call statement `obj.method(...)` / `func(...)` (recovers dropped protocol/Combine calls & `event x`).
+            if !trimmed_code.starts_with(b"let ") && !trimmed_code.starts_with(b"var ") && !trimmed_code.starts_with(b"func ")
+                && !trimmed_code.starts_with(b"if ") && !trimmed_code.starts_with(b"guard ") && !trimmed_code.starts_with(b"case ")
+                && trimmed_code.contains(&b'(')
+            {
+                let mut parts: Vec<String> = Vec::new();
+                let mut rk = 0usize;
+                let mut instr = false;
+                while rk < trimmed_code.len() {
+                    if trimmed_code[rk] == b'"' && (rk == 0 || trimmed_code[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                    if instr { rk += 1; continue; }
+                    if trimmed_code[rk].is_ascii_alphabetic() || trimmed_code[rk] == b'_' {
+                        let r0 = rk;
+                        while rk < trimmed_code.len() && (trimmed_code[rk].is_ascii_alphanumeric() || trimmed_code[rk] == b'_' || trimmed_code[rk] == b'.') { rk += 1; }
+                        let full = String::from_utf8_lossy(&trimmed_code[r0..rk]).trim_matches('.').to_string();
+                        if !full.is_empty() && rk < trimmed_code.len() && trimmed_code[rk] == b'('
+                            && !matches!(full.as_str(), "if" | "while" | "switch" | "catch" | "guard" | "for" | "init" | "deinit" | "subscript")
+                        {
+                            let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                            if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                    sym.calls.push(Call { path: full.clone(), line: lno });
+                                    sym.calls.len() - 1
+                                });
+                                parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                            }
+                        }
+                        continue;
+                    }
+                    rk += 1;
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                    let ev = format!("[\"x\",{lno},{val}]");
+                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                        if !sym.events.is_empty() { sym.events.push(','); }
+                        sym.events.push_str(&ev);
+                    }
+                }
+            }
+
+            // 6i. Swift `struct`/`class`/`enum`/`protocol`/`actor`/`extension` symbol recovery (host coverage).
+            for &(kw, skind) in &[
+                (b"struct " as &[u8], 2u8), (b"class ", 2u8), (b"enum ", 2u8),
+                (b"protocol ", 2u8), (b"actor ", 2u8), (b"extension ", 2u8),
+            ] {
+                if let Some(kpos) = trimmed_code.windows(kw.len()).position(|w| w == kw) {
+                    if kpos == 0 || matches!(trimmed_code[kpos - 1], b' ' | b'\t') {
+                        let mut p0 = kpos + kw.len();
+                        while p0 < trimmed_code.len() && matches!(trimmed_code[p0], b' ' | b'\t') { p0 += 1; }
+                        let mut p1 = p0;
+                        while p1 < trimmed_code.len() && (trimmed_code[p1].is_ascii_alphanumeric() || trimmed_code[p1] == b'_') { p1 += 1; }
+                        if p1 > p0 && trimmed_code[p0].is_ascii_alphabetic() {
+                            let sname = String::from_utf8_lossy(&trimmed_code[p0..p1]).to_string();
+                            if !self.facts.symbols.iter().any(|sym| sym.name == sname && sym.line == lno) {
+                                let owner = self.facts.symbols.get(owner_idx).map(|s| s.key.clone()).unwrap_or_default();
+                                let key = if owner.is_empty() { sname.clone() } else { format!("{owner}.{sname}") };
+                                self.facts.symbols.push(Symbol { key, name: sname, owner, kind: skind, line: lno, end_line: lno, ..Symbol::default() });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 6j. Swift general `func <name>` symbol recovery with brace `end_line` tracking (host coverage).
+            if let Some(fpos) = trimmed_code.windows(5).position(|w| w == b"func ") {
+                if fpos == 0 || matches!(trimmed_code[fpos - 1], b' ' | b'\t') {
+                    let mut p0 = fpos + 5;
+                    while p0 < trimmed_code.len() && matches!(trimmed_code[p0], b' ' | b'\t') { p0 += 1; }
+                    let mut p1 = p0;
+                    while p1 < trimmed_code.len() && (trimmed_code[p1].is_ascii_alphanumeric() || trimmed_code[p1] == b'_') { p1 += 1; }
+                    if p1 > p0 && (trimmed_code[p0].is_ascii_alphabetic() || trimmed_code[p0] == b'_') {
+                        let fname = String::from_utf8_lossy(&trimmed_code[p0..p1]).to_string();
+                        if !self.facts.symbols.iter().any(|sym| sym.name == fname && sym.line == lno) {
+                            let mut eline = lno;
+                            let mut bk = line_start + (trimmed_code.as_ptr() as usize - raw.as_ptr() as usize) + p1;
+                            let lim = (bk + 1000).min(n);
+                            while bk < lim && src[bk] != b'{' { if src[bk] == b'\n' { eline += 1; } bk += 1; }
+                            if bk < lim && src[bk] == b'{' {
+                                let mut depth = 1usize; bk += 1;
+                                while bk < n && depth > 0 {
+                                    match src[bk] { b'\n' => eline += 1, b'{' => depth += 1, b'}' => depth -= 1, _ => {} }
+                                    bk += 1;
+                                }
+                            }
+                            let owner = self.facts.symbols.get(owner_idx).map(|s| s.key.clone()).unwrap_or_default();
+                            let key = if owner.is_empty() { fname.clone() } else { format!("{owner}.{fname}") };
+                            self.facts.symbols.push(Symbol { key, name: fname, owner, kind: 1, line: lno, end_line: eline, ..Symbol::default() });
+                        }
+                    }
+                }
+            }
+
+            // 6k. Swift `import` recovery (including `@_exported import`, `@testable import`, `import struct/class Mod.Item`).
+            if let Some(ipos) = trimmed_code.windows(7).position(|w| w == b"import ") {
+                if ipos == 0 || matches!(trimmed_code[ipos - 1], b' ' | b'\t') {
+                    let rest = String::from_utf8_lossy(&trimmed_code[ipos + 7..]).trim().to_string();
+                    let mod_tok = rest.split_whitespace().last().unwrap_or("").trim().to_string();
+                    if !mod_tok.is_empty() && mod_tok.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.') {
+                        if !self.facts.imports.iter().any(|im| im.module == mod_tok) {
+                            self.facts.imports.push(Import { line: lno, module: mod_tok.clone(), name: String::new(), alias: mod_tok, kind: IMPORT_MODULE, ..Import::default() });
+                        }
+                    }
+                }
+            }
+
+            // 6l. Swift `guard` condition expressions.
+            if trimmed_code.starts_with(b"guard ") {
+                let mut parts: Vec<String> = Vec::new();
+                let mut rk = 0usize;
+                let mut instr = false;
+                while rk < trimmed_code.len() {
+                    if trimmed_code[rk] == b'"' && (rk == 0 || trimmed_code[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                    if instr { rk += 1; continue; }
+                    if trimmed_code[rk].is_ascii_alphabetic() || trimmed_code[rk] == b'_' {
+                        let r0 = rk;
+                        while rk < trimmed_code.len() && (trimmed_code[rk].is_ascii_alphanumeric() || trimmed_code[rk] == b'_' || trimmed_code[rk] == b'.') { rk += 1; }
+                        let full = String::from_utf8_lossy(&trimmed_code[r0..rk]).trim_matches('.').to_string();
+                        if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "guard" | "while" | "for" | "in" | "switch" | "case" | "return" | "throw" | "try" | "await" | "as" | "is" | "true" | "false" | "nil" | "defer") {
+                            if rk < trimmed_code.len() && trimmed_code[rk] == b'(' {
+                                let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                        sym.calls.len() - 1
+                                    });
+                                    parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                }
+                            }
+                            parts.push(format!("[\"n\",\"{full}\"]"));
+                        }
+                        continue;
+                    }
+                    rk += 1;
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                    let ev = format!("[\"x\",{lno},{val}]");
+                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                        if !sym.events.is_empty() { sym.events.push(','); }
+                        sym.events.push_str(&ev);
+                    }
+                }
+            }
+
+            // 6m. Swift `if` / `else if` condition calls & identifiers.
+            if trimmed_code.starts_with(b"if ") || trimmed_code.starts_with(b"} else if ") {
+                let mut parts: Vec<String> = Vec::new();
+                let mut rk = 0usize;
+                let mut instr = false;
+                while rk < trimmed_code.len() {
+                    if trimmed_code[rk] == b'"' && (rk == 0 || trimmed_code[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                    if instr { rk += 1; continue; }
+                    if trimmed_code[rk].is_ascii_alphabetic() || trimmed_code[rk] == b'_' {
+                        let r0 = rk;
+                        while rk < trimmed_code.len() && (trimmed_code[rk].is_ascii_alphanumeric() || trimmed_code[rk] == b'_' || trimmed_code[rk] == b'.') { rk += 1; }
+                        let full = String::from_utf8_lossy(&trimmed_code[r0..rk]).trim_matches('.').to_string();
+                        if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "guard" | "while" | "for" | "in" | "switch" | "case" | "return" | "throw" | "try" | "await" | "as" | "is" | "true" | "false" | "nil" | "defer") {
+                            if rk < trimmed_code.len() && trimmed_code[rk] == b'(' {
+                                let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                        sym.calls.len() - 1
+                                    });
+                                    parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                }
+                            }
+                            parts.push(format!("[\"n\",\"{full}\"]"));
+                        }
+                        continue;
+                    }
+                    rk += 1;
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                    let ev = format!("[\"x\",{lno},{val}]");
+                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                        if !sym.events.is_empty() { sym.events.push(','); }
+                        sym.events.push_str(&ev);
+                    }
+                }
+            }
+
+            // 6n. Swift `while` condition calls & identifiers.
+            if trimmed_code.starts_with(b"while ") {
+                let mut parts: Vec<String> = Vec::new();
+                let mut rk = 0usize;
+                let mut instr = false;
+                while rk < trimmed_code.len() {
+                    if trimmed_code[rk] == b'"' && (rk == 0 || trimmed_code[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                    if instr { rk += 1; continue; }
+                    if trimmed_code[rk].is_ascii_alphabetic() || trimmed_code[rk] == b'_' {
+                        let r0 = rk;
+                        while rk < trimmed_code.len() && (trimmed_code[rk].is_ascii_alphanumeric() || trimmed_code[rk] == b'_' || trimmed_code[rk] == b'.') { rk += 1; }
+                        let full = String::from_utf8_lossy(&trimmed_code[r0..rk]).trim_matches('.').to_string();
+                        if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "guard" | "while" | "for" | "in" | "switch" | "case" | "return" | "throw" | "try" | "await" | "as" | "is" | "true" | "false" | "nil" | "defer") {
+                            if rk < trimmed_code.len() && trimmed_code[rk] == b'(' {
+                                let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
