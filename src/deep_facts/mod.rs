@@ -936,6 +936,12 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     if lang == Lang::Ocaml {
         walker.augment_ocaml();
     }
+    if lang == Lang::D {
+        walker.augment_d();
+    }
+    if lang == Lang::Julia {
+        walker.augment_julia();
+    }
     walker.facts
 
 
