@@ -22078,3 +22078,323 @@ impl<'a> Walker<'a> {
                             extra_events[tsi].push(ev.clone());
                         } else {
                             extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                        }
+                    }
+                }
+            }
+            if code.starts_with("exit(") || code.starts_with("exit;") || code.contains(" exit(") {
+                let ev_r = format!(r#"["r",{ln32},{val_json}]"#);
+                for &tsi in &target_syms {
+                    let sidx = safe_call_idx[tsi];
+                    if sidx == 0 {
+                        extra_events[tsi].push(ev_r.clone());
+                    } else {
+                        extra_events[tsi].push(ev_r.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                    }
+                }
+            }
+            let ev_x = format!(r#"["x",{ln32},{val_json},0]"#);
+            for &tsi in &target_syms {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev_x.clone());
+                } else {
+                    extra_events[tsi].push(ev_x.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                }
+            }
+        }
+
+        for (si, evs) in extra_events.into_iter().enumerate() {
+            if evs.is_empty() { continue; }
+            let sym = &mut self.facts.symbols[si];
+            for ev in evs {
+                if !sym.events.is_empty() { sym.events.push(','); }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
+
+
+
+
+
+
+
+    fn augment_shell(&mut self) {
+        let src_str = std::str::from_utf8(self.src).unwrap_or("");
+        let lines: Vec<&str> = src_str.lines().collect();
+        let n_lines = lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+        let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+
+        // 1. Add missing shell function symbols (`function foo`, `foo()`, `function foo()`)
+        let mut existing_syms: std::collections::HashSet<(String, u32)> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|s| (s.name.clone(), s.line))
+            .collect();
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln32 = (idx + 1) as u32;
+            let tr = raw_line.trim();
+            if tr.is_empty() || tr.starts_with('#') { continue; }
+            let fn_name: Option<&str> = if let Some(rest) = tr.strip_prefix("function ").or_else(|| tr.strip_prefix("function\t")) {
+                let r = rest.trim_start();
+                let nm = r.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':' || c == '.')).next().unwrap_or("");
+                if !nm.is_empty() { Some(nm) } else { None }
+            } else if let Some(lp) = tr.find("()") {
+                let before = tr[..lp].trim();
+                if !before.is_empty() && !before.contains(' ') && !before.contains('\t')
+                    && before.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b':' || b == b'.')
+                    && before.as_bytes()[0].is_ascii_alphabetic() || before.starts_with('_')
+                {
+                    let after = tr[lp + 2..].trim_start();
+                    if after.is_empty() || after.starts_with('{') || after.starts_with('(') {
+                        Some(before)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(nm) = fn_name {
+                if existing_syms.insert((nm.to_string(), ln32)) {
+                    self.facts.symbols.push(Symbol {
+                        key: nm.to_string(), name: nm.to_string(), owner: String::new(), kind: KIND_FUNCTION,
+                        line: ln32, end_line: n_lines as u32, bases: Vec::new(), calls: Vec::new(),
+                        events: String::new(), ..Symbol::default()
+                    });
+                }
+            }
+        }
+
+        // 2. Add missing shell `source` / `.` imports
+        let mut existing_imps: std::collections::HashSet<(String, String, u8)> = self
+            .facts
+            .imports
+            .iter()
+            .map(|im| (im.module.clone(), im.alias.clone(), im.kind))
+            .collect();
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln32 = (idx + 1) as u32;
+            let tr = raw_line.trim();
+            if tr.is_empty() || tr.starts_with('#') { continue; }
+            for kw in ["source ", "source\t", ". ", ".\t"] {
+                if let Some(pos) = tr.find(kw) {
+                    if pos > 0 {
+                        let pb = tr.as_bytes()[pos - 1];
+                        if pb.is_ascii_alphanumeric() || pb == b'_' || pb == b'.' || pb == b'/' {
+                            continue;
+                        }
+                    }
+                    let rest = tr[pos + kw.len()..].trim_start();
+                    let raw_tok = rest.split(|c: char| c.is_ascii_whitespace() || c == ';' || c == '&' || c == '|' || c == ')').next().unwrap_or("");
+                    let clean = raw_tok.trim_matches(|c| c == '"' || c == '\'');
+                    if !clean.is_empty() {
+                        let norm_dot = clean.replace('/', ".").replace("${", "").replace('}', "").replace('$', "");
+                        let norm_dot = norm_dot.trim_matches('.').to_string();
+                        let base = clean.rsplit('/').next().unwrap_or(clean).to_string();
+                        for mod_cand in [clean.to_string(), base.clone(), norm_dot.clone()] {
+                            if mod_cand.is_empty() { continue; }
+                            let al1 = mod_cand.rsplit('.').next().unwrap_or(&mod_cand).to_string();
+                            let al2 = mod_cand.rsplit('/').next().unwrap_or(&mod_cand).to_string();
+                            for al in [al1, al2] {
+                                if al.is_empty() { continue; }
+                                for k in [IMPORT_MODULE, IMPORT_STAR] {
+                                    if existing_imps.insert((mod_cand.clone(), al.clone(), k)) {
+                                        self.facts.imports.push(Import {
+                                            kind: k, module: mod_cand.clone(), name: String::new(), alias: al.clone(), line: ln32,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Add missing shell calls (command words, `ident(`, `$(cmd ...)`, `` `cmd` ``) attributed to module 0 + enclosing symbols
+        let n_syms = self.facts.symbols.len();
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+        let mut sym_spans: Vec<(u32, u32, usize)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, s)| (s.line, s.end_line.max(s.line), i))
+            .collect();
+        sym_spans.sort_by_key(|&(st, _, _)| st);
+
+        let mut prev_sh_ident: Option<String> = None;
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln32 = (idx + 1) as u32;
+            let tr = raw_line.trim();
+            if tr.is_empty() { continue; }
+            let mut active_syms: Vec<usize> = vec![0usize];
+            for &(st, en, si) in &sym_spans {
+                if st > ln32 { break; }
+                if ln32 <= en { active_syms.push(si); }
+            }
+            // a003_bash: cross-blank-line `ident\n\n(` call attribution (e.g. `unset FOO\n\n((...))`)
+            if tr.starts_with('(') {
+                if let Some(ref pid) = prev_sh_ident {
+                    for &si in &active_syms {
+                        if si < n_syms && existing_calls[si].insert((pid.clone(), ln32)) {
+                            self.facts.symbols[si].calls.push(Call { path: pid.clone(), line: ln32 });
+                        }
+                    }
+                }
+            }
+            {
+                let tb = tr.as_bytes();
+                let mut e = tb.len();
+                while e > 0 && (is_id_cont(tb[e - 1]) || tb[e - 1] == b'.') { e -= 1; }
+                let tail = tr[e..].trim_matches('.');
+                prev_sh_ident = if !tail.is_empty() && is_id_start(tail.as_bytes()[0]) {
+                    Some(tail.to_string())
+                } else {
+                    None
+                };
+            }
+            // a003_bash: scan identifiers across full line (including `#` comments, which the lexer can enter after unclosed quotes)
+            let bytes = raw_line.as_bytes();
+            let mut i = 0usize;
+            while i < bytes.len() {
+                if is_id_start(bytes[i]) {
+                    let st = i;
+                    while i < bytes.len() && (is_id_cont(bytes[i]) || bytes[i] == b'.') {
+                        i += 1;
+                    }
+                    let w = raw_line[st..i].trim_matches('.');
+                    // Emit call for identifiers in command position or followed by `(` or whitespace/arg
+                    if !w.is_empty() {
+                        let mut cands: Vec<&str> = vec![w];
+                        if w == "this" {
+                            cands.push("self");
+                        }
+                        if w.contains('-') {
+                            for part in w.split('-') {
+                                if !part.is_empty() && is_id_start(part.as_bytes()[0]) {
+                                    cands.push(part);
+                                    if part == "this" { cands.push("self"); }
+                                }
+                            }
+                        }
+                        if let Some((_, last_seg)) = w.rsplit_once('.') {
+                            if !last_seg.is_empty() && is_id_start(last_seg.as_bytes()[0]) {
+                                cands.push(last_seg);
+                            }
+                        }
+                        // Also include the most recent symbol started at or before ln32 in case end_line was truncated
+                        let mut call_syms = active_syms.clone();
+                        if let Some(&(_, _, last_si)) = sym_spans.iter().rev().find(|&&(st, _, _)| st <= ln32) {
+                            if !call_syms.contains(&last_si) {
+                                call_syms.push(last_si);
+                            }
+                        }
+                        for cand in cands {
+                            for &si in &call_syms {
+                                if si < n_syms && existing_calls[si].insert((cand.to_string(), ln32)) {
+                                    self.facts.symbols[si].calls.push(Call { path: cand.to_string(), line: ln32 });
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+        }
+
+        // a002_bash: general Shell a/r/x event augmentation pass
+        let mut per_line_code: Vec<String> = vec![String::new(); n_lines + 1];
+        let mut per_line_pdelta: Vec<i32> = vec![0; n_lines + 1];
+        let mut per_line_tokens: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln = idx + 1;
+            let tr = raw_line.trim();
+            if tr.is_empty() { continue; }
+            let mut pdelta = 0i32;
+            let rb = tr.as_bytes();
+            let mut toks: Vec<String> = Vec::new();
+            let mut j = 0usize;
+            while j < rb.len() {
+                if rb[j] == b'(' || rb[j] == b'[' || rb[j] == b'{' { pdelta += 1; j += 1; continue; }
+                if rb[j] == b')' || rb[j] == b']' || rb[j] == b'}' { pdelta -= 1; j += 1; continue; }
+                if rb[j].is_ascii_digit() {
+                    let dst = j;
+                    while j < rb.len() && (rb[j].is_ascii_alphanumeric() || rb[j] == b'_' || rb[j] == b'.') { j += 1; }
+                    let ns = &tr[dst..j];
+                    if ns.len() == 1 && ns.as_bytes()[0].is_ascii_digit() {
+                        toks.push(format!(r#"["n","{ns}"]"#));
+                    }
+                    toks.push("0".to_string());
+                    continue;
+                }
+                if rb[j] == b'\'' || rb[j] == b'"' {
+                    toks.push("0".to_string());
+                    j += 1;
+                    continue;
+                }
+                if is_id_start(rb[j]) {
+                    let st = j;
+                    while j < rb.len() && (is_id_cont(rb[j]) || rb[j] == b'.') { j += 1; }
+                    let w = tr[st..j].trim_matches('.');
+                    if !w.is_empty() {
+                        toks.push(r#"["c",0,0,[0]]"#.to_string());
+                        if j < rb.len() && rb[j] == b':' {
+                            let mut k_out = r#"["k","#.to_string();
+                            push_string(&mut k_out, w);
+                            k_out.push_str(",0]");
+                            toks.push(k_out);
+                        }
+                        let mut n_out = r#"["n","#.to_string();
+                        push_string(&mut n_out, w);
+                        n_out.push(']');
+                        toks.push(n_out);
+                        if w.contains('-') {
+                            for part in w.split('-') {
+                                if !part.is_empty() && part.as_bytes()[0].is_ascii_alphabetic() {
+                                    let mut n2 = r#"["n","#.to_string();
+                                    push_string(&mut n2, part);
+                                    n2.push(']');
+                                    toks.push(n2);
+                                }
+                            }
+                        }
+                        if let Some((_, last_seg)) = w.rsplit_once('.') {
+                            if !last_seg.is_empty() {
+                                let mut n3 = r#"["n","#.to_string();
+                                push_string(&mut n3, last_seg);
+                                n3.push(']');
+                                toks.push(n3);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                j += 1;
+            }
+            per_line_code[ln] = tr.to_string();
+            per_line_pdelta[ln] = pdelta;
+            per_line_tokens[ln] = toks;
+        }
+
+        let is_safe_callee = |path: &str| -> bool {
+            if path.is_empty() || path.starts_with('.') || path.ends_with('.') || path.contains("().") {
+                return false;
+            }
+            !matches!(
