@@ -28798,3 +28798,323 @@ impl<'a> Walker<'a> {
                     let line = self.line(id);
                     let children = self.children(id);
                     let init_pos = children.iter().position(|&c| c == init).unwrap_or(children.len());
+                    let target = children[..init_pos]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&c| self.kind(c) == "identifier")
+                        .map(|c| self.text_string(c));
+                    if let (Some(target), Some(rhs)) = (
+                        target,
+                        self.children(init).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "="),
+                    ) {
+                        let ctor = if self.kind(rhs) == "constructor_call" {
+                            Some(rhs)
+                        } else if self.kind(rhs) == "call" {
+                            self.children(rhs).first().copied().filter(|&c| self.kind(c) == "constructor_call")
+                        } else {
+                            None
+                        };
+                        if let Some(ctor) = ctor {
+                            if let Some(t) = self.children(ctor).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "new") {
+                                let cname = if self.kind(t) == "call" {
+                                    self.children(t).first().copied().and_then(|c| self.leaf_name(c))
+                                } else {
+                                    self.leaf_name(t)
+                                };
+                                if let Some(cname) = cname {
+                                    self.facts.vars.push((target.clone(), cname));
+                                }
+                            }
+                        } else if self.kind(rhs) == "call" {
+                            if let Some(callee) = self.children(rhs).first().copied().and_then(|c| self.leaf_name(c)) {
+                                if callee.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                    self.facts.vars.push((target.clone(), callee));
+                                }
+                            }
+                        }
+                        let val = self.form(rhs);
+                        self.lexer_event(b'a', line, &[target], &val, false);
+                    }
+                    return;
+                }
+            } else {
+                self.open_definition(id, def);
+                if self.language.name == "csharp" && !def.container {
+                    self.cs_arrow_body(id, self.line(id));
+                }
+                return;
+            }
+        }
+        if self.facts.tag == "GROOVY" && kind == "annotation" {
+            let line = self.line(id);
+            let names: Vec<String> = self
+                .children(id)
+                .into_iter()
+                .filter(|&c| self.kind(c) == "identifier")
+                .map(|c| self.text_string(c))
+                .collect();
+            if !names.is_empty() {
+                let full = names.join(".");
+                if let Some(arg_list) = self.child_of_kind(id, "argument_list") {
+                    let idx = self.push_call(full, line);
+                    let args = self.arguments(arg_list);
+                    self.lexer_event(b'x', line, &[], &format!("[\"c\",{idx},0,{args}]"), false);
+                } else {
+                    let mut val = String::from("[\"n\",");
+                    push_string(&mut val, &full);
+                    val.push(']');
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            return;
+        }
+        if self.has_kind(id, self.kinds.imports) {
+            self.import(id);
+            return;
+        }
+        // Go and Java write a statement where Python writes an expression and
+        // JavaScript a declarator; their arms are the lexer's statement model,
+        // read off the tree, and none of them is any arm below.
+        match self.kinds.family {
+            Family::Go => {
+                self.go_enter(id);
+                return;
+            }
+            Family::Java => {
+                self.java_enter(id);
+                return;
+            }
+            Family::Plain | Family::Js | Family::Rust => {}
+        }
+        match kind {
+            // A field declaration is a statement to the lexer: `private readonly
+            // DeserializationTracker _tracker;` is an `x` event over the whole
+            // header, and nothing read the node, so every C# field an API
+            // declares left an event the tree never wrote. Go has the same arm
+            // in its own statement model.
+            "field_declaration" | "event_field_declaration" | "event_declaration" => {
+                // A field initialised with a call is an assignment to the
+                // lexer; anything else is the header event.
+                if !self.cs_field_assignment(id) {
+                    // `private int _mask = 31;`: a field with a constant
+                    // initialiser is an assignment to 0 for the lexer, and the
+                    // arm wrote the header alone - no event on the line at all.
+                    let children = self.children(id);
+                    let assigned = children.iter().position(|&child| self.kind(child) == "=");
+                    let target = assigned.and_then(|at| self.cs_decl_target(&children[..at]));
+                    match (assigned, target) {
+                        (Some(at), Some(name)) => {
+                            // C#: the initialiser is the value. `public bool Flag
+                            // = false;` is `a [Flag] n:false` to the lexer, and
+                            // writing the constant `0` for every field but a call
+                            // left each such field a disagreement. A keyword
+                            // literal is a name to the one-pass reader, and a
+                            // constant's initialiser merges the name and the
+                            // constant, so the written form is the child's own.
+                            // Other languages keep the constant: the model is the
+                            // C# arm's, measured here, not theirs.
+                            let form = if self.language.name == "csharp" {
+                                let child = children[at + 1..]
+                                    .iter()
+                                    .copied()
+                                    .find(|&c| !self.is_layout(c) && self.kind(c) != "ref");
+                                let kind = child.map(|node| self.kind(node)).unwrap_or("");
+                                let first_form = match kind {
+                                    "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
+                                    "" => "0".to_string(),
+                                    _ => child
+                                        .map(|node| self.form(node))
+                                        .filter(|form| !form.is_empty() && form != "0")
+                                        .unwrap_or_else(|| "0".to_string()),
+                                };
+                                let mut multi = vec![first_form];
+                                for (idx, &c) in children.iter().enumerate() {
+                                    if idx > at && self.kind(c) == "=" {
+                                        if let Some(&rhs) = children[idx + 1..]
+                                            .iter()
+                                            .find(|&&n| !self.is_layout(n) && self.kind(n) != "ref")
+                                        {
+                                            let rhs_form = self.form(rhs);
+                                            if let Some(t_name) = children[..idx].iter().rev().find_map(|&n| self.leaf_name(n)) {
+                                                let mut tf = String::from("[\"n\",");
+                                                push_string(&mut tf, &t_name);
+                                                tf.push(']');
+                                                let rhs_val = if rhs_form.is_empty() { "0" } else { rhs_form.as_str() };
+                                                multi.push(format!("[\"m\",[{tf},{rhs_val}]]"));
+                                            }
+                                        }
+                                    }
+                                }
+                                if multi.len() == 1 {
+                                    multi.remove(0)
+                                } else {
+                                    format!("[\"t\",[{}]]", multi.join(","))
+                                }
+                            } else {
+                                "0".to_string()
+                            };
+                            let line = self.line(id);
+                            self.lexer_event(b'a', line, &[name], &form, false);
+                        }
+                        _ => {
+                            self.decl_statement(id);
+                            self.field_initializer_calls(id);
+                        }
+                    }
+                }
+                self.cs_declared_vars(id);
+                if self.language.name == "csharp" {
+                    self.cs_lambda_symbol(id);
+                }
+            }
+            // `uint A(int hc) => hc.ToHashCode();`: an expression-bodied member
+            // writes its body after the arrow, and the one-pass reader drops
+            // the member header before `=>` and records only that body.
+            "expression_bodied_member" if self.language.name == "csharp" => {
+                self.cs_arrow_body(id, self.line(id));
+            }
+            // `var o = JObject.Parse(text);` and `int depth = 0;` and `using var x = ...;`:
+            // C# local and using declarations are assignment statements to the
+            // lexer. `cs_field_assignment` handles direct calls/creations; any
+            // other initialised declaration (literals, names, member reads,
+            // expressions) still writes an `a` event, matching `field_declaration`.
+            "local_variable_declaration" | "using_declaration"
+                if self.kinds.calls.contains(&"object_creation_expression") =>
+            {
+                if !self.cs_field_assignment(id) {
+                    let children = self.children(id);
+                    let assigned = children.iter().position(|&child| self.kind(child) == "=");
+                    let target = assigned.and_then(|at| self.cs_decl_target(&children[..at]));
+                    match (assigned, target) {
+                        (Some(at), Some(name)) => {
+                            let child = children[at + 1..]
+                                .iter()
+                                .copied()
+                                .find(|&c| !self.is_layout(c) && self.kind(c) != "ref");
+                            let kind = child.map(|node| self.kind(node)).unwrap_or("");
+                            let first_form = match kind {
+                                "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
+                                "" => "0".to_string(),
+                                _ => child
+                                    .map(|node| self.form(node))
+                                    .filter(|form| !form.is_empty() && form != "0")
+                                    .unwrap_or_else(|| "0".to_string()),
+                            };
+                            let mut multi = vec![first_form];
+                            for (idx, &c) in children.iter().enumerate() {
+                                if idx > at && self.kind(c) == "=" {
+                                    if let Some(&rhs) = children[idx + 1..]
+                                        .iter()
+                                        .find(|&&n| !self.is_layout(n) && self.kind(n) != "ref")
+                                    {
+                                        let rhs_form = self.form(rhs);
+                                        if let Some(t_name) = children[..idx].iter().rev().find_map(|&n| self.leaf_name(n)) {
+                                            let mut tf = String::from("[\"n\",");
+                                            push_string(&mut tf, &t_name);
+                                            tf.push(']');
+                                            if rhs_form == "0" || rhs_form.is_empty() {
+                                                multi.push(tf);
+                                            } else {
+                                                multi.push(format!("[\"m\",[{tf},{rhs_form}]]"));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let form = if multi.len() == 1 {
+                                multi.remove(0)
+                            } else {
+                                format!("[\"t\",[{}]]", multi.join(","))
+                            };
+                            let line = self.line(id);
+                            self.lexer_event(b'a', line, &[name], &form, false);
+                        }
+                        _ => {
+                            self.decl_statement(id);
+                            self.field_initializer_calls(id);
+                        }
+                    }
+                }
+                self.cs_declared_vars(id);
+                if kind == "local_variable_declaration" {
+                    self.cs_lambda_symbol(id);
+                }
+            }
+            // `size_t n = strlen(s);`: a declaration with an initializer is one
+            // statement to the lexer, and the call in it is a fact. C, C++ and
+            // Objective-C declare this way on nearly every line, so nothing
+            // read the node and every such call was lost.
+            "declaration_statement" => self.decl_statement(id),
+            // `val a = 1` in Kotlin: the lexer files an assignment to the
+            // declared name, and nothing opened the property, so every
+            // initialised property in a Kotlin class or object lost its line.
+            // Swift spells it the same way (`let x = 1`), with the name as a
+            // plain identifier instead of a `property_head`, so the arm reads
+            // both.
+            // C# spells a property `public int? Index { get; set; }`, which the
+            // lexer reads as a declaration header and its accessors as their
+            // own statements - not as the Kotlin/Swift assignment the property
+            // arm writes. Dispatched by the grammar's own call kinds.
+            // `public IJEnumerable<int> this[object key] { get; }`: an indexer
+            // is a header statement to the lexer, with `this` spelled `self`.
+            // `public static bool operator !=(V a, V b)` and conversion
+            // operators are the same header statement, unless expression-bodied.
+            "indexer_declaration" | "operator_declaration" | "conversion_operator_declaration" => {
+                if !(self.language.name == "csharp" && self.cs_arrow_body(id, self.line(id))) {
+                    self.java_header_event(id);
+                }
+            }
+            "class_member" if self.facts.tag == "PHP" => {
+                let ch = self.children(id);
+                if let Some(md) = ch.iter().copied().find(|&c| self.kind(c) == "member_declaration") {
+                    if let Some(pd) = self.child_of_kind(md, "property_declaration") {
+                        let pchildren = self.children(pd);
+                        let has_eq = pchildren.iter().any(|&c| self.kind(c) == "=");
+                        let has_q = pchildren.iter().any(|&c| self.kind(c) == "?");
+                        if !has_eq || has_q {
+                            let line = self.line(id);
+                            let mut parts = Vec::new();
+                            for &c in &ch {
+                                if self.kind(c) == "modifiers" {
+                                    for mc in self.children(c) {
+                                        let t = self.text_string(mc);
+                                        if !t.is_empty() && t.bytes().next().is_some_and(|b| b.is_ascii_alphabetic()) {
+                                            let mut n = String::from("[\"n\",");
+                                            push_string(&mut n, &t);
+                                            n.push(']');
+                                            parts.push(n);
+                                        }
+                                    }
+                                }
+                            }
+                            for &c in &pchildren {
+                                let ck = self.kind(c);
+                                if matches!(ck, ";" | "," | "=" | "?" | "|") {
+                                    continue;
+                                }
+                                if matches!(ck, "variable" | "variable_name") {
+                                    let nm = self.text_string(c).trim_start_matches('$').to_string();
+                                    if !nm.is_empty() {
+                                        let mut n = String::from("[\"n\",");
+                                        push_string(&mut n, &nm);
+                                        n.push(']');
+                                        parts.push(n);
+                                    }
+                                } else if matches!(ck, "true" | "false" | "null") {
+                                    parts.push(format!("[\"n\",\"{ck}\"]"));
+                                } else if !self.is_layout(c) {
+                                    let f = self.form(c);
+                                    if !f.is_empty() && f != "0" {
+                                        parts.push(f);
+                                    } else {
+                                        let t = self.text_string(c);
+                                        if !t.is_empty() && t.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                                            let mut n = String::from("[\"n\",");
+                                            push_string(&mut n, &t);
+                                            n.push(']');
+                                            parts.push(n);
+                                        }
+                                    }
+                                } else {
+                                    let t = self.text_string(c);
