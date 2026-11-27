@@ -8199,6 +8199,37 @@ fn dotted_piece(text: &str) -> bool {
                 return format!("[\"t\",[{}]]", items.join(","));
             }
         }
+        if self.facts.tag == "GROOVY"
+            && matches!(
+                kind,
+                "equality" | "comparison" | "additive" | "multiplicative"
+                    | "logical_or" | "logical_and" | "bitwise_or" | "bitwise_xor"
+                    | "bitwise_and" | "shift" | "power" | "conditional" | "unary"
+            )
+        {
+            let mut parts = Vec::new();
+            for c in self.children(id) {
+                let ck = self.kind(c);
+                if self.is_layout(c) && !matches!(ck, "string" | "number" | "true" | "false" | "null") {
+                    continue;
+                }
+                let v = if matches!(ck, "string" | "number") {
+                    "0".to_string()
+                } else if matches!(ck, "true" | "false" | "null") {
+                    format!("[\"n\",\"{ck}\"]")
+                } else {
+                    self.form(c)
+                };
+                if !v.is_empty() {
+                    parts.push(v);
+                }
+            }
+            return match parts.len() {
+                0 => "0".to_string(),
+                1 => parts.into_iter().next().unwrap(),
+                _ => format!("[\"m\",[{}]]", parts.join(",")),
+            };
+        }
         if self.facts.tag == "PAS" && matches!(kind, "true" | "false") {
             return format!("[\"n\",\"{kind}\"]");
         }
@@ -8484,7 +8515,7 @@ fn dotted_piece(text: &str) -> bool {
             let mut items = Vec::new();
             for ch in self.children(id) {
                 let ck = self.kind(ch);
-                if self.is_layout(ch) || matches!(ck, "[" | "]" | "{" | "}" | ",") {
+                if (self.is_layout(ch) && !(self.facts.tag == "CR" && kind == "array" && matches!(ck, "number" | "string"))) || matches!(ck, "[" | "]" | "{" | "}" | ",") {
                     continue;
                 }
                 if matches!(ck, "label_pair" | "arrow_pair") {
@@ -8512,6 +8543,8 @@ fn dotted_piece(text: &str) -> bool {
                     } else if pparts.len() > 1 {
                         items.push(format!("[\"m\",[{}]]", pparts.join(",")));
                     }
+                } else if self.facts.tag == "CR" && kind == "array" && matches!(ck, "number" | "string") {
+                    items.push("0".to_string());
                 } else {
                     let v = self.form(ch);
                     if !v.is_empty() && v != "0" {
