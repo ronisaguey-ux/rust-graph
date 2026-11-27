@@ -3050,52 +3050,248 @@ impl<'a> Walker<'a> {
                     }
                 }
 
+                // 3b. `unsafe { ... }` single-line expression -> emit `event x` with all path calls & identifiers.
+                if trimmed.starts_with(b"unsafe {") && trimmed.contains(&b'}') {
+                    let body = &trimmed[8..];
                     let mut parts: Vec<String> = Vec::new();
                     let mut rk = 0usize;
+                    while rk < body.len() {
+                        if body[rk] == b'}' { break; }
+                        if body[rk].is_ascii_alphabetic() || body[rk] == b'_' {
                             let r0 = rk;
+                            while rk < body.len() {
+                                if body[rk].is_ascii_alphanumeric() || body[rk] == b'_' {
+                                    rk += 1;
+                                } else if rk + 1 < body.len() && body[rk] == b':' && body[rk + 1] == b':' {
+                                    rk += 2;
+                                } else {
+                                    break;
+                                }
                             }
+                            let path = String::from_utf8_lossy(&body[r0..rk]).replace("::", ".");
+                            let path = path.trim_matches('.').to_string();
+                            if !path.is_empty() && !matches!(path.as_str(), "as" | "mut" | "ref" | "const" | "unsafe" | "true" | "false") {
+                                if rk < body.len() && body[rk] == b'(' {
                                     if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = if let Some(pos) = sym.calls.iter().position(|c| c.line == lno && c.path == path) {
+                                            pos
+                                        } else {
+                                            sym.calls.push(Call { path: path.clone(), line: lno });
                                             sym.calls.len() - 1
+                                        };
+                                        parts.push(format!("[\"c\",{cidx},0,[0]]"));
                                     }
                                 }
+                                parts.push(format!("[\"n\",\"{path}\"]"));
                             }
                             continue;
                         }
                         rk += 1;
                     }
                     if !parts.is_empty() {
+                        let ev = format!("[\"x\",{lno},[\"m\",[{}]]]", parts.join(","));
                         if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
                             if !sym.events.is_empty() { sym.events.push(','); }
                             sym.events.push_str(&ev);
                         }
                     }
                 }
+                // 4. `self.<field> = <expr>;` (e.g. `self.filter = Some(::regex::Regex::new(pattern).unwrap());`)
+                if trimmed.starts_with(b"self.") && trimmed.contains(&b'=') {
+                    if let Some(eq_p) = trimmed.iter().position(|&b| b == b'=') {
+                        if eq_p > 5 && eq_p + 1 < trimmed.len() && !matches!(trimmed[eq_p - 1], b'=' | b'!' | b'<' | b'>') && !matches!(trimmed[eq_p + 1], b'=' | b'>') {
+                            let target = String::from_utf8_lossy(&trimmed[..eq_p]).trim().to_string();
+                            let rhs = &trimmed[eq_p + 1..];
+                            let mut parts: Vec<String> = Vec::new();
+                            let mut rk = 0usize;
                             while rk < rhs.len() {
+                                if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
+                                    let r0 = rk;
+                                    while rk < rhs.len() {
+                                        if rhs[rk].is_ascii_alphanumeric() || rhs[rk] == b'_' {
+                                            rk += 1;
+                                        } else if rk + 1 < rhs.len() && rhs[rk] == b':' && rhs[rk + 1] == b':' {
+                                            rk += 2;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    let path = String::from_utf8_lossy(&rhs[r0..rk]).replace("::", ".");
+                                    let path = path.trim_matches('.').to_string();
+                                    if !path.is_empty() && !matches!(path.as_str(), "as" | "mut" | "ref" | "unsafe" | "true" | "false") {
+                                        if rk < rhs.len() && rhs[rk] == b'(' {
+                                            if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                let cidx = if let Some(pos) = sym.calls.iter().position(|c| c.line == lno && c.path == path) {
+                                                    pos
+                                                } else {
+                                                    sym.calls.push(Call { path: path.clone(), line: lno });
+                                                    sym.calls.len() - 1
+                                                };
+                                                parts.push(format!("[\"c\",{cidx},0,[0]]"));
+                                            }
+                                        }
+                                        parts.push(format!("[\"n\",\"{path}\"]"));
+                                    }
+                                    continue;
+                                }
+                                rk += 1;
                             }
+                            if !parts.is_empty() {
+                                let ev = format!("[\"a\",{lno},[\"{target}\"],[\"m\",[{}]],0]", parts.join(","));
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    if !sym.events.is_empty() { sym.events.push(','); }
+                                    sym.events.push_str(&ev);
                                 }
                             }
                         }
                     }
                 }
 
-                    }
-                }
+            }
+            if li < n && src[li] == b'\n' {
+                li += 1;
+                lno += 1;
+            }
+        }
+    }
 
+    fn augment_swift(&mut self) {
+        let src = self.orig_src;
+        let n = src.len();
+        let mut li = 0usize;
+        let mut lno = 1u32;
+        while li < n {
+            let line_start = li;
+            while li < n && src[li] != b'\n' {
+                li += 1;
+            }
+            let raw = &src[line_start..li];
+            // Strip `//` line comment
+            let code = {
+                let mut end = raw.len();
+                let mut k = 0usize;
+                let mut in_str = false;
+                while k < raw.len() {
+                    if raw[k] == b'"' && (k == 0 || raw[k - 1] != b'\\') {
+                        in_str = !in_str;
+                    } else if !in_str && k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'/' {
+                        end = k;
+                        break;
+                    }
+                    k += 1;
+                }
+                &raw[..end]
+            };
+            let owner_idx = self
+                .facts
+                .symbols
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter(|(_, sym)| sym.line <= lno && lno <= sym.end_line)
+                .max_by_key(|(_, sym)| sym.line)
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            // 1. Recover `func open(` / `func type(` / contextual keyword function definitions.
+            let mut k = 0usize;
+            while k < code.len() && matches!(code[k], b' ' | b'\t') { k += 1; }
+            if let Some(fpos) = code.windows(5).position(|w| w == b"func ") {
+                let after = fpos + 5;
+                if fpos == 0 || !code[fpos - 1].is_ascii_alphanumeric() {
+                    let mut p0 = after;
+                    while p0 < code.len() && matches!(code[p0], b' ' | b'\t') { p0 += 1; }
+                    let mut p1 = p0;
+                    while p1 < code.len() && (code[p1].is_ascii_alphanumeric() || code[p1] == b'_') { p1 += 1; }
+                    if p1 > p0 {
+                        let fname = String::from_utf8_lossy(&code[p0..p1]).to_string();
+                        if matches!(fname.as_str(), "open" | "type" | "get" | "set" | "any" | "some") {
+                            if !self.facts.symbols.iter().any(|sym| sym.name == fname && sym.line == lno) {
+                                let owner = self.facts.symbols.get(owner_idx).map(|s| s.key.clone()).unwrap_or_default();
+                                let key = if owner.is_empty() { fname.clone() } else { format!("{owner}.{fname}") };
+                                self.facts.symbols.push(Symbol {
+                                    key,
+                                    name: fname,
+                                    owner,
+                                    kind: 1,
+                                    line: lno,
+                                    end_line: lno,
+                                    ..Symbol::default()
                                 });
                             }
                         }
                     }
                 }
+            }
 
+            // 2. Scan dotted generic calls `A.B<T>(` and contextual keyword calls `open(`, `obj.open(`, `type(`.
+            let mut i = 0usize;
+            let mut in_str = false;
+            while i < code.len() {
+                if code[i] == b'"' && (i == 0 || code[i - 1] != b'\\') {
+                    in_str = !in_str;
+                    i += 1;
+                    continue;
+                }
+                if in_str {
+                    i += 1;
+                    continue;
+                }
+                if code[i].is_ascii_alphabetic() || code[i] == b'_' {
+                    let s0 = i;
+                    let mut segs: Vec<String> = Vec::new();
+                    loop {
+                        let p0 = i;
+                        while i < code.len() && (code[i].is_ascii_alphanumeric() || code[i] == b'_') {
+                            i += 1;
                         }
+                        if i > p0 {
+                            segs.push(String::from_utf8_lossy(&code[p0..i]).to_string());
                         }
+                        if i < code.len() && code[i] == b'.' && i + 1 < code.len() && (code[i + 1].is_ascii_alphabetic() || code[i + 1] == b'_') {
+                            i += 1;
                             continue;
                         }
+                        break;
                     }
+                    let mut after = i;
+                    // Skip optional `<...>` generic argument list
+                    let mut had_generic = false;
+                    if after < code.len() && code[after] == b'<' {
+                        let mut gdepth = 1usize;
+                        let mut gj = after + 1;
+                        while gj < code.len() && gdepth > 0 {
+                            if code[gj] == b'<' { gdepth += 1; }
+                            else if code[gj] == b'>' { gdepth -= 1; }
+                            else if matches!(code[gj], b';' | b'{' | b'}') { break; }
+                            gj += 1;
                         }
+                        if gdepth == 0 {
+                            had_generic = true;
+                            after = gj;
                         }
                     }
+                    if after < code.len() && code[after] == b'(' {
+                        let last = segs.last().map(|s| s.as_str()).unwrap_or("");
+                        let prev_ok = s0 == 0 || !matches!(code[s0 - 1], b'.');
+                        let after_unsafe = code[..s0].ends_with(b"unsafe ");
+                        if prev_ok && (had_generic && segs.len() >= 2 || matches!(last, "open" | "type" | "set") || after_unsafe) {
+                            let path = segs.join(".");
+                            let call_idx_opt = if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                if let Some(pos) = sym.calls.iter().position(|c| c.line == lno && c.path == path) {
+                                    Some(pos)
+                                } else {
+                                    sym.calls.push(Call { path: path.clone(), line: lno });
+                                    Some(sym.calls.len() - 1)
                                 }
+                            } else {
+                                None
+                            };
+                            if let Some(cidx) = call_idx_opt {
+                                // Collect argument names/constants inside `(...)` (across lines if multi-line).
+                                let open_abs = line_start + after;
+                                let mut ak = open_abs + 1;
+                                let mut pdepth = 1usize;
                                 let mut arg_parts: Vec<String> = Vec::new();
                                 while ak < n && pdepth > 0 {
                                     let c = src[ak];
@@ -3109,111 +3305,64 @@ impl<'a> Walker<'a> {
                                             if src[ak] == b'\\' && ak + 1 < n { ak += 2; continue; }
                                             ak += 1;
                                         }
+                                        if ak < n { ak += 1; }
+                                        arg_parts.push("0".to_string());
+                                        continue;
                                     }
+                                    if c == b'(' { pdepth += 1; ak += 1; continue; }
+                                    if c == b')' { pdepth -= 1; ak += 1; continue; }
+                                    if c.is_ascii_alphabetic() || c == b'_' {
+                                        let id0 = ak;
+                                        while ak < n && (src[ak].is_ascii_alphanumeric() || src[ak] == b'_') { ak += 1; }
+                                        // Emit labeled argument `["k", label, val]` when `label: expr`
+                                        let mut la = ak;
+                                        while la < n && matches!(src[la], b' ' | b'\t') { la += 1; }
+                                        if la < n && src[la] == b':' {
+                                            let lbl = String::from_utf8_lossy(&src[id0..ak]).to_string();
+                                            ak = la + 1;
+                                            while ak < n && matches!(src[ak], b' ' | b'\t' | b'\r' | b'\n') { ak += 1; }
+                                            if ak < n && (src[ak].is_ascii_alphabetic() || src[ak] == b'_') {
+                                                let v0 = ak;
+                                                while ak < n && (src[ak].is_ascii_alphanumeric() || src[ak] == b'_' || src[ak] == b'.') { ak += 1; }
+                                                let vraw = String::from_utf8_lossy(&src[v0..ak]);
+                                                let vname = vraw.rsplit('.').next().unwrap_or(&vraw);
+                                                arg_parts.push(format!("[\"k\",\"{lbl}\",[\"n\",\"{vname}\"]]"));
+                                            }
                                             continue;
                                         }
-                                        }
-                                    }
-                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
-                                        if !sym.events.is_empty() { sym.events.push(','); }
-                                        sym.events.push_str(&ev);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-                                        rk += 1;
-                                        if pdepth == 0 && bdepth == 0 { break; }
-                                        continue;
-                                    }
-                                    if c == b'{' { bdepth += 1; rk += 1; continue; }
-                                    if c == b'}' {
-                                        if bdepth > 0 { bdepth -= 1; }
-                                        rk += 1;
-                                        continue;
-                                    }
-                                    if c == b'\n' && pdepth == 0 && bdepth == 0 { break; }
-                                    if c.is_ascii_alphabetic() || c == b'_' {
-                                        let id0 = rk;
-                                        while rk < n && (src[rk].is_ascii_alphanumeric() || src[rk] == b'_') { rk += 1; }
-                                        let id = String::from_utf8_lossy(&src[id0..rk]);
-                                        if !matches!(id.as_ref(), "true" | "false" | "nil" | "in" | "let" | "var" | "return" | "try" | "await") {
-                                            parts.push(format!("[\"n\",\"{id}\"]"));
+                                        let id = String::from_utf8_lossy(&src[id0..ak]);
+                                        if !matches!(id.as_ref(), "true" | "false" | "nil" | "self" | "try" | "await" | "unsafe") {
+                                            arg_parts.push(format!("[\"n\",\"{id}\"]"));
                                         }
                                         continue;
-                                    }
-                                    rk += 1;
-                                }
-                                if parts.len() >= 2 {
-                                    let ev = format!("[\"a\",{lno},[\"{target}\"],[\"m\",[{}]],0]", parts.join(","));
-                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
-                                        if !sym.events.is_empty() { sym.events.push(','); }
-                                        sym.events.push_str(&ev);
-                                    }
-                                }
-                            } else if ak < n && src[ak..].starts_with(b"if ") {
-                                let ev = format!("[\"a\",{lno},[\"{target}\"],[\"t\",[0,0,0]],0]");
-                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
-                                    if !sym.events.is_empty() { sym.events.push(','); }
-                                    sym.events.push_str(&ev);
-                                }
-                            } else if ak < n && src[ak] == b'[' {
-                                ak += 1;
-                                let mut depth = 1usize;
-                                let mut elems = 0usize;
-                                let mut has_tok = false;
-                                let mut has_ident = false;
-                                while ak < n && depth > 0 {
-                                    let c = src[ak];
-                                    if c == b'/' && ak + 1 < n && src[ak + 1] == b'/' {
-                                        while ak < n && src[ak] != b'\n' { ak += 1; }
-                                        continue;
-                                    }
-                                    if c == b'"' {
-                                        has_tok = true;
-                                        ak += 1;
-                                        while ak < n && src[ak] != b'"' {
-                                            if src[ak] == b'\\' && ak + 1 < n { ak += 2; continue; }
-                                            ak += 1;
-                                        }
-                                        if ak < n { ak += 1; }
-                                        continue;
-                                    }
-                                    if c == b'[' || c == b'(' || c == b'{' {
-                                        depth += 1;
-                                        has_tok = true;
-                                    } else if c == b']' || c == b')' || c == b'}' {
-                                        depth -= 1;
-                                        if depth == 0 && has_tok {
-                                            elems += 1;
-                                        }
-                                    } else if c == b',' && depth == 1 {
-                                        if has_tok {
-                                            elems += 1;
-                                            has_tok = false;
-                                        }
-                                    } else if !c.is_ascii_whitespace() {
-                                        if c.is_ascii_alphabetic() && !(ak > 0 && src[ak - 1] == b'0' && matches!(c, b'x' | b'X' | b'b' | b'B' | b'o' | b'O')) {
-                                            // Allow hex digits inside 0x... literals
-                                            if !(matches!(c, b'a'..=b'f' | b'A'..=b'F')) {
-                                                has_ident = true;
-                                            }
-                                        }
-                                        has_tok = true;
                                     }
                                     ak += 1;
                                 }
-                                if depth == 0 && elems >= 2 && !has_ident {
-                                    let zeros = vec!["0"; elems].join(",");
-                                    let ev = format!("[\"a\",{lno},[\"{target}\"],[\"t\",[{zeros}]],0]");
+                                let recv = if segs.len() >= 2 { format!("[\"n\",\"{}\"]", segs[0]) } else { "0".to_string() };
+                                let cval = format!("[\"c\",{cidx},{recv},[{}]]", arg_parts.join(","));
+                                // Check if `let <target> = ` or `var <target> = ` precedes this call on the line.
+                                let prefix = &code[..s0];
+                                let mut emitted_a = false;
+                                if let Some(eq_p) = prefix.iter().rposition(|&b| b == b'=') {
+                                    if eq_p == 0 || !matches!(prefix[eq_p - 1], b'=' | b'!' | b'<' | b'>') {
+                                        let lhs_slice = &prefix[..eq_p];
+                                        let mut t1 = lhs_slice.len();
+                                        while t1 > 0 && matches!(lhs_slice[t1 - 1], b' ' | b'\t') { t1 -= 1; }
+                                        let mut t0 = t1;
+                                        while t0 > 0 && (lhs_slice[t0 - 1].is_ascii_alphanumeric() || lhs_slice[t0 - 1] == b'_' || lhs_slice[t0 - 1] == b'.') { t0 -= 1; }
+                                        if t1 > t0 {
+                                            let tgt = String::from_utf8_lossy(&lhs_slice[t0..t1]).to_string();
+                                            let ev = format!("[\"a\",{lno},[\"{tgt}\"],{cval},0]");
+                                            if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                if !sym.events.is_empty() { sym.events.push(','); }
+                                                sym.events.push_str(&ev);
+                                            }
+                                            emitted_a = true;
+                                        }
+                                    }
+                                }
+                                if !emitted_a {
+                                    let ev = format!("[\"x\",{lno},{cval}]");
                                     if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
                                         if !sym.events.is_empty() { sym.events.push(','); }
                                         sym.events.push_str(&ev);
@@ -3225,36 +3374,13 @@ impl<'a> Walker<'a> {
                 }
             }
 
-            // 4. Swift pointer/constructor member assignment `Type<...>(arg).prop = rhs`
-            // (e.g. `unsafe UnsafeMutablePointer<...>(_rawValue).pointee = unmanaged`).
-            if let Some(dp) = code.windows(2).position(|w| w == b").") {
-                // Extract single identifier inside `(<arg>)` immediately before `).`
-                let mut a1 = dp;
-                while a1 > 0 && matches!(code[a1 - 1], b' ' | b'\t') { a1 -= 1; }
-                let mut a0 = a1;
-                while a0 > 0 && (code[a0 - 1].is_ascii_alphanumeric() || code[a0 - 1] == b'_') { a0 -= 1; }
-                if a0 > 0 && code[a0 - 1] == b'(' && a1 > a0 {
-                    let arg = String::from_utf8_lossy(&code[a0..a1]).to_string();
-                    let mut p0 = dp + 2;
-                    let mut p1 = p0;
-                    while p1 < code.len() && (code[p1].is_ascii_alphanumeric() || code[p1] == b'_') { p1 += 1; }
-                    if p1 > p0 {
-                        let prop = String::from_utf8_lossy(&code[p0..p1]).to_string();
-                        let mut eq = p1;
-                        while eq < code.len() && matches!(code[eq], b' ' | b'\t') { eq += 1; }
-                        if eq < code.len() && code[eq] == b'=' && (eq + 1 >= code.len() || !matches!(code[eq + 1], b'=' | b'>')) {
-                            let eq_abs = line_start + eq;
-                            let mut rk = eq_abs + 1;
-                            while rk < n && matches!(src[rk], b' ' | b'\t' | b'\r' | b'\n') { rk += 1; }
-                            let r0 = rk;
-                            while rk < n && (src[rk].is_ascii_alphanumeric() || src[rk] == b'_') { rk += 1; }
-                            if rk > r0 {
-                                let rhs = String::from_utf8_lossy(&src[r0..rk]).to_string();
-                                let target = format!("{arg}.{prop}");
-                                let ev = format!("[\"a\",{lno},[\"{target}\"],[\"n\",\"{rhs}\"],0]");
+                                        }
+                                    }
+                                }
+                                }
                                 if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
-                                    if !sym.events.is_empty() { sym.events.push(','); }
-                                    sym.events.push_str(&ev);
+                                }
+                                }
                                 }
                             }
                         }
@@ -3262,21 +3388,14 @@ impl<'a> Walker<'a> {
                 }
             }
 
-            // 5. Swift ternary `return a ? b : c` (including inline `if cond { return ... }`)
-            // and multi-line boolean `return a ||\n b` -> emit `event r` preserving all names/constants.
-            if let Some(rpos) = code.windows(7).position(|w| w == b"return ") {
-                if rpos == 0 || !code[rpos - 1].is_ascii_alphanumeric() {
-                    let after_ret = &code[rpos + 7..];
-                    let is_ternary = after_ret.contains(&b'?') && after_ret.contains(&b':');
-                    let trimmed_ret = after_ret.iter().rev().skip_while(|&&b| matches!(b, b' ' | b'\t' | b'\r')).next().copied();
-                    let is_cont = matches!(trimmed_ret, Some(b'|' | b'&'));
-                    if is_ternary || is_cont {
-                        let mut expr_bytes: Vec<u8> = after_ret.to_vec();
-                        if is_cont {
-                            let mut next_i = li;
-                            while next_i < n && src[next_i] == b'\n' {
-                                next_i += 1;
-                                let nl_start = next_i;
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
                                 while next_i < n && src[next_i] != b'\n' { next_i += 1; }
                                 let nline = &src[nl_start..next_i];
                                 expr_bytes.push(b' ');
