@@ -248,6 +248,48 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             let rest = &self.src[self.pos..];
+            // Perl POD (`=head1`..`=cut`, `=pod`, `=encoding`, etc.) and `__END__`/`__DATA__`
+            // are documentation/data sections, not executable Perl statements.
+            if self.lang.tag == "PL" && self.pos == self.line_start {
+                if rest.starts_with(b"=") && rest.get(1).is_some_and(|b| b.is_ascii_alphabetic()) {
+                    loop {
+                        while self.pos < self.src.len() && self.src[self.pos] != b'\n' {
+                            self.pos += 1;
+                        }
+                        if self.pos >= self.src.len() {
+                            break;
+                        }
+                        self.newline();
+                        let next_line = &self.src[self.pos..];
+                        if next_line.starts_with(b"=cut")
+                            && !next_line.get(4).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                        {
+                            while self.pos < self.src.len() && self.src[self.pos] != b'\n' {
+                                self.pos += 1;
+                            }
+                            if self.pos < self.src.len() {
+                                self.newline();
+                            }
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if (rest.starts_with(b"__END__")
+                    && !rest.get(7).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_'))
+                    || (rest.starts_with(b"__DATA__")
+                        && !rest.get(8).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_'))
+                {
+                    while self.pos < self.src.len() {
+                        if self.src[self.pos] == b'\n' {
+                            self.newline();
+                        } else {
+                            self.pos += 1;
+                        }
+                    }
+                    return;
+                }
+            }
             if self.lang.tag == "PHP" && rest.starts_with(b"?>") {
                 self.pos += 2;
                 self.in_html = true;

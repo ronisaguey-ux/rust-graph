@@ -899,6 +899,9 @@ pub fn extract(root: &[u8], tree: &Cst, lang: Lang) -> Facts {
     if lang == Lang::Swift {
         walker.augment_swift();
     }
+    if lang == Lang::Rust {
+        walker.augment_rust();
+    }
     if lang == Lang::Lua {
         walker.augment_lua();
     }
@@ -1336,6 +1339,306 @@ impl<'a> Walker<'a> {
             in_kotlin_expr_body: false,
             delim_depth: 0,
             go_literal_frames: std::collections::HashMap::new(),
+        }
+    }
+
+    fn augment_rust(&mut self) {
+        let src = self.orig_src;
+        let n = src.len();
+        let mut li = 0usize;
+        let mut lno = 1u32;
+        let mut in_block_comment = 0usize;
+        while li < n {
+            let line_start = li;
+            while li < n && src[li] != b'\n' {
+                li += 1;
+            }
+            let raw = &src[line_start..li];
+            // Track nested `/* ... */` block comments and strip `//` line comments.
+            let mut code_end = raw.len();
+            let mut k = 0usize;
+            let mut in_str = false;
+            let line_starts_in_comment = in_block_comment > 0;
+            while k < raw.len() {
+                if in_block_comment > 0 {
+                    if k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'*' {
+                        in_block_comment += 1;
+                        k += 2;
+                        continue;
+                    }
+                    if k + 1 < raw.len() && raw[k] == b'*' && raw[k + 1] == b'/' {
+                        in_block_comment -= 1;
+                        k += 2;
+                        continue;
+                    }
+                    k += 1;
+                    continue;
+                }
+                if raw[k] == b'"' && (k == 0 || raw[k - 1] != b'\\') {
+                    in_str = !in_str;
+                    k += 1;
+                    continue;
+                }
+                if !in_str && k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'/' {
+                    code_end = k;
+                    break;
+                }
+                if !in_str && k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'*' {
+                    in_block_comment += 1;
+                    k += 2;
+                    continue;
+                }
+                k += 1;
+            }
+            if !line_starts_in_comment {
+                let code = &raw[..code_end];
+                let trimmed = {
+                    let mut t0 = 0;
+                    while t0 < code.len() && matches!(code[t0], b' ' | b'\t') { t0 += 1; }
+                    &code[t0..]
+                };
+                let owner_idx = self
+                    .facts
+                    .symbols
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .filter(|(_, sym)| sym.line <= lno && lno <= sym.end_line)
+                    .max_by_key(|(_, sym)| sym.line)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
+
+                // 1. Recover missing `fn <name>(` symbols (including `default fn`, `unsafe fn`, etc.).
+                if let Some(fpos) = trimmed.windows(3).position(|w| w == b"fn ") {
+                    let prev_ok = fpos == 0 || matches!(trimmed[fpos - 1], b' ' | b'\t' | b')');
+                    if prev_ok {
+                        let mut p0 = fpos + 3;
+                        while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                        let mut p1 = p0;
+                        while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                        if p1 > p0 && trimmed[p0].is_ascii_alphabetic() {
+                            let fname = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                            if !self.facts.symbols.iter().any(|sym| sym.name == fname && sym.line == lno) {
+                                // Find closing brace end_line for this fn body
+                                let mut eline = lno;
+                                let mut bk = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + p1;
+                                while bk < n && !matches!(src[bk], b'{' | b';') {
+                                    if src[bk] == b'\n' { eline += 1; }
+                                    bk += 1;
+                                }
+                                if bk < n && src[bk] == b'{' {
+                                    let mut depth = 1usize;
+                                    bk += 1;
+                                    while bk < n && depth > 0 {
+                                        match src[bk] {
+                                            b'\n' => eline += 1,
+                                            b'{' => depth += 1,
+                                            b'}' => depth -= 1,
+                                            _ => {}
+                                        }
+                                        bk += 1;
+                                    }
+                                }
+                                let owner = self.facts.symbols.get(owner_idx).map(|s| s.key.clone()).unwrap_or_default();
+                                let key = if owner.is_empty() { fname.clone() } else { format!("{owner}.{fname}") };
+                                self.facts.symbols.push(Symbol {
+                                    key,
+                                    name: fname,
+                                    owner,
+                                    kind: 1,
+                                    line: lno,
+                                    end_line: eline,
+                                    ..Symbol::default()
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // 2. Struct destructuring `let Path { ... } = expr;` -> emit `event x` with rhs + field names.
+                if trimmed.starts_with(b"let ") && trimmed.contains(&b'{') && trimmed.contains(&b'=') {
+                    if let Some(eq_p) = trimmed.iter().rposition(|&b| b == b'=') {
+                        if eq_p > 4 && !matches!(trimmed[eq_p - 1], b'=' | b'!' | b'<' | b'>') {
+                            let rhs = &trimmed[eq_p + 1..];
+                            let mut parts: Vec<String> = Vec::new();
+                            let mut rk = 0usize;
+                            while rk < rhs.len() {
+                                if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
+                                    let r0 = rk;
+                                    while rk < rhs.len() && (rhs[rk].is_ascii_alphanumeric() || rhs[rk] == b'_' || rhs[rk] == b'.') { rk += 1; }
+                                    let id = String::from_utf8_lossy(&rhs[r0..rk]).trim_matches('.').to_string();
+                                    if !id.is_empty() {
+                                        parts.push(format!("[\"n\",\"{id}\"]"));
+                                    }
+                                    continue;
+                                }
+                                rk += 1;
+                            }
+                            if !parts.is_empty() {
+                                let val = if parts.len() == 1 {
+                                    parts.remove(0)
+                                } else {
+                                    format!("[\"m\",[{}]]", parts.join(","))
+                                };
+                                let ev = format!("[\"x\",{lno},{val}]");
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    if !sym.events.is_empty() { sym.events.push(','); }
+                                    sym.events.push_str(&ev);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. `let [mut] <ident> [: Type] = <expr>;` -> emit `event a` for simple local bindings missed by errors/default fn.
+                if trimmed.starts_with(b"let ") && !trimmed.contains(&b'{') && trimmed.contains(&b'=') {
+                    let mut p0 = 4usize;
+                    while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                    if trimmed[p0..].starts_with(b"mut ") {
+                        p0 += 4;
+                        while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                    }
+                    let mut p1 = p0;
+                    while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                    if p1 > p0 && (trimmed[p0].is_ascii_alphabetic() || trimmed[p0] == b'_') {
+                        let target = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                        if let Some(eq_rel) = trimmed[p1..].iter().position(|&b| b == b'=') {
+                            let eq = p1 + eq_rel;
+                            if eq + 1 < trimmed.len() && !matches!(trimmed[eq + 1], b'=' | b'>') {
+                                let rhs = &trimmed[eq + 1..];
+                                let mut parts: Vec<String> = Vec::new();
+                                let mut rk = 0usize;
+                                while rk < rhs.len() {
+                                    if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
+                                        let r0 = rk;
+                                        while rk < rhs.len() && (rhs[rk].is_ascii_alphanumeric() || rhs[rk] == b'_') { rk += 1; }
+                                        let id = String::from_utf8_lossy(&rhs[r0..rk]);
+                                        if !matches!(id.as_ref(), "as" | "mut" | "ref" | "unsafe" | "true" | "false") {
+                                            parts.push(format!("[\"n\",\"{id}\"]"));
+                                        }
+                                        continue;
+                                    }
+                                    rk += 1;
+                                }
+                                let val = if parts.is_empty() {
+                                    "0".to_string()
+                                } else if parts.len() == 1 {
+                                    parts.remove(0)
+                                } else {
+                                    format!("[\"m\",[{}]]", parts.join(","))
+                                };
+                                let ev = format!("[\"a\",{lno},[\"{target}\"],{val},0]");
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    if !sym.events.is_empty() { sym.events.push(','); }
+                                    sym.events.push_str(&ev);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3b. `unsafe { ... }` single-line expression -> emit `event x` with all path calls & identifiers.
+                if trimmed.starts_with(b"unsafe {") && trimmed.contains(&b'}') {
+                    let body = &trimmed[8..];
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    while rk < body.len() {
+                        if body[rk] == b'}' { break; }
+                        if body[rk].is_ascii_alphabetic() || body[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < body.len() {
+                                if body[rk].is_ascii_alphanumeric() || body[rk] == b'_' {
+                                    rk += 1;
+                                } else if rk + 1 < body.len() && body[rk] == b':' && body[rk + 1] == b':' {
+                                    rk += 2;
+                                } else {
+                                    break;
+                                }
+                            }
+                            let path = String::from_utf8_lossy(&body[r0..rk]).replace("::", ".");
+                            let path = path.trim_matches('.').to_string();
+                            if !path.is_empty() && !matches!(path.as_str(), "as" | "mut" | "ref" | "const" | "unsafe" | "true" | "false") {
+                                if rk < body.len() && body[rk] == b'(' {
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = if let Some(pos) = sym.calls.iter().position(|c| c.line == lno && c.path == path) {
+                                            pos
+                                        } else {
+                                            sym.calls.push(Call { path: path.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        };
+                                        parts.push(format!("[\"c\",{cidx},0,[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{path}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let ev = format!("[\"x\",{lno},[\"m\",[{}]]]", parts.join(","));
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+                // 4. `self.<field> = <expr>;` (e.g. `self.filter = Some(::regex::Regex::new(pattern).unwrap());`)
+                if trimmed.starts_with(b"self.") && trimmed.contains(&b'=') {
+                    if let Some(eq_p) = trimmed.iter().position(|&b| b == b'=') {
+                        if eq_p > 5 && eq_p + 1 < trimmed.len() && !matches!(trimmed[eq_p - 1], b'=' | b'!' | b'<' | b'>') && !matches!(trimmed[eq_p + 1], b'=' | b'>') {
+                            let target = String::from_utf8_lossy(&trimmed[..eq_p]).trim().to_string();
+                            let rhs = &trimmed[eq_p + 1..];
+                            let mut parts: Vec<String> = Vec::new();
+                            let mut rk = 0usize;
+                            while rk < rhs.len() {
+                                if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
+                                    let r0 = rk;
+                                    while rk < rhs.len() {
+                                        if rhs[rk].is_ascii_alphanumeric() || rhs[rk] == b'_' {
+                                            rk += 1;
+                                        } else if rk + 1 < rhs.len() && rhs[rk] == b':' && rhs[rk + 1] == b':' {
+                                            rk += 2;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    let path = String::from_utf8_lossy(&rhs[r0..rk]).replace("::", ".");
+                                    let path = path.trim_matches('.').to_string();
+                                    if !path.is_empty() && !matches!(path.as_str(), "as" | "mut" | "ref" | "unsafe" | "true" | "false") {
+                                        if rk < rhs.len() && rhs[rk] == b'(' {
+                                            if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                let cidx = if let Some(pos) = sym.calls.iter().position(|c| c.line == lno && c.path == path) {
+                                                    pos
+                                                } else {
+                                                    sym.calls.push(Call { path: path.clone(), line: lno });
+                                                    sym.calls.len() - 1
+                                                };
+                                                parts.push(format!("[\"c\",{cidx},0,[0]]"));
+                                            }
+                                        }
+                                        parts.push(format!("[\"n\",\"{path}\"]"));
+                                    }
+                                    continue;
+                                }
+                                rk += 1;
+                            }
+                            if !parts.is_empty() {
+                                let ev = format!("[\"a\",{lno},[\"{target}\"],[\"m\",[{}]],0]", parts.join(","));
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    if !sym.events.is_empty() { sym.events.push(','); }
+                                    sym.events.push_str(&ev);
+                                }
+                            }
+                        }
+                    }
+                }
+
+            }
+            if li < n && src[li] == b'\n' {
+                li += 1;
+                lno += 1;
+            }
         }
     }
 
@@ -16709,7 +17012,22 @@ impl<'a> Walker<'a> {
                 if !val.is_empty() && val != "0" {
                     self.lexer_event(b'x', cline, &[], &val, false);
                 }
-                for (wl, w) in &words {
+                if words.iter().any(|w| w.1.starts_with('{') && w.1.ends_with('}')) {
+                    let mut seg_start = 0usize;
+                    for wi in 0..=words.len() {
+                        if wi == words.len() || (words[wi].1.starts_with('{') && words[wi].1.ends_with('}')) {
+                            if wi > seg_start {
+                                let sl = words[seg_start].0;
+                                let sv = self.tcl_eval_words(&words[seg_start..wi], sl, depth + 1);
+                                if !sv.is_empty() && sv != "0" {
+                                    self.lexer_event(b'x', sl, &[], &sv, false);
+                                }
+                            }
+                            seg_start = wi + 1;
+                        }
+                    }
+                }
+                for (wi, (wl, w)) in words.iter().enumerate() {
                         if !w.starts_with('"') && !w.starts_with('{') && !w.starts_with('[') {
                             if let Some(ep) = w.find('=') {
                                 let prev_b = if ep > 0 { w.as_bytes()[ep - 1] } else { 0 };
@@ -16724,7 +17042,17 @@ impl<'a> Walker<'a> {
                                         if Self::tcl_is_ident(&t) {
                                             let rhs_str = &w[ep + 1..];
                                             let rv = if !rhs_str.is_empty() {
-                                                let r = self.tcl_eval_words(&[(*wl, rhs_str.to_string())], *wl, depth + 1);
+                                                let mut rhs_words = vec![(*wl, rhs_str.to_string())];
+                                                if rhs_str.starts_with('[') && !rhs_str.ends_with(']') {
+                                                    let mut joined = rhs_str.to_string();
+                                                    for (_, nw) in &words[wi + 1..] {
+                                                        joined.push(' ');
+                                                        joined.push_str(nw);
+                                                        if nw.ends_with(']') { break; }
+                                                    }
+                                                    rhs_words = vec![(*wl, joined)];
+                                                }
+                                                let r = self.tcl_eval_words(&rhs_words, *wl, depth + 1);
                                                 if r.is_empty() { "0".to_string() } else { r }
                                             } else {
                                                 "0".to_string()
@@ -16836,6 +17164,21 @@ impl<'a> Walker<'a> {
             self.lexer_event(b'r', line, &[], &rv, false);
         } else if !val.is_empty() && val != "0" {
             self.lexer_event(b'x', line, &[], &val, false);
+            if words.iter().any(|w| w.1.starts_with('{') && w.1.ends_with('}')) {
+                let mut seg_start = 0usize;
+                for wi in 0..=words.len() {
+                    if wi == words.len() || (words[wi].1.starts_with('{') && words[wi].1.ends_with('}')) {
+                        if wi > seg_start {
+                            let sl = words[seg_start].0;
+                            let sv = self.tcl_eval_words(&words[seg_start..wi], sl, 1);
+                            if !sv.is_empty() && sv != "0" {
+                                self.lexer_event(b'x', sl, &[], &sv, false);
+                            }
+                        }
+                        seg_start = wi + 1;
+                    }
+                }
+            }
         }
     }
 
