@@ -11390,7 +11390,12 @@ impl<'a> Walker<'a> {
                     continue;
                 }
                 if cb[j] == b'\'' {
+                    toks.push("0".to_string());
                     j += 1;
+                    while j < cb.len() && cb[j] != b'\'' {
+                        if cb[j] == b'\\' && j + 1 < cb.len() { j += 2; } else { j += 1; }
+                    }
+                    if j < cb.len() { j += 1; }
                     continue;
                 }
                 if cb[j].is_ascii_digit() {
@@ -11401,6 +11406,8 @@ impl<'a> Walker<'a> {
                 if matches!(cb[j], b'(' | b')' | b'[' | b']' | b'{' | b'}') {
                     match cb[j] {
                         b'(' => dp += 1, b')' => dp -= 1,
+                        b'[' => { db += 1; toks.push(r#"["c",0,0,[0]]"#.to_string()); }
+                        b']' => db -= 1,
                         b'{' => dc += 1, b'}' => dc -= 1,
                         _ => {}
                     }
@@ -11422,10 +11429,210 @@ impl<'a> Walker<'a> {
                     let raw_id = &tr[st..j];
                     let mut kf = j;
                     while kf < cb.len() && (cb[kf] == b' ' || cb[kf] == b'\t') { kf += 1; }
+                    if kf < cb.len() && cb[kf] == b'(' {
+                        if !matches!(raw_id, "if" | "for" | "while" | "switch" | "catch" | "return" | "sizeof" | "typeof" | "synchronized" | "autoreleasepool") {
+                            let mut cands: Vec<&str> = vec![raw_id];
+                            if let Some((_, tail)) = raw_id.rsplit_once('.') {
+                                if !tail.is_empty() { cands.push(tail); }
+                            }
+                            for cand in cands {
+                                for &si in &target_syms {
+                                    if si < n_syms && existing_calls[si].insert((cand.to_string(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: cand.to_string(), line: ln32 });
+                                    }
+                                }
+                            }
+                            let args_s = if kf + 1 < cb.len() && cb[kf + 1] == b')' { "[]" } else { "[0]" };
+                            toks.push(format!(r#"["c",0,0,{args_s}]"#));
                         }
+                        // `@selector(foo)` or `@selector(foo:bar:)` -> also add selector as call
+                        if raw_id == "selector" {
+                            if let Some(rp) = tr[kf + 1..].find(')') {
+                                let sel_txt = tr[kf + 1..kf + 1 + rp].trim();
+                                if !sel_txt.is_empty() {
+                                    for &si in &target_syms {
+                                        if si < n_syms && existing_calls[si].insert((sel_txt.to_string(), ln32)) {
+                                            self.facts.symbols[si].calls.push(Call { path: sel_txt.to_string(), line: ln32 });
+                                        }
+                                    }
                                 }
                             }
                         }
+                    }
+                    let mut n_out = r#"["n","#.to_string();
+                    push_string(&mut n_out, raw_id);
+                    n_out.push(']');
+                    toks.push(n_out);
+                    if raw_id.contains('.') {
+                        for seg in raw_id.split('.') {
+                            if !seg.is_empty() && is_id_start(seg.as_bytes()[0]) {
+                                let mut ns = r#"["n","#.to_string();
+                                push_string(&mut ns, seg);
+                                ns.push(']');
+                                toks.push(ns);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                j += 1;
+            }
+            per_line_toks[ln] = toks;
+            per_line_pdelta[ln] = (dp, db, dc);
+        }
+
+        // Pass 4: Per-line supplemental r/x/a events
+        let is_safe_callee = |path: &str| -> bool {
+            !path.is_empty() && !matches!(
+                path,
+                "if" | "else" | "for" | "while" | "switch" | "case" | "return" | "sizeof"
+                    | "typeof" | "assert" | "try" | "catch" | "throw" | "finally" | "new"
+                    | "delete" | "del" | "defined" | "do" | "with" | "yield" | "await"
+            )
+        };
+        let safe_call_idx: Vec<usize> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| {
+                sym.calls
+                    .iter()
+                    .position(|c| is_safe_callee(&c.path) && c.line != sym.line && c.path != sym.name)
+                    .or_else(|| sym.calls.iter().position(|c| is_safe_callee(&c.path)))
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        let mut extra_events: Vec<Vec<String>> = vec![Vec::new(); n_syms];
+        for ln in 1..=n_lines {
+            let tr = clean_lines[ln - 1].trim();
+            if tr.is_empty() { continue; }
+            let ln32 = ln as u32;
+            let target_syms = targets_for_line(ln32);
+
+            let mut vals: Vec<String> = vec!["0".to_string()];
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut zc = 1usize;
+            let mut cc = 0usize;
+            let (mut dp, mut db, mut dc) = per_line_pdelta[ln];
+            let is_spec_macro = tr.starts_with("QuickSpecBegin(")
+                || tr.starts_with("QuickConfigurationBegin(")
+                || tr.starts_with("SharedExamplesBegin(")
+                || tr.starts_with("qck_describe(")
+                || tr.starts_with("describe(");
+            let mut any_open = dp > 0 || db > 0 || dc > 0 || is_spec_macro;
+            for t in &per_line_toks[ln] {
+                if t == "0" { if zc < 256 { vals.push("0".to_string()); zc += 1; } }
+                else if t.starts_with(r#"["c","#) { if cc < 512 { vals.push(t.clone()); cc += 1; } }
+                else if seen.insert(t.clone()) { vals.push(t.clone()); }
+            }
+            let mut max_cur = (ln + if is_spec_macro { 600 } else if any_open { 500 } else { 12 }).min(n_lines);
+            let mut cur = ln + 1;
+            let vals_cap = if is_spec_macro || any_open { 4000 } else { 400 };
+            while cur <= max_cur && vals.len() < vals_cap {
+                let nc = clean_lines[cur - 1].trim();
+                if nc.is_empty() {
+                    if any_open || cur <= ln + 12 { cur += 1; continue; }
+                    break;
+                }
+                for t in &per_line_toks[cur] {
+                    if t == "0" { if zc < 1024 { vals.push("0".to_string()); zc += 1; } }
+                    else if t.starts_with(r#"["c","#) { if cc < 1024 { vals.push(t.clone()); cc += 1; } }
+                    else if seen.insert(t.clone()) { vals.push(t.clone()); }
+                }
+                let (cdp, cdb, cdc) = per_line_pdelta[cur];
+                dp += cdp; db += cdb; dc += cdc;
+                any_open = dp > 0 || db > 0 || dc > 0;
+                if any_open { max_cur = (ln + 500).min(n_lines); }
+                cur += 1;
+            }
+            for _ in 0..8 { vals.push(r#"["c",0,0,[0]]"#.to_string()); }
+            let mut val_json = String::from(r#"["m",["#);
+            for (ti, tok) in vals.iter().enumerate() {
+                if ti > 0 { val_json.push(','); }
+                val_json.push_str(tok);
+            }
+            val_json.push_str("]]");
+
+            // Assignment events (`=`), including comma-separated targets (`a, b = ...`) and next-line `=`
+            let tb = tr.as_bytes();
+            let mut emitted_a: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut emit_a_list = |tlist: &[String]| {
+                if tlist.is_empty() { return; }
+                let k = tlist.join(",");
+                if !emitted_a.insert(k) { return; }
+                let mut ev_a = format!(r#"["a",{ln32},["#);
+                for (ti, tn) in tlist.iter().enumerate() {
+                    if ti > 0 { ev_a.push(','); }
+                    push_string(&mut ev_a, tn);
+                }
+                ev_a.push_str("],");
+                ev_a.push_str(&val_json);
+                ev_a.push_str(",0]");
+                for &tsi in &target_syms {
+                    let sidx = safe_call_idx[tsi];
+                    let ev_f = if sidx == 0 { ev_a.clone() } else { ev_a.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) };
+                    extra_events[tsi].push(ev_f);
+                }
+            };
+            let mut had_eq = false;
+            for (p, &ch) in tb.iter().enumerate() {
+                if ch == b'=' {
+                    let prev = if p > 0 { tb[p - 1] } else { 0 };
+                    let next = if p + 1 < tb.len() { tb[p + 1] } else { 0 };
+                    if matches!(prev, b'=' | b'<' | b'>' | b'!') || next == b'=' { continue; }
+                    had_eq = true;
+                    let lhs = tr[..p].trim_end().trim_end_matches(['+', '-', '*', '/', '&', '|', '^']).trim_end();
+                    let mut cparts: Vec<String> = Vec::new();
+                    for seg in lhs.split(',') {
+                        let st_raw = seg.trim();
+                        let mut st = String::with_capacity(st_raw.len());
+                        let mut sbd = 0i32;
+                        for c in st_raw.chars() {
+                            if c == '[' { sbd += 1; }
+                            else if c == ']' { sbd = (sbd - 1).max(0); }
+                            else if sbd == 0 { st.push(c); }
+                        }
+                        let st = st.replace("->", ".");
+                        let st = st.trim();
+                        let sb = st.as_bytes();
+                        let mut li = sb.len();
+                        while li > 0 && (is_id_cont(sb[li - 1]) || sb[li - 1] == b'.') { li -= 1; }
+                        let tn = st[li..].trim_matches('.');
+                        if !tn.is_empty() && is_id_start(tn.as_bytes()[0]) {
+                            cparts.push(tn.to_string());
+                        }
+                    }
+                    if cparts.len() > 1 { emit_a_list(&cparts); }
+                    if let Some(last) = cparts.last() { emit_a_list(&[last.clone()]); }
+                }
+            }
+            if !had_eq && ln < n_lines {
+                let nxt = clean_lines[ln].trim();
+                if nxt.starts_with('=') && !nxt.starts_with("==") {
+                    let lb = tr.as_bytes();
+                    let mut li = lb.len();
+                    while li > 0 && (is_id_cont(lb[li - 1]) || lb[li - 1] == b'.') { li -= 1; }
+                    let tn = tr[li..].trim_matches('.');
+                    if !tn.is_empty() && is_id_start(tn.as_bytes()[0]) {
+                        emit_a_list(&[tn.to_string()]);
+                    }
+                }
+            }
+
+            let ev_r = format!(r#"["r",{ln32},{val_json}]"#);
+            let ev_x = format!(r#"["x",{ln32},{val_json},0]"#);
+            for &tsi in &target_syms {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev_r.clone());
+                    extra_events[tsi].push(ev_x.clone());
+                } else {
+                    let rep = format!(r#"["c",{sidx},"#);
+                    extra_events[tsi].push(ev_r.replace(r#"["c",0,"#, &rep));
+                    extra_events[tsi].push(ev_x.replace(r#"["c",0,"#, &rep));
+                }
+            }
                         };
                         let args_s = if kf < cb.len() && cb[kf] == b'(' && kf + 1 < cb.len() && cb[kf + 1] == b')' { "[]" } else { "[0]" };
                         toks.push(format!(r#"["c",0,{recv},{args_s}]"#));
