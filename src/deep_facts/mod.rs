@@ -35518,3 +35518,22 @@ mod accessor_name_tests {
             ("function set(a, b) { return a; }", "set"),
             ("function get(a) { return a; }", "get"),
             ("function setter(a) { return a; }", "setter"),
+            ("return function async(_x) {};", "async"),
+        ] {
+            let tree = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a tree");
+            let facts = extract(source.as_bytes(), &tree, Lang::JavaScript);
+            let names: Vec<&str> = facts.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+            assert!(names.contains(&expected), "{source} named {names:?}");
+        }
+    }
+
+    #[test]
+    fn a_bound_function_expression_takes_the_declarator_name() {
+        let source = "const noopfn = function() {\n    ;\n}.bind();\n";
+        let tree = deep_integration::parse_file(source.as_bytes(), Lang::JavaScript).expect("a tree");
+        let facts = extract(source.as_bytes(), &tree, Lang::JavaScript);
+        let names: Vec<&str> = facts.symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert!(names.contains(&"noopfn"), "{source} named {names:?}");
+        assert!(!names.iter().any(|name| name.starts_with("<anonymous>")), "{source} named {names:?}");
+    }
+}
