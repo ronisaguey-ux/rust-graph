@@ -17,6 +17,8 @@
 //! lookup, not with lexer modes the DSL cannot drive.
 
 pub mod cobol;
+pub mod elm;
+pub mod matlab;
 pub mod dart;
 pub mod fortran;
 pub mod fsharp;

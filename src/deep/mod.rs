@@ -104,6 +104,7 @@ pub fn language_for(path: &str) -> Option<&'static syntax::Language> {
         "zig" => Some(&batch_d::zig::ZIG),
         "d" => Some(&batch_e::d::D),
         "fs" | "fsx" => Some(&batch_f::fsharp::FSHARP),
+        "elm" => Some(&batch_f::elm::ELM),
         "ml" | "mli" => Some(&batch_e::ocaml::OCAML),
         "erl" | "hrl" => Some(&batch_d::erlang::ERLANG),
         "clj" | "cljs" | "cljc" => Some(&batch_d::clojure::CLOJURE),
