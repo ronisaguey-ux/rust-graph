@@ -1471,12 +1471,73 @@ impl<'a> Walker<'a> {
                     }
                 }
 
-                // 2. Struct destructuring `let Path { ... } = expr;` -> emit `event x` with rhs + field names.
+                // 1b. Recover missing `struct`/`enum`/`trait`/`type`/`macro_rules!` symbols (for attribute/macro-gated definitions).
+                for &(kw, sym_kind) in &[
+                    (b"struct " as &[u8], 2u8),
+                    (b"enum ", 2u8),
+                    (b"trait ", 2u8),
+                    (b"type ", 2u8),
+                    (b"macro_rules! ", 1u8),
+                ] {
+                    if let Some(kpos) = trimmed.windows(kw.len()).position(|w| w == kw) {
+                        let prev_ok = kpos == 0 || matches!(trimmed[kpos - 1], b' ' | b'\t' | b')');
+                        if prev_ok {
+                            let mut p0 = kpos + kw.len();
+                            while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                            let mut p1 = p0;
+                            while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                            if p1 > p0 && trimmed[p0].is_ascii_alphabetic() {
+                                let sname = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                                if !self.facts.symbols.iter().any(|sym| sym.name == sname && sym.line == lno) {
+                                    let mut eline = lno;
+                                    let mut bk = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + p1;
+                                    while bk < n && !matches!(src[bk], b'{' | b';') {
+                                        if src[bk] == b'\n' { eline += 1; }
+                                        bk += 1;
+                                    }
+                                    if bk < n && src[bk] == b'{' {
+                                        let mut depth = 1usize;
+                                        bk += 1;
+                                        while bk < n && depth > 0 {
+                                            match src[bk] {
+                                                b'\n' => eline += 1,
+                                                b'{' => depth += 1,
+                                                b'}' => depth -= 1,
+                                                _ => {}
+                                            }
+                                            bk += 1;
+                                        }
+                                    }
+                                    let owner = self.facts.symbols.get(owner_idx).map(|s| s.key.clone()).unwrap_or_default();
+                                    let key = if owner.is_empty() { sname.clone() } else { format!("{owner}.{sname}") };
+                                    self.facts.symbols.push(Symbol {
+                                        key,
+                                        name: sname,
+                                        owner,
+                                        kind: sym_kind,
+                                        line: lno,
+                                        end_line: eline,
+                                        ..Symbol::default()
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Struct destructuring `let Path { ... } = expr;`:
+                //    - Emit `event x` with struct `Path` + rhs names (fixes `let Self { ... } = self;`).
+                //    - If renamed fields `field: var` appear inside `{...}`, emit `event a` with first field name as target.
                 if trimmed.starts_with(b"let ") && trimmed.contains(&b'{') && trimmed.contains(&b'=') {
-                    if let Some(eq_p) = trimmed.iter().rposition(|&b| b == b'=') {
-                        if eq_p > 4 && !matches!(trimmed[eq_p - 1], b'=' | b'!' | b'<' | b'>') {
+                    if let (Some(lb), Some(eq_p)) = (trimmed.iter().position(|&b| b == b'{'), trimmed.iter().rposition(|&b| b == b'=')) {
+                        if eq_p > lb && !matches!(trimmed[eq_p - 1], b'=' | b'!' | b'<' | b'>') {
+                            let path_str = String::from_utf8_lossy(&trimmed[4..lb]).trim().replace("::", ".");
                             let rhs = &trimmed[eq_p + 1..];
                             let mut parts: Vec<String> = Vec::new();
+                            let mut rhs_parts: Vec<String> = Vec::new();
+                            if !path_str.is_empty() && path_str.as_bytes()[0].is_ascii_alphabetic() {
+                                parts.push(format!("[\"n\",\"{path_str}\"]"));
+                            }
                             let mut rk = 0usize;
                             while rk < rhs.len() {
                                 if rhs[rk].is_ascii_alphabetic() || rhs[rk] == b'_' {
