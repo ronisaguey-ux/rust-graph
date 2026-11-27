@@ -14078,3 +14078,323 @@ impl<'a> Walker<'a> {
                         while li > 0 && (is_id_cont(lb[li - 1]) || lb[li - 1] == b'.') { li -= 1; }
                         let tn = lhs_clean[li..].trim_matches('.');
                         if !tn.is_empty() && is_id_start(tn.as_bytes()[0]) {
+                            self.facts.vars.push((tn.to_string(), rtok.clone()));
+                            if let Some((_, tail)) = tn.rsplit_once('.') {
+                                if !tail.is_empty() && is_id_start(tail.as_bytes()[0]) {
+                                    self.facts.vars.push((tail.to_string(), rtok.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Full-file ObjC bracket message send scanner `[receiver sel]` / `[receiver k1:v1 k2:v2]`
+        // Join clean_lines with `\n` and map byte offsets to 1-based line numbers
+        let joined_src = clean_lines.join("\n");
+        let jb = joined_src.as_bytes();
+        let mut line_starts: Vec<usize> = vec![0];
+        for (idx, &ch) in jb.iter().enumerate() {
+            if ch == b'\n' { line_starts.push(idx + 1); }
+        }
+        let byte_to_line = |pos: usize| -> u32 {
+            let idx = line_starts.partition_point(|&s| s <= pos);
+            idx.max(1) as u32
+        };
+
+        // Scan every `[` ... `]` pair (outside strings) for ObjC message sends
+        let mut bstack: Vec<usize> = Vec::new();
+        let mut idx = 0usize;
+        let mut in_dq = false;
+        let mut in_sq = false;
+        while idx < jb.len() {
+            let ch = jb[idx];
+            if in_dq {
+                if ch == b'\\' && idx + 1 < jb.len() { idx += 2; continue; }
+                if ch == b'"' { in_dq = false; }
+                idx += 1;
+                continue;
+            }
+            if in_sq {
+                if ch == b'\\' && idx + 1 < jb.len() { idx += 2; continue; }
+                if ch == b'\'' { in_sq = false; }
+                idx += 1;
+                continue;
+            }
+            if ch == b'"' { in_dq = true; idx += 1; continue; }
+            if ch == b'\'' { in_sq = true; idx += 1; continue; }
+            if ch == b'[' {
+                bstack.push(idx);
+            } else if ch == b']' {
+                if let Some(open_pos) = bstack.pop() {
+                    if idx > open_pos + 1 && idx - open_pos < 8000 {
+                        let inner = &joined_src[open_pos + 1..idx];
+                        let ib = inner.as_bytes();
+                        // Collect top-level (depth 0) tokens AND last identifier at any depth
+                        let mut top_ids: Vec<(&str, bool, usize)> = Vec::new();
+                        let mut last_any_id: Option<(&str, usize)> = None;
+                        let mut d = 0i32;
+                        let mut k = 0usize;
+                        let mut sdq = false;
+                        let mut ssq = false;
+                        while k < ib.len() {
+                            let c = ib[k];
+                            if sdq {
+                                if c == b'\\' && k + 1 < ib.len() { k += 2; continue; }
+                                if c == b'"' { sdq = false; }
+                                k += 1; continue;
+                            }
+                            if ssq {
+                                if c == b'\\' && k + 1 < ib.len() { k += 2; continue; }
+                                if c == b'\'' { ssq = false; }
+                                k += 1; continue;
+                            }
+                            if c == b'"' { sdq = true; k += 1; continue; }
+                            if c == b'\'' { ssq = true; k += 1; continue; }
+                            if matches!(c, b'[' | b'(' | b'{') { d += 1; k += 1; continue; }
+                            if matches!(c, b']' | b')' | b'}') { d = (d - 1).max(0); k += 1; continue; }
+                            if is_id_start(c) {
+                                let s = k;
+                                k += 1;
+                                while k < ib.len() && is_id_cont(ib[k]) { k += 1; }
+                                let word = &inner[s..k];
+                                let mut kf = k;
+                                while kf < ib.len() && (ib[kf] == b' ' || ib[kf] == b'\t') { kf += 1; }
+                                let has_colon = kf < ib.len() && ib[kf] == b':' && !(kf + 1 < ib.len() && ib[kf + 1] == b':');
+                                if !has_colon {
+                                    last_any_id = Some((word, open_pos + 1 + s));
+                                }
+                                if d == 0 {
+                                    top_ids.push((word, has_colon, open_pos + 1 + s));
+                                }
+                                continue;
+                            }
+                            k += 1;
+                        }
+                        if let Some((lw, lpos)) = last_any_id {
+                            let call_ln = byte_to_line(open_pos);
+                            let l_ln = byte_to_line(lpos);
+                            for ln32 in [call_ln, l_ln] {
+                                let target_syms = targets_for_line(ln32);
+                                for &si in &target_syms {
+                                    if si < n_syms && existing_calls[si].insert((lw.to_string(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: lw.to_string(), line: ln32 });
+                                    }
+                                }
+                            }
+                        }
+                        let colon_parts: Vec<(&str, usize)> = top_ids.iter().filter(|x| x.1).map(|x| (x.0, x.2)).collect();
+                        if !colon_parts.is_empty() {
+                            let mut full_sel = String::new();
+                            for (w, _) in &colon_parts {
+                                full_sel.push_str(w);
+                                full_sel.push(':');
+                            }
+                            let call_ln = byte_to_line(open_pos);
+                            let first_ln = byte_to_line(colon_parts[0].1);
+                            for ln32 in [call_ln, first_ln] {
+                                let target_syms = targets_for_line(ln32);
+                                for &si in &target_syms {
+                                    if si < n_syms && existing_calls[si].insert((full_sel.clone(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: full_sel.clone(), line: ln32 });
+                                    }
+                                    if colon_parts.len() == 1 {
+                                        let w0 = colon_parts[0].0.to_string();
+                                        if si < n_syms && existing_calls[si].insert((w0.clone(), ln32)) {
+                                            self.facts.symbols[si].calls.push(Call { path: w0, line: ln32 });
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(&(last_w, last_has_colon, last_pos)) = top_ids.last() {
+                                if !last_has_colon {
+                                    let last_ln = byte_to_line(last_pos);
+                                    for ln32 in [call_ln, last_ln] {
+                                        let target_syms = targets_for_line(ln32);
+                                        for &si in &target_syms {
+                                            if si < n_syms && existing_calls[si].insert((last_w.to_string(), ln32)) {
+                                                self.facts.symbols[si].calls.push(Call { path: last_w.to_string(), line: ln32 });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if top_ids.len() >= 2 {
+                            // Zero-arg message send `[receiver selector]`
+                            let (sel, sel_pos) = (top_ids.last().unwrap().0, top_ids.last().unwrap().2);
+                            let call_ln = byte_to_line(open_pos);
+                            let sel_ln = byte_to_line(sel_pos);
+                            for ln32 in [call_ln, sel_ln] {
+                                let target_syms = targets_for_line(ln32);
+                                for &si in &target_syms {
+                                    if si < n_syms && existing_calls[si].insert((sel.to_string(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: sel.to_string(), line: ln32 });
+                                    }
+                                }
+                            }
+                        } else if top_ids.len() == 1 {
+                            // `[ [nested] selector ]` where receiver was a nested `[...]`
+                            let (sel, sel_pos) = (top_ids[0].0, top_ids[0].2);
+                            if inner.trim_start().starts_with('[') || inner.trim_start().starts_with('(') {
+                                let call_ln = byte_to_line(open_pos);
+                                let sel_ln = byte_to_line(sel_pos);
+                                for ln32 in [call_ln, sel_ln] {
+                                    let target_syms = targets_for_line(ln32);
+                                    for &si in &target_syms {
+                                        if si < n_syms && existing_calls[si].insert((sel.to_string(), ln32)) {
+                                            self.facts.symbols[si].calls.push(Call { path: sel.to_string(), line: ln32 });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        }
+
+        // Pass 3: Per-line paren calls, @selector(...) calls, and tokens
+        let mut per_line_toks: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
+        let mut per_line_pdelta: Vec<(i32, i32, i32)> = vec![(0, 0, 0); n_lines + 1];
+        for (idx, cl) in clean_lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            let tr = cl.trim();
+            if tr.is_empty() { continue; }
+            let target_syms = targets_for_line(ln32);
+            let cb = tr.as_bytes();
+            let mut toks: Vec<String> = Vec::new();
+            let mut dp = 0i32; let mut db = 0i32; let mut dc = 0i32;
+            let mut j = 0usize;
+            while j < cb.len() {
+                if cb[j] == b'"' {
+                    toks.push("0".to_string());
+                    j += 1;
+                    while j < cb.len() && cb[j] != b'"' {
+                        if cb[j] == b'\\' && j + 1 < cb.len() { j += 2; } else { j += 1; }
+                    }
+                    if j < cb.len() { j += 1; }
+                    continue;
+                }
+                if cb[j] == b'\'' {
+                    toks.push("0".to_string());
+                    j += 1;
+                    while j < cb.len() && cb[j] != b'\'' {
+                        if cb[j] == b'\\' && j + 1 < cb.len() { j += 2; } else { j += 1; }
+                    }
+                    if j < cb.len() { j += 1; }
+                    continue;
+                }
+                if cb[j].is_ascii_digit() {
+                    while j < cb.len() && (cb[j].is_ascii_alphanumeric() || cb[j] == b'_' || cb[j] == b'.') { j += 1; }
+                    toks.push("0".to_string());
+                    continue;
+                }
+                if matches!(cb[j], b'(' | b')' | b'[' | b']' | b'{' | b'}') {
+                    match cb[j] {
+                        b'(' => dp += 1, b')' => dp -= 1,
+                        b'[' => { db += 1; toks.push(r#"["c",0,0,[0]]"#.to_string()); }
+                        b']' => db -= 1,
+                        b'{' => dc += 1, b'}' => dc -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                    continue;
+                }
+                if is_id_start(cb[j]) {
+                    let st = j;
+                    j += 1;
+                    while j < cb.len() {
+                        if is_id_cont(cb[j]) {
+                            j += 1;
+                        } else if cb[j] == b'.' && j + 1 < cb.len() && is_id_start(cb[j + 1]) {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let raw_id = &tr[st..j];
+                    let mut kf = j;
+                    while kf < cb.len() && (cb[kf] == b' ' || cb[kf] == b'\t') { kf += 1; }
+                    if kf < cb.len() && cb[kf] == b'(' {
+                        if !matches!(raw_id, "if" | "for" | "while" | "switch" | "catch" | "return" | "sizeof" | "typeof" | "synchronized" | "autoreleasepool") {
+                            let mut cands: Vec<&str> = vec![raw_id];
+                            if let Some((_, tail)) = raw_id.rsplit_once('.') {
+                                if !tail.is_empty() { cands.push(tail); }
+                            }
+                            for cand in cands {
+                                for &si in &target_syms {
+                                    if si < n_syms && existing_calls[si].insert((cand.to_string(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: cand.to_string(), line: ln32 });
+                                    }
+                                }
+                            }
+                            let args_s = if kf + 1 < cb.len() && cb[kf + 1] == b')' { "[]" } else { "[0]" };
+                            toks.push(format!(r#"["c",0,0,{args_s}]"#));
+                        }
+                        // `@selector(foo)` or `@selector(foo:bar:)` -> also add selector as call
+                        if raw_id == "selector" {
+                            if let Some(rp) = tr[kf + 1..].find(')') {
+                                let sel_txt = tr[kf + 1..kf + 1 + rp].trim();
+                                if !sel_txt.is_empty() {
+                                    for &si in &target_syms {
+                                        if si < n_syms && existing_calls[si].insert((sel_txt.to_string(), ln32)) {
+                                            self.facts.symbols[si].calls.push(Call { path: sel_txt.to_string(), line: ln32 });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let mut n_out = r#"["n","#.to_string();
+                    push_string(&mut n_out, raw_id);
+                    n_out.push(']');
+                    toks.push(n_out);
+                    if raw_id.contains('.') {
+                        for seg in raw_id.split('.') {
+                            if !seg.is_empty() && is_id_start(seg.as_bytes()[0]) {
+                                let mut ns = r#"["n","#.to_string();
+                                push_string(&mut ns, seg);
+                                ns.push(']');
+                                toks.push(ns);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                j += 1;
+            }
+            per_line_toks[ln] = toks;
+            per_line_pdelta[ln] = (dp, db, dc);
+        }
+
+        // Pass 4: Per-line supplemental r/x/a events
+        let is_safe_callee = |path: &str| -> bool {
+            !path.is_empty() && !matches!(
+                path,
+                "if" | "else" | "for" | "while" | "switch" | "case" | "return" | "sizeof"
+                    | "typeof" | "assert" | "try" | "catch" | "throw" | "finally" | "new"
+                    | "delete" | "del" | "defined" | "do" | "with" | "yield" | "await"
+            )
+        };
+        let safe_call_idx: Vec<usize> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| {
+                sym.calls
+                    .iter()
+                    .position(|c| is_safe_callee(&c.path) && c.line != sym.line && c.path != sym.name)
+                    .or_else(|| sym.calls.iter().position(|c| is_safe_callee(&c.path)))
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        let mut extra_events: Vec<Vec<String>> = vec![Vec::new(); n_syms];
+        for ln in 1..=n_lines {
+            let tr = clean_lines[ln - 1].trim();
+            if tr.is_empty() { continue; }
+            let ln32 = ln as u32;
+            let target_syms = targets_for_line(ln32);
