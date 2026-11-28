@@ -27198,3 +27198,323 @@ impl<'a> Walker<'a> {
             let sym = &mut self.facts.symbols[si];
             for ev in evs {
                 if !sym.events.is_empty() { sym.events.push(','); }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
+
+    fn augment_dart(&mut self) {
+        let src_str = std::str::from_utf8(self.src).unwrap_or("");
+        let lines: Vec<&str> = src_str.lines().collect();
+        let n_lines = lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+        // a010_dart: add any missing Dart 3 class/mixin/enum/extension symbols (e.g. `abstract interface class`, `final class`, `base class`, `sealed class`, `mixin class`)
+        // and any missing Dart `import '...'` / `import pkg.Class;` imports.
+        {
+            let mut existing_syms: std::collections::HashSet<(String, u32)> = self
+                .facts
+                .symbols
+                .iter()
+                .map(|s| (s.name.clone(), s.line))
+                .collect();
+            let mut existing_imps: std::collections::HashSet<(String, String, u8)> = self
+                .facts
+                .imports
+                .iter()
+                .map(|im| (im.module.clone(), im.alias.clone(), im.kind))
+                .collect();
+            for (idx, raw_line) in lines.iter().enumerate() {
+                let ln32 = (idx + 1) as u32;
+                let tr = raw_line.trim();
+                if tr.is_empty() || tr.starts_with("//") || tr.starts_with('*') || tr.starts_with("/*") {
+                    continue;
+                }
+                // Check Dart class/mixin/enum/extension declarations
+                let mut rest = tr;
+                loop {
+                    if let Some(r) = rest.strip_prefix("abstract ")
+                        .or_else(|| rest.strip_prefix("base "))
+                        .or_else(|| rest.strip_prefix("interface "))
+                        .or_else(|| rest.strip_prefix("final "))
+                        .or_else(|| rest.strip_prefix("sealed "))
+                        .or_else(|| rest.strip_prefix("mixin "))
+                    {
+                        // Handle bare `mixin Foo` when next token is not `class `
+                        if rest.starts_with("mixin ") && !r.trim_start().starts_with("class ") {
+                            let nm: String = r.trim_start().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$').collect();
+                            if !nm.is_empty() && existing_syms.insert((nm.clone(), ln32)) {
+                                self.facts.symbols.push(Symbol {
+                                    key: nm.clone(), name: nm, owner: String::new(), kind: KIND_CLASS,
+                                    line: ln32, end_line: n_lines as u32, bases: Vec::new(), calls: Vec::new(),
+                                    events: String::new(), ..Symbol::default()
+                                });
+                            }
+                            break;
+                        }
+                        rest = r.trim_start();
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(after_kw) = rest.strip_prefix("class ").or_else(|| rest.strip_prefix("enum ")).or_else(|| rest.strip_prefix("extension ")) {
+                    let nm: String = after_kw.trim_start().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$').collect();
+                    if !nm.is_empty() && nm != "on" && nm != "type" && existing_syms.insert((nm.clone(), ln32)) {
+                        self.facts.symbols.push(Symbol {
+                            key: nm.clone(), name: nm, owner: String::new(), kind: KIND_CLASS,
+                            line: ln32, end_line: n_lines as u32, bases: Vec::new(), calls: Vec::new(),
+                            events: String::new(), ..Symbol::default()
+                        });
+                    }
+                }
+                // Check `import '...'` / `import "..."` / `import pkg.Class;` (including inside test templates)
+                if let Some(after_imp) = tr.strip_prefix("import ") {
+                    let a = after_imp.trim_start();
+                    let mod_s: String = if a.starts_with('\'') || a.starts_with('"') {
+                        let q = a.as_bytes()[0] as char;
+                        a[1..].split(q).next().unwrap_or("").to_string()
+                    } else {
+                        a.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '.' | '/' | ':' | '-')).collect()
+                    };
+                    if !mod_s.is_empty() {
+                        let alias = mod_s.rsplit(|c| c == '/' || c == '.' || c == ':').next().unwrap_or(&mod_s).to_string();
+                        let alias2 = mod_s.rsplit('/').next().unwrap_or(&mod_s).to_string();
+                        for al in [alias, alias2] {
+                            if al.is_empty() { continue; }
+                            for k in [IMPORT_MODULE, IMPORT_STAR] {
+                                if existing_imps.insert((mod_s.clone(), al.clone(), k)) {
+                                    self.facts.imports.push(Import {
+                                        kind: k, module: mod_s.clone(), name: String::new(), alias: al.clone(), line: ln32,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let n_syms = self.facts.symbols.len();
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+
+        // Precompute symbol spans sorted by start line so we can attribute calls to enclosing symbols + module (0).
+        let mut sym_spans: Vec<(u32, u32, usize)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, s)| (s.line, s.end_line.max(s.line), i))
+            .collect();
+        sym_spans.sort_by_key(|&(st, _, _)| st);
+
+        let mut existing_vars: std::collections::HashSet<(String, String)> = self
+            .facts
+            .vars
+            .iter()
+            .cloned()
+            .collect();
+
+        let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_' || b == b'$';
+        let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+
+        let mut in_block_comment = false;
+        let mut prev_line_last_ident: Option<String> = None;
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            let bytes = raw_line.as_bytes();
+            let mut active_syms: Vec<usize> = vec![0usize];
+            for &(st, en, si) in &sym_spans {
+                if st > ln32 {
+                    break;
+                }
+                if ln32 <= en {
+                    active_syms.push(si);
+                }
+            }
+
+            // a007_dart: if this line starts with `(` (after whitespace) and the previous non-blank line
+            // ended with an identifier, attribute that identifier as a call on `ln32`.
+            {
+                let tr = raw_line.trim_start();
+                if tr.starts_with('(') {
+                    if let Some(ref pid) = prev_line_last_ident {
+                        if !matches!(pid.as_str(), "if" | "for" | "while" | "switch" | "catch" | "return" | "assert" | "super" | "this") {
+                            for &si in &active_syms {
+                                if si < n_syms && existing_calls[si].insert((pid.clone(), ln32)) {
+                                    self.facts.symbols[si].calls.push(Call { path: pid.clone(), line: ln32 });
+                                }
+                            }
+                        }
+                    }
+                }
+                let tr_end = raw_line.trim_end();
+                if !tr_end.is_empty() {
+                    let mut last_w = String::new();
+                    for ch in tr_end.chars().rev() {
+                        if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '.' {
+                            last_w.push(ch);
+                        } else {
+                            break;
+                        }
+                    }
+                    let rev_w: String = last_w.chars().rev().collect();
+                    let clean = rev_w.trim_matches('.').to_string();
+                    prev_line_last_ident = if !clean.is_empty() && clean.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$') {
+                        Some(clean)
+                    } else {
+                        None
+                    };
+                }
+            }
+            // a003_dart: UTF-8 Unicode identifier scanning for Dart calls
+            let is_u_start = |c: char| c.is_alphabetic() || c == '_' || c == '$';
+            let is_u_cont = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+            let mut i = 0usize;
+            while i < bytes.len() {
+                if in_block_comment {
+                    if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        in_block_comment = false;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                    break;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                    in_block_comment = true;
+                    i += 2;
+                    continue;
+                }
+                let ch = raw_line[i..].chars().next().unwrap_or('\0');
+                if is_u_start(ch) {
+                    let st = i;
+                    i += ch.len_utf8();
+                    while i < bytes.len() {
+                        let c2 = raw_line[i..].chars().next().unwrap_or('\0');
+                        if is_u_cont(c2) {
+                            i += c2.len_utf8();
+                        } else if bytes[i] == b'.' && i + 1 < bytes.len() && raw_line[i + 1..].chars().next().is_some_and(is_u_start) {
+                            i += 1;
+                        } else if bytes[i] == b'?' && i + 1 < bytes.len() && bytes[i + 1] == b'.' && i + 2 < bytes.len() && raw_line[i + 2..].chars().next().is_some_and(is_u_start) {
+                            i += 2;
+                        } else {
+                            break;
+                        }
+                    }
+                    let raw_id = &raw_line[st..i];
+                    let mut k = i;
+                    while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t') {
+                        k += 1;
+                    }
+                    // Skip optional generic type arguments `<...>` before `(`
+                    if k < bytes.len() && bytes[k] == b'<' {
+                        let mut depth = 1i32;
+                        let mut g = k + 1;
+                        while g < bytes.len() && depth > 0 {
+                            if bytes[g] == b'<' { depth += 1; }
+                            else if bytes[g] == b'>' { depth -= 1; }
+                            else if bytes[g] == b';' || bytes[g] == b'{' || bytes[g] == b'}' { depth = -1; break; }
+                            g += 1;
+                        }
+                        if depth == 0 {
+                            k = g;
+                            while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t') {
+                                k += 1;
+                            }
+                        }
+                    }
+                    if k < bytes.len() && bytes[k] == b'(' {
+                        let norm = raw_id.replace("?.", ".");
+                        if !norm.is_empty() && !matches!(norm.as_str(), "if" | "for" | "while" | "switch" | "catch" | "return" | "assert" | "super" | "this") {
+                            let mut cands: Vec<String> = vec![norm.clone()];
+                            let segs: Vec<&str> = norm.split('.').collect();
+                            if segs.len() >= 2 {
+                                cands.push(format!("{}.{}", segs[segs.len() - 2], segs[segs.len() - 1]));
+                                cands.push(segs[segs.len() - 1].to_string());
+                            }
+                            for cand in cands {
+                                if cand.is_empty() { continue; }
+                                for &si in &active_syms {
+                                    if si < n_syms && existing_calls[si].insert((cand.clone(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: cand.clone(), line: ln32 });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                i += ch.len_utf8().max(1);
+            }
+            // a002_dart: extract Dart `var`/`final`/`const`/`static` constructor-typed bindings (`lhs = [const|new] UpperType(...)`) into self.facts.vars
+            if !in_block_comment {
+                let code_part = raw_line.split("//").next().unwrap_or(raw_line).trim();
+                let cb_v = code_part.as_bytes();
+                let mut eq_idx: Option<usize> = None;
+                let mut qch: u8 = 0;
+                for ci in 0..cb_v.len() {
+                    let b = cb_v[ci];
+                    if qch != 0 {
+                        if b == b'\\' { continue; }
+                        if b == qch { qch = 0; }
+                        continue;
+                    }
+                    if b == b'\'' || b == b'"' { qch = b; continue; }
+                    if b == b'=' {
+                        let prev = if ci > 0 { cb_v[ci - 1] } else { 0 };
+                        let next = if ci + 1 < cb_v.len() { cb_v[ci + 1] } else { 0 };
+                        if next != b'=' && next != b'>' && !matches!(prev, b'=' | b'!' | b'<' | b'>') {
+                            eq_idx = Some(ci);
+                            break;
+                        }
+                    }
+                }
+                if let Some(ep) = eq_idx {
+                    let lhs_s = code_part[..ep].trim_end();
+                    let lb = lhs_s.as_bytes();
+                    let mut li = lb.len();
+                    while li > 0 && is_id_cont(lb[li - 1]) {
+                        li -= 1;
+                    }
+                    let lhs_nm = &lhs_s[li..];
+                    if !lhs_nm.is_empty() && is_id_start(lhs_nm.as_bytes()[0]) {
+                        let mut rhs_s = code_part[ep + 1..].trim_start();
+                        loop {
+                            if let Some(r) = rhs_s.strip_prefix("const ").or_else(|| rhs_s.strip_prefix("new ")).or_else(|| rhs_s.strip_prefix("await ")) {
+                                rhs_s = r.trim_start();
+                            } else {
+                                break;
+                            }
+                        }
+                        let rb = rhs_s.as_bytes();
+                        let mut ri = 0usize;
+                        while ri < rb.len() && (is_id_cont(rb[ri]) || rb[ri] == b'.') {
+                            ri += 1;
+                        }
+                        let rhs_raw = &rhs_s[..ri];
+                        let rhs_ty = rhs_raw.split('.').find(|seg| seg.as_bytes().first().is_some_and(|b| b.is_ascii_uppercase())).unwrap_or("");
+                        if !rhs_ty.is_empty() {
+                            let rest = rhs_s[ri..].trim_start();
+                            if rest.starts_with('(') || rest.starts_with('<') {
+                                let pair = (lhs_nm.to_string(), rhs_ty.to_string());
+                                if existing_vars.insert(pair.clone()) {
+                                    self.facts.vars.push(pair);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // a004_dart: general Dart a/r/x event augmentation pass (covers top-level/class const/final/var
