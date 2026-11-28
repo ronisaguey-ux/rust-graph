@@ -23358,3 +23358,323 @@ impl<'a> Walker<'a> {
 
             if let Some(rest) = tr.strip_prefix("function").filter(|r| r.starts_with([' ', '\t', '['])) {
                 let mut hdr = rest.trim().to_string();
+                let mut look = idx + 1;
+                while hdr.trim_end().ends_with("...") && look < n_lines && look <= idx + 6 {
+                    hdr = hdr.trim_end().trim_end_matches("...").to_string();
+                    hdr.push(' ');
+                    hdr.push_str(clean_lines[look].trim());
+                    look += 1;
+                }
+                let after_eq = if let Some(ep) = hdr.find('=') {
+                    &hdr[ep + 1..]
+                } else {
+                    hdr.as_str()
+                };
+                let after_eq = after_eq.trim_start();
+                let fname_raw: String = after_eq
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                    .collect();
+                let fname = fname_raw.rsplit('.').next().unwrap_or(&fname_raw).to_string();
+                let mut pushed_si: Option<usize> = None;
+                if !fname.is_empty() && is_id_start(fname.as_bytes()[0]) {
+                    let mut params: Vec<String> = Vec::new();
+                    if let Some(lp) = after_eq.find('(') {
+                        if let Some(rp) = after_eq[lp + 1..].find(')') {
+                            for p in after_eq[lp + 1..lp + 1 + rp].split(',') {
+                                let pt = p.trim();
+                                if !pt.is_empty() && is_id_start(pt.as_bytes()[0]) && pt.bytes().all(is_id_cont) {
+                                    params.push(pt.to_string());
+                                }
+                            }
+                        }
+                    }
+                    let owner = active_class.clone().unwrap_or_default();
+                    let owners: Vec<String> = if owner.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        vec![owner, String::new()]
+                    };
+                    for own in owners {
+                        if existing_syms.insert((fname.clone(), own.clone(), KIND_FUNCTION, ln32)) {
+                            let base_key = if own.is_empty() { fname.clone() } else { format!("{own}.{fname}") };
+                            let key = if existing_keys.insert(base_key.clone()) { base_key } else { format!("{base_key}@{ln32}") };
+                            let si = self.facts.symbols.len();
+                            self.facts.symbols.push(Symbol {
+                                key, name: fname.clone(), owner: own, kind: KIND_FUNCTION,
+                                line: ln32, end_line: n_lines as u32, params: params.clone(),
+                                bases: Vec::new(), calls: Vec::new(),
+                                events: String::new(), ..Symbol::default()
+                            });
+                            if pushed_si.is_none() { pushed_si = Some(si); }
+                        }
+                    }
+                }
+                block_depth += 1;
+                // Only open a new lexer function scope if we aren't already inside an unclosed block, or push onto stack
+                if let Some(si) = pushed_si {
+                    if lexer_scope_stack.is_empty() {
+                        lexer_scope_stack.push(Some(si));
+                    } else {
+                        // In Blocks::End, if a function appears while inside an unclosed `if` (e.g. Octave `endif`),
+                        // the lexer may keep the outer function open, so keep existing stack and push None
+                        lexer_scope_stack.push(Some(si));
+                    }
+                    per_line_lexer_fn[ln] = si;
+                }
+                continue;
+            }
+
+            if let Some((lhs_l, rhs_l)) = tr.split_once('=') {
+                if !rhs_l.starts_with('=') && !lhs_l.ends_with(['=', '~', '<', '>', '!']) {
+                    let rt = rhs_l.trim_start();
+                    if rt.strip_prefix("lambda").is_some_and(|r| r.is_empty() || !is_id_cont(r.as_bytes()[0])) {
+                        let lt = lhs_l.trim_end();
+                        let lb = lt.as_bytes();
+                        let mut li = lb.len();
+                        while li > 0 && is_id_cont(lb[li - 1]) { li -= 1; }
+                        let lname = &lt[li..];
+                        if !lname.is_empty() && is_id_start(lname.as_bytes()[0]) {
+                            if existing_syms.insert((lname.to_string(), String::new(), KIND_FUNCTION, ln32)) {
+                                let key = if existing_keys.insert(lname.to_string()) { lname.to_string() } else { format!("{lname}@{ln32}") };
+                                self.facts.symbols.push(Symbol {
+                                    key, name: lname.to_string(), owner: String::new(), kind: KIND_FUNCTION,
+                                    line: ln32, end_line: n_lines as u32, bases: Vec::new(), calls: Vec::new(),
+                                    events: String::new(), ..Symbol::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Track Blocks::End (only bare `end` pops lexer_scope_stack; `endfunction`/`endif` do NOT!)
+            let first_w: &str = tr.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+            if matches!(first_w, "if" | "for" | "while" | "switch" | "try" | "parfor") {
+                block_depth += 1;
+                lexer_scope_stack.push(None);
+            } else if matches!(first_w, "methods" | "properties" | "events" | "enumeration") {
+                block_depth += 1;
+            } else if first_w == "end" {
+                block_depth = (block_depth - 1).max(0);
+                lexer_scope_stack.pop();
+                if let Some(cd) = class_depth {
+                    if block_depth <= cd {
+                        active_class = None;
+                        class_depth = None;
+                    }
+                }
+            } else if matches!(first_w, "endfunction" | "endclassdef" | "endif" | "endfor" | "endwhile" | "endswitch" | "end_try_catch") {
+                block_depth = (block_depth - 1).max(0);
+                if let Some(cd) = class_depth {
+                    if block_depth <= cd {
+                        active_class = None;
+                        class_depth = None;
+                    }
+                }
+            }
+        }
+
+        // Also compute `unclosed_fn[ln]`: the earliest function whose body opened an `if`/`for`/etc. without bare `end`
+        let mut fn_order: Vec<(u32, usize)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, s)| s.kind == KIND_FUNCTION)
+            .map(|(i, s)| (s.line, i))
+            .collect();
+        fn_order.sort_by_key(|&(st, _)| st);
+        let first_fn_sym: Option<(u32, usize)> = fn_order.first().copied();
+        // Track exact lexer function nesting: in parser.rs, a `function` keyword inside a block (depth > 1)
+        // or at depth 1: collect all open functions in the Blocks::End stack for each line.
+        let mut per_line_open_fns: Vec<Vec<usize>> = vec![Vec::new(); n_lines + 1];
+        {
+            let mut fn_by_line: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+            for &(st, si) in &fn_order {
+                fn_by_line.entry(st).or_insert(si);
+            }
+            let mut st_stack: Vec<Option<usize>> = Vec::new();
+            for (idx, cl) in clean_lines.iter().enumerate() {
+                let ln = idx + 1;
+                let ln32 = ln as u32;
+                let tr = cl.trim();
+                if let Some(&si) = fn_by_line.get(&ln32) {
+                    if tr.starts_with("function") {
+                        st_stack.push(Some(si));
+                    }
+                }
+                let mut open_fns: Vec<usize> = Vec::new();
+                for &entry in st_stack.iter().rev() {
+                    if let Some(si) = entry {
+                        if !open_fns.contains(&si) {
+                            open_fns.push(si);
+                            if open_fns.len() >= 32 { break; }
+                        }
+                    }
+                }
+                per_line_open_fns[ln] = open_fns;
+                if tr.is_empty() { continue; }
+                let fw = tr.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+                if matches!(fw, "if" | "for" | "while" | "switch" | "try" | "parfor" | "classdef") {
+                    st_stack.push(None);
+                } else if fw == "end" {
+                    st_stack.pop();
+                }
+            }
+        }
+
+        // 2. Constructor vars (`lhs = UpperCase(...)`) — preserve counts + cross-line dot gluing + `# word:` colon target
+        let mut prev_var_dot: Option<String> = None;
+        let mut prev_hash_colon: Option<String> = None;
+        for cl in &clean_lines {
+            let tr = cl.trim();
+            if tr.is_empty() { continue; }
+            if !tr.starts_with("function ") && !tr.starts_with("classdef ") {
+                for stmt in tr.split(';') {
+                    let st = stmt.trim();
+                    let sb = st.as_bytes();
+                    let mut scan_from = 0usize;
+                    while let Some(rel_ep) = st[scan_from..].find('=') {
+                        let ep = scan_from + rel_ep;
+                        scan_from = ep + 1;
+                        let prev = if ep > 0 { sb[ep - 1] } else { 0 };
+                        let next = if ep + 1 < sb.len() { sb[ep + 1] } else { 0 };
+                        if matches!(prev, b'=' | b'~' | b'<' | b'>' | b'!') || next == b'=' { continue; }
+                        let lhs_raw = st[..ep].trim();
+                        let rhs = st[ep + 1..].trim_start();
+                        let rtok: String = rhs.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                        let rrest = rhs[rtok.len()..].trim_start();
+                        let rtail = rtok.rsplit('.').next().unwrap_or(&rtok);
+                        if !rtail.is_empty() && rtail.as_bytes()[0].is_ascii_uppercase() && rrest.starts_with('(') {
+                            if let Some(ref hc) = prev_hash_colon {
+                                self.facts.vars.push((hc.clone(), rtail.to_string()));
+                            }
+                            let lhs = lhs_raw.trim_matches(|c| c == '[' || c == ']');
+                            for t in lhs.split(',') {
+                                for tn in extract_lhs_target(t) {
+                                    self.facts.vars.push((tn.clone(), rtail.to_string()));
+                                    if let Some(ref pd) = prev_var_dot {
+                                        if !tn.contains('.') {
+                                            self.facts.vars.push((format!("{pd}.{tn}"), rtail.to_string()));
+                                        }
+                                    }
+                                    if let Some((_, dot_tail)) = tn.rsplit_once('.') {
+                                        if !dot_tail.is_empty() && is_id_start(dot_tail.as_bytes()[0]) {
+                                            self.facts.vars.push((format!(".{dot_tail}"), rtail.to_string()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if tr.ends_with('.') && !tr.ends_with("...") {
+                let before = tr[..tr.len() - 1].trim_end();
+                let bb = before.as_bytes();
+                let mut bi2 = bb.len();
+                while bi2 > 0 && is_id_cont(bb[bi2 - 1]) { bi2 -= 1; }
+                let wd = &before[bi2..];
+                prev_var_dot = if !wd.is_empty() && is_id_start(wd.as_bytes()[0]) {
+                    Some(wd.to_string())
+                } else {
+                    Some(String::new())
+                };
+            } else {
+                prev_var_dot = None;
+            }
+            if tr.starts_with('#') {
+                if let Some(cpos) = tr.find(':') {
+                    let before_c = tr[..cpos].trim_end();
+                    let cb2 = before_c.as_bytes();
+                    let mut ci2 = cb2.len();
+                    while ci2 > 0 && is_id_cont(cb2[ci2 - 1]) { ci2 -= 1; }
+                    let cw = &before_c[ci2..];
+                    prev_hash_colon = if !cw.is_empty() && is_id_start(cw.as_bytes()[0]) { Some(cw.to_string()) } else { None };
+                } else {
+                    prev_hash_colon = None;
+                }
+            } else {
+                prev_hash_colon = None;
+            }
+        }
+
+        let targets_for_line = |ln: usize, ln32: u32| -> Vec<usize> {
+            let mut out: Vec<usize> = vec![0];
+            if let Some((f_ln, f_si)) = first_fn_sym {
+                if ln32 >= f_ln && !out.contains(&f_si) {
+                    out.push(f_si);
+                }
+            }
+            let lfn = per_line_lexer_fn[ln];
+            if lfn != 0 && !out.contains(&lfn) {
+                out.push(lfn);
+            }
+            for &si in &per_line_open_fns[ln] {
+                if !out.contains(&si) {
+                    out.push(si);
+                }
+            }
+            let pos = fn_order.partition_point(|&(st, _)| st <= ln32);
+            let start = pos.saturating_sub(2);
+            for &(_, si) in &fn_order[start..pos] {
+                if !out.contains(&si) {
+                    out.push(si);
+                }
+            }
+            out
+        };
+
+        // 3. Call & token scanner
+        let n_syms = self.facts.symbols.len();
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+
+        let mut per_line_code: Vec<String> = vec![String::new(); n_lines + 1];
+        let mut per_line_pdelta: Vec<(i32, i32, i32)> = vec![(0, 0, 0); n_lines + 1];
+        let mut per_line_unclosed_sq: Vec<bool> = vec![false; n_lines + 1];
+        let mut per_line_raw_pdelta: Vec<i32> = vec![0; n_lines + 1];
+        let mut per_line_tokens: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
+        let mut per_line_prev_dot: Vec<Option<String>> = vec![None; n_lines + 1];
+        let mut prev_last_id: Option<String> = None;
+        let mut prev_ended_dot: Option<String> = None;
+
+        for (idx, cl) in clean_lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            let code = cl.trim().to_string();
+            if code.is_empty() { continue; }
+            per_line_code[ln] = code.clone();
+            per_line_prev_dot[ln] = prev_ended_dot.clone();
+
+            let cb = code.as_bytes();
+            let mut pd_p = 0i32;
+            let mut pd_b = 0i32;
+            let mut pd_c = 0i32;
+            let mut in_dq = false;
+            let mut in_sq = false;
+            let mut unclosed_sq = false;
+            let mut pnw: u8 = 0;
+            let mut bi = 0usize;
+            while bi < cb.len() {
+                if in_dq {
+                    if cb[bi] == b'\\' && bi + 1 < cb.len() { bi += 2; continue; }
+                    if cb[bi] == b'"' { in_dq = false; pnw = b'"'; }
+                    bi += 1;
+                    continue;
+                }
+                if in_sq {
+                    if cb[bi] == b'\'' {
+                        if bi + 1 < cb.len() && cb[bi + 1] == b'\'' { bi += 2; continue; }
+                        in_sq = false;
+                        pnw = b'\'';
+                    }
+                    bi += 1;
+                    continue;
+                }
