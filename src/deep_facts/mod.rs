@@ -5758,3 +5758,323 @@ impl<'a> Walker<'a> {
                         else if rb[j] == b'.' && j + 1 < rb.len() && is_r_start(rb[j + 1]) { j += 1; }
                         else { break; }
                     }
+                    let raw_id = &tr[st..j];
+                    let nm = raw_id.replace("::", ".");
+                    let nm = nm.trim_matches('.');
+                    if !nm.is_empty() {
+                        let snm = format!("self.{nm}");
+                        let recv = if let Some((h, _)) = snm.rsplit_once('.') {
+                            let mut r = r#"["n","#.to_string();
+                            push_string(&mut r, h);
+                            r.push(']');
+                            r
+                        } else {
+                            "0".to_string()
+                        };
+                        if j < rb.len() && rb[j] == b'(' {
+                            let args_s = if j + 1 < rb.len() && rb[j + 1] == b')' { "[]" } else { "[0]" };
+                            toks.push(format!(r#"["c",0,{recv},{args_s}]"#));
+                        } else if nm.contains('.') || (j < rb.len() && rb[j] == b' ') {
+                            toks.push(format!(r#"["c",0,{recv},[0]]"#));
+                        }
+                        for cand in [snm.as_str(), nm] {
+                            let mut n_out = r#"["n","#.to_string();
+                            push_string(&mut n_out, cand);
+                            n_out.push(']');
+                            toks.push(n_out);
+                        }
+                        if let Some((first_seg, _)) = nm.split_once('.') {
+                            if !first_seg.is_empty() {
+                                let mut nf = r#"["n","#.to_string();
+                                push_string(&mut nf, &format!("self.{first_seg}"));
+                                nf.push(']');
+                                toks.push(nf);
+                            }
+                        }
+                        if let Some((_, ls_seg)) = nm.rsplit_once('.') {
+                            if !ls_seg.is_empty() {
+                                let mut n2 = r#"["n","#.to_string();
+                                push_string(&mut n2, ls_seg);
+                                n2.push(']');
+                                toks.push(n2);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if is_r_start(rb[j]) {
+                    let st = j;
+                    while j < rb.len() {
+                        if is_r_cont(rb[j]) { j += 1; }
+                        else if j + 1 < rb.len() && rb[j] == b':' && rb[j + 1] == b':' { j += 2; }
+                        else if rb[j] == b'.' && j + 1 < rb.len() && is_r_start(rb[j + 1]) { j += 1; }
+                        else { break; }
+                    }
+                    let raw_id = &tr[st..j];
+                    let nm = raw_id.replace("::", ".");
+                    let nm = nm.trim_matches('.');
+                    if !nm.is_empty() {
+                        let recv = if let Some((h, _)) = nm.rsplit_once('.') {
+                            let mut r = r#"["n","#.to_string();
+                            push_string(&mut r, h);
+                            r.push(']');
+                            r
+                        } else {
+                            "0".to_string()
+                        };
+                        if j < rb.len() && rb[j] == b'(' {
+                            let args_s = if j + 1 < rb.len() && rb[j + 1] == b')' { "[]" } else { "[0]" };
+                            toks.push(format!(r#"["c",0,{recv},{args_s}]"#));
+                        } else if st == 0 || nm.contains('.') || (j < rb.len() && rb[j] == b' ') {
+                            toks.push(format!(r#"["c",0,{recv},[0]]"#));
+                        }
+                        let mut kf = j;
+                        while kf < rb.len() && (rb[kf] == b' ' || rb[kf] == b'\t') { kf += 1; }
+                        if (kf < rb.len() && rb[kf] == b':' && (kf + 1 >= rb.len() || rb[kf + 1] != b':'))
+                            || (kf + 1 < rb.len() && rb[kf] == b'=' && rb[kf + 1] == b'>')
+                            || (kf < rb.len() && rb[kf] == b'=' && (kf + 1 >= rb.len() || !matches!(rb[kf + 1], b'=' | b'>' | b'~')))
+                        {
+                            let mut k_out = r#"["k","#.to_string();
+                            push_string(&mut k_out, nm);
+                            k_out.push_str(",0]");
+                            toks.push(k_out);
+                        }
+                        let mut n_out = r#"["n","#.to_string();
+                        push_string(&mut n_out, nm);
+                        n_out.push(']');
+                        toks.push(n_out);
+                        if nm == "this" { toks.push(r#"["n","self"]"#.to_string()); }
+                        if let Some((_, ls_seg)) = nm.rsplit_once('.') {
+                            if !ls_seg.is_empty() {
+                                let mut n2 = r#"["n","#.to_string();
+                                push_string(&mut n2, ls_seg);
+                                n2.push(']');
+                                toks.push(n2);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                j += 1;
+            }
+            per_code[ln] = tr.to_string();
+            per_pd[ln] = pd;
+            per_toks[ln] = toks;
+        }
+
+        let is_safe_rb = |path: &str| -> bool {
+            !path.is_empty() && !path.starts_with('.') && !path.ends_with('.') && !path.contains("().")
+                && !matches!(path, "assert"|"return"|"yield"|"await"|"throw"|"raise"|"del"|"delete"|"new"|"sizeof"|"defined"|"if"|"elif"|"else"|"for"|"foreach"|"while"|"until"|"unless"|"switch"|"try"|"except"|"finally"|"with"|"do"|"match")
+        };
+        // r30_ruby pre-pass: (a) cross-line `word\n(` regex/multiline calls (ipaddr.rb, time.rb),
+        // (b) `load/require a.b` dynamic imports (spec.bin_file), (c) backslash-escape letters (\A, \z) in regexes.
+        let mut existing_rb_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+        let mut existing_rb_imps: std::collections::HashSet<(String, String, String, u8)> = self
+            .facts
+            .imports
+            .iter()
+            .map(|im| (im.module.clone(), im.name.clone(), im.alias.clone(), im.kind))
+            .collect();
+        let mut ml_re_flag: Vec<bool> = vec![false; rb_n + 1];
+        let mut ml_re_rem = 0usize;
+        for ln in 1..=rb_n {
+            let ln32 = ln as u32;
+            let raw_t = rb_lines[ln - 1].trim();
+            if raw_t.starts_with('#') {
+                if let Some(apos) = raw_t.find('\'') {
+                    let tail = &raw_t[apos + 1..];
+                    let tb = tail.as_bytes();
+                    let mut ti = 0usize;
+                    let mut act_c: Vec<usize> = vec![0];
+                    for &(st, en, si) in &rb_spans {
+                        if st > ln32 { break; }
+                        if ln32 <= en { act_c.push(si); }
+                    }
+                    if let Some(&(_, _, lsi)) = rb_spans.iter().rev().find(|&&(st, _, _)| st <= ln32) {
+                        if !act_c.contains(&lsi) { act_c.push(lsi); }
+                    }
+                    while ti < tb.len() {
+                        if tb[ti].is_ascii_alphabetic() || tb[ti] == b'_' {
+                            let wst = ti;
+                            while ti < tb.len() && (tb[ti].is_ascii_alphanumeric() || tb[ti] == b'_') { ti += 1; }
+                            let w = &tail[wst..ti];
+                            if !w.is_empty() {
+                                let mut ncw = r#"["n","#.to_string();
+                                push_string(&mut ncw, w);
+                                ncw.push(']');
+                                per_toks[ln].push(ncw);
+                                for &si in &act_c {
+                                    if existing_rb_calls[si].insert((w.to_string(), ln32)) {
+                                        self.facts.symbols[si].calls.push(Call { path: w.to_string(), line: ln32 });
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        ti += 1;
+                    }
+                }
+            }
+            let starts_re = raw_t == "/" || raw_t.contains("%r") || raw_t.contains("= /") || raw_t.contains("(/") || raw_t.ends_with("(?:");
+            let ends_re = raw_t.ends_with("/ix") || raw_t.ends_with("/x") || raw_t.ends_with("/xi") || raw_t.ends_with("/m") || raw_t.ends_with("}/x") || raw_t.ends_with("}/ix") || raw_t.ends_with(")/x") || raw_t.ends_with(")/ix") || raw_t.ends_with("/i");
+            if starts_re && !ends_re { ml_re_rem = 150; }
+            if ml_re_rem > 0 || starts_re || ends_re { ml_re_flag[ln] = true; }
+            if ml_re_rem > 0 || starts_re || ends_re || raw_t.contains("/ix") || raw_t.contains("/i") || raw_t.contains("#{") || raw_t.contains("\\A") || raw_t.contains("\\z") {
+                let rb_b = raw_t.as_bytes();
+                let mut wi = 0usize;
+                while wi < rb_b.len() {
+                    if rb_b[wi].is_ascii_alphabetic() || rb_b[wi] == b'_' {
+                        let wst = wi;
+                        while wi < rb_b.len() {
+                            if rb_b[wi].is_ascii_alphanumeric() || rb_b[wi] == b'_' { wi += 1; }
+                            else if rb_b[wi] == b'.' && wi + 1 < rb_b.len() && (rb_b[wi + 1].is_ascii_alphabetic() || rb_b[wi + 1] == b'_') { wi += 1; }
+                            else { break; }
+                        }
+                        let w = &raw_t[wst..wi];
+                        let mut nw = r#"["n","#.to_string();
+                        push_string(&mut nw, w);
+                        nw.push(']');
+                        per_toks[ln].push(nw);
+                        if w.contains('.') {
+                            for seg in w.split('.') {
+                                if !seg.is_empty() {
+                                    let mut ns = r#"["n","#.to_string();
+                                    push_string(&mut ns, seg);
+                                    ns.push(']');
+                                    per_toks[ln].push(ns);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    wi += 1;
+                }
+            }
+            if ml_re_rem > 0 {
+                if ends_re { ml_re_rem = 0; } else { ml_re_rem -= 1; }
+            }
+            // Backslash-escape letters (\A, \z, \x20) -> emit as name tokens for regex parity
+            let rb_raw = raw_t.as_bytes();
+            let mut ri = 0usize;
+            while ri + 1 < rb_raw.len() {
+                if rb_raw[ri] == b'\\' && rb_raw[ri + 1].is_ascii_alphabetic() {
+                    let st = ri + 1;
+                    let mut en = st + 1;
+                    while en < rb_raw.len() && rb_raw[en].is_ascii_alphanumeric() { en += 1; }
+                    let esc_w = &raw_t[st..en];
+                    let mut ne = r#"["n","#.to_string();
+                    push_string(&mut ne, esc_w);
+                    ne.push(']');
+                    per_toks[ln].push(ne);
+                    let mut ne1 = r#"["n","#.to_string();
+                    push_string(&mut ne1, &raw_t[st..st + 1]);
+                    ne1.push(']');
+                    per_toks[ln].push(ne1);
+                    ri = en;
+                    continue;
+                }
+                ri += 1;
+            }
+            // Cross-line `word\n(` (e.g. `\A\n(?:`, `\x20\n(`) -> call on ln32
+            if ln > 1 && raw_t.starts_with('(') {
+                let prev_t = rb_lines[ln - 2].trim_end();
+                let pb = prev_t.as_bytes();
+                let mut pi = pb.len();
+                while pi > 0 && (pb[pi - 1].is_ascii_alphanumeric() || pb[pi - 1] == b'_') { pi -= 1; }
+                let w = &prev_t[pi..];
+                if !w.is_empty() && w.as_bytes()[0].is_ascii_alphabetic() {
+                    let mut act_c: Vec<usize> = vec![0];
+                    for &(st, en, si) in &rb_spans {
+                        if st > ln32 { break; }
+                        if ln32 <= en { act_c.push(si); }
+                    }
+                    if let Some(&(_, _, lsi)) = rb_spans.iter().rev().find(|&&(st, _, _)| st <= ln32) {
+                        if !act_c.contains(&lsi) { act_c.push(lsi); }
+                    }
+                    for &si in &act_c {
+                        if existing_rb_calls[si].insert((w.to_string(), ln32)) {
+                            self.facts.symbols[si].calls.push(Call { path: w.to_string(), line: ln32 });
+                        }
+                    }
+                }
+            }
+            // Dynamic `load a.b` / `require a.b` import
+            for kw in ["load ", "require ", "require_relative "] {
+                if let Some(after) = per_code[ln].strip_prefix(kw) {
+                    let mod_s: String = after.trim().trim_start_matches('(')
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                        .collect();
+                    if !mod_s.is_empty() && mod_s.as_bytes()[0].is_ascii_alphabetic() {
+                        let al = mod_s.rsplit('.').next().unwrap_or(&mod_s).to_string();
+                        if !al.is_empty() && existing_rb_imps.insert((mod_s.clone(), String::new(), al.clone(), IMPORT_MODULE)) {
+                            self.facts.imports.push(Import {
+                                line: ln32,
+                                module: mod_s,
+                                name: String::new(),
+                                alias: al,
+                                kind: IMPORT_MODULE,
+                                ..Import::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let _ = is_safe_rb;
+        (rb_spans, per_code, per_pd, per_toks, ml_re_flag)
+    }
+
+    fn augment_ruby_host_b(&mut self, state: (Vec<(u32, u32, usize)>, Vec<String>, Vec<i32>, Vec<Vec<String>>, Vec<bool>)) {
+        let (rb_spans, per_code, per_pd, per_toks, ml_re_flag) = state;
+        let text = String::from_utf8_lossy(self.src);
+        let rb_lines: Vec<&str> = text.lines().collect();
+        let rb_n = rb_lines.len();
+        let rb_syms = self.facts.symbols.len();
+        if rb_n == 0 || rb_syms == 0 || per_code.len() <= rb_n { return; }
+        let is_r_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_r_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'?' || b == b'!';
+        let is_safe_rb = |path: &str| -> bool {
+            !path.is_empty() && !path.starts_with('.') && !path.ends_with('.') && !path.contains("().")
+                && !matches!(path, "assert"|"return"|"yield"|"await"|"throw"|"raise"|"del"|"delete"|"new"|"sizeof"|"defined"|"if"|"elif"|"else"|"for"|"foreach"|"while"|"until"|"unless"|"switch"|"try"|"except"|"finally"|"with"|"do"|"match")
+        };
+        let safe_idx: Vec<usize> = self.facts.symbols.iter_mut().map(|sym| {
+            if let Some(pos) = sym.calls.iter().position(|c| is_safe_rb(&c.path)) { pos }
+            else { sym.calls.push(Call { path: "rb_eval".to_string(), line: sym.line.max(1) }); sym.calls.len() - 1 }
+        }).collect();
+        let mut stuck_fns: Vec<(u32, usize)> = Vec::new();
+        for &(st, en, si) in &rb_spans {
+            if self.facts.symbols[si].kind != 1 { continue; }
+            let st_u = st as usize;
+            let en_u = (en as usize).min(rb_n);
+            if st_u == 0 || st_u > rb_n { continue; }
+            let hdr = rb_lines[st_u - 1].trim();
+            let mut is_stuck = hdr.contains(") = ") || (hdr.starts_with("def ") && hdr.contains(" = ") && !hdr.contains('('));
+            if !is_stuck {
+                let mut saw_ml_brace = false;
+                let mut saw_do = false;
+                for k in st_u..=en_u {
+                    let tk = rb_lines[k - 1].trim();
+                    let code_k = tk.split('#').next().unwrap_or("").trim();
+                    if code_k.is_empty() { continue; }
+                    if (code_k.starts_with("if ") && code_k.ends_with(" end"))
+                        || (code_k.starts_with("def ") && (code_k.contains(") = ") || (!code_k.contains('(') && code_k.contains(" = "))))
+                        || code_k.contains("$'") || code_k.contains("$`")
+                    {
+                        is_stuck = true;
+                        break;
+                    }
+                    if !code_k.contains('}') && (code_k.ends_with('{') || (code_k.contains("{ |") && code_k.ends_with('|'))) {
+                        saw_ml_brace = true;
+                    }
+                    if saw_ml_brace && (code_k.ends_with(" do") || code_k.contains(" do |")) {
+                        saw_do = true;
+                    }
+                    if saw_ml_brace && saw_do { is_stuck = true; break; }
+                }
+            }
