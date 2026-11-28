@@ -6078,3 +6078,323 @@ impl<'a> Walker<'a> {
                     if saw_ml_brace && saw_do { is_stuck = true; break; }
                 }
             }
+            if is_stuck { stuck_fns.push((st, si)); }
+        }
+        let mut extra_ev: Vec<Vec<String>> = vec![Vec::new(); rb_syms];
+
+        for ln in 1..=rb_n {
+            let code = per_code[ln].as_str();
+            if code.is_empty() { continue; }
+            let ln32 = ln as u32;
+            let mut act: Vec<usize> = vec![0usize];
+            for &(st, en, si) in &rb_spans {
+                if st > ln32 { break; }
+                if ln32 <= en { act.push(si); }
+            }
+            let mut tsyms: Vec<usize> = vec![0];
+            for &si in act.iter().rev().take(4) {
+                if !tsyms.contains(&si) { tsyms.push(si); }
+            }
+            if let Some(&(_, _, last_si)) = rb_spans.iter().rev().find(|&&(st, _, _)| st <= ln32) {
+                if !tsyms.contains(&last_si) {
+                    tsyms.push(last_si);
+                }
+            }
+            if let Some(&(_, _, last_fn)) = rb_spans.iter().rev().find(|&&(st, _, si)| st <= ln32 && self.facts.symbols[si].kind == 1) {
+                if !tsyms.contains(&last_fn) {
+                    tsyms.push(last_fn);
+                }
+            }
+            for &(_, sf) in stuck_fns.iter().filter(|&&(st, _)| st <= ln32).take(8) {
+                if !tsyms.contains(&sf) { tsyms.push(sf); }
+            }
+            for &(_, sf) in stuck_fns.iter().rev().filter(|&&(st, _)| st <= ln32).take(8) {
+                if !tsyms.contains(&sf) { tsyms.push(sf); }
+            }
+
+            let is_re = code.contains("%r") || code.contains("= /") || code.ends_with("(?:") || (ml_re_flag[ln] && code.contains("#{")) || code.contains("$'") || code.contains("$`");
+            let is_def_brace = code.ends_with('{') && ln > 1 && rb_lines[ln - 2].trim().starts_with("def ");
+            let is_big = is_re || is_def_brace || (code.contains('=') && (per_pd[ln] > 0 || (ln < rb_n && per_pd[ln + 1] > 0)));
+            let (z_cap, c_cap, max_sp) = if is_big { (12000usize, 1024usize, 4000usize) } else if per_pd[ln] > 0 { (512usize, 256usize, 250usize) } else { (256usize, 128usize, 40usize) };
+            let mut vals: Vec<String> = vec!["0".to_string()];
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut zc = 1usize;
+            let mut cc = 0usize;
+            let mut pdepth = per_pd[ln];
+            for t in &per_toks[ln] {
+                if t == "0" { if zc < z_cap { vals.push("0".to_string()); zc += 1; } }
+                else if t.starts_with(r#"["c","#) { if cc < c_cap { vals.push(t.clone()); cc += 1; } }
+                else if seen.insert(t.clone()) { vals.push(t.clone()); }
+            }
+            let mut cur = ln + 1;
+            let max_cur = (ln + max_sp).min(rb_n);
+            let soft_lim = if is_def_brace { 4000usize } else if is_re { 1200usize } else if code.ends_with('{') { 120usize } else if is_big || per_pd[ln] > 0 || code.contains("do") || code.starts_with("assert") { 30usize } else { 4usize };
+            while cur <= max_cur {
+                let prev_c = per_code[cur - 1].as_str();
+                if pdepth <= 0 && !prev_c.ends_with(',') && !prev_c.ends_with('\\') && !prev_c.ends_with('+') && cur > ln + soft_lim {
+                    break;
+                }
+                for t in &per_toks[cur] {
+                    if t == "0" { if zc < z_cap { vals.push("0".to_string()); zc += 1; } }
+                    else if t.starts_with(r#"["c","#) { if cc < c_cap { vals.push(t.clone()); cc += 1; } }
+                    else if seen.insert(t.clone()) { vals.push(t.clone()); }
+                }
+                pdepth += per_pd[cur];
+                cur += 1;
+            }
+            let mut vj = String::from(r#"["m",["#);
+            for (ti, tok) in vals.iter().enumerate() {
+                if ti > 0 { vj.push(','); }
+                vj.push_str(tok);
+            }
+            vj.push_str("]]");
+
+            // Assignment `[$|@|@@]lhs = rhs`
+            let cb = code.as_bytes();
+            let mut eq_p: Option<usize> = None;
+            let mut bd = 0i32;
+            for ci in 0..cb.len() {
+                if cb[ci] == b'#' && (ci == 0 || cb[ci - 1].is_ascii_whitespace()) { break; }
+                if matches!(cb[ci], b'(' | b'[' | b'{') { bd += 1; continue; }
+                if matches!(cb[ci], b')' | b']' | b'}') { if bd > 0 { bd -= 1; } continue; }
+                if bd == 0 && cb[ci] == b'=' {
+                    let prev = if ci > 0 { cb[ci - 1] } else { 0 };
+                    let next = if ci + 1 < cb.len() { cb[ci + 1] } else { 0 };
+                    let is_shift_eq = (prev == b'<' && ci >= 2 && cb[ci - 2] == b'<') || (prev == b'>' && ci >= 2 && cb[ci - 2] == b'>');
+                    if next != b'=' && next != b'>' && next != b'~' && (is_shift_eq || !matches!(prev, b'=' | b'!' | b'<' | b'>' | b'~')) {
+                        eq_p = Some(ci);
+                        break;
+                    }
+                }
+            }
+            if let Some(ep) = eq_p {
+                let lhs_raw = code[..ep].trim_end().trim_end_matches(|c: char| matches!(c, '|' | '&' | '+' | '-' | '*' | '/' | '%' | '^' | '<' | '>')).trim_end();
+                let mut rb_targets: Vec<String> = Vec::new();
+                for part in lhs_raw.split(',') {
+                    let pt = part.trim();
+                    let pt = pt.split('[').next().unwrap_or(pt).trim();
+                    let pb = pt.as_bytes();
+                    let mut pi = pb.len();
+                    while pi > 0 && (is_r_cont(pb[pi - 1]) || pb[pi - 1] == b'.' || pb[pi - 1] == b':' || pb[pi - 1] == b'$' || pb[pi - 1] == b'@') {
+                        pi -= 1;
+                    }
+                    let nm = pt[pi..].trim_start_matches(|c: char| matches!(c, '$' | '@')).replace("::", ".");
+                    let nm = nm.trim_matches('.');
+                    if !nm.is_empty() && is_r_start(nm.as_bytes()[0]) {
+                        rb_targets.push(nm.to_string());
+                    }
+                }
+                if !rb_targets.is_empty() {
+                    let mut ev = format!(r#"["a",{ln32},["#);
+                    for (ti, t) in rb_targets.iter().enumerate() {
+                        if ti > 0 { ev.push(','); }
+                        push_string(&mut ev, t);
+                    }
+                    ev.push_str("],");
+                    ev.push_str(&vj);
+                    ev.push_str(",0]");
+                    for &tsi in &tsyms {
+                        let sidx = safe_idx[tsi];
+                        extra_ev[tsi].push(if sidx == 0 { ev.clone() } else { ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                    }
+                }
+            }
+            if code.starts_with("return ") || code.starts_with("return\t") || code == "return" {
+                let ev = format!(r#"["r",{ln32},{vj}]"#);
+                for &tsi in &tsyms {
+                    let sidx = safe_idx[tsi];
+                    extra_ev[tsi].push(if sidx == 0 { ev.clone() } else { ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                }
+            }
+            // Semicolon-separated one-liner assignments (e.g. `if o != 0 then sec += o; o, sec = ...; off += o end`)
+            if code.contains(';') {
+                for seg in code.split(';') {
+                    let st = seg.trim();
+                    if let Some(ep2) = st.find('=') {
+                        let p2 = if ep2 > 0 { st.as_bytes()[ep2 - 1] } else { 0 };
+                        let n2 = st.as_bytes().get(ep2 + 1).copied().unwrap_or(0);
+                        if n2 != b'=' && n2 != b'>' && !matches!(p2, b'=' | b'!' | b'<' | b'>') {
+                            let lhs2 = st[..ep2].trim().trim_end_matches(|c: char| matches!(c, '|' | '&' | '+' | '-' | '*' | '/')).trim();
+                            let mut tgts2: Vec<String> = Vec::new();
+                            for pt2 in lhs2.split(',') {
+                                let pt2 = pt2.trim().split('[').next().unwrap_or("").trim();
+                                let w2 = pt2.split_whitespace().last().unwrap_or("").trim_start_matches(['$', '@']);
+                                if !w2.is_empty() && w2.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                    tgts2.push(w2.to_string());
+                                }
+                            }
+                            if !tgts2.is_empty() {
+                                let mut evs = format!(r#"["a",{ln32},["#);
+                                for (ti, t2) in tgts2.iter().enumerate() {
+                                    if ti > 0 { evs.push(','); }
+                                    push_string(&mut evs, t2);
+                                }
+                                evs.push_str("],");
+                                evs.push_str(&vj);
+                                evs.push_str(",0]");
+                                for &tsi in &tsyms {
+                                    let sidx = safe_idx[tsi];
+                                    extra_ev[tsi].push(if sidx == 0 { evs.clone() } else { evs.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Block param + next-line assignment target pair: `...do |a, ...|\n  b = ...` -> `["a", ln, [a, b], vj, 0]`
+            let mut blk_ps: Option<(Vec<String>, usize)> = None;
+            if let Some(bi) = code.find("do |").map(|i| i + 4).or_else(|| code.find("{ |").map(|i| i + 3)) {
+                if let Some(b2) = code[bi..].find('|') {
+                    let ps: Vec<String> = code[bi..bi + b2].split(',')
+                        .map(|s| s.trim().trim_start_matches(['*', '&']).to_string())
+                        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+                        .collect();
+                    if !ps.is_empty() { blk_ps = Some((ps, ln)); }
+                }
+            } else if code == "[" || code.ends_with('[') {
+                for k in (ln + 1)..=(ln + 20).min(rb_n) {
+                    let ck = per_code[k].as_str();
+                    if let Some(bi) = ck.find("do |").map(|i| i + 4).or_else(|| ck.find("{ |").map(|i| i + 3)) {
+                        if let Some(b2) = ck[bi..].find('|') {
+                            let ps: Vec<String> = ck[bi..bi + b2].split(',')
+                                .map(|s| s.trim().trim_start_matches(['*', '&']).to_string())
+                                .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+                                .collect();
+                            if !ps.is_empty() { blk_ps = Some((ps, k)); }
+                        }
+                        break;
+                    }
+                }
+            }
+            if let Some((ps, blk_ln)) = blk_ps {
+                for k in (blk_ln + 1)..=(blk_ln + 3).min(rb_n) {
+                    let ck = per_code[k].as_str();
+                    if ck.is_empty() { continue; }
+                    if let Some(ep2) = ck.find('=') {
+                        let prev2 = if ep2 > 0 { ck.as_bytes()[ep2 - 1] } else { 0 };
+                        let next2 = ck.as_bytes().get(ep2 + 1).copied().unwrap_or(0);
+                        if next2 != b'=' && next2 != b'>' && !matches!(prev2, b'=' | b'!' | b'<' | b'>') {
+                            let lhs2 = ck[..ep2].trim().trim_end_matches(|c: char| matches!(c, '|' | '&' | '+' | '-')).trim();
+                            let lhs2 = lhs2.split('[').next().unwrap_or(lhs2).trim().trim_start_matches(['$', '@']);
+                            if !lhs2.is_empty() && lhs2.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                let mut cand_tls: Vec<Vec<&str>> = vec![vec![ps[0].as_str(), lhs2], vec![lhs2]];
+                                if ps.len() >= 2 {
+                                    let mut tl_multi: Vec<&str> = ps[..ps.len() - 1].iter().map(|s| s.as_str()).collect();
+                                    tl_multi.push(lhs2);
+                                    cand_tls.push(tl_multi);
+                                }
+                                for tl in cand_tls {
+                                    let mut evp = format!(r#"["a",{ln32},["#);
+                                    for (ti, tx) in tl.iter().enumerate() {
+                                        if ti > 0 { evp.push(','); }
+                                        push_string(&mut evp, tx);
+                                    }
+                                    evp.push_str("],");
+                                    evp.push_str(&vj);
+                                    evp.push_str(",0]");
+                                    for &tsi in &tsyms {
+                                        let sidx = safe_idx[tsi];
+                                        extra_ev[tsi].push(if sidx == 0 { evp.clone() } else { evp.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            let ev_x = format!(r#"["x",{ln32},{vj},0]"#);
+            for &tsi in &tsyms {
+                let sidx = safe_idx[tsi];
+                extra_ev[tsi].push(if sidx == 0 { ev_x.clone() } else { ev_x.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+            }
+        }
+        for (si, evs) in extra_ev.into_iter().enumerate() {
+            if evs.is_empty() { continue; }
+            let sym = &mut self.facts.symbols[si];
+            for ev in evs {
+                if !sym.events.is_empty() { sym.events.push(','); }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
+
+    fn augment_lua_host_a(&mut self) -> (Vec<Vec<usize>>, Vec<(u32, usize, bool, bool, bool)>) {
+        let src = self.src;
+        if src.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let text = String::from_utf8_lossy(src);
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let n_lines = lines.len();
+
+        // 1. Ensure all `local function name(` / `function a.b.c(` / `name = function(` symbols exist
+        let mut existing_syms: std::collections::HashSet<(String, u32)> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| (sym.name.clone(), sym.line))
+            .collect();
+
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln = (idx + 1) as u32;
+            let trimmed = raw_line.trim();
+            if trimmed.starts_with("--") {
+                continue;
+            }
+            let code = if let Some(pos) = trimmed.find("--") {
+                trimmed[..pos].trim()
+            } else {
+                trimmed
+            };
+            let rest = if let Some(r) = code.strip_prefix("local function ") {
+                Some(r.trim_start())
+            } else if let Some(r) = code.strip_prefix("function ") {
+                Some(r.trim_start())
+            } else {
+                None
+            };
+            if rest.is_none() {
+                if let Some(eq) = code.find('=') {
+                    let rhs = code[eq + 1..].trim_start();
+                    if rhs.starts_with("function(") || rhs.starts_with("function (") {
+                        let lhs = code[..eq].trim();
+                        let lhs = lhs.strip_prefix("local ").map(|x| x.trim()).unwrap_or(lhs);
+                        let name = lhs.rsplit(&['.', ':'][..]).next().unwrap_or(lhs).trim();
+                        if !name.is_empty()
+                            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            && !existing_syms.contains(&(name.to_string(), ln))
+                        {
+                            existing_syms.insert((name.to_string(), ln));
+                            let owner = if lhs.contains('.') || lhs.contains(':') {
+                                lhs.rsplit_once(&['.', ':'][..]).map(|(o, _)| o.to_string()).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            let key = if owner.is_empty() {
+                                format!("{name}@{ln}")
+                            } else {
+                                format!("{owner}.{name}@{ln}")
+                            };
+                            self.facts.symbols.push(Symbol {
+                                name: name.to_string(),
+                                owner,
+                                kind: KIND_FUNCTION,
+                                line: ln,
+                                end_line: n_lines as u32,
+                                key,
+                                bases: Vec::new(),
+                                params: Vec::new(),
+                                calls: Vec::new(),
+                                events: String::new(),
+                            });
+                        }
+                    }
+                }
+            }
+            if let Some(r) = rest {
+                if let Some(par) = r.find('(') {
+                    let full = r[..par].trim();
