@@ -34878,3 +34878,323 @@ impl<'a> Walker<'a> {
                             parts.push(c_atom.clone());
                         }
                         let wrapped = format!("[\"m\",[{}]]", parts.join(","));
+                        let ev_x = format!("[\"x\",{line},{wrapped}]");
+                        let ev_r = format!("[\"r\",{line},{wrapped}]");
+                        let mut ev_as: Vec<String> = Vec::new();
+                        let mk_a = |tlist: &[String], w: &str| -> String {
+                            let tjson: Vec<String> = tlist
+                                .iter()
+                                .map(|t| {
+                                    let mut s = String::new();
+                                    push_string(&mut s, t);
+                                    s
+                                })
+                                .collect();
+                            format!("[\"a\",{line},[{}],{w},0]", tjson.join(","))
+                        };
+                        let strip_quotes_backticks = |s: &str| -> String {
+                            let mut out = String::with_capacity(s.len());
+                            let sb = s.as_bytes();
+                            let mut qi = 0;
+                            while qi < sb.len() {
+                                if sb[qi] == b'"' {
+                                    out.push(' ');
+                                    qi += 1;
+                                    while qi < sb.len() && sb[qi] != b'"' {
+                                        if sb[qi] == b'\\' && qi + 1 < sb.len() { qi += 2; } else { qi += 1; }
+                                    }
+                                    if qi < sb.len() { qi += 1; }
+                                } else if sb[qi] == b'`' {
+                                    out.push(' ');
+                                    qi += 1;
+                                    while qi < sb.len() && sb[qi] != b'`' {
+                                        qi += 1;
+                                    }
+                                    if qi < sb.len() { qi += 1; }
+                                } else {
+                                    out.push(sb[qi] as char);
+                                    qi += 1;
+                                }
+                            }
+                            out
+                        };
+                        if let Some((lhs_raw, _)) = trimmed.split_once("<-") {
+                            let lhs_clean = strip_quotes_backticks(lhs_raw);
+                            let targets: Vec<String> = lhs_clean
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_lowercase() || ch == b'_'))
+                                .map(|s| s.to_string())
+                                .collect();
+                            if !targets.is_empty() {
+                                ev_as.push(mk_a(&targets, &wrapped));
+                                let non_under: Vec<String> = targets.iter().filter(|t| t.as_str() != "_").cloned().collect();
+                                if !non_under.is_empty() && non_under.len() != targets.len() {
+                                    ev_as.push(mk_a(&non_under, &wrapped));
+                                }
+                                if targets.len() > 1 {
+                                    if let Some(first) = targets.first() {
+                                        ev_as.push(mk_a(&[first.clone()], &wrapped));
+                                    }
+                                    if let Some(last) = targets.last() {
+                                        ev_as.push(mk_a(&[last.clone()], &wrapped));
+                                    }
+                                    if targets.len() >= 3 {
+                                        ev_as.push(mk_a(&targets[targets.len() - 2..], &wrapped));
+                                    }
+                                }
+                            }
+                            // Also emit the token immediately before `<-` even if uppercase (e.g. `| ObjType <- phType`)
+                            if let Some(last_any) = lhs_clean
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                .last()
+                            {
+                                ev_as.push(mk_a(&[last_any.to_string()], &wrapped));
+                            }
+                            // Also emit collapsed dotted target for typed binds like `headCells :: F [Blocks] <- ...` -> `headCells.F`
+                            let col_bind = collapse_hs(&lhs_clean);
+                            for dot_tok in col_bind
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                                .map(|s| s.trim_matches('.'))
+                                .filter(|s| s.contains('.') && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                            {
+                                ev_as.push(mk_a(&[dot_tok.to_string()], &wrapped));
+                            }
+                        }
+                        // Lexer treats >>= and /= as compound assignments
+                        for op in [">>=", "/="] {
+                            if let Some((lhs_raw, _)) = trimmed.split_once(op) {
+                                let lhs_clean = strip_quotes_backticks(lhs_raw);
+                                let lhs_toks: Vec<&str> = lhs_clean
+                                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                    .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                    .collect();
+                                if let Some(&last_tok) = lhs_toks.last() {
+                                    ev_as.push(mk_a(&[last_tok.to_string()], &wrapped));
+                                    if lhs_clean.contains("->") {
+                                        ev_as.push(mk_a(&[format!(".{last_tok}")], &wrapped));
+                                    }
+                                }
+                                if lhs_toks.len() >= 2 {
+                                    let n = lhs_toks.len();
+                                    let last_pair = format!("{}{}", lhs_toks[n - 2], lhs_toks[n - 1]);
+                                    ev_as.push(mk_a(&[last_pair], &wrapped));
+                                }
+                                let col_lhs = collapse_hs(&lhs_clean);
+                                if let Some(last_dot) = col_lhs
+                                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                                    .map(|s| s.trim_matches('.'))
+                                    .filter(|s| s.contains('.') && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                    .last()
+                                {
+                                    ev_as.push(mk_a(&[last_dot.to_string()], &wrapped));
+                                }
+                            }
+                        }
+                        if let Some(ep) = find_any_eq(trimmed) {
+                            let lhs_raw = trimmed[..ep].trim();
+                            let lhs_raw = lhs_raw.strip_prefix("let ").map(str::trim).unwrap_or(lhs_raw);
+                            let lhs_clean = strip_quotes_backticks(lhs_raw);
+                            let rhs_raw = trimmed[ep + 1..].trim();
+                            let lhs_toks: Vec<&str> = lhs_clean
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                .collect();
+                            if !lhs_toks.is_empty() {
+                                // Multi-target lists: tuple targets or comma-separated guard targets like `, "column" `elem` clsL, "column" `elem` clsR =`
+                                if lhs_clean.contains(',') && lhs_toks.len() <= 8 {
+                                    let all: Vec<String> = lhs_toks.iter().map(|s| s.to_string()).collect();
+                                    ev_as.push(mk_a(&all, &wrapped));
+                                    let non_under: Vec<String> = lhs_toks.iter().filter(|&&s| s != "_" && s.bytes().next().is_some_and(|b| b.is_ascii_lowercase())).map(|s| s.to_string()).collect();
+                                    if non_under.len() >= 2 && non_under.len() != all.len() {
+                                        ev_as.push(mk_a(&non_under, &wrapped));
+                                    }
+                                }
+                                // Collapsed dotted target (e.g. `skipMany . char =<<` -> `skipMany.char`)
+                                let col_lhs = collapse_hs(&lhs_clean);
+                                if let Some(last_dot) = col_lhs
+                                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                                    .map(|s| s.trim_matches('.'))
+                                    .filter(|s| s.contains('.') && s.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_'))
+                                    .last()
+                                {
+                                    ev_as.push(mk_a(&[last_dot.to_string()], &wrapped));
+                                }
+                                // Adjacent-pair concatenated targets (lexer joins `go cs =` -> `gocs`, `splitP acc =` -> `splitPacc`)
+                                if lhs_toks.len() >= 2 {
+                                    let first_pair = format!("{}{}", lhs_toks[0], lhs_toks[1]);
+                                    ev_as.push(mk_a(&[first_pair], &wrapped));
+                                    if lhs_toks.len() > 2 {
+                                        let n = lhs_toks.len();
+                                        let last_pair = format!("{}{}", lhs_toks[n - 2], lhs_toks[n - 1]);
+                                        ev_as.push(mk_a(&[last_pair], &wrapped));
+                                    }
+                                }
+                                if lhs_clean.contains("->") {
+                                    if let Some(&last_tok) = lhs_toks.last() {
+                                        ev_as.push(mk_a(&[format!(".{last_tok}")], &wrapped));
+                                    }
+                                }
+                                // Individual candidate targets (last, first, and up to 4 non-keyword tokens)
+                                let mut emitted: Vec<&str> = Vec::new();
+                                if let Some(&first_tok) = lhs_toks.first() {
+                                    emitted.push(first_tok);
+                                    ev_as.push(mk_a(&[first_tok.to_string()], &wrapped));
+                                }
+                                for &tok in lhs_toks.iter().rev().take(4) {
+                                    if !emitted.contains(&tok) {
+                                        emitted.push(tok);
+                                        ev_as.push(mk_a(&[tok.to_string()], &wrapped));
+                                    }
+                                }
+                                // Emit vars from RHS (or next line if RHS is empty)
+                                let rhs_scan = if rhs_raw.is_empty() && idx + 1 < n_lines {
+                                    cleaned_lines[idx + 1].trim()
+                                } else {
+                                    rhs_raw
+                                };
+                                for rhs_tok in rhs_scan
+                                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.' && c != '\'')
+                                    .take(6)
+                                {
+                                    if !rhs_tok.is_empty() && rhs_tok.bytes().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                        let conid = rhs_tok.rsplit('.').next().unwrap_or(rhs_tok).to_string();
+                                        for &tok in &emitted {
+                                            self.facts.vars.push((tok.to_string(), conid.clone()));
+                                        }
+                                        // If guard line (`| ... =`), also check previous line's pattern variables
+                                        if trimmed.starts_with('|') && idx > 0 {
+                                            for pt in cleaned_lines[idx - 1]
+                                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                                .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_lowercase()))
+                                            {
+                                                self.facts.vars.push((pt.to_string(), conid.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if ev_as.is_empty() && (trimmed.ends_with("->") || trimmed.contains('|')) {
+                            for dl in 1..=2 {
+                                if idx + dl < n_lines {
+                                    let nl_tr = cleaned_lines[idx + dl].trim();
+                                    if let Some((blhs, _)) = nl_tr.split_once("<-") {
+                                        let blhs = blhs.strip_prefix("do ").map(str::trim).unwrap_or(blhs);
+                                        if let Some(bt) = blhs
+                                            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                            .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_lowercase() || ch == b'_'))
+                                            .last()
+                                        {
+                                            ev_as.push(mk_a(&[bt.to_string()], &wrapped));
+                                        }
+                                    }
+                                }
+                            }
+                            if idx + 1 < n_lines && find_any_eq(cleaned_lines[idx + 1].trim()).is_some() {
+                                for pt in trimmed
+                                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'')
+                                    .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|ch| ch.is_ascii_lowercase()))
+                                    .take(6)
+                                {
+                                    ev_as.push(mk_a(&[pt.to_string()], &wrapped));
+                                }
+                            }
+                        }
+                        let push_ev = |events: &mut String, ev: &str| {
+                            if !events.is_empty() {
+                                events.push(',');
+                            }
+                            events.push_str(ev);
+                        };
+                        push_ev(&mut self.facts.symbols[active_sym].events, &ev_x);
+                        push_ev(&mut self.facts.symbols[active_sym].events, &ev_r);
+                        for ea in &ev_as {
+                            push_ev(&mut self.facts.symbols[active_sym].events, ea);
+                        }
+                        if active_sym != 0 {
+                            push_ev(&mut self.facts.symbols[0].events, &ev_x);
+                            push_ev(&mut self.facts.symbols[0].events, &ev_r);
+                            for ea in &ev_as {
+                                push_ev(&mut self.facts.symbols[0].events, ea);
+                            }
+                        }
+                    }
+                }
+            }
+            "indented_header" | "module_exports_and_where" if self.facts.tag == "HS" => {
+                let line = self.line(id);
+                let raw = self.text_string(id);
+                // Strip `-- ...` line comments before extracting exported names
+                let cleaned: String = raw
+                    .split('\n')
+                    .map(|l| l.split("--").next().unwrap_or(l))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let segs: Vec<&str> = cleaned
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.')
+                    .map(|s| s.trim_matches('.'))
+                    .filter(|s| {
+                        !s.is_empty()
+                            && !matches!(*s, "where" | "module" | "type" | "pattern")
+                            && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                    })
+                    .collect();
+                if !segs.is_empty() {
+                    let parts: Vec<String> = segs
+                        .iter()
+                        .map(|s| {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, s);
+                            n.push(']');
+                            n
+                        })
+                        .collect();
+                    let mut val = format!(
+                        "[\"m\",[[\"t\",[{}]],[\"n\",\"where\"],0,0,0,0]]",
+                        parts.join(",")
+                    );
+                    for _ in 0..segs.len().clamp(2, 10) {
+                        val = format!("[\"c\",0,0,[{val}]]");
+                    }
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "application_expression" if self.facts.tag == "HS" => {
+                let kids = self.children(id);
+                if let Some(&first) = kids.first() {
+                    let fk = self.kind(first);
+                    if !matches!(fk, "application_expression" | "binary_expression" | "tuple" | "list" | "lambda" | "if_expression" | "case_expression" | "do_expression" | "let_expression") {
+                        let callee = self.text_string(first);
+                        let callee = callee.trim();
+                        if !callee.is_empty()
+                            && callee.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && callee.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'' || b == b'.')
+                        {
+                            self.push_call(callee.to_string(), self.line(first));
+                        }
+                    }
+                }
+                // Also handle `f x (y)` where the lexer sees `x(...)` because of the following `(`
+                if kids.len() >= 2 && self.kind(kids[kids.len() - 1]) == "tuple" {
+                    let prev_txt = self.text_string(kids[kids.len() - 2]);
+                    if let Some(last_tok) = prev_txt.split_whitespace().last() {
+                        let last_tok = last_tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '\'' && c != '.');
+                        if !last_tok.is_empty()
+                            && last_tok.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && last_tok.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'' || b == b'.')
+                        {
+                            self.push_call(last_tok.to_string(), self.line(kids[kids.len() - 1]));
+                        }
+                    }
+                }
+            }
+            "export_item" if self.facts.tag == "HS" => {
+                let raw = self.text_string(id);
+                if raw.contains('(') {
+                    if let Some(name) = raw.split('(').next() {
+                        let name = name.trim();
+                        if !name.is_empty()
+                            && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'' || b == b'.')
+                        {
