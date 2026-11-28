@@ -2558,3 +2558,323 @@ impl<'a> Walker<'a> {
                                                 || (rk + 1 < rhs.len() && rhs[rk] == b'!' && rhs[rk + 1] == b'(');
                                             if is_call {
                                                 let recv_str = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                                        sym.calls.len() - 1
+                                                    });
+                                                    parts.push(format!("[\"c\",{cidx},{recv_str},[0]]"));
+                                                }
+                                            }
+                                            parts.push(format!("[\"n\",\"{full}\"]"));
+                                        }
+                                        continue;
+                                    }
+                                    rk += 1;
+                                }
+                                if !parts.is_empty() {
+                                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                                    let ev = format!("[\"a\",{lno},[\"{lhs}\"],{val},0]");
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        if !sym.events.is_empty() { sym.events.push(','); }
+                                        sym.events.push_str(&ev);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3a9. Negative const-generic turbofish `ident::<-N>()` (lexer splits `<-` into assignment target `"ident."`).
+                if let Some(tf) = trimmed.windows(4).position(|w| w == b"::<-") {
+                    let mut i0 = tf;
+                    while i0 > 0 && (trimmed[i0 - 1].is_ascii_alphanumeric() || trimmed[i0 - 1] == b'_') { i0 -= 1; }
+                    if tf > i0 && (trimmed[i0].is_ascii_alphabetic() || trimmed[i0] == b'_') {
+                        let ident = String::from_utf8_lossy(&trimmed[i0..tf]);
+                        let ev = format!("[\"a\",{lno},[\"{ident}.\"],0,0]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // 3a10. Tuple destructuring `let (a, b, ...) = <expr>;` (single- or multi-line RHS, e.g. `let (k1, k2) = ...;`, `let (v, f) = match ... { ... };`).
+                if trimmed.starts_with(b"let (") && trimmed.contains(&b')') && trimmed.contains(&b'=') {
+                    if let (Some(rp), Some(eq_p)) = (trimmed.iter().position(|&b| b == b')'), trimmed.iter().position(|&b| b == b'=')) {
+                        if eq_p > rp && eq_p + 1 < trimmed.len() && !matches!(trimmed[eq_p + 1], b'=' | b'>') {
+                            let pat_s = String::from_utf8_lossy(&trimmed[5..rp]);
+                            let mut tgts: Vec<String> = Vec::new();
+                            for part in pat_s.split(',') {
+                                let p = part.trim().trim_start_matches("mut ").trim_start_matches("ref ").trim();
+                                if !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                    tgts.push(format!("\"{p}\""));
+                                }
+                            }
+                            if !tgts.is_empty() {
+                                let abs_eq = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + eq_p;
+                                let scan_lim = (abs_eq + 900).min(n);
+                                let mut pk = abs_eq + 1;
+                                let mut bdepth = 0usize;
+                                let mut pdepth = 0usize;
+                                let mut parts: Vec<String> = Vec::new();
+                                while pk < scan_lim {
+                                    if src[pk] == b';' && bdepth == 0 && pdepth == 0 { break; }
+                                    if src[pk] == b'{' { bdepth += 1; pk += 1; continue; }
+                                    if src[pk] == b'}' { if bdepth > 0 { bdepth -= 1; } pk += 1; continue; }
+                                    if src[pk] == b'(' { pdepth += 1; pk += 1; continue; }
+                                    if src[pk] == b')' { if pdepth > 0 { pdepth -= 1; } pk += 1; continue; }
+                                    if src[pk] == b'/' && pk + 1 < scan_lim && src[pk + 1] == b'/' {
+                                        while pk < scan_lim && src[pk] != b'\n' { pk += 1; }
+                                        continue;
+                                    }
+                                    if src[pk] == b'"' {
+                                        pk += 1;
+                                        while pk < scan_lim && src[pk] != b'"' {
+                                            if src[pk] == b'\\' && pk + 1 < scan_lim { pk += 2; continue; }
+                                            pk += 1;
+                                        }
+                                        if pk < scan_lim { pk += 1; }
+                                        parts.push("0".to_string());
+                                        continue;
+                                    }
+                                    if src[pk].is_ascii_alphabetic() || src[pk] == b'_' {
+                                        let r0 = pk;
+                                        while pk < scan_lim {
+                                            if src[pk].is_ascii_alphanumeric() || src[pk] == b'_' || src[pk] == b'.' {
+                                                pk += 1;
+                                            } else if pk + 1 < scan_lim && src[pk] == b':' && src[pk + 1] == b':' {
+                                                pk += 2;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        let full = String::from_utf8_lossy(&src[r0..pk]).replace("::", ".");
+                                        let full = full.trim_matches('.').to_string();
+                                        if !full.is_empty() && !matches!(full.as_str(), "as" | "mut" | "ref" | "unsafe" | "true" | "false" | "const") {
+                                            if pk < scan_lim && src[pk] == b'(' {
+                                                let recv_str = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                                        sym.calls.len() - 1
+                                                    });
+                                                    parts.push(format!("[\"c\",{cidx},{recv_str},[0]]"));
+                                                }
+                                            }
+                                            parts.push(format!("[\"n\",\"{full}\"]"));
+                                        }
+                                        continue;
+                                    }
+                                    pk += 1;
+                                }
+                                let val = if parts.is_empty() { "0".to_string() } else if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                                let ev = format!("[\"a\",{lno},[{}],{val},0]", tgts.join(","));
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    if !sym.events.is_empty() { sym.events.push(','); }
+                                    sym.events.push_str(&ev);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3a11. Multi-line `let [mut] <var> = match|if ... { ... };` expression bindings.
+                if trimmed.starts_with(b"let ") && trimmed.contains(&b'=') && trimmed.contains(&b'{')
+                    && (trimmed.windows(6).any(|w| w == b"match ") || trimmed.windows(3).any(|w| w == b"if "))
+                {
+                    let mut p0 = 4usize;
+                    while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                    if trimmed[p0..].starts_with(b"mut ") { p0 += 4; while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; } }
+                    let mut p1 = p0;
+                    while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                    if p1 > p0 && (trimmed[p0].is_ascii_alphabetic() || trimmed[p0] == b'_') {
+                        let target = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                        if let Some(eq_rel) = trimmed[p1..].iter().position(|&b| b == b'=') {
+                            let eq = p1 + eq_rel;
+                            if eq + 1 < trimmed.len() && !matches!(trimmed[eq + 1], b'=' | b'>') {
+                                let abs_eq = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + eq;
+                                let scan_lim = (abs_eq + 1200).min(n);
+                                let mut pk = abs_eq + 1;
+                                let mut bdepth = 0usize;
+                                let mut seen_brace = false;
+                                let mut parts: Vec<String> = Vec::new();
+                                while pk < scan_lim {
+                                    if src[pk] == b'{' { bdepth += 1; seen_brace = true; pk += 1; continue; }
+                                    if src[pk] == b'}' {
+                                        if bdepth > 0 { bdepth -= 1; }
+                                        pk += 1;
+                                        if seen_brace && bdepth == 0 {
+                                            // Keep scanning if followed by `else`
+                                            let mut look = pk;
+                                            while look < scan_lim && matches!(src[look], b' ' | b'\t' | b'\n' | b'\r') { look += 1; }
+                                            if !src[look..].starts_with(b"else") { break; }
+                                        }
+                                        continue;
+                                    }
+                                    if src[pk] == b'/' && pk + 1 < scan_lim && src[pk + 1] == b'/' {
+                                        while pk < scan_lim && src[pk] != b'\n' { pk += 1; }
+                                        continue;
+                                    }
+                                    if src[pk] == b'"' {
+                                        pk += 1;
+                                        while pk < scan_lim && src[pk] != b'"' {
+                                            if src[pk] == b'\\' && pk + 1 < scan_lim { pk += 2; continue; }
+                                            pk += 1;
+                                        }
+                                        if pk < scan_lim { pk += 1; }
+                                        parts.push("0".to_string());
+                                        continue;
+                                    }
+                                    if src[pk].is_ascii_alphabetic() || src[pk] == b'_' {
+                                        let r0 = pk;
+                                        while pk < scan_lim {
+                                            if src[pk].is_ascii_alphanumeric() || src[pk] == b'_' || src[pk] == b'.' {
+                                                pk += 1;
+                                            } else if pk + 1 < scan_lim && src[pk] == b':' && src[pk + 1] == b':' {
+                                                pk += 2;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        let full = String::from_utf8_lossy(&src[r0..pk]).replace("::", ".");
+                                        let full = full.trim_matches('.').to_string();
+                                        if !full.is_empty() && !matches!(full.as_str(), "as" | "mut" | "ref" | "unsafe" | "true" | "false" | "const" | "let") {
+                                            if pk < scan_lim && src[pk] == b'(' {
+                                                let recv_str = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                    let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                                        sym.calls.push(Call { path: full.clone(), line: lno });
+                                                        sym.calls.len() - 1
+                                                    });
+                                                    parts.push(format!("[\"c\",{cidx},{recv_str},[0]]"));
+                                                }
+                                            }
+                                            parts.push(format!("[\"n\",\"{full}\"]"));
+                                        }
+                                        continue;
+                                    }
+                                    pk += 1;
+                                }
+                                if !parts.is_empty() {
+                                    let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                                    let ev = format!("[\"a\",{lno},[\"{target}\"],{val},0]");
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        if !sym.events.is_empty() { sym.events.push(','); }
+                                        sym.events.push_str(&ev);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3a12. Struct literal expressions with turbofish or numeric fields (`Type::<T> { field }`, `Type { 0: expr }`).
+                if !trimmed.starts_with(b"let ") && !trimmed.starts_with(b"struct ") && !trimmed.starts_with(b"pub ")
+                    && !trimmed.starts_with(b"enum ") && !trimmed.starts_with(b"impl ") && !trimmed.starts_with(b"fn ")
+                    && !trimmed.starts_with(b"trait ") && !trimmed.starts_with(b"mod ")
+                    && trimmed.contains(&b'{') && trimmed.contains(&b'}')
+                    && trimmed.first().map(|b| b.is_ascii_uppercase()).unwrap_or(false)
+                {
+                    if let (Some(lb), Some(rb)) = (trimmed.iter().position(|&b| b == b'{'), trimmed.iter().rposition(|&b| b == b'}')) {
+                        if rb > lb {
+                            let body = &trimmed[lb + 1..rb];
+                            let mut parts: Vec<String> = Vec::new();
+                            let mut rk = 0usize;
+                            while rk < body.len() {
+                                if body[rk].is_ascii_alphabetic() || body[rk] == b'_' {
+                                    let r0 = rk;
+                                    while rk < body.len() {
+                                        if body[rk].is_ascii_alphanumeric() || body[rk] == b'_' || body[rk] == b'.' {
+                                            rk += 1;
+                                        } else if rk + 1 < body.len() && body[rk] == b':' && body[rk + 1] == b':' {
+                                            rk += 2;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                    let full = String::from_utf8_lossy(&body[r0..rk]).replace("::", ".");
+                                    let full = full.trim_matches('.').to_string();
+                                    if !full.is_empty() && !matches!(full.as_str(), "as" | "mut" | "ref" | "unsafe" | "true" | "false" | "const") {
+                                        if rk < body.len() && body[rk] == b'(' {
+                                            // Scan call args inside `(...)`
+                                            let mut pdepth = 1usize;
+                                            let mut ak = rk + 1;
+                                            let mut a_parts: Vec<String> = Vec::new();
+                                            while ak < body.len() && pdepth > 0 {
+                                                if body[ak] == b'(' { pdepth += 1; ak += 1; continue; }
+                                                if body[ak] == b')' { pdepth -= 1; ak += 1; continue; }
+                                                if body[ak].is_ascii_alphabetic() || body[ak] == b'_' {
+                                                    let a0 = ak;
+                                                    while ak < body.len() && (body[ak].is_ascii_alphanumeric() || body[ak] == b'_') { ak += 1; }
+                                                    let aid = String::from_utf8_lossy(&body[a0..ak]);
+                                                    if !matches!(aid.as_ref(), "as" | "mut" | "ref") {
+                                                        a_parts.push(format!("[\"n\",\"{aid}\"]"));
+                                                    }
+                                                    continue;
+                                                }
+                                                ak += 1;
+                                            }
+                                            let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                            if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                                    sym.calls.push(Call { path: full.clone(), line: lno });
+                                                    sym.calls.len() - 1
+                                                });
+                                                let aexpr = if a_parts.is_empty() { "0".to_string() } else { format!("[\"m\",[{}]]", a_parts.join(",")) };
+                                                parts.push(format!("[\"c\",{cidx},{recv},[{aexpr}]]"));
+                                            }
+                                            rk = ak;
+                                            continue;
+                                        }
+                                        parts.push(format!("[\"n\",\"{full}\"]"));
+                                    }
+                                    continue;
+                                }
+                                rk += 1;
+                            }
+                            if !parts.is_empty() {
+                                let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                                let ev = format!("[\"x\",{lno},{val}]");
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    if !sym.events.is_empty() { sym.events.push(','); }
+                                    sym.events.push_str(&ev);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3a13. Multi-line or nested-call `let [mut] <var> = [unsafe {] Call(args...) [}];` preserving call argument identifiers & inner calls (and outer-fn mirror for nested `fn`).
+                if trimmed.starts_with(b"let ") && trimmed.contains(&b'=') && trimmed.contains(&b'(') {
+                    let mut p0 = 4usize;
+                    while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                    if trimmed[p0..].starts_with(b"mut ") { p0 += 4; while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; } }
+                    let mut p1 = p0;
+                    while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                    if p1 > p0 && (trimmed[p0].is_ascii_alphabetic() || trimmed[p0] == b'_') {
+                        let target = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                        if let Some(eq_rel) = trimmed[p1..].iter().position(|&b| b == b'=') {
+                            let eq = p1 + eq_rel;
+                            if eq + 1 < trimmed.len() && !matches!(trimmed[eq + 1], b'=' | b'>') {
+                                let abs_eq = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + eq;
+                                let scan_lim = (abs_eq + 600).min(n);
+                                let mut pk = abs_eq + 1;
+                                let mut pdepth = 0usize;
+                                let mut bdepth = 0usize;
+                                let mut first_call_path: Option<String> = None;
+                                let mut arg_parts: Vec<String> = Vec::new();
+                                while pk < scan_lim {
+                                    if src[pk] == b';' && pdepth == 0 && bdepth == 0 { break; }
+                                    if src[pk] == b'{' { bdepth += 1; pk += 1; continue; }
+                                    if src[pk] == b'}' { if bdepth > 0 { bdepth -= 1; } pk += 1; continue; }
+                                    if src[pk] == b'(' { pdepth += 1; pk += 1; continue; }
+                                    if src[pk] == b')' { if pdepth > 0 { pdepth -= 1; } pk += 1; continue; }
+                                    if src[pk] == b'/' && pk + 1 < scan_lim && src[pk + 1] == b'/' {
+                                        while pk < scan_lim && src[pk] != b'\n' { pk += 1; }
+                                        continue;
+                                    }
+                                    if src[pk] == b'"' {
+                                        pk += 1;
+                                        while pk < scan_lim && src[pk] != b'"' {
+                                            if src[pk] == b'\\' && pk + 1 < scan_lim { pk += 2; continue; }
