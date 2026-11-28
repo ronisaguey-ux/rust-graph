@@ -33278,3 +33278,323 @@ impl<'a> Walker<'a> {
                     }
                 }
                 for (wi, (wl, w)) in words.iter().enumerate() {
+                        if !w.starts_with('"') && !w.starts_with('{') && !w.starts_with('[') {
+                            if let Some(ep) = w.find('=') {
+                                let prev_b = if ep > 0 { w.as_bytes()[ep - 1] } else { 0 };
+                                let next_b = w.as_bytes().get(ep + 1).copied().unwrap_or(0);
+                                if ep > 0 && !matches!(prev_b, b'=' | b'!' | b'<' | b'>') && next_b != b'=' {
+                                    let lhs_part = &w[..ep];
+                                    if let Some(tseg) = lhs_part
+                                        .rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                                        .find(|t| !t.is_empty())
+                                    {
+                                        let t = Self::tcl_clean_name(tseg);
+                                        if Self::tcl_is_ident(&t) {
+                                            let rhs_str = &w[ep + 1..];
+                                            let rv = if !rhs_str.is_empty() {
+                                                let mut rhs_words = vec![(*wl, rhs_str.to_string())];
+                                                if rhs_str.starts_with('[') && !rhs_str.ends_with(']') {
+                                                    let mut joined = rhs_str.to_string();
+                                                    for (_, nw) in &words[wi + 1..] {
+                                                        joined.push(' ');
+                                                        joined.push_str(nw);
+                                                        if nw.ends_with(']') { break; }
+                                                    }
+                                                    rhs_words = vec![(*wl, joined)];
+                                                }
+                                                let r = self.tcl_eval_words(&rhs_words, *wl, depth + 1);
+                                                if r.is_empty() { "0".to_string() } else { r }
+                                            } else {
+                                                "0".to_string()
+                                            };
+                                            self.lexer_event(b'a', *wl, &[t], &rv, false);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(eq_pos) = words.iter().position(|w| w.1 == "=") {
+                    if eq_pos > 0 {
+                        let lhs = Self::tcl_clean_name(&words[eq_pos - 1].1);
+                        if Self::tcl_is_ident(&lhs) {
+                            let rhs_val = if eq_pos + 1 < words.len() {
+                                let v = self.tcl_eval_words(&words[eq_pos + 1..], words[eq_pos].0, depth + 1);
+                                if v.is_empty() { "0".to_string() } else { v }
+                            } else {
+                                "0".to_string()
+                            };
+                            self.lexer_event(b'a', words[eq_pos].0, &[lhs], &rhs_val, false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn tcl_proc_command(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let words: Vec<u32> = children
+            .into_iter()
+            .filter(|&c| !matches!(self.kind(c), "whitespace" | "comment" | "newline" | ";" | "command_end"))
+            .collect();
+        // words[0] is "proc", words[1] is name, last braced_word is body
+        let raw_name = words.get(1).map(|&c| self.text_string(c)).unwrap_or_default();
+        let sym_name = Self::tcl_clean_name(raw_name.trim_matches(|c| c == '{' || c == '}'));
+        if sym_name.is_empty() {
+            return;
+        }
+        let args_braced = words.get(2).is_some_and(|&c| self.kind(c) == "braced_word");
+        let args_has_nested = words.get(2).is_some_and(|&c| {
+            if self.kind(c) != "braced_word" {
+                return false;
+            }
+            let t = self.text_string(c);
+            t.len() >= 2 && t.starts_with('{') && t[1..t.len() - 1].contains('{')
+        });
+        let body_braced = words.len() >= 4 && words.last().is_some_and(|&c| self.kind(c) == "braced_word");
+        if !args_braced || !body_braced || args_has_nested {
+            if raw_name.starts_with("::") {
+                self.push_call(format!("proc.{sym_name}"), line);
+            } else if !args_braced {
+                self.push_call(sym_name.clone(), line);
+            }
+            self.push_call("proc".to_string(), line);
+            if !body_braced && args_braced {
+                if let Some(&arg_node) = words.get(2) {
+                    let raw_args = self.text_string(arg_node);
+                    if raw_args.starts_with('{') && raw_args.ends_with('}') && raw_args.len() >= 2 {
+                        self.tcl_scan_script(&raw_args[1..raw_args.len() - 1], self.line(arg_node), 1);
+                    }
+                }
+            }
+        }
+        let sym = self.add_symbol(sym_name, String::new(), KIND_FUNCTION, line, Vec::new());
+        self.stack.push(Frame {
+            node: id,
+            symbol: sym,
+            class: String::new(),
+            receiver: String::new(),
+            container: false,
+            defines: Some(sym),
+        });
+        if let Some(&body_node) = words.last() {
+            if words.len() >= 4 && self.kind(body_node) == "braced_word" {
+                let raw_body = self.text_string(body_node);
+                if raw_body.starts_with('{') && raw_body.ends_with('}') && raw_body.len() >= 2 {
+                    self.tcl_scan_script(&raw_body[1..raw_body.len() - 1], self.line(body_node), 1);
+                }
+            } else {
+                self.push_call("proc".to_string(), line);
+            }
+        }
+        self.stack.pop();
+    }
+
+    fn tcl_call_command(&mut self, id: u32) {
+        let line = self.line(id);
+        let children = self.children(id);
+        let mut words: Vec<(u32, String)> = Vec::new();
+        for c in children {
+            let ck = self.kind(c);
+            if matches!(ck, "whitespace" | "comment" | "newline" | ";" | "command_end") {
+                continue;
+            }
+            words.push((self.line(c), self.text_string(c)));
+        }
+        let is_ret = words.first().is_some_and(|w| w.1 == "return");
+        let val = if is_ret && words.len() > 1 {
+            self.tcl_eval_words(&words[1..], line, 0)
+        } else {
+            self.tcl_eval_words(&words, line, 0)
+        };
+        if is_ret {
+            let rv = if val.is_empty() { "0".to_string() } else { val };
+            self.lexer_event(b'r', line, &[], &rv, false);
+        } else if !val.is_empty() && val != "0" {
+            self.lexer_event(b'x', line, &[], &val, false);
+            if words.iter().any(|w| w.1.starts_with('{') && w.1.ends_with('}')) {
+                let mut seg_start = 0usize;
+                for wi in 0..=words.len() {
+                    if wi == words.len() || (words[wi].1.starts_with('{') && words[wi].1.ends_with('}')) {
+                        if wi > seg_start {
+                            let sl = words[seg_start].0;
+                            let sv = self.tcl_eval_words(&words[seg_start..wi], sl, 1);
+                            if !sv.is_empty() && sv != "0" {
+                                self.lexer_event(b'x', sl, &[], &sv, false);
+                            }
+                        }
+                        seg_start = wi + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn enter(&mut self, id: u32) {
+        let kind = self.kind(id);
+        if self.is_rust() && self.enter_rust(id) {
+            return;
+        }
+        if self.facts.tag == "TCL" && kind == "proc_command" {
+            self.tcl_proc_command(id);
+            return;
+        }
+        // C, C++: the declared name lives inside a declarator, so the node
+        // cannot be read off a `Def` table. `enter_c` only claims the nodes it
+        // actually reads, and the generic walk keeps everything else.
+        if self.is_c() && self.enter_c(id) {
+            return;
+        }
+        // `public abstract T Create(Type objectType);` in an interface or an
+        // abstract class has no body: the grammar calls it a declaration and
+        // the lexer reads a call, so every abstract member of the corpus lost
+        // one. Read before the definition table claims the node. An
+        // expression-bodied method (`=>`) has a body and is read below instead.
+        // `public delegate object ObjectConstructor<T>(params object[] args);`:
+        // a delegate declaration is one header statement to the one-pass
+        // reader, and the definition table claims the node before any arm can
+        // read it, so every delegate declaration lost its line.
+        if (kind == "method_declaration"
+            && self.kinds.calls.contains(&"object_creation_expression")
+            && !self
+                .children(id)
+                .into_iter()
+                .any(|child| matches!(self.kind(child), "block" | "=>")))
+            || (kind == "delegate_declaration" && self.language.name == "csharp")
+        {
+            let children = self.children(id);
+            let named = children
+                .iter()
+                .copied()
+                .take_while(|&child| !matches!(self.kind(child), "parameter_list" | "formal_parameters" | "type_parameters"))
+                .filter(|&child| self.kind(child) == "identifier" || self.leaf_name(child).is_some())
+                .last();
+            if let Some(named) = named {
+                let name = self.text_string(named);
+                let call_line = self.line(named);
+                let index = self.push_call(name, call_line);
+                let mut line = self.line(id);
+                if self.language.name == "csharp" {
+                    if let Some(first) = children.iter().copied().find(|&child| {
+                        matches!(self.kind(child), "attributes" | "attribute_section" | "attribute_list")
+                    }) {
+                        line = self.line(first);
+                    }
+                }
+                let mut parts: Vec<String> = Vec::new();
+                let mut attributed = false;
+                // The header words run up to the parameter list, so the name and
+                // the generic parameters (`MapFrom<TMember>`) reach the value the
+                // way the lexer writes them; stopping at `type_parameters` lost
+                // every generic abstract member's name and type parameters.
+                for child in &children {
+                    if matches!(self.kind(*child), "parameter_list" | "formal_parameters") {
+                        break;
+                    }
+                    if self.language.name == "csharp"
+                        && matches!(self.kind(*child), "attributes" | "attribute_section" | "attribute_list")
+                    {
+                        self.csharp_attributes(*child, &mut attributed, &mut parts);
+                        continue;
+                    }
+                    for word in self.c_words_of(*child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &word);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                }
+                let mut args: Vec<String> = Vec::new();
+                if let Some(list) = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "parameter_list" | "formal_parameters"))
+                {
+                    for parameter in self.children(list) {
+                        if self.kind(parameter) != "parameter" {
+                            continue;
+                        }
+                        let mut p_parts: Vec<String> = Vec::new();
+                        let mut p_attr = false;
+                        for p_child in self.children(parameter) {
+                            if self.language.name == "csharp"
+                                && matches!(self.kind(p_child), "attributes" | "attribute_section" | "attribute_list")
+                            {
+                                self.csharp_attributes(p_child, &mut p_attr, &mut p_parts);
+                                continue;
+                            }
+                            for word in self.c_words_of(p_child) {
+                                let word = if word == "this" { "self" } else { word.as_str() };
+                                let mut form = String::from("[\"n\",");
+                                push_string(&mut form, word);
+                                form.push(']');
+                                p_parts.push(form);
+                            }
+                        }
+                        if !p_parts.is_empty() {
+                            args.push(format!("[\"m\",[{}]]", p_parts.join(",")));
+                        }
+                    }
+                }
+                let call = format!("[\"c\",{index},0,[{}]]", args.join(","));
+                parts.push(call);
+                for child in &children {
+                    if self.kind(*child) != "type_parameter_constraints" {
+                        continue;
+                    }
+                    for word in self.c_words_of(*child) {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &word);
+                        form.push(']');
+                        parts.push(form);
+                    }
+                }
+                let value = format!("[\"m\",[{}]]", parts.join(","));
+                self.lexer_event(b'x', line, &[], &value, false);
+            }
+        }
+        if kind == "instance_variable_declaration" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let kids = self.children(id);
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(&var_node) = kids.first() {
+                let raw = self.text_string(var_node);
+                let stripped = raw.trim_start_matches('@');
+                if !stripped.is_empty() {
+                    let mut vf = String::from("[\"n\",");
+                    push_string(&mut vf, &format!("self.{stripped}"));
+                    vf.push(']');
+                    parts.push(vf);
+                }
+            }
+            // Helper to format a slice of children representing a Crystal `_type`
+            // (where `generic_arguments` wraps each arg in `type_argument`).
+            fn emit_cr_type(w: &mut Walker, nodes: &[u32]) -> String {
+                let mut out: Vec<String> = Vec::new();
+                let mut i = 0usize;
+                while i < nodes.len() {
+                    let c = nodes[i];
+                    let ck = w.kind(c);
+                    if ck == "type_argument" {
+                        let tkids = w.children(c);
+                        let f = emit_cr_type(w, &tkids);
+                        if !f.is_empty() {
+                            out.push(f);
+                        }
+                    } else if ck == "type_path" {
+                        let tname = w.text_string(c);
+                        if i + 1 < nodes.len() && w.kind(nodes[i + 1]) == "generic_arguments" {
+                            let idx = w.push_call(tname, w.line(c));
+                            let gkids = w.children(nodes[i + 1]);
+                            let mut args = Vec::new();
+                            for gc in gkids {
+                                if w.kind(gc) == "type_argument" {
+                                    let tk = w.children(gc);
+                                    let f = emit_cr_type(w, &tk);
+                                    if !f.is_empty() {
+                                        args.push(f);
+                                    }
+                                }
+                            }
