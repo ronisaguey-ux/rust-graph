@@ -31998,3 +31998,323 @@ impl<'a> Walker<'a> {
                 let eq = children.iter().position(|&c| self.kind(c) == "=");
                 let colon = children.iter().position(|&c| self.kind(c) == ":");
                 let end_names = colon.or(eq).unwrap_or(children.len());
+                let mut targets = Vec::new();
+                for &c in &children[..end_names] {
+                    if self.kind(c) == "identifier" {
+                        let name = self.text_string(c);
+                        if !name.is_empty() {
+                            targets.push(name);
+                        }
+                    }
+                }
+                if let Some(col) = colon {
+                    let stop = eq.unwrap_or(children.len());
+                    if let Some(ty) = children[col + 1..stop].iter().copied().find_map(|c| self.leaf_name(c)) {
+                        if ty.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                            for t in &targets {
+                                self.facts.vars.push((t.clone(), ty.clone()));
+                            }
+                        }
+                    }
+                }
+                if let Some(eq_idx) = eq {
+                    let line = self.line(id);
+                    if let Some(&rhs) = children[eq_idx + 1..].iter().find(|&&c| !self.is_layout(c)) {
+                        if self.kind(rhs) == "call" {
+                            if let Some(callee) = self.children(rhs).first().copied().and_then(|c| self.leaf_name(c)) {
+                                if callee.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                    for t in &targets {
+                                        self.facts.vars.push((t.clone(), callee.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        let val = self.form(rhs);
+                        if !targets.is_empty() {
+                            self.lexer_event(b'a', line, &targets, &val, false);
+                        }
+                    }
+                }
+            }
+            "include_statement" if matches!(self.facts.tag.as_str(), "RB" | "CR") => {
+                let line = self.line(id);
+                let children = self.children(id);
+                let kw = children
+                    .first()
+                    .map(|&c| self.text_string(c))
+                    .filter(|k| matches!(k.as_str(), "include" | "extend" | "prepend"))
+                    .unwrap_or_else(|| "include".to_string());
+                let idx = self.push_call(kw, line);
+                let mut args = Vec::new();
+                for &c in children.iter().skip(1) {
+                    if !self.is_layout(c) {
+                        let v = self.form(c);
+                        if !v.is_empty() {
+                            args.push(v);
+                        }
+                    }
+                }
+                let val = format!("[\"c\",{idx},0,[{}]]", args.join(","));
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
+            "foreach_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                if let Some(var) = self.child_of_kind(id, "variable") {
+                    let target = self
+                        .text_string(var)
+                        .trim_start_matches(|ch| matches!(ch, '$' | '@' | '%' | '#'))
+                        .replace("::", ".");
+                    let rhs = self
+                        .child_of_kind(id, "paren_expression")
+                        .map(|p| self.form(p))
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| "0".to_string());
+                    if !target.is_empty() {
+                        self.lexer_event(b'a', line, &[target], &rhs, false);
+                    }
+                }
+            }
+            "return_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                let val = self
+                    .children(id)
+                    .into_iter()
+                    .find(|&c| !self.is_layout(c) && !matches!(self.kind(c), "return" | ";"))
+                    .map(|c| self.form(c))
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| "0".to_string());
+                self.lexer_event(b'r', line, &[], &val, false);
+            }
+            "my_declaration" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                let children = self.children(id);
+                if let Some(eq_pos) = children.iter().position(|&c| self.kind(c) == "=") {
+                    let mut targets = Vec::new();
+                    for &c in &children[..eq_pos] {
+                        if self.kind(c) == "variable" {
+                            let t = self.text_string(c).trim_start_matches(|ch| matches!(ch, '$' | '@' | '%' | '#')).replace("::", ".");
+                            if !t.is_empty() { targets.push(t); }
+                        } else if self.kind(c) == "variable_declarator" {
+                            for sub in self.children(c) {
+                                if self.kind(sub) == "variable" {
+                                    let t = self.text_string(sub).trim_start_matches(|ch| matches!(ch, '$' | '@' | '%' | '#')).replace("::", ".");
+                                    if !t.is_empty() { targets.push(t); }
+                                } else if self.kind(sub) == "paren_variables" {
+                                    for pv in self.children(sub) {
+                                        if self.kind(pv) == "variable" {
+                                            let t = self.text_string(pv).trim_start_matches(|ch| matches!(ch, '$' | '@' | '%' | '#')).replace("::", ".");
+                                            if !t.is_empty() { targets.push(t); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let rhs = children[eq_pos + 1..].iter().copied().find(|&c| !self.is_layout(c) && self.kind(c) != ";");
+                    if !targets.is_empty() {
+                        let val = rhs.map(|r| self.form(r)).filter(|v| !v.is_empty()).unwrap_or_else(|| "0".to_string());
+                        self.lexer_event(b'a', line, &targets, &val, false);
+                    }
+                }
+            }
+            "print_statement" | "list_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                if let Some(first) = self.children(id).into_iter().find(|&c| !self.is_layout(c)) {
+                    let kw = self.text_string(first);
+                    if !kw.is_empty() {
+                        let idx = self.push_call(kw, line);
+                        let mut args = Vec::new();
+                        for c in self.children(id).into_iter().skip(1) {
+                            if !self.is_layout(c) && !matches!(self.kind(c), "," | ";") {
+                                let v = self.form(c);
+                                if !v.is_empty() {
+                                    args.push(v);
+                                }
+                            }
+                        }
+                        let val = format!("[\"c\",{idx},0,[{}]]", args.join(","));
+                        self.lexer_event(b'x', line, &[], &val, false);
+                    }
+                }
+            }
+            "package_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                let idx = self.push_call("package".to_string(), line);
+                let arg = self
+                    .child_of_kind(id, "module_name")
+                    .map(|mn| format!("[\"n\",\"{}\"]", self.text_string(mn).replace("::", ".")))
+                    .unwrap_or_default();
+                let val = if arg.is_empty() {
+                    format!("[\"c\",{idx},0,[]]")
+                } else {
+                    format!("[\"c\",{idx},0,[{arg}]]")
+                };
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
+            "use_statement" if self.facts.tag == "PL" => {
+                let line = self.line(id);
+                if let Some(mn) = self.child_of_kind(id, "module_name") {
+                    let module = self.text_string(mn).replace("::", ".");
+                    let alias = module.rsplit('.').next().unwrap_or(&module).to_string();
+                    if !module.is_empty() {
+                        self.facts.imports.push(Import {
+                            line,
+                            module,
+                            name: String::new(),
+                            alias,
+                            ..Import::default()
+                        });
+                    }
+                } else if let Some(st) = self.child_of_kind(id, "string") {
+                    let raw = self.text_string(st);
+                    let module = raw.trim_matches(|c| c == '"' || c == '\'').to_string();
+                    if !module.is_empty() {
+                        self.facts.imports.push(Import {
+                            line,
+                            module: module.clone(),
+                            name: String::new(),
+                            alias: module,
+                            ..Import::default()
+                        });
+                    }
+                }
+            }
+            "import_declaration" if self.facts.tag == "GROOVY" => {
+                let line = self.line(id);
+                if let Some(dn) = self.child_of_kind(id, "dotted_name") {
+                    let module = self.text_string(dn);
+                    let children = self.children(id);
+                    let star = children.iter().any(|&c| self.kind(c) == "*");
+                    let alias = if star {
+                        String::new()
+                    } else if let Some(as_pos) = children.iter().position(|&c| self.kind(c) == "as") {
+                        children[as_pos + 1..]
+                            .iter()
+                            .copied()
+                            .find(|&c| self.kind(c) == "identifier")
+                            .map(|c| self.text_string(c))
+                            .unwrap_or_default()
+                    } else {
+                        module.rsplit('.').next().unwrap_or(&module).to_string()
+                    };
+                    if !module.is_empty() {
+                        self.facts.imports.push(Import {
+                            line,
+                            module,
+                            name: String::new(),
+                            alias,
+                            kind: if star { IMPORT_STAR } else { Import::default().kind },
+                            ..Import::default()
+                        });
+                    }
+                }
+            }
+            "field_or_method" if self.facts.tag == "GROOVY" && self.child_of_kind(id, "initializer").is_some() => {
+                let line = self.line(id);
+                let children = self.children(id);
+                if let Some(init_pos) = children.iter().position(|&c| self.kind(c) == "initializer") {
+                    let target = children[..init_pos]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&c| self.kind(c) == "identifier")
+                        .map(|c| self.text_string(c));
+                    let init = children[init_pos];
+                    if let (Some(target), Some(rhs)) = (
+                        target,
+                        self.children(init).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "="),
+                    ) {
+                        let ctor = if self.kind(rhs) == "constructor_call" {
+                            Some(rhs)
+                        } else if self.kind(rhs) == "call" {
+                            self.children(rhs).first().copied().filter(|&c| self.kind(c) == "constructor_call")
+                        } else {
+                            None
+                        };
+                        if let Some(ctor) = ctor {
+                            if let Some(t) = self.children(ctor).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "new") {
+                                let cname = if self.kind(t) == "call" {
+                                    self.children(t).first().copied().and_then(|c| self.leaf_name(c))
+                                } else {
+                                    self.leaf_name(t)
+                                };
+                                if let Some(cname) = cname {
+                                    self.facts.vars.push((target.clone(), cname));
+                                }
+                            }
+                        }
+                        let val = self.form(rhs);
+                        self.lexer_event(b'a', line, &[target], &val, false);
+                    }
+                }
+            }
+            "annotation" if self.facts.tag == "GROOVY" => {
+                let line = self.line(id);
+                let names: Vec<String> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&c| self.kind(c) == "identifier")
+                    .map(|c| self.text_string(c))
+                    .collect();
+                if !names.is_empty() {
+                    let full = names.join(".");
+                    if let Some(arg_list) = self.child_of_kind(id, "argument_list") {
+                        let idx = self.push_call(full, line);
+                        let args = self.arguments(arg_list);
+                        self.lexer_event(b'x', line, &[], &format!("[\"c\",{idx},0,{args}]"), false);
+                    } else {
+                        let mut val = String::from("[\"n\",");
+                        push_string(&mut val, &full);
+                        val.push(']');
+                        self.lexer_event(b'x', line, &[], &val, false);
+                    }
+                }
+            }
+            "package_declaration" if self.facts.tag == "GROOVY" => {
+                let line = self.line(id);
+                if let Some(dn) = self.child_of_kind(id, "dotted_name") {
+                    let path = self.text_string(dn);
+                    let mut val = String::from("[\"m\",[[\"n\",\"package\"],[\"n\",");
+                    push_string(&mut val, &path);
+                    val.push_str("]]]");
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            "pragma_directive" if self.facts.tag == "SOL" => {
+                let raw = self.text_string(id);
+                if raw.contains('=') {
+                    let line = self.line(id);
+                    self.lexer_event(b'a', line, &["solidity".to_string()], "0", false);
+                } else {
+                    self.decl_statement(id);
+                }
+            }
+            "alias_declaration" if self.facts.tag == "CR" => {
+                let children = self.children(id);
+                if let Some(eq) = children.iter().position(|&c| self.kind(c) == "=") {
+                    if let Some(name) = children[..eq].iter().rev().find_map(|&c| self.leaf_name(c)) {
+                        let rhs = children[eq + 1..].iter().copied().find(|&c| !self.is_layout(c));
+                        let val = rhs.map(|c| {
+                            let f = self.form(c);
+                            if !f.is_empty() && f != "0" {
+                                f
+                            } else {
+                                let t = self.text_string(c).trim().replace("::", ".");
+                                if t.is_empty() {
+                                    "0".to_string()
+                                } else {
+                                    let mut o = String::from("[\"n\",");
+                                    push_string(&mut o, &t);
+                                    o.push(']');
+                                    o
+                                }
+                            }
+                        }).unwrap_or_else(|| "0".to_string());
+                        let val = if self.text_string(id).trim().ends_with('*') && val != "0" {
+                            let mut m = String::from("[\"m\",["); m.push_str(&val); m.push_str(",[\"n\",\"end\"]]]"); m
+                        } else {
+                            val
+                        };
+                        self.lexer_event(b'a', self.line(id), &[name], &val, false);
+                    }
+                }
