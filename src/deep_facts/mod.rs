@@ -30078,3 +30078,323 @@ impl<'a> Walker<'a> {
                             if !module.is_empty() {
                                 let before = code[..req_pos].trim_end();
                                 let alias = if let Some(lhs) = before.strip_suffix('=') {
+                                    let lhs = lhs.trim();
+                                    let lhs = lhs.strip_prefix("local ").map(|x| x.trim()).unwrap_or(lhs);
+                                    if lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                        lhs.to_string()
+                                    } else {
+                                        String::new()
+                                    }
+                                } else {
+                                    String::new()
+                                };
+                                if !existing_imports.contains(&(module.clone(), alias.clone())) {
+                                    existing_imports.insert((module.clone(), alias.clone()));
+                                    self.facts.imports.push(Import {
+                                        line: ln32,
+                                        module,
+                                        name: String::new(),
+                                        alias,
+                                        kind: IMPORT_MODULE,
+                                        ..Import::default()
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Scan calls and identifiers on the line (inside long strings, do NOT skip quotes!)
+            let cb = code.as_bytes();
+            let mut toks: Vec<String> = Vec::new();
+            let mut lcalls: Vec<(String, usize)> = Vec::new();
+            let mut i = 0;
+            while i < cb.len() {
+                if !started_in_long && (cb[i] == b'"' || cb[i] == b'\'') {
+                    let q = cb[i];
+                    i += 1;
+                    while i < cb.len() && cb[i] != q {
+                        if cb[i] == b'\\' && i + 1 < cb.len() {
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    if i < cb.len() {
+                        i += 1;
+                    }
+                    toks.push("0".to_string());
+                    continue;
+                }
+                if is_ident_start(cb[i]) {
+                    let start = i;
+                    while i < cb.len() && is_ident_cont(cb[i]) {
+                        i += 1;
+                    }
+                    let mut full_end = i;
+                    let mut j = i;
+                    while j + 1 < cb.len() && (cb[j] == b'.' || cb[j] == b':') && is_ident_start(cb[j + 1]) {
+                        j += 1;
+                        while j < cb.len() && is_ident_cont(cb[j]) {
+                            j += 1;
+                        }
+                        full_end = j;
+                    }
+                    let full_str = &code[start..full_end];
+                    let norm_path = full_str.replace(':', ".");
+                    let mut k = full_end;
+                    while k < cb.len() && (cb[k] == b' ' || cb[k] == b'\t') {
+                        k += 1;
+                    }
+                    // Also handle indexed calls like `conf_constants.TYP_CHECKS[typ](value)`
+                    let mut indexed_call = false;
+                    if !started_in_long && k < cb.len() && cb[k] == b'[' {
+                        let mut m = k + 1;
+                        let mut bd = 1i32;
+                        while m < cb.len() && bd > 0 {
+                            if cb[m] == b'[' { bd += 1; }
+                            else if cb[m] == b']' { bd -= 1; }
+                            m += 1;
+                        }
+                        while m < cb.len() && (cb[m] == b' ' || cb[m] == b'\t') { m += 1; }
+                        if m < cb.len() && cb[m] == b'(' {
+                            indexed_call = true;
+                        }
+                    }
+                    let is_func_decl_name = !started_in_long && start >= 9 && code[..start].trim_end().ends_with("function");
+                    let next_line_starts_paren = started_in_long
+                        && k >= cb.len()
+                        && idx + 1 < lines.len()
+                        && lines[idx + 1].trim_start().starts_with('(');
+                    let is_call = !is_func_decl_name
+                        && (indexed_call
+                            || next_line_starts_paren
+                            || (k < cb.len()
+                                && (cb[k] == b'(' || (!started_in_long && (cb[k] == b'{' || cb[k] == b'"' || cb[k] == b'\'')))));
+                    if is_call && !matches!(norm_path.as_str(), "if" | "elseif" | "while" | "until" | "return" | "function" | "local" | "and" | "or" | "not" | "then" | "do" | "end") {
+                        let mut primary_idx = 0usize;
+                        for (ti, &tsi) in targets.iter().enumerate() {
+                            let ci = push_call_to(&mut self.facts.symbols, &mut existing_calls, tsi, norm_path.clone(), ln32);
+                            if ti == 0 {
+                                primary_idx = ci;
+                            }
+                        }
+                        lcalls.push((norm_path.clone(), primary_idx));
+                        let recv = if let Some((h, _)) = norm_path.rsplit_once('.') {
+                            let mut r = "[\"n\",".to_string();
+                            push_string(&mut r, h);
+                            r.push(']');
+                            r
+                        } else {
+                            "0".to_string()
+                        };
+                        let empty_args = k < cb.len() && cb[k] == b'(' && k + 1 < cb.len() && cb[k + 1] == b')';
+                        let args_str = if empty_args { "[]" } else { "[0]" };
+                        // Use index 0 so the call form is valid in EVERY target symbol
+                        toks.push(format!(r#"["c",0,{recv},{args_str}]"#));
+                        // If this is a leading `.method(` or `:method(` on a continuation line, also emit call with previous line's trailing path as receiver
+                        if start >= 1 && (cb[start - 1] == b'.' || cb[start - 1] == b':') && code[..start - 1].trim().is_empty() && ln > 1 {
+                            let prev = per_line_code[ln - 1].trim_end();
+                            let pb = prev.as_bytes();
+                            let mut pe = pb.len();
+                            while pe > 0 && (pb[pe - 1].is_ascii_alphanumeric() || pb[pe - 1] == b'_' || pb[pe - 1] == b'.') {
+                                pe -= 1;
+                            }
+                            let prev_recv = prev[pe..].trim_matches('.');
+                            if !prev_recv.is_empty() {
+                                let mut pr = r#"["n","#.to_string();
+                                push_string(&mut pr, prev_recv);
+                                pr.push(']');
+                                toks.push(format!(r#"["c",0,{pr},{args_str}]"#));
+                            }
+                        }
+                    }
+                    let mut n_out = "[\"n\",".to_string();
+                    push_string(&mut n_out, &norm_path);
+                    n_out.push(']');
+                    toks.push(n_out);
+                    // One-pass lexer normalizes `this` -> `self` (critical for prose inside [=[ ... ]=])
+                    if norm_path == "this" {
+                        toks.push("[\"n\",\"self\"]".to_string());
+                    } else if let Some(rest) = norm_path.strip_prefix("this.") {
+                        let mut s_out = "[\"n\",".to_string();
+                        push_string(&mut s_out, &format!("self.{rest}"));
+                        s_out.push(']');
+                        toks.push(s_out);
+                    }
+                    if norm_path.contains('.') {
+                        for seg in norm_path.split('.') {
+                            if !seg.is_empty() {
+                                let mut s_out = "[\"n\",".to_string();
+                                push_string(&mut s_out, seg);
+                                s_out.push(']');
+                                toks.push(s_out);
+                                if seg == "this" {
+                                    toks.push("[\"n\",\"self\"]".to_string());
+                                }
+                            }
+                        }
+                    }
+                    if started_in_long && full_end < cb.len() && cb[full_end] == b'.' {
+                        let mut m = full_end + 1;
+                        while m < cb.len() && (cb[m] == b' ' || cb[m] == b'\t') {
+                            m += 1;
+                        }
+                        if m < cb.len() && is_ident_start(cb[m]) {
+                            let ns = m;
+                            while m < cb.len() && is_ident_cont(cb[m]) {
+                                m += 1;
+                            }
+                            let joined = format!("{}.{}", norm_path, &code[ns..m]);
+                            let mut j_out = "[\"n\",".to_string();
+                            push_string(&mut j_out, &joined);
+                            j_out.push(']');
+                            toks.push(j_out);
+                        } else if m >= cb.len() && idx + 1 < lines.len() {
+                            let nxt = lines[idx + 1].trim_start();
+                            let nb = nxt.as_bytes();
+                            if !nb.is_empty() && is_ident_start(nb[0]) {
+                                let mut nm = 0;
+                                while nm < nb.len() && is_ident_cont(nb[nm]) {
+                                    nm += 1;
+                                }
+                                let joined = format!("{}.{}", norm_path, &nxt[..nm]);
+                                let mut j_out = "[\"n\",".to_string();
+                                push_string(&mut j_out, &joined);
+                                j_out.push(']');
+                                toks.push(j_out);
+                            }
+                        }
+                    }
+                    i = full_end;
+                    continue;
+                }
+                if cb[i].is_ascii_digit() {
+                    while i < cb.len() && (cb[i].is_ascii_alphanumeric() || cb[i] == b'.') {
+                        i += 1;
+                    }
+                    toks.push("0".to_string());
+                    continue;
+                }
+                i += 1;
+            }
+            // Also emit keyword-arg form `["k","key",0]` for `key = ...` (needed when lexer thinks a prior long string left `(` open)
+            if !started_in_long {
+                if let Some(eq_p) = code.find('=') {
+                    let prev_b = if eq_p > 0 { cb[eq_p - 1] } else { 0 };
+                    let next_b = if eq_p + 1 < cb.len() { cb[eq_p + 1] } else { 0 };
+                    if !matches!(prev_b, b'=' | b'~' | b'<' | b'>') && next_b != b'=' {
+                        let kname = code[..eq_p].trim();
+                        if !kname.is_empty() && kname.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                            let mut k_out = r#"["k","#.to_string();
+                            push_string(&mut k_out, kname);
+                            k_out.push_str(",0]");
+                            toks.push(k_out);
+                        }
+                    }
+                }
+            }
+            per_line_tokens[ln] = toks;
+            per_line_calls[ln] = lcalls;
+        }
+
+        // Helper: find first standalone `=` (not `==`, `~=`, `<=`, `>=`) outside quotes
+        let find_assign_eq = |s: &str| -> Option<usize> {
+            let b = s.as_bytes();
+            let mut q: u8 = 0;
+            let mut i = 0;
+            while i < b.len() {
+                let c = b[i];
+                if q != 0 {
+                    if c == b'\\' && i + 1 < b.len() { i += 2; continue; }
+                    if c == q { q = 0; }
+                } else if c == b'"' || c == b'\'' {
+                    q = c;
+                } else if c == b'=' {
+                    let prev = if i > 0 { b[i - 1] } else { 0 };
+                    let next = if i + 1 < b.len() { b[i + 1] } else { 0 };
+                    if !matches!(prev, b'=' | b'~' | b'<' | b'>') && next != b'=' {
+                        return Some(i);
+                    }
+                }
+                i += 1;
+            }
+            None
+        };
+
+        let line_needs_cont = |s: &str| -> bool {
+            s == "if"
+                || s == "elseif"
+                || s == "while"
+                || s == "return"
+                || s.ends_with('=')
+                || s.ends_with(',')
+                || s.ends_with("..")
+                || s.ends_with(" and")
+                || s.ends_with(" or")
+                || s.ends_with("...")
+                || s.ends_with(" in")
+        };
+
+        // Precompute a non-phantom call index per symbol so `["c",safe_idx,...]` is never rewritten/dropped by guard's phantom_call()
+        let is_safe_callee = |path: &str| -> bool {
+            if path.is_empty() || path.starts_with('.') || path.ends_with('.') || path.contains("().") {
+                return false;
+            }
+            !matches!(
+                path,
+                "assert" | "return" | "yield" | "await" | "throw" | "raise" | "del" | "delete"
+                    | "new" | "sizeof" | "defined" | "if" | "elif" | "else" | "for" | "foreach"
+                    | "while" | "until" | "unless" | "switch" | "try" | "except" | "finally"
+                    | "with" | "do" | "match"
+            )
+        };
+        let safe_call_idx: Vec<usize> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| {
+                sym.calls
+                    .iter()
+                    .position(|c| is_safe_callee(&c.path))
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        let push_ev_to_targets = |extra_events: &mut Vec<Vec<String>>, targets: &[usize], ev: &str| {
+            for &tsi in targets {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev.to_string());
+                } else {
+                    extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                }
+            }
+        };
+
+        // Pass 2: emit vars and events (including multi-line continuation & table-literal gathering!)
+        for ln in 1..=n_lines {
+            let code = &per_line_code[ln];
+            if code.is_empty() {
+                continue;
+            }
+            let ln32 = ln as u32;
+            let targets = &line_targets[ln];
+
+            // Gather tokens from this line plus continuation lines (keep up to 2048 `"0"`s and 512 calls without deduplicating calls!)
+            let gather_multiline = |start_ln: usize| -> Vec<String> {
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut out: Vec<String> = vec!["0".to_string()];
+                let mut z_cnt: usize = 1;
+                let mut c_cnt: usize = 0;
+                let mut bdepth = per_line_brace_delta[start_ln];
+                let mut pdepth = per_line_paren_delta[start_ln];
+                let mut prev_needs = line_needs_cont(per_line_code[start_ln].as_str());
+                let has_eq_long = |s: &str| -> bool {
+                    let b = s.as_bytes();
+                    let mut i = 0;
+                    while i + 2 < b.len() {
+                        if b[i] == b'[' && b[i + 1] == b'=' {
+                            let mut j = i + 1;
+                            while j < b.len() && b[j] == b'=' { j += 1; }
