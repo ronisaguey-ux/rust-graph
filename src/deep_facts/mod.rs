@@ -32958,3 +32958,323 @@ impl<'a> Walker<'a> {
                             let start = k;
                             while k < wb.len() && (wb[k].is_ascii_alphanumeric() || wb[k] == b'_' || wb[k] == b':') {
                                 k += 1;
+                            }
+                            if k < wb.len() && wb[k] == b'(' {
+                                let cn = Self::tcl_clean_name(&w[start..k]);
+                                if Self::tcl_is_ident(&cn) {
+                                    let c_id = self.push_call(cn, *wline);
+                                    if !pushed_any {
+                                        first_cid = c_id;
+                                        pushed_any = true;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        k += 1;
+                    }
+                    let cid = if pushed_any { first_cid } else { self.push_call(vname.clone(), *wline) };
+                    let inner = rest.trim_end_matches(')');
+                    let isegs: Vec<String> = inner
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    let arg_form = if isegs.is_empty() {
+                        "0".to_string()
+                    } else if isegs.len() == 1 {
+                        let mut an = String::from("[\"n\",");
+                        push_string(&mut an, &isegs[0]);
+                        an.push(']');
+                        an
+                    } else {
+                        let parts: Vec<String> = isegs
+                            .iter()
+                            .map(|s| {
+                                let mut an = String::from("[\"n\",");
+                                push_string(&mut an, s);
+                                an.push(']');
+                                an
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    let form = format!("[\"c\",{cid},0,[{arg_form}]]");
+                    word_forms.push((*wline, None, form, true));
+                } else {
+                    let full_vname = if w.starts_with('$') && w.contains('.') {
+                        let stripped = w.trim_start_matches('$');
+                        let cleaned = Self::tcl_clean_name(stripped);
+                        if !cleaned.is_empty() && cleaned.split('.').all(|seg| Self::tcl_is_ident(seg)) {
+                            cleaned
+                        } else {
+                            vname
+                        }
+                    } else {
+                        vname
+                    };
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &full_vname);
+                    n.push(']');
+                    word_forms.push((*wline, Some(full_vname), n, true));
+                }
+            } else if w.starts_with("::") {
+                let clean = Self::tcl_clean_name(w);
+                if Self::tcl_is_ident(&clean) {
+                    // Join leading ::name to previous identifier with '.' as reference lexer does
+                    if let Some(prev) = word_forms.last_mut() {
+                        if let Some(ref mut prev_id) = prev.1 {
+                            prev_id.push('.');
+                            prev_id.push_str(&clean);
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, prev_id);
+                            n.push(']');
+                            prev.2 = n;
+                            continue;
+                        }
+                    }
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, &clean);
+                    n.push(']');
+                    word_forms.push((*wline, Some(clean), n, true));
+                } else {
+                    word_forms.push((*wline, None, "0".to_string(), false));
+                }
+            } else {
+                // Handle array elements & parenthesized expr calls like env(FOO),
+                // int(rand()*62), ($end-$begin)/double($nosteps), Tcl_GetAssocData(...)
+                if w.contains('(') {
+                    let wb = w.as_bytes();
+                    let mut k = 0usize;
+                    let mut first_call: Option<(String, String)> = None;
+                    let mut call_forms: Vec<String> = Vec::new();
+                    while k < wb.len() {
+                        if wb[k].is_ascii_alphabetic() || wb[k] == b'_' || wb[k] == b':' {
+                            let start = k;
+                            while k < wb.len() && (wb[k].is_ascii_alphanumeric() || wb[k] == b'_' || wb[k] == b':') {
+                                k += 1;
+                            }
+                            if k < wb.len() && wb[k] == b'(' {
+                                let raw_name = &w[start..k];
+                                let clean = Self::tcl_clean_name(raw_name);
+                                if Self::tcl_is_ident(&clean) {
+                                    let cid = self.push_call(clean.clone(), *wline);
+                                    // Find matching close paren for arg preview
+                                    let mut d = 1usize;
+                                    let mut end = k + 1;
+                                    while end < wb.len() && d > 0 {
+                                        if wb[end] == b'(' { d += 1; } else if wb[end] == b')' { d -= 1; }
+                                        end += 1;
+                                    }
+                                    let inner = if end > k + 1 && d == 0 { &w[k + 1..end - 1] } else { "" };
+                                    let arg_form = if let Some(vn) = Self::tcl_var_name(inner) {
+                                        let mut an = String::from("[\"n\",");
+                                        push_string(&mut an, &vn);
+                                        an.push(']');
+                                        an
+                                    } else {
+                                        let ic = Self::tcl_clean_name(inner);
+                                        if Self::tcl_is_ident(&ic) {
+                                            let mut an = String::from("[\"n\",");
+                                            push_string(&mut an, &ic);
+                                            an.push(']');
+                                            an
+                                        } else {
+                                            "0".to_string()
+                                        }
+                                    };
+                                    let f = format!("[\"c\",{cid},0,[{arg_form}]]");
+                                    if first_call.is_none() {
+                                        first_call = Some((clean, f.clone()));
+                                    }
+                                    call_forms.push(f);
+                                }
+                            }
+                            continue;
+                        }
+                        k += 1;
+                    }
+                    if let Some((_clean, _)) = first_call {
+                        let form = if call_forms.len() == 1 {
+                            call_forms.remove(0)
+                        } else {
+                            format!("[\"m\",[{}]]", call_forms.join(","))
+                        };
+                        word_forms.push((*wline, None, form, true));
+                    } else {
+                        let tail_id = w.rsplit(')').next().and_then(|t| {
+                            let s = t.rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':').next().unwrap_or("");
+                            let c = Self::tcl_clean_name(s);
+                            if Self::tcl_is_ident(&c) { Some(c) } else { None }
+                        });
+                        word_forms.push((*wline, tail_id, "0".to_string(), w.starts_with('(')));
+                    }
+                } else {
+                    // Handle -flag, hyphenated words (amazon-s3), and slash/dot paths (tcl/httpd)
+                    let is_flag = w.starts_with('-') && w.len() > 1 && w.as_bytes()[1].is_ascii_alphabetic();
+                    let raw_tail = w.rsplit('-').next().unwrap_or(w);
+                    let clean = Self::tcl_clean_name(raw_tail);
+                    // Extract all identifier segments so hyphen/slash words never lose names
+                    let segs: Vec<String> = w
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    let seg_form = if segs.is_empty() {
+                        "0".to_string()
+                    } else if segs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, &segs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = segs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    const TCL_NOISE: &[&str] = &[
+                        "await", "yield", "new", "not", "typeof", "delete", "void", "throw", "raise", "async",
+                        "lambda", "in", "is", "and", "or", "if", "else", "for", "of", "as", "then", "do",
+                        "instanceof", "sizeof", "return", "my", "local", "let", "var", "const", "final",
+                        "mut", "ref", "unsafe", "defer", "go", "our", "pub",
+                    ];
+                    let tail_ident = if Self::tcl_is_ident(&clean) {
+                        Some(clean.clone())
+                    } else if w.as_bytes().last().is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                        segs.last().cloned()
+                    } else {
+                        None
+                    };
+                    if !is_flag && tail_ident.as_deref().is_some_and(|t| TCL_NOISE.contains(&t)) {
+                        // Reference lexer skips NOISE words and does not trigger juxtaposed calls on preceding words
+                        word_forms.push((*wline, None, "0".to_string(), false));
+                    } else if let Some(ident) = tail_ident {
+                        let ident = if ident == "this" { "self".to_string() } else { ident };
+                        // A -flag or %d / \n starts with an operator byte so it does NOT trigger a call on the preceding word,
+                        // but its trailing ident CAN open a juxtaposed call on the following word.
+                        let is_val = !is_flag && w.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+                        word_forms.push((*wline, Some(ident), seg_form, is_val));
+                    } else {
+                        let is_val = !is_flag
+                            && (w.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+                                || (w.starts_with('@') && !segs.is_empty()));
+                        word_forms.push((*wline, None, seg_form, is_val));
+                    }
+                }
+            }
+        }
+        // Emit x-events for continuation-line words (wline != cmd_line)
+        let mut cont_line: u32 = 0;
+        let mut cont_parts: Vec<String> = Vec::new();
+        for &(wline, _, ref form_str, _) in &word_forms {
+            if wline != cmd_line && form_str != "0" && !form_str.is_empty() {
+                if cont_line != 0 && wline != cont_line && !cont_parts.is_empty() {
+                    let v = if cont_parts.len() == 1 {
+                        cont_parts.remove(0)
+                    } else {
+                        format!("[\"m\",[{}]]", cont_parts.join(","))
+                    };
+                    self.lexer_event(b'x', cont_line, &[], &v, false);
+                    cont_parts.clear();
+                }
+                cont_line = wline;
+                cont_parts.push(form_str.clone());
+            }
+        }
+        if cont_line != 0 && !cont_parts.is_empty() {
+            let v = if cont_parts.len() == 1 {
+                cont_parts.remove(0)
+            } else {
+                format!("[\"m\",[{}]]", cont_parts.join(","))
+            };
+            self.lexer_event(b'x', cont_line, &[], &v, false);
+        }
+        // Right-nest command calls on the same line ONLY when followed by a value token (not { or [)
+        let mut acc = String::new();
+        for idx in (0..word_forms.len()).rev() {
+            let (wline, ref ident_opt, ref form_str, _) = word_forms[idx];
+            let next_is_val = idx + 1 < word_forms.len() && word_forms[idx + 1].3 && word_forms[idx + 1].0 == wline;
+            if acc.is_empty() {
+                acc = form_str.clone();
+            } else if let Some(cname) = ident_opt {
+                if next_is_val {
+                    let cid = self.push_call(cname.clone(), wline);
+                    if idx > 0 && form_str != "0" {
+                        acc = format!("[\"m\",[{form_str},[\"c\",{cid},0,[{acc}]]]]");
+                    } else {
+                        acc = format!("[\"c\",{cid},0,[{acc}]]");
+                    }
+                } else {
+                    let next_is_bracket = idx + 1 < word_forms.len()
+                        && word_forms[idx + 1].0 == wline
+                        && word_forms[idx + 1].2.starts_with("[\"t\",");
+                    if next_is_bracket {
+                        let _ = self.push_call(cname.clone(), wline);
+                    }
+                    acc = format!("[\"m\",[{form_str},{acc}]]");
+                }
+            } else {
+                acc = format!("[\"m\",[{form_str},{acc}]]");
+            }
+        }
+        acc
+    }
+
+    fn tcl_scan_script(&mut self, text: &str, start_line: u32, depth: usize) {
+        if depth > 24 {
+            return;
+        }
+        let cmds = Self::tcl_tokenize_commands(text, start_line);
+        for (cline, words) in cmds {
+            let ret_pos = words.iter().position(|w| w.1 == "return");
+            if let Some(rp) = ret_pos {
+                if rp == 0 {
+                    let val = if words.len() > 1 {
+                        self.tcl_eval_words(&words[1..], cline, depth)
+                    } else {
+                        "0".to_string()
+                    };
+                    let rv = if val.is_empty() { "0".to_string() } else { val };
+                    self.lexer_event(b'r', cline, &[], &rv, false);
+                } else {
+                    let val = self.tcl_eval_words(&words, cline, depth);
+                    if !val.is_empty() && val != "0" {
+                        self.lexer_event(b'x', cline, &[], &val, false);
+                    }
+                    let rline = words[rp].0;
+                    let rval = if rp + 1 < words.len() {
+                        self.tcl_eval_words(&words[rp + 1..], rline, depth)
+                    } else {
+                        "0".to_string()
+                    };
+                    let rv = if rval.is_empty() { "0".to_string() } else { rval };
+                    self.lexer_event(b'r', rline, &[], &rv, false);
+                }
+            } else {
+                let val = self.tcl_eval_words(&words, cline, depth);
+                if !val.is_empty() && val != "0" {
+                    self.lexer_event(b'x', cline, &[], &val, false);
+                }
+                if words.iter().any(|w| w.1.starts_with('{') && w.1.ends_with('}')) {
+                    let mut seg_start = 0usize;
+                    for wi in 0..=words.len() {
+                        if wi == words.len() || (words[wi].1.starts_with('{') && words[wi].1.ends_with('}')) {
+                            if wi > seg_start {
+                                let sl = words[seg_start].0;
+                                let sv = self.tcl_eval_words(&words[seg_start..wi], sl, depth + 1);
+                                if !sv.is_empty() && sv != "0" {
+                                    self.lexer_event(b'x', sl, &[], &sv, false);
+                                }
+                            }
+                            seg_start = wi + 1;
+                        }
+                    }
+                }
+                for (wi, (wl, w)) in words.iter().enumerate() {
