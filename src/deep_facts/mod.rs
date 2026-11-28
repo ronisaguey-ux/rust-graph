@@ -31358,3 +31358,323 @@ impl<'a> Walker<'a> {
                     let line = self.line(id);
                     // `[Obsolete] int F()` is written on the member's header,
                     // but the attribute is the class's statement, not the
+                    // member's: the one-pass reader files it while the class is
+                    // open, so the call belongs to the enclosing symbol. Pushed
+                    // onto the member, it took the first index and every call
+                    // the method itself writes shifted by one, which changed a
+                    // method's events when its attributes changed.
+                    let current = self.frame().symbol;
+                    // The attribute decorates the declaration whose frame is
+                    // already open, and the one-pass reader files it while the
+                    // enclosing scope is open - so its call belongs one level up.
+                    // Pushed onto the member it took the first index and every
+                    // call the member itself writes shifted by the attribute's
+                    // count.
+                    let decorated = self.stack.last().is_some_and(|frame| {
+                        matches!(
+                            self.kind(frame.node),
+                            "method_declaration"
+                                | "constructor_declaration"
+                                | "destructor_declaration"
+                                | "property_declaration"
+                                | "field_declaration"
+                                | "event_declaration"
+                                | "indexer_declaration"
+                                | "delegate_declaration"
+                                | "operator_declaration"
+                                | "conversion_operator_declaration"
+                                | "class_declaration"
+                                | "struct_declaration"
+                                | "interface_declaration"
+                                | "enum_declaration"
+                                | "record_declaration"
+                        )
+                    });
+                    let target = if decorated && self.stack.len() > 1 {
+                        self.stack[self.stack.len() - 2].symbol
+                    } else {
+                        current
+                    };
+                    self.facts.symbols[target].calls.push(Call { path: name, line });
+                }
+            }
+            // `@file:JvmName("Test")` heads a file and states no value: the
+            // one-pass reader reads a statement of annotations as layout
+            // (`kotlin_annotation_alone` accepts `(`, `)`, `,` and strings but
+            // no `=` and no nested call), so filing the call `JvmName` invents
+            // one the lexer never has and the `kotlin_file_calls_agree` gate
+            // fails. The walk visits the nested `annotation_item` on its own,
+            // so it is consumed here and the arm below skips it.
+            // Only the bare literal form: `@file:WasmCoroutineMode(isStack
+            // SwitchingMode = true)` and `@file:DependsOn("…", options =
+            // arrayOf(…))` carry an `=` or a nested call, fall through the
+            // matcher, and the lexer DOES file a call for them — silencing
+            // those cost four corpus files (kotlin 480 -> 484).
+            "file_annotation" if self.kinds.family == Family::Plain => {
+                let text = self.text(id);
+                let nested_call = {
+                    let mut pending = self.children(id);
+                    let mut found = false;
+                    while let Some(child) = pending.pop() {
+                        if self.kind(child) == "call_expression" {
+                            found = true;
+                            break;
+                        }
+                        pending.extend(self.children(child));
+                    }
+                    found
+                };
+                if !nested_call && !text.contains(&b'=') {
+                    let items: Vec<u32> = self
+                        .children(id)
+                        .into_iter()
+                        .filter(|&child| matches!(self.kind(child), "annotation_item" | "annotation"))
+                        .collect();
+                    self.consumed.extend(items);
+                }
+            }
+            "annotation" | "annotation_item" if self.kinds.family == Family::Plain => {
+                if self.consumed.contains(&id) {
+                    return;
+                }
+                // `@kotlin.jvm.JvmName("x")`: a qualified annotation is a run of
+                // identifier children, and the first one alone is `kotlin`. The
+                // lexer records the whole path as the call, so every qualified
+                // annotation in the corpus lost its call (`call
+                // kotlin.jvm.JvmName`, 18 rows of the kotlin dump).
+                let mut parts: Vec<String> = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) {
+                        continue;
+                    }
+                    match self.kind(child) {
+                        "identifier" | "simple_identifier" => parts.push(self.text_string(child)),
+                        // `@get:Option(…)`, `@file:JvmName(…)`: the use-site
+                        // target is a keyword leaf in front of the name, not
+                        // part of it. Breaking on it wrote no call at all, so
+                        // every `@get:`-targeted annotation lost the call the
+                        // lexer files (20 files of the kotlin corpus).
+                        "get" | "set" | "field" | "param" | "property" | "receiver" | "file" | "delegate" if parts.is_empty() => {}
+                        "annotation_arguments" => break,
+                        // `@kotlin.internal.RequireKotlin(…)`: the segment
+                        // `internal` is also a Kotlin modifier, so it arrives
+                        // as a keyword leaf of its own instead of an
+                        // identifier. Breaking there wrote the call `kotlin`
+                        // and lost the path the lexer files.
+                        _ if self.children(child).is_empty() => parts.push(self.text_string(child)),
+                        _ => break,
+                    }
+                }
+                if !parts.is_empty() {
+                    let name = parts.join(".");
+                    // The event names the call the way the lexer writes any
+                    // dotted call: the receiver in the path slot and the last
+                    // segment as the callee — `@kotlin.jvm.JvmName("y")` is
+                    // `c(n:kotlin.jvm;[0])`, not a call with an empty receiver.
+                    let receiver = if parts.len() > 1 {
+                        let mut text = "[\"n\",".to_string();
+                        push_string(&mut text, &parts[..parts.len() - 1].join("."));
+                        text.push(']');
+                        text
+                    } else {
+                        "0".to_string()
+                    };
+                    let line = self.line(id);
+                    let index = self.push_call(name.clone(), line);
+                    // The lexer files the annotation's own arguments as an
+                    // event holding the call's form, as it does for any other
+                    // call written as a statement.
+                    if let Some(list) = self.children(id).into_iter().find(|&child| self.kind(child) == "annotation_arguments") {
+                        let args = self.arguments(list);
+                        self.event(&format!("[\"x\",{line},[\"c\",{index},{receiver},{args}]]"));
+                    } else if self.language.name == "scala" {
+                        // `@tailrec`, `@InternalApi`, `@inline`: a bare Scala
+                        // annotation states just its name. The lexer files an
+                        // `x` event for it, and writing only the call above
+                        // left every such line with no value the guard could
+                        // pair (`n:tailrec` against no event).
+                        let mut value = "[\"n\",".to_string();
+                        push_string(&mut value, &name);
+                        value.push(']');
+                        self.event(&format!("[\"x\",{line},{value}]"));
+                    }
+                }
+            }
+            // `public string Key { get; set; }`: the lexer reads each accessor
+            // as an expression statement and names it `get` / `set`. Nothing
+            // read `accessor_declaration`, so a property lost one event per
+            // accessor — the largest single C# cluster left.
+            // `get;` / `set;`: the notifier token is the value — a keyword leaf
+            // carries no expression child, so the arm writes the name itself.
+            "accessor_declaration" => {
+                if self.language.name == "csharp" && self.cs_arrow_body(id, self.line(id)) {
+                    return;
+                }
+                let name = self
+                    .children(id)
+                    .into_iter()
+                    .map(|child| self.kind(child).to_string())
+                    .find(|kind| matches!(kind.as_str(), "get" | "set" | "init" | "add" | "remove"))
+                    .or_else(|| {
+                        self.children(id)
+                            .first()
+                            .map(|&child| self.kind(child).to_string())
+                    })
+                    .unwrap_or_default();
+                if !name.is_empty() {
+                    let line = self.line(id);
+                    // `get; private set;`: the accessor's own modifier words
+                    // are the first elements of the value, the keyword last.
+                    let mut parts: Vec<String> = Vec::new();
+                    for child in self.children(id) {
+                        if self.kind(child) == name {
+                            break;
+                        }
+                        for word in self.c_words_of(child) {
+                            let mut form = String::from("[\"n\",");
+                            push_string(&mut form, &word);
+                            form.push(']');
+                            parts.push(form);
+                        }
+                    }
+                    let mut keyword = String::from("[\"n\",");
+                    push_string(&mut keyword, &name);
+                    keyword.push(']');
+                    parts.push(keyword);
+                    let value = if parts.len() == 1 {
+                        parts.pop().unwrap()
+                    } else {
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', line, &[], &value, false);
+                }
+                // `get => GetItem(index);`: an expression-bodied accessor's
+                // body is an expression statement to the lexer, and its calls
+                // were never read (C# corpus: 20 files).
+                if self.facts.tag == "CS" {
+                    if let Some(body) = self.cs_expression_body(id) {
+                        self.form(body);
+                    }
+                }
+            }
+            // `public string Key { get; set; }`: the header is a statement to
+            // the lexer, and the accessors are its own statements.
+            "property_declaration" => self.java_header_event(id),
+            // `enum E { A = 1, B }`: every member is an assignment statement to
+            // the lexer, and the tree wrote nothing for it, so an enum's own
+            // lines were the first loss on most enum-bearing files.
+            // `enum E { Binary = 0x00, Number = 1, … }`: the lexer unpacks the
+            // member list exactly as it unpacks a declarator list - one
+            // assignment to the first member whose value is a tuple of the
+            // rest (`t:[0,n:Number,m:[n:Text,0]]`) - so one assignment per
+            // member disagreed on every enum in the corpus.
+            "enum_body" => {
+                let members: Vec<u32> = self
+                    .children(id)
+                    .into_iter()
+                    .filter(|&child| self.kind(child) == "enum_member")
+                    .collect();
+                self.consumed.extend(members.iter().copied());
+                if let Some((first, rest)) = members.split_first() {
+                    let line = self.line(*first);
+                    let name = self.first_identifier(*first);
+                    if let Some(name) = name {
+                        let first_value = self.enum_member_value(*first);
+                        let parts: Vec<String> = if rest.is_empty() {
+                            vec![first_value]
+                        } else {
+                            let mut parts = vec![first_value];
+                            for member in rest {
+                                let attr_forms: Vec<String> = if self.language.name == "csharp" {
+                                    let mut forms = Vec::new();
+                                    let mut attributed = false;
+                                    self.csharp_attributes(*member, &mut attributed, &mut forms);
+                                    forms
+                                } else {
+                                    Vec::new()
+                                };
+                                let member_name = if self.language.name == "csharp" {
+                                    self.children(*member)
+                                        .into_iter()
+                                        .find(|&c| self.kind(c) == "identifier")
+                                        .map(|c| self.text_string(c))
+                                        .or_else(|| self.first_identifier(*member))
+                                } else {
+                                    self.first_identifier(*member)
+                                };
+                                match (member_name, self.enum_member_value(*member)) {
+                                    (Some(member_name), value) if value == "0" => {
+                                        let mut form = String::from("[\"n\",");
+                                        push_string(&mut form, &member_name);
+                                        form.push(']');
+                                        if attr_forms.is_empty() {
+                                            parts.push(form);
+                                        } else {
+                                            let mut items = attr_forms;
+                                            items.push(form);
+                                            parts.push(format!("[\"m\",[{}]]", items.join(",")));
+                                        }
+                                    }
+                                    (Some(member_name), value) => {
+                                        let mut key = String::from("[\"n\",");
+                                        push_string(&mut key, &member_name);
+                                        key.push(']');
+                                        let mut items = attr_forms;
+                                        items.push(key);
+                                        items.push(value);
+                                        parts.push(format!("[\"m\",[{}]]", items.join(",")));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            parts
+                        };
+                        let value = if parts.len() == 1 {
+                            parts[0].clone()
+                        } else {
+                            format!("[\"t\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'a', line, &[name], &value, false);
+                    }
+                }
+            }
+            "enum_member" => {
+                if self.consumed.contains(&id) {
+                    return;
+                }
+                let line = self.line(id);
+                let name = self.first_identifier(id);
+                if let Some(name) = name {
+                    let value = self
+                        .children(id)
+                        .into_iter()
+                        .filter(|&child| child != id)
+                        .rev()
+                        .find(|&child| {
+                            !matches!(self.kind(child), "identifier" | "=" | ",")
+                                && !self.is_layout(child)
+                        })
+                        .map(|child| self.decl_value(child))
+                        .unwrap_or_else(|| "0".to_string());
+                    let value = if value.is_empty() { "0".to_string() } else { value };
+                    let targets = vec![name];
+                    self.lexer_event(b'a', line, &targets, &value, false);
+                }
+            }
+            // `return (byte[])_obj.GetValue(value, n);`, `(DataTable)conv.
+            // ReadJson(...)`: the call sits inside a cast, and nothing
+            // descended into that node - every cast-and-call in the C# corpus
+            // lost its call.
+            "cast_expression" => {
+                let mut calls = Vec::new();
+                for child in self.children(id) {
+                    self.c_calls_in_pub(child, &mut calls);
+                }
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            // `Assert.Throws(null, () => G(1))` and `Export(def, () => part.Get())`:
+            // a lambda passed as an argument is the whole content of that
+            // argument, and the expression reader gives a lambda no form, so
+            // every call written inside one stayed in the tree and out of the
