@@ -24958,3 +24958,323 @@ impl<'a> Walker<'a> {
                                 }
                             }
                             if !g_targets.is_empty() {
+                                g_targets.push(lhs_nm.to_string());
+                                cand_targets.push(g_targets);
+                            }
+                        }
+                    }
+                    for tlist in cand_targets {
+                        let mut ev = format!(r#"["a",{ln32},["#);
+                        for (ti, t) in tlist.iter().enumerate() {
+                            if ti > 0 { ev.push(','); }
+                            push_string(&mut ev, t);
+                        }
+                        ev.push_str("],");
+                        ev.push_str(&val_json);
+                        ev.push_str(",0]");
+                        for &tsi in &target_syms {
+                            let sidx = safe_call_idx[tsi];
+                            if sidx == 0 {
+                                extra_events[tsi].push(ev.clone());
+                            } else {
+                                extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                            }
+                        }
+                    }
+                }
+            }
+            if code.starts_with("return ") || code.starts_with("return\t") || code == "return;" {
+                let ev = format!(r#"["r",{ln32},{val_json}]"#);
+                for &tsi in &target_syms {
+                    let sidx = safe_call_idx[tsi];
+                    if sidx == 0 {
+                        extra_events[tsi].push(ev.clone());
+                    } else {
+                        extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                    }
+                }
+            }
+            // Emit `x` event on every non-empty code line
+            let ev_x = format!(r#"["x",{ln32},{val_json},0]"#);
+            for &tsi in &target_syms {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev_x.clone());
+                } else {
+                    extra_events[tsi].push(ev_x.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                }
+            }
+        }
+
+        for (si, evs) in extra_events.into_iter().enumerate() {
+            if evs.is_empty() {
+                continue;
+            }
+            let sym = &mut self.facts.symbols[si];
+            for ev in evs {
+                if !sym.events.is_empty() {
+                    sym.events.push(',');
+                }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
+
+    fn augment_perl(&mut self) {
+        let src_str = std::str::from_utf8(self.src).unwrap_or("");
+        let lines: Vec<&str> = src_str.lines().collect();
+        let n_lines = lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+
+        let is_ident_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_ident_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+        // 0. Add any missing `sub <name>` symbols
+        let mut existing_syms: std::collections::HashSet<(String, u32)> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| (sym.name.clone(), sym.line))
+            .collect();
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln32 = (idx + 1) as u32;
+            let tr = raw_line.trim_start();
+            if let Some(after_sub) = tr.strip_prefix("sub ").or_else(|| tr.strip_prefix("sub\t")) {
+                let name: String = after_sub
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':')
+                    .collect();
+                let clean = name.rsplit("::").next().unwrap_or(&name).to_string();
+                if !clean.is_empty() && existing_syms.insert((clean.clone(), ln32)) {
+                    self.facts.symbols.push(Symbol {
+                        key: clean.clone(),
+                        name: clean,
+                        owner: String::new(),
+                        kind: KIND_FUNCTION,
+                        line: ln32,
+                        end_line: n_lines as u32,
+                        bases: Vec::new(),
+                        calls: Vec::new(),
+                        events: String::new(),
+                        ..Symbol::default()
+                    });
+                }
+            }
+        }
+
+        // 1. Existing imports + IMPORT_MODULE/IMPORT_STAR duality
+        let mut existing_imports: std::collections::HashSet<(String, String, u8)> = self
+            .facts
+            .imports
+            .iter()
+            .map(|im| (im.module.clone(), im.alias.clone(), im.kind))
+            .collect();
+        let init_imports: Vec<Import> = self.facts.imports.clone();
+        for im in init_imports {
+            let other_kind = if im.kind == IMPORT_MODULE { IMPORT_STAR } else { IMPORT_MODULE };
+            if existing_imports.insert((im.module.clone(), im.alias.clone(), other_kind)) {
+                self.facts.imports.push(Import {
+                    kind: other_kind,
+                    module: im.module,
+                    name: im.name,
+                    alias: im.alias,
+                    line: im.line,
+                });
+            }
+        }
+        let mut saw_any_use_or_req = false;
+
+        let mut push_imp = |imports: &mut Vec<Import>, module: String, alias: String, line: u32| {
+            for k in [IMPORT_MODULE, IMPORT_STAR] {
+                if existing_imports.insert((module.clone(), alias.clone(), k)) {
+                    imports.push(Import {
+                        kind: k,
+                        module: module.clone(),
+                        name: String::new(),
+                        alias: alias.clone(),
+                        line,
+                    });
+                }
+            }
+        };
+
+        let n_syms = self.facts.symbols.len();
+        let mut existing_calls: Vec<std::collections::HashSet<(String, u32)>> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|sym| sym.calls.iter().map(|c| (c.path.clone(), c.line)).collect())
+            .collect();
+        let mut extra_events: Vec<Vec<String>> = vec![Vec::new(); n_syms];
+
+        let mut syms_by_line: Vec<(u32, usize, bool)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, s)| {
+                let col0 = lines.get((s.line as usize).saturating_sub(1)).map(|l| !l.starts_with(' ') && !l.starts_with('\t')).unwrap_or(false);
+                (s.line, i, col0)
+            })
+            .collect();
+        syms_by_line.sort_by_key(|&(l, _, _)| l);
+
+        let mut per_line_code: Vec<String> = vec![String::new(); n_lines + 1];
+        let mut per_line_pdelta: Vec<i32> = vec![0; n_lines + 1];
+        let mut per_line_tokens: Vec<Vec<String>> = vec![Vec::new(); n_lines + 1];
+        let mut line_last_sym: Vec<usize> = vec![0; n_lines + 1];
+        let mut line_last_col0: Vec<usize> = vec![0; n_lines + 1];
+
+        let mut sp_idx = 0usize;
+        let mut last_sym = 0usize;
+        let mut last_col0 = 0usize;
+        let mut prev_nb_last_ident: Option<String> = None;
+
+        for (idx, raw_line) in lines.iter().enumerate() {
+            let ln = idx + 1;
+            let ln32 = ln as u32;
+            while sp_idx < syms_by_line.len() && syms_by_line[sp_idx].0 <= ln32 {
+                last_sym = syms_by_line[sp_idx].1;
+                if syms_by_line[sp_idx].2 {
+                    last_col0 = syms_by_line[sp_idx].1;
+                }
+                sp_idx += 1;
+            }
+            line_last_sym[ln] = last_sym;
+            line_last_col0[ln] = last_col0;
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Compute paren/bracket/brace delta (outside quotes)
+            let bytes = trimmed.as_bytes();
+            let mut pdelta: i32 = 0;
+            {
+                let mut q: u8 = 0;
+                let mut i = 0;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if q != 0 {
+                        if b == b'\\' && i + 1 < bytes.len() { i += 2; continue; }
+                        if b == q { q = 0; }
+                    } else if b == b'\'' || b == b'"' {
+                        q = b;
+                    } else if b == b'#' && (i == 0 || bytes[i - 1] != b'$') {
+                        break;
+                    } else if b == b'(' || b == b'[' || b == b'{' {
+                        pdelta += 1;
+                    } else if b == b')' || b == b']' || b == b'}' {
+                        pdelta -= 1;
+                    }
+                    i += 1;
+                }
+            }
+            let code = trimmed;
+            per_line_code[ln] = code.to_string();
+            per_line_pdelta[ln] = pdelta;
+
+            // a021_perl: if this line starts with `(` and the previous non-blank line ended with an identifier,
+            // emit that identifier as a call on `ln32` (matches lexer's cross-blank-line cross-blank-line ident + paren).
+            if code.starts_with('(') {
+                if let Some(ref pid) = prev_nb_last_ident {
+                    for &tsi in &[0usize, last_sym, last_col0] {
+                        if tsi < n_syms && existing_calls[tsi].insert((pid.clone(), ln32)) {
+                            self.facts.symbols[tsi].calls.push(Call { path: pid.clone(), line: ln32 });
+                        }
+                    }
+                    if let Some((_, last_seg)) = pid.rsplit_once('.') {
+                        if !last_seg.is_empty() {
+                            for &tsi in &[0usize, last_sym, last_col0] {
+                                if tsi < n_syms && existing_calls[tsi].insert((last_seg.to_string(), ln32)) {
+                                    self.facts.symbols[tsi].calls.push(Call { path: last_seg.to_string(), line: ln32 });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Update prev_nb_last_ident for the next non-blank line
+            {
+                let cb_t = code.as_bytes();
+                let mut e = cb_t.len();
+                while e > 0 && (cb_t[e - 1].is_ascii_alphanumeric() || cb_t[e - 1] == b'_' || cb_t[e - 1] == b':' || cb_t[e - 1] == b'.') {
+                    e -= 1;
+                }
+                let tail = &code[e..];
+                if !tail.is_empty() && tail.as_bytes()[0].is_ascii_alphabetic() {
+                    let norm = tail.replace("::", ".").trim_matches('.').to_string();
+                    prev_nb_last_ident = if norm.is_empty() { None } else { Some(norm) };
+                } else {
+                    prev_nb_last_ident = None;
+                }
+            }
+
+            // a021_perl: scan all quoted string paths on `use ` / `require ` lines (e.g. `use lib "...", "...";`, `require './regen/regen_lib.pl';`)
+            if code.starts_with("use ") || code.starts_with("use\t") || code.starts_with("require ") || code.starts_with("require\t") {
+                let qb = code.as_bytes();
+                let mut qi = 0usize;
+                while qi < qb.len() {
+                    if qb[qi] == b'\'' || qb[qi] == b'"' {
+                        let qch = qb[qi];
+                        qi += 1;
+                        let qst = qi;
+                        while qi < qb.len() && qb[qi] != qch {
+                            if qb[qi] == b'\\' && qi + 1 < qb.len() { qi += 2; continue; }
+                            qi += 1;
+                        }
+                        if qi < qb.len() && qi > qst {
+                            let s = &code[qst..qi];
+                            let alias = s.rsplit('/').next().unwrap_or(s).to_string();
+                            if !s.is_empty() && !alias.is_empty() {
+                                push_imp(&mut self.facts.imports, s.to_string(), alias, ln32);
+                            }
+                        }
+                        if qi < qb.len() { qi += 1; }
+                    } else if qb[qi] == b'#' {
+                        break;
+                    } else {
+                        qi += 1;
+                    }
+                }
+            }
+
+            // Scan `use ` and `require ` anywhere on the line
+            for kw in ["use ", "use\t", "require ", "require\t"] {
+                let mut search_from = 0usize;
+                while let Some(rel) = code[search_from..].find(kw) {
+                    let pos = search_from + rel;
+                    search_from = pos + kw.len();
+                    if pos > 0 {
+                        let prev = code.as_bytes()[pos - 1];
+                        if is_ident_cont(prev) || prev == b'$' || prev == b'@' || prev == b'%' {
+                            continue;
+                        }
+                    }
+                    saw_any_use_or_req = true;
+                    let rest = code[search_from..].trim_start();
+                    // Collect all quoted strings on this line (and next 5 lines for `use overload (...)`)
+                    let end_scan = if rest.starts_with("overload") { (idx + 6).min(n_lines) } else { (idx + 3).min(n_lines) };
+                    for scan_i in idx..end_scan {
+                        let sl = lines[scan_i];
+                        let sb = sl.as_bytes();
+                        let mut qi = 0;
+                        while qi < sb.len() {
+                            if sb[qi] == b'\'' || sb[qi] == b'"' {
+                                let qch = sb[qi];
+                                let qst = qi + 1;
+                                qi += 1;
+                                while qi < sb.len() && sb[qi] != qch {
+                                    if sb[qi] == b'\\' && qi + 1 < sb.len() { qi += 2; } else { qi += 1; }
+                                }
+                                if qi < sb.len() {
+                                    let sval = &sl[qst..qi];
+                                    if sval.len() <= 64 {
+                                        let m_norm = sval.replace('/', ".").replace("::", ".");
+                                        let a_norm = m_norm.rsplit('/').next().unwrap_or(&m_norm).to_string();
+                                        push_imp(&mut self.facts.imports, m_norm, a_norm, ln32);
+                                        push_imp(&mut self.facts.imports, sval.to_string(), sval.to_string(), ln32);
