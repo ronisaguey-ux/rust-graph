@@ -20798,3 +20798,323 @@ impl<'a> Walker<'a> {
 
             let cb = code.as_bytes();
             let mut pd_p = 0i32;
+            let mut pd_b = 0i32;
+            let mut pd_c = 0i32;
+            let mut in_dq = false;
+            let mut in_sq = false;
+            let mut unclosed_sq = false;
+            let mut pnw: u8 = 0;
+            let mut bi = 0usize;
+            while bi < cb.len() {
+                if in_dq {
+                    if cb[bi] == b'\\' && bi + 1 < cb.len() { bi += 2; continue; }
+                    if cb[bi] == b'"' { in_dq = false; pnw = b'"'; }
+                    bi += 1;
+                    continue;
+                }
+                if in_sq {
+                    if cb[bi] == b'\'' {
+                        if bi + 1 < cb.len() && cb[bi + 1] == b'\'' { bi += 2; continue; }
+                        in_sq = false;
+                        pnw = b'\'';
+                    }
+                    bi += 1;
+                    continue;
+                }
+                if cb[bi] == b'"' { in_dq = true; bi += 1; continue; }
+                if cb[bi] == b'\'' {
+                    let is_tr = pnw.is_ascii_alphanumeric() || matches!(pnw, b'_' | b')' | b']' | b'}' | b'.' | b'\'');
+                    if !is_tr {
+                        if cb[bi + 1..].contains(&b'\'') { in_sq = true; }
+                        else { unclosed_sq = true; }
+                    }
+                    pnw = b'\'';
+                    bi += 1;
+                    continue;
+                }
+                if cb[bi] != b' ' && cb[bi] != b'\t' { pnw = cb[bi]; }
+                match cb[bi] {
+                    b'(' => pd_p += 1,
+                    b')' => pd_p -= 1,
+                    b'[' => pd_b += 1,
+                    b']' => pd_b -= 1,
+                    b'{' => pd_c += 1,
+                    b'}' => pd_c -= 1,
+                    _ => {}
+                }
+                bi += 1;
+            }
+            per_line_pdelta[ln] = (pd_p, pd_b, pd_c);
+            per_line_unclosed_sq[ln] = unclosed_sq;
+            let mut raw_pdelta = 0i32;
+            let mut raw_dq = false;
+            let mut rbi = 0usize;
+            while rbi < cb.len() {
+                if raw_dq {
+                    if cb[rbi] == b'\\' && rbi + 1 < cb.len() { rbi += 2; continue; }
+                    if cb[rbi] == b'"' { raw_dq = false; }
+                    rbi += 1;
+                    continue;
+                }
+                if cb[rbi] == b'%' { break; }
+                if cb[rbi] == b'"' { raw_dq = true; rbi += 1; continue; }
+                if matches!(cb[rbi], b'(' | b'[' | b'{') { raw_pdelta += 1; }
+                else if matches!(cb[rbi], b')' | b']' | b'}') { raw_pdelta -= 1; }
+                rbi += 1;
+            }
+            per_line_raw_pdelta[ln] = raw_pdelta;
+
+            let target_syms = targets_for_line(ln, ln32);
+
+            if code.starts_with('(') {
+                if let Some(ref callee) = prev_last_id {
+                    let mut mcands: Vec<String> = vec![callee.clone()];
+                    if callee == "this" { mcands.push("self".to_string()); }
+                    if let Some((_, tail)) = callee.rsplit_once('.') {
+                        mcands.push(tail.to_string());
+                    }
+                    for cand in mcands {
+                        for &si in &target_syms {
+                            if si < n_syms && existing_calls[si].insert((cand.clone(), ln32)) {
+                                self.facts.symbols[si].calls.push(Call { path: cand.clone(), line: ln32 });
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut toks: Vec<String> = Vec::new();
+            let mut last_id_on_line: Option<String> = None;
+            let mut j = 0usize;
+            let mut j_pnw: u8 = 0;
+            while j < cb.len() {
+                if cb[j] == b'"' {
+                    toks.push("0".to_string());
+                    j += 1;
+                    while j < cb.len() && cb[j] != b'"' {
+                        if cb[j] == b'\\' && j + 1 < cb.len() { j += 2; } else { j += 1; }
+                    }
+                    if j < cb.len() { j += 1; }
+                    j_pnw = b'"';
+                    continue;
+                }
+                if cb[j] == b'\'' {
+                    let is_tr = j_pnw.is_ascii_alphanumeric() || matches!(j_pnw, b'_' | b')' | b']' | b'}' | b'.' | b'\'');
+                    if !is_tr && cb[j + 1..].contains(&b'\'') {
+                        toks.push("0".to_string());
+                        let sq_start = j + 1;
+                        j += 1;
+                        while j < cb.len() {
+                            if cb[j] == b'\'' {
+                                if j + 1 < cb.len() && cb[j + 1] == b'\'' { j += 2; continue; }
+                                break;
+                            }
+                            j += 1;
+                        }
+                        let sq_inner = &code[sq_start..j];
+                        let sqb = sq_inner.as_bytes();
+                        let mut sk = 0usize;
+                        while sk < sqb.len() {
+                            if is_id_start(sqb[sk]) {
+                                let ss = sk;
+                                if sqb[sk] >= 0x80 {
+                                    sk += sq_inner[sk..].chars().next().unwrap().len_utf8();
+                                } else {
+                                    sk += 1;
+                                }
+                                while sk < sqb.len() {
+                                    if sqb[sk] >= 0x80 {
+                                        sk += sq_inner[sk..].chars().next().unwrap().len_utf8();
+                                    } else if is_id_cont(sqb[sk]) || (sqb[sk] == b'.' && sk + 1 < sqb.len() && is_id_start(sqb[sk + 1])) {
+                                        sk += 1;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                let wt = sq_inner[ss..sk].trim_matches('.');
+                                if !wt.is_empty() && is_id_start(wt.as_bytes()[0]) {
+                                    let mut nw = r#"["n","#.to_string();
+                                    push_string(&mut nw, wt);
+                                    nw.push(']');
+                                    toks.push(nw);
+                                    let mut skf = sk;
+                                    while skf < sqb.len() && (sqb[skf] == b' ' || sqb[skf] == b'\t') { skf += 1; }
+                                    if skf < sqb.len() && sqb[skf] == b'(' && !matches!(wt, "if" | "while" | "for" | "switch" | "function" | "parfor") {
+                                        for &si in &target_syms {
+                                            if si < n_syms && existing_calls[si].insert((wt.to_string(), ln32)) {
+                                                self.facts.symbols[si].calls.push(Call { path: wt.to_string(), line: ln32 });
+                                            }
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            sk += 1;
+                        }
+                        if j < cb.len() { j += 1; }
+                        j_pnw = b'\'';
+                        continue;
+                    }
+                    j_pnw = b'\'';
+                    j += 1;
+                    continue;
+                }
+                if cb[j].is_ascii_digit() {
+                    while j < cb.len() && (cb[j].is_ascii_alphanumeric() || cb[j] == b'_' || cb[j] == b'.') { j += 1; }
+                    toks.push("0".to_string());
+                    j_pnw = b'0';
+                    continue;
+                }
+                if is_id_start(cb[j]) {
+                    let st = j;
+                    if cb[j] >= 0x80 {
+                        let ch = code[j..].chars().next().unwrap();
+                        j += ch.len_utf8();
+                    } else {
+                        j += 1;
+                    }
+                    while j < cb.len() {
+                        if cb[j] >= 0x80 {
+                            let ch = code[j..].chars().next().unwrap();
+                            j += ch.len_utf8();
+                        } else if is_id_cont(cb[j]) {
+                            j += 1;
+                        } else if cb[j] == b'.' && j + 1 < cb.len() && is_id_start(cb[j + 1]) {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let raw_id = &code[st..j];
+                    j_pnw = b'a';
+                    let glued_from_dot = prev_ended_dot.take().map(|pd| format!("{pd}.{raw_id}"));
+                    if j < cb.len() && cb[j] == b'.' && !(j + 2 < cb.len() && cb[j + 1] == b'.' && cb[j + 2] == b'.') {
+                        let tail_dot = raw_id.rsplit('.').next().unwrap_or(raw_id);
+                        prev_ended_dot = Some(tail_dot.to_string());
+                    }
+                    last_id_on_line = Some(raw_id.to_string());
+                    let mut kf = j;
+                    while kf < cb.len() && (cb[kf] == b' ' || cb[kf] == b'\t') { kf += 1; }
+                    if kf < cb.len() && cb[kf] == b'=' && !(kf + 1 < cb.len() && cb[kf + 1] == b'=') {
+                        let mut k_out = r#"["k","#.to_string();
+                        push_string(&mut k_out, raw_id);
+                        k_out.push_str(",0]");
+                        toks.push(k_out);
+                    }
+                    let is_paren_call = kf < cb.len() && cb[kf] == b'(';
+                    if is_paren_call && !matches!(raw_id, "if" | "while" | "for" | "switch" | "function" | "parfor") {
+                        let mut cands: Vec<String> = vec![raw_id.to_string()];
+                        if let Some(ref gd) = glued_from_dot {
+                            cands.push(gd.clone());
+                        }
+                        if raw_id == "this" { cands.push("self".to_string()); }
+                        else if let Some(rest) = raw_id.strip_prefix("this.") {
+                            cands.push(format!("self.{rest}"));
+                        }
+                        if let Some((_, tail)) = raw_id.rsplit_once('.') {
+                            cands.push(tail.to_string());
+                        }
+                        for cand in cands {
+                            for &si in &target_syms {
+                                if si < n_syms && existing_calls[si].insert((cand.clone(), ln32)) {
+                                    self.facts.symbols[si].calls.push(Call { path: cand.clone(), line: ln32 });
+                                }
+                            }
+                        }
+                        let recv = if let Some((h, _)) = raw_id.rsplit_once('.') {
+                            let h_norm = if h == "this" { "self" } else { h };
+                            let mut r = r#"["n","#.to_string();
+                            push_string(&mut r, h_norm);
+                            r.push(']');
+                            r
+                        } else {
+                            "0".to_string()
+                        };
+                        let args_s = if kf + 1 < cb.len() && cb[kf + 1] == b')' { "[]" } else { "[0]" };
+                        toks.push(format!(r#"["c",0,{recv},{args_s}]"#));
+                    }
+                    if let Some(ref gd) = glued_from_dot {
+                        let mut ng = r#"["n","#.to_string();
+                        push_string(&mut ng, gd);
+                        ng.push(']');
+                        toks.push(ng);
+                    }
+                    let mut n_out = r#"["n","#.to_string();
+                    push_string(&mut n_out, raw_id);
+                    n_out.push(']');
+                    toks.push(n_out);
+                    if raw_id == "this" {
+                        toks.push(r#"["n","self"]"#.to_string());
+                    } else if let Some(rest) = raw_id.strip_prefix("this.") {
+                        let mut ns = r#"["n","#.to_string();
+                        push_string(&mut ns, &format!("self.{rest}"));
+                        ns.push(']');
+                        toks.push(ns);
+                    }
+                    if raw_id.contains('.') {
+                        for seg in raw_id.split('.') {
+                            if !seg.is_empty() && is_id_start(seg.as_bytes()[0]) {
+                                let mut ns = r#"["n","#.to_string();
+                                push_string(&mut ns, seg);
+                                ns.push(']');
+                                toks.push(ns);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if cb[j] == b';' {
+                    prev_ended_dot = None;
+                }
+                if cb[j] != b' ' && cb[j] != b'\t' {
+                    j_pnw = cb[j];
+                }
+                j += 1;
+            }
+            per_line_tokens[ln] = toks;
+            let trimmed_no_dots = code.trim_end_matches("...").trim_end();
+            if let Some(ref lid) = last_id_on_line {
+                if trimmed_no_dots.ends_with(lid.as_str()) {
+                    prev_last_id = Some(lid.clone());
+                } else {
+                    prev_last_id = None;
+                }
+            } else {
+                prev_last_id = None;
+            }
+        }
+
+        // 4. MATLAB a/r/x event pass
+        let is_safe_callee = |path: &str| -> bool {
+            !path.is_empty() && !matches!(
+                path,
+                "assert" | "return" | "yield" | "await" | "throw" | "raise" | "del" | "delete"
+                    | "new" | "sizeof" | "defined" | "if" | "elseif" | "elif" | "else" | "for"
+                    | "foreach" | "while" | "until" | "unless" | "switch" | "case" | "end"
+                    | "try" | "except" | "finally" | "with" | "do" | "match"
+            )
+        };
+        let safe_call_idx: Vec<usize> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .map(|(si, sym)| {
+                if si == 0 || sym.kind != KIND_FUNCTION {
+                    return sym.calls
+                        .iter()
+                        .position(|c| is_safe_callee(&c.path) && c.line != sym.line && c.path != sym.name)
+                        .or_else(|| sym.calls.iter().position(|c| is_safe_callee(&c.path)))
+                        .unwrap_or(0);
+                }
+                let next_fn_ln = fn_order
+                    .iter()
+                    .find(|&&(st, _)| st > sym.line)
+                    .map(|&(st, _)| st)
+                    .unwrap_or(u32::MAX);
+                sym.calls
+                    .iter()
+                    .position(|c| {
+                        is_safe_callee(&c.path)
+                            && c.line > sym.line
+                            && c.line < next_fn_ln
