@@ -18558,3 +18558,323 @@ impl<'a> Walker<'a> {
             let mut val_json = String::from(r#"["m",["#);
             for (ti, tok) in vals.iter().enumerate() {
                 if ti > 0 { val_json.push(','); }
+                val_json.push_str(tok);
+            }
+            val_json.push_str("]]");
+
+            let mut cand_targets: Vec<Vec<String>> = Vec::new();
+            let cb_a = code.as_bytes();
+            let mut eq_pos: Option<usize> = None;
+            let mut qch: u8 = 0;
+            let mut bd = 0i32;
+            for ci in 0..cb_a.len() {
+                let b = cb_a[ci];
+                if qch != 0 {
+                    if b == b'\\' { continue; }
+                    if b == qch { qch = 0; }
+                    continue;
+                }
+                if b == b'"' || b == b'\'' { qch = b; continue; }
+                if matches!(b, b'(' | b'[' | b'{') { bd += 1; continue; }
+                if matches!(b, b')' | b']' | b'}') { if bd > 0 { bd -= 1; } continue; }
+                if bd == 0 && b == b'=' {
+                    let prev = if ci > 0 { cb_a[ci - 1] } else { 0 };
+                    let next = if ci + 1 < cb_a.len() { cb_a[ci + 1] } else { 0 };
+                    if next != b'=' && !matches!(prev, b'=' | b'!' | b'<' | b'>') {
+                        eq_pos = Some(ci);
+                        break;
+                    }
+                }
+            }
+            if let Some(ep) = eq_pos {
+                let lhs_full = code[..ep].trim_end().trim_end_matches(|c: char| matches!(c, '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | ':' | '@')).trim_end();
+                let lhs_no_ann = lhs_full.split(':').next().unwrap_or(lhs_full).trim();
+                if lhs_no_ann.contains(',') {
+                    let mut tlist: Vec<String> = Vec::new();
+                    for seg in lhs_no_ann.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']')).split(',') {
+                        let w = seg.trim().trim_start_matches('*');
+                        if !w.is_empty() && is_id_start(w.as_bytes()[0]) {
+                            tlist.push(w.to_string());
+                        }
+                    }
+                    if !tlist.is_empty() { cand_targets.push(tlist); }
+                }
+                let lb = lhs_no_ann.as_bytes();
+                let mut li = lb.len();
+                while li > 0 && (is_id_cont(lb[li - 1]) || lb[li - 1] == b'.') { li -= 1; }
+                let nm = lhs_no_ann[li..].trim_matches('.');
+                if !nm.is_empty() && is_id_start(nm.as_bytes()[0]) {
+                    cand_targets.push(vec![nm.to_string()]);
+                }
+            }
+            if let Some(as_pos) = code.rfind(" as ") {
+                let after_as = code[as_pos + 4..].trim().trim_end_matches(':').trim();
+                let inner = after_as.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']'));
+                let mut alist: Vec<String> = Vec::new();
+                for seg in inner.split(',') {
+                    let w = seg.trim();
+                    if !w.is_empty() && is_id_start(w.as_bytes()[0]) {
+                        alist.push(w.to_string());
+                    }
+                }
+                if !alist.is_empty() { cand_targets.push(alist); }
+            }
+            if let Some(rest_for) = code.strip_prefix("for ").or_else(|| code.strip_prefix("async for ")) {
+                if let Some(in_pos) = rest_for.find(" in ") {
+                    let lhs_f = rest_for[..in_pos].trim().trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']'));
+                    let mut flist: Vec<String> = Vec::new();
+                    for seg in lhs_f.split(',') {
+                        let w = seg.trim();
+                        if !w.is_empty() && is_id_start(w.as_bytes()[0]) {
+                            flist.push(w.to_string());
+                        }
+                    }
+                    if !flist.is_empty() { cand_targets.push(flist); }
+                }
+            }
+            for tlist in cand_targets {
+                let mut ev = format!(r#"["a",{ln32},["#);
+                for (ti, t) in tlist.iter().enumerate() {
+                    if ti > 0 { ev.push(','); }
+                    push_string(&mut ev, t);
+                }
+                ev.push_str("],");
+                ev.push_str(&val_json);
+                ev.push_str(",0]");
+                for &tsi in &target_syms {
+                    let sidx = safe_call_idx[tsi];
+                    if sidx == 0 {
+                        extra_events[tsi].push(ev.clone());
+                    } else {
+                        extra_events[tsi].push(ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                    }
+                }
+            }
+            if code.starts_with("return ") || code == "return" || code.starts_with("yield ") || code.contains(" return ") {
+                let ev_r = format!(r#"["r",{ln32},{val_json}]"#);
+                for &tsi in &target_syms {
+                    let sidx = safe_call_idx[tsi];
+                    if sidx == 0 {
+                        extra_events[tsi].push(ev_r.clone());
+                    } else {
+                        extra_events[tsi].push(ev_r.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                    }
+                }
+            }
+            let ev_x = format!(r#"["x",{ln32},{val_json},0]"#);
+            for &tsi in &target_syms {
+                let sidx = safe_call_idx[tsi];
+                if sidx == 0 {
+                    extra_events[tsi].push(ev_x.clone());
+                } else {
+                    extra_events[tsi].push(ev_x.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)));
+                }
+            }
+        }
+
+        for (si, evs) in extra_events.into_iter().enumerate() {
+            if evs.is_empty() { continue; }
+            let sym = &mut self.facts.symbols[si];
+            for ev in evs {
+                if !sym.events.is_empty() { sym.events.push(','); }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
+
+    fn augment_d(&mut self) {
+        let src_str = std::str::from_utf8(self.src).unwrap_or("");
+        let lines: Vec<&str> = src_str.lines().collect();
+        let n_lines = lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+        let orig_n_syms = self.facts.symbols.len();
+        let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+        let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+        // Strip //, /* ... */, and /+ ... +/ comments per line while keeping line alignment
+        let mut clean_lines: Vec<String> = Vec::with_capacity(n_lines);
+        let mut in_block_c = false;
+        let mut nest_plus = 0usize;
+        for raw_line in &lines {
+            let b = raw_line.as_bytes();
+            let mut out = String::with_capacity(b.len());
+            let mut i = 0usize;
+            let mut in_dq = false;
+            let mut in_sq = false;
+            while i < b.len() {
+                if in_block_c {
+                    if i + 1 < b.len() && b[i] == b'*' && b[i + 1] == b'/' {
+                        in_block_c = false;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if nest_plus > 0 {
+                    if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'+' {
+                        nest_plus += 1;
+                        i += 2;
+                    } else if i + 1 < b.len() && b[i] == b'+' && b[i + 1] == b'/' {
+                        nest_plus -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if in_dq {
+                    out.push(b[i] as char);
+                    if b[i] == b'\\' && i + 1 < b.len() {
+                        out.push(b[i + 1] as char);
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'"' { in_dq = false; }
+                    i += 1;
+                    continue;
+                }
+                if in_sq {
+                    out.push(b[i] as char);
+                    if b[i] == b'\\' && i + 1 < b.len() {
+                        out.push(b[i + 1] as char);
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'\'' { in_sq = false; }
+                    i += 1;
+                    continue;
+                }
+                if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'/' {
+                    break;
+                }
+                if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'*' {
+                    in_block_c = true;
+                    i += 2;
+                    continue;
+                }
+                let _ = nest_plus;
+                if b[i] == b'"' { in_dq = true; }
+                else if b[i] == b'\'' { in_sq = true; }
+                out.push(b[i] as char);
+                i += 1;
+            }
+            clean_lines.push(out);
+        }
+
+        // 1. D imports: `[public|private|protected|package|static] import [alias =] mod.path [: sym1, sym2];`
+        let mut existing_imports: std::collections::HashSet<(String, String, String)> = self
+            .facts
+            .imports
+            .iter()
+            .map(|imp| (imp.module.clone(), imp.name.clone(), imp.alias.clone()))
+            .collect();
+        for (idx, cl) in clean_lines.iter().enumerate() {
+            let ln32 = (idx + 1) as u32;
+            let mut tr = cl.trim();
+            if tr.is_empty() { continue; }
+            for pref in ["public ", "private ", "protected ", "package ", "static "] {
+                while let Some(r) = tr.strip_prefix(pref) {
+                    tr = r.trim_start();
+                }
+            }
+            let Some(mut rest) = tr.strip_prefix("import ").or_else(|| tr.strip_prefix("import\t")) else { continue };
+            // Gather until ';' (up to 6 lines)
+            let mut full = rest.to_string();
+            let mut k = idx + 1;
+            while !full.contains(';') && k < n_lines && k <= idx + 6 {
+                full.push(' ');
+                full.push_str(clean_lines[k].trim());
+                k += 1;
+            }
+            rest = full.split(';').next().unwrap_or(&full).trim();
+            // Handle selective import `mod.path : a, b = c`
+            if let Some((mod_part, sel_part)) = rest.split_once(':') {
+                let m = mod_part.trim();
+                let (m_alias, m_path) = if let Some((al, mp)) = m.split_once('=') {
+                    (Some(al.trim()), mp.trim())
+                } else {
+                    (None, m)
+                };
+                if !m_path.is_empty() && is_id_start(m_path.as_bytes()[0]) {
+                    let base_al = m_alias.unwrap_or_else(|| m_path.rsplit('.').next().unwrap_or(m_path));
+                    if existing_imports.insert((m_path.to_string(), String::new(), base_al.to_string())) {
+                        self.facts.imports.push(Import {
+                            line: ln32,
+                            module: m_path.to_string(),
+                            name: String::new(),
+                            alias: base_al.to_string(),
+                            kind: IMPORT_MODULE,
+                            ..Import::default()
+                        });
+                    }
+                    for item in sel_part.split(',') {
+                        let it = item.trim();
+                        if it.is_empty() { continue; }
+                        let (al, sym) = if let Some((a, s)) = it.split_once('=') {
+                            (a.trim(), s.trim())
+                        } else {
+                            (it, it)
+                        };
+                        if !sym.is_empty() && is_id_start(sym.as_bytes()[0]) {
+                            let full_mod = format!("{m_path}.{sym}");
+                            if existing_imports.insert((full_mod.clone(), String::new(), al.to_string())) {
+                                self.facts.imports.push(Import {
+                                    line: ln32,
+                                    module: full_mod,
+                                    name: String::new(),
+                                    alias: al.to_string(),
+                                    kind: IMPORT_MODULE,
+                                    ..Import::default()
+                                });
+                            }
+                            if existing_imports.insert((m_path.to_string(), sym.to_string(), al.to_string())) {
+                                self.facts.imports.push(Import {
+                                    line: ln32,
+                                    module: m_path.to_string(),
+                                    name: sym.to_string(),
+                                    alias: al.to_string(),
+                                    kind: 0u8,
+                                    ..Import::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            } else {
+                for item in rest.split(',') {
+                    let it = item.trim();
+                    if it.is_empty() { continue; }
+                    let (al, mp) = if let Some((a, m)) = it.split_once('=') {
+                        (a.trim(), m.trim())
+                    } else {
+                        (it.rsplit('.').next().unwrap_or(it), it)
+                    };
+                    if !mp.is_empty() && is_id_start(mp.as_bytes()[0]) {
+                        if existing_imports.insert((mp.to_string(), String::new(), al.to_string())) {
+                            self.facts.imports.push(Import {
+                                line: ln32,
+                                module: mp.to_string(),
+                                name: String::new(),
+                                alias: al.to_string(),
+                                kind: IMPORT_MODULE,
+                                ..Import::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1b. D lambda alias symbols & constructor vars
+        let mut existing_syms: std::collections::HashSet<(String, u32)> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|s| (s.name.clone(), s.line))
+            .collect();
+        let mut existing_keys: std::collections::HashSet<String> = self
+            .facts
+            .symbols
