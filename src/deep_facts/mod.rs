@@ -29758,3 +29758,323 @@ impl<'a> Walker<'a> {
                     let cname = Self::tcl_clean_name(&words[1].1);
                     if !cname.is_empty() {
                         self.push_call(format!("proc.{cname}"), cmd_line);
+                    }
+                } else if !args_braced {
+                    let cname = Self::tcl_clean_name(&words[1].1);
+                    if !cname.is_empty() {
+                        self.push_call(cname, cmd_line);
+                    }
+                }
+                self.push_call("proc".to_string(), cmd_line);
+            }
+            if args_has_nested {
+                if let Some((aline, raw_args)) = words.get(2) {
+                    if raw_args.starts_with('{') && raw_args.ends_with('}') && raw_args.len() >= 2 {
+                        self.tcl_scan_script(&raw_args[1..raw_args.len() - 1], *aline, depth + 1);
+                    }
+                }
+            }
+            let raw_name = words[1].1.trim_matches(|c| c == '{' || c == '}');
+            let sym_name = Self::tcl_clean_name(raw_name);
+            if !sym_name.is_empty() {
+                let sym = self.add_symbol(sym_name, String::new(), KIND_FUNCTION, cmd_line, Vec::new());
+                self.stack.push(Frame {
+                    node: 0,
+                    symbol: sym,
+                    class: String::new(),
+                    receiver: String::new(),
+                    container: false,
+                    defines: Some(sym),
+                });
+                if let Some((bline, body)) = words.last() {
+                    if words.len() >= 4 && body.starts_with('{') && body.ends_with('}') && body.len() >= 2 {
+                        let inner = &body[1..body.len() - 1];
+                        self.tcl_scan_script(inner, *bline, depth + 1);
+                    }
+                }
+                self.stack.pop();
+                return String::new();
+            }
+        }
+        // Scan braced_word bodies recursively
+        // Tuple: (wline, ident_opt, form_str, is_value_token)
+        // Only plain words, quoted strings, and $variables are value tokens that trigger juxtaposed command_calls
+        // Pre-split bare words containing inline `$var` / `${var}tail` substitutions
+        // (e.g. `::ns::_$x`, `_$cmd`, `\x00$v`, `${name}::${type}Attr`) or single-colon
+        // names (`file:counter`) to match how the reference lexer tokenizes them.
+        let mut expanded: Vec<(u32, String)> = Vec::with_capacity(words.len());
+        for (wline, w) in words {
+            let w_owned;
+            let w = if let Some(stripped) = w.strip_prefix("{*}") {
+                if !stripped.is_empty() {
+                    w_owned = stripped.to_string();
+                    &w_owned
+                } else {
+                    w
+                }
+            } else {
+                w
+            };
+            if w.starts_with('"') && !w.ends_with('"') && w.len() > 2 {
+                if let Some(rel) = w[1..].find('"') {
+                    let end = rel + 1;
+                    expanded.push((*wline, w[..=end].to_string()));
+                    if end + 1 < w.len() {
+                        expanded.push((*wline, w[end + 1..].to_string()));
+                    }
+                    continue;
+                }
+            }
+            if w.starts_with("::") {
+                if let Some(ppos) = w.find('(') {
+                    if ppos > 2 {
+                        expanded.push((*wline, w[..ppos].to_string()));
+                        expanded.push((*wline, w[ppos..].to_string()));
+                        continue;
+                    }
+                }
+            }
+            if !w.starts_with('{')
+                && !w.starts_with('"')
+                && !w.starts_with('[')
+            {
+                // Split words with an embedded/trailing `"` (e.g. `Baseline"`, `no":"yes"}]`, `%M"]`, `$param"]`)
+                // resulting from nested quotes inside `[...]` inside `"..."` into prefix + quoted tail.
+                if let Some(qpos) = w.find('"') {
+                    if qpos > 0 {
+                        expanded.push((*wline, w[..qpos].to_string()));
+                        expanded.push((*wline, "\"\"".to_string()));
+                        continue;
+                    }
+                }
+                // Split `prefix$arr(idx)` at `$` when `$` precedes `(` (e.g. `keyset$keysets(ndx)`).
+                if let (Some(dpos), Some(ppos)) = (w.find('$'), w.find('(')) {
+                    if dpos > 0 && dpos < ppos {
+                        expanded.push((*wline, w[..dpos].to_string()));
+                        expanded.push((*wline, w[dpos..].to_string()));
+                        continue;
+                    }
+                }
+            }
+            if !w.starts_with('{')
+                && !w.starts_with('"')
+                && !w.starts_with('[')
+                && !w.contains('(')
+            {
+                if w.contains('$') {
+                    let mut rest = w.as_str();
+                    while !rest.is_empty() {
+                        if rest.starts_with("${") {
+                            if let Some(end) = rest.find('}') {
+                                expanded.push((*wline, rest[..=end].to_string()));
+                                rest = &rest[end + 1..];
+                                continue;
+                            }
+                        } else if rest.starts_with('$') {
+                            let rb = rest.as_bytes();
+                            let mut k = 1usize;
+                            while k < rb.len() && (rb[k].is_ascii_alphanumeric() || rb[k] == b'_' || rb[k] == b':') {
+                                k += 1;
+                            }
+                            if k < rb.len() && rb[k] == b'$' {
+                                expanded.push((*wline, rest[..k].to_string()));
+                                rest = &rest[k..];
+                                continue;
+                            }
+                            expanded.push((*wline, rest.to_string()));
+                            break;
+                        }
+                        if let Some(dpos) = rest.find('$') {
+                            if dpos > 0 {
+                                expanded.push((*wline, rest[..dpos].to_string()));
+                                rest = &rest[dpos..];
+                                continue;
+                            }
+                        }
+                        expanded.push((*wline, rest.to_string()));
+                        break;
+                    }
+                    continue;
+                }
+                // Single-colon bareword like `file:counter` (not `::` namespace separator)
+                if !w.contains("::") && w.contains(':') {
+                    for part in w.split(':') {
+                        if !part.is_empty() {
+                            expanded.push((*wline, part.to_string()));
+                        }
+                    }
+                    continue;
+                }
+            }
+            expanded.push((*wline, w.clone()));
+        }
+        let mut word_forms: Vec<(u32, Option<String>, String, bool)> = Vec::new();
+        for (wline, w) in &expanded {
+            if w.starts_with('{') && w.ends_with('}') && w.len() >= 2 {
+                let inner = &w[1..w.len() - 1];
+                self.tcl_scan_script(inner, *wline, depth + 1);
+                let bform = if !inner.contains('\n') {
+                    let bsegs: Vec<String> = inner
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                        .map(|s| Self::tcl_clean_name(s))
+                        .filter(|s| Self::tcl_is_ident(s))
+                        .collect();
+                    if bsegs.is_empty() {
+                        "0".to_string()
+                    } else if bsegs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, &bsegs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let mut parts: Vec<String> = bsegs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        if inner.contains('[') && inner.contains(']') {
+                            if let (Some(lb), Some(rb)) = (inner.find('['), inner.rfind(']')) {
+                                if rb > lb + 1 {
+                                    let sub = &inner[lb + 1..rb];
+                                    for (sline, swords) in Self::tcl_tokenize_commands(sub, *wline) {
+                                        let sf = self.tcl_eval_words(&swords, sline, depth + 1);
+                                        if !sf.is_empty() && sf != "0" {
+                                            parts.push(format!("[\"t\",[{sf}]]"));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    }
+                } else {
+                    "0".to_string()
+                };
+                word_forms.push((*wline, None, bform, false));
+            } else if w.starts_with('[') && w.ends_with(']') && w.len() >= 2 {
+                let inner = &w[1..w.len() - 1];
+                let sub_cmds = Self::tcl_tokenize_commands(inner, *wline);
+                let mut last_form = "0".to_string();
+                for (sline, swords) in sub_cmds {
+                    let f = self.tcl_eval_words(&swords, sline, depth + 1);
+                    if !f.is_empty() {
+                        last_form = f;
+                    }
+                }
+                word_forms.push((*wline, None, format!("[\"t\",[{last_form}]]"), false));
+            } else if w.starts_with('"') && w.ends_with('"') && w.len() >= 2 {
+                // Scan any [...] inside quoted string
+                let inner = &w[1..w.len() - 1];
+                let ib = inner.as_bytes();
+                let mut j = 0;
+                let mut cur_line = *wline;
+                while j < ib.len() {
+                    if ib[j] == b'\\' && j + 1 < ib.len() {
+                        if ib[j + 1] == b'\n' {
+                            cur_line += 1;
+                        }
+                        j += 2;
+                        continue;
+                    }
+                    if ib[j] == b'\n' {
+                        cur_line += 1;
+                    } else if ib[j] == b'[' {
+                        let bstart = j + 1;
+                        let bline = cur_line;
+                        let mut d = 1usize;
+                        j += 1;
+                        while j < ib.len() && d > 0 {
+                            if ib[j] == b'\\' && j + 1 < ib.len() {
+                                if ib[j + 1] == b'\n' {
+                                    cur_line += 1;
+                                }
+                                j += 2;
+                                continue;
+                            }
+                            if ib[j] == b'\n' {
+                                cur_line += 1;
+                            } else if ib[j] == b'[' {
+                                d += 1;
+                            } else if ib[j] == b']' {
+                                d -= 1;
+                                if d == 0 {
+                                    let sub = &inner[bstart..j];
+                                    for (sline, swords) in Self::tcl_tokenize_commands(sub, bline) {
+                                        let _ = self.tcl_eval_words(&swords, sline, depth + 1);
+                                    }
+                                    // Reference lexer closes the outer "..." at the first unescaped `"`
+                                    // inside `[...]` and tokenizes the interior of inner `"..."` spans as code.
+                                    let sb = sub.as_bytes();
+                                    let mut qk = 0usize;
+                                    let mut ql = bline;
+                                    while qk < sb.len() {
+                                        if sb[qk] == b'\\' && qk + 1 < sb.len() {
+                                            if sb[qk + 1] == b'\n' { ql += 1; }
+                                            qk += 2;
+                                            continue;
+                                        }
+                                        if sb[qk] == b'\n' {
+                                            ql += 1;
+                                            qk += 1;
+                                            continue;
+                                        }
+                                        if sb[qk] == b'"' {
+                                            let qs = qk + 1;
+                                            let qsl = ql;
+                                            qk += 1;
+                                            while qk < sb.len() && sb[qk] != b'"' {
+                                                if sb[qk] == b'\\' && qk + 1 < sb.len() {
+                                                    if sb[qk + 1] == b'\n' { ql += 1; }
+                                                    qk += 2;
+                                                    continue;
+                                                }
+                                                if sb[qk] == b'\n' { ql += 1; }
+                                                qk += 1;
+                                            }
+                                            if qk < sb.len() && sb[qk] == b'"' && qk > qs {
+                                                let qinner = &sub[qs..qk];
+                                                self.tcl_scan_script(qinner, qsl, depth + 1);
+                                                if let Some(last_id) = qinner
+                                                    .rsplit(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+                                                    .find(|t| !t.is_empty())
+                                                {
+                                                    let cid = Self::tcl_clean_name(last_id);
+                                                    if Self::tcl_is_ident(&cid) {
+                                                        self.push_call(cid, qsl);
+                                                    }
+                                                }
+                                                qk += 1;
+                                            }
+                                            continue;
+                                        }
+                                        qk += 1;
+                                    }
+                                }
+                            }
+                            j += 1;
+                        }
+                        continue;
+                    }
+                    j += 1;
+                }
+                // Also extract $var interpolations inside quoted_word
+                let mut qvars: Vec<String> = Vec::new();
+                let mut qj = 0;
+                while qj < ib.len() {
+                    if ib[qj] == b'\\' && qj + 1 < ib.len() {
+                        qj += 2;
+                        continue;
+                    }
+                    if ib[qj] == b'$' {
+                        let rest = &inner[qj..];
+                        if let Some(vn) = Self::tcl_var_name(rest) {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &vn);
+                            n.push(']');
+                            qvars.push(n);
+                        }
+                    }
