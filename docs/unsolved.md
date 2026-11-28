@@ -479,3 +479,101 @@ Cross-language regression check on the 4 original corpora: **0 movement** (`pyth
 - **php** (9 attempts, **PASSED <120**): `675 files / 1330 rows` -> `100 files / 332 rows` (`-575 files / -998 rows`; 29/45 languages under 120)
 - **dart** (14/25 attempts; resume at dart attempt 15): `668 files / 1081 rows` -> `334 files / 500 rows` (`-334 files / -581 rows`)
 - **7-corpus guard**: `js 23/23`, `ts 28/36`, `py 23/25`, `rs 26/27`, `kt 84/90`, `sc 82/112`, `sw 68/90` (7/7 PASS); `rust-graph/src` self-parse `0/0`; `cargo test` `256 passed, 0 failed, 24 ignored`.
+## Carbon handoff: the three problems that ate the lanes — **open 2026-11-28**
+
+`/tmp/opencode/carbon-bak/carbon.json` is the hand-off written on 2026-11-24 for an
+agent with strong reasoning and little usage. It deliberately omits every
+per-language reader fix — a lane can land those without design work — and keeps
+only the three problems that blocked whole language lanes and that each already
+ate several failed attempts. They are written here so the knowledge stops living
+in a lane's head.
+
+State it was written against: 15 of 45 languages under 5% of their files failing,
+7,540 files still to cut, worst ruby 62.19%, clojure 70.01%, r 63.29%, tcl 54.07%,
+bash 34.62%. Attempt keep rate across the last four rounds is about 35% (13/30,
+4/16, 5/13, 11/29) — most attempts are reverted by the guards below, and that keep
+rate is what makes these three worth more than any single language.
+
+Guards, unchanged: `cargo test --bin rust-graph` stays 256 passed / 0 failed; the
+7-corpus guard stays js 23/23, ts 28/36, py 23/25, rs 26/27, kt 84/90, sc 82/112,
+sw 68/90; self-parse (`rust-graph build rust-graph/src --no-cache`) stays 0 files
+/ 0 rows. **Files down and rows up = revert.** One language measured per attempt,
+never a 45-language sweep.
+
+### H1 — unmasking a fact kind multiplies rows, and the x-event nesting rule is written nowhere
+
+**The question.** The reference lexer emits right-nested x-events per call, so the
+moment a calls bucket is unmasked every call demands a matching x-event chain.
+Files fall, rows multiply 2–10×, the rule forces a revert, and what the invariant
+actually is never gets recorded. Each lane rediscovers it and loses the same
+attempts.
+
+**The evidence.** bash: the `-flag` guard turned 468 files/1,010 rows into 4,914
+rows and was reverted. r: generic `call_arguments` turned 7,194 rows into 8,636,
+reverted. tcl: multi-word emission reverted at 684 files/743 rows, and a round-7
+call fix unmasked exactly 1,034 x-event rows in one step. zig:
+`test_declaration`/`builtin_call` form, same rule. solidity: `mapping_body`
+named-parameter rule raised 159 → 165 files, reverted.
+
+**Where.** `src/expr.rs` decides both readers' value shapes for every language and
+is where the reverted `in_command_call` guard lived; `src/deep_facts/mod.rs` and
+`src/deep_facts/go.rs` hold the per-language emit arms and the shared
+path/form/member_name helpers; `src/pipeline.rs` produces the reason codes.
+
+**Done when** the nesting rule is written down with a small fixture per language
+asserting it, and at least one language drops files with flat rows — bash is the
+best candidate (1,681 files, 582 failing).
+
+**Not allowed:** unmasking a calls bucket without predicting the row delta from the
+event counts; accepting rows up because files dropped.
+
+### H2 — grammar recovery swallows whole C blocks, and no target covers it
+
+Error nodes are the CVD parser's recovery, not a reader disagreement, so the
+threshold is the only honest knob — which is why raising it is not a fix: it hides
+the problem. Teaching recovery to resynchronise on the next item boundary instead
+of consuming the block is.
+
+**The evidence.** `CST_DEGRADED:recovery` was 128 of C's 554 fallback files in the
+2026-11-16 sweep and 137 of the 295 measured on 2026-11-17. The same bucket holds
+2 rust rows, both one file: the source repeats a `fn` header line, so the block
+sits in recovery and the call inside it has no CST node to read from
+(`CST_MISSING_KIND:call`, 2 rows).
+
+**Done when** C is under 200 fallback files (from 295) with the recovery threshold
+unchanged, the 7-corpus guard unchanged, and the repeated-`fn`-header fixture
+parses with 0 rows. **Not allowed:** raising the recovery or parse budget.
+
+### H3 — a brace opens a block before the call/import reader sees the statement
+
+Every fix so far was a per-statement guard, and by the time the reader runs the
+statement no longer exists as a statement. The fix moves up a layer: the lexer
+classifies the brace before it decides to open a block, and the call and import
+readers consume that classified construct instead of filtering tokens afterwards.
+This is the same mechanism behind the deferred `use {a as b, c};` item — the
+statement produces no event at all because the brace splits it into a block before
+the import reader sees it.
+
+**Blocked languages.** tcl: 598 files / 729 rows of 1,104 (54.07%) after 25
+measured attempts, having started at 957/957 (86.53%); round 6 found and round 7
+applied all three named root causes — `is_layout` skipping
+`braced_word`/`command_substitution`/`quoted_word`, `proc_command` recorded outside
+the proc scope, `call_command` emitting no x-events — and it still will not cross
+54%. clojure: 1,018 of 1,454 files (70.01%); a lane sat on it for three hours with
+no kept attempt. rust: the brace-import case. bash: arrays.
+
+**Where.** `src/parser.rs:191` (`enum BraceContext`) and `src/parser.rs:1369`
+(`classify_brace_context`) exist but are consulted only for initialisers (block vs
+struct literal vs table constructor), never on the import or call statement path;
+`src/deep_facts/mod.rs:3001` (`tcl_call_command`), `:6283` (dispatch on
+`call_command`), `:501` (`TCL_CALLS`), and `:1411` (`is_layout`, which every failed
+guard tried to work around).
+
+**Done when** tcl is below 598 files with rows not above 729, clojure moves below
+1,018 with rows not above 1,454, and rust stays 26/27 with self-parse at 0 rows.
+**Not allowed:** another `is_layout` skip-list entry — the shape of all six prior
+failures — or moving the loss threshold to make the percentage change.
+
+**Known extra.** tcl exits rc=-11 (SIGSEGV) after printing its loss rows. The rows
+are complete before the crash, so measurement is valid, but the crash is unfixed
+and may be a second bug in the same reader.
