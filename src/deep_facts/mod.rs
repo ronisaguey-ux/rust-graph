@@ -12158,3 +12158,323 @@ impl<'a> Walker<'a> {
                     for ev in evs {
                         if !sym.events.is_empty() { sym.events.push(','); }
                         sym.events.push_str(&ev);
+                    }
+                }
+            }
+        }
+    }
+
+    fn augment_tcl(&mut self) {
+        let text = String::from_utf8_lossy(self.src);
+        let lines: Vec<&str> = text.lines().collect();
+        let n_lines = lines.len();
+
+        let is_pipe_kw = |w: &str| -> bool {
+            matches!(w, "if" | "for" | "while" | "switch" | "catch")
+        };
+
+        // Pass 1: Add missing `proc` / `oo::define` / `method` symbols if any
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let tr = lines[idx].trim();
+            if tr.is_empty() || (tr.starts_with('#') && !tr.contains('"') && !tr.contains('$') && !tr.contains("::")) { continue; }
+            for kw in ["proc ", "method ", "destructor ", "constructor "] {
+                if let Some(rest) = tr.strip_prefix(kw) {
+                    let tok: String = rest
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | ':' | '.' | '-'))
+                        .collect();
+                    let base = tok.rsplit(':').next().unwrap_or(&tok);
+                    if !base.is_empty() && base.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                        if !self.facts.symbols.iter().any(|s| s.line == line && s.name == base) {
+                            self.add_symbol(base.to_string(), String::new(), 1, line, Vec::new());
+                        }
+                    }
+                }
+            }
+            for seg in tr.split(';') {
+                if let Some((lhs, rhs)) = seg.split_once('=') {
+                    if !lhs.ends_with(['=', '!', '<', '>']) && !rhs.starts_with('=') {
+                        let rhs_t = rhs.trim_start().trim_start_matches('(').trim_start();
+                        let rhs_call: String = rhs_t.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                        let after_c = rhs_t[rhs_call.len()..].trim_start();
+                        if !rhs_call.is_empty()
+                            && rhs_call.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
+                            && after_c.starts_with('(')
+                        {
+                            let mut lhs_nobr = String::with_capacity(lhs.len());
+                    {
+                        let mut bd = 0i32;
+                        for c in lhs.chars() {
+                            if c == '[' { bd += 1; }
+                            else if c == ']' { bd = (bd - 1).max(0); }
+                            else if bd == 0 { lhs_nobr.push(c); }
+                        }
+                    }
+                    let lhs_norm = lhs_nobr.replace(" -> ", ".").replace("->", ".");
+                            if let Some(lw) = lhs_norm.split_whitespace().last() {
+                                let lv = lw.trim_start_matches(['*', '&', '$', '(']).trim_end_matches(['.', ')']);
+                                if !lv.is_empty() && lv.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) {
+                                    self.facts.vars.push((lv.to_string(), rhs_call));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut sym_meta: Vec<(usize, u32, u8)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, s)| (i, s.line, s.kind))
+            .collect();
+        sym_meta.sort_by_key(|&(_, sl, _)| sl);
+
+        let enclosing_syms = |line: u32| -> Vec<usize> {
+            let mut out: Vec<usize> = vec![0];
+            let mut procs: Vec<usize> = Vec::new();
+            for &(si, sl, sk) in &sym_meta {
+                if sl <= line && sk == 1 {
+                    procs.push(si);
+                }
+            }
+            for &si in procs.iter().rev().take(2) {
+                if !out.contains(&si) { out.push(si); }
+            }
+            out
+        };
+
+        // Pass 2a: Emit calls per line
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let tr = lines[idx].trim();
+            if tr.is_empty() || (tr.starts_with('#') && !tr.contains('"') && !tr.contains('$') && !tr.contains("::")) { continue; }
+            let targets_syms = enclosing_syms(line);
+
+            // Normalize ` ::` -> `.` (so `proc ::http::Log` -> `proc.http.Log`, `exists ::env(` -> `exists.env(`)
+            // and `::` -> `.`
+            let mut norm_spaced = String::with_capacity(tr.len());
+            {
+                let tb = tr.as_bytes();
+                let mut k = 0;
+                while k < tb.len() {
+                    if tb[k] == b' ' && k + 2 < tb.len() && tb[k + 1] == b':' && tb[k + 2] == b':' {
+                        norm_spaced.push('.');
+                        k += 3;
+                    } else if k + 1 < tb.len() && tb[k] == b':' && tb[k + 1] == b':' {
+                        norm_spaced.push('.');
+                        k += 2;
+                    } else {
+                        norm_spaced.push(tb[k] as char);
+                        k += 1;
+                    }
+                }
+            }
+            let norm_plain = tr.replace("::", ".").replace(". $", ".").replace(" .", ".");
+
+            let mut line_calls: Vec<String> = Vec::new();
+            let mut add_call = |c: &str| {
+                let c1 = c.trim_start_matches('.').trim_end_matches('.');
+                if c1.is_empty() || is_pipe_kw(c1) { return; }
+                let first_ok = c1.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_')
+                    || (c1.bytes().next().is_some_and(|ch| ch.is_ascii_digit()) && c1.bytes().any(|ch| ch.is_ascii_alphabetic()));
+                if !first_ok { return; }
+                let c_mapped = if c1 == "this" { "self" } else { c1 };
+                if !line_calls.iter().any(|x| x == c_mapped) {
+                    line_calls.push(c_mapped.to_string());
+                }
+                if let Some(tail) = c1.rsplit('.').next() {
+                    if !tail.is_empty() && !is_pipe_kw(tail) && tail != c1
+                        && tail.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_')
+                    {
+                        if !line_calls.iter().any(|x| x == tail) {
+                            line_calls.push(tail.to_string());
+                        }
+                    }
+                }
+            };
+
+            for src_s in [&norm_plain, &norm_spaced] {
+                let nb = src_s.as_bytes();
+                let mut pi = 0;
+                while pi < nb.len() {
+                    if nb[pi].is_ascii_alphabetic() || nb[pi] == b'_' {
+                        let st = pi;
+                        while pi < nb.len() && (nb[pi].is_ascii_alphanumeric() || nb[pi] == b'_' || nb[pi] == b'.') {
+                            pi += 1;
+                        }
+                        let tok = &src_s[st..pi];
+                        let mut nxt = pi;
+                        while nxt < nb.len() && (nb[nxt] == b' ' || nb[nxt] == b'\t') { nxt += 1; }
+                        let has_paren = nxt < nb.len() && (nb[nxt] == b'(' || nb[nxt] == b'[' || (nxt == pi && matches!(nb[nxt], b'"' | b'\'' | b'@')));
+                        let has_arg = !has_paren
+                            && nxt < nb.len()
+                            && (nxt > pi || nb[nxt] == b'$')
+                            && (nb[nxt].is_ascii_alphanumeric()
+                                || matches!(nb[nxt], b'$' | b'{' | b'[' | b'"' | b'\'' | b'@' | b'-' | b'\\' | b'_' | b'.' | b':' | b'*'));
+                        if has_paren || has_arg {
+                            add_call(tok);
+                        }
+                    } else {
+                        pi += 1;
+                    }
+                }
+            }
+            // Digit-starting `$var` calls (e.g. `$2dhampm $AMPMind`)
+            {
+                let tb = tr.as_bytes();
+                let mut k = 0;
+                while k < tb.len() {
+                    if tb[k] == b'$' && k + 1 < tb.len() && tb[k + 1].is_ascii_digit() {
+                        let st = k + 1;
+                        let mut e = st;
+                        while e < tb.len() && (tb[e].is_ascii_alphanumeric() || tb[e] == b'_') { e += 1; }
+                        if e > st && tb[st..e].iter().any(|b| b.is_ascii_alphabetic()) {
+                            add_call(&tr[st..e]);
+                        }
+                        k = e;
+                    } else {
+                        k += 1;
+                    }
+                }
+            }
+            // Previous non-comment line ending in identifier followed by `(` on this line
+            if tr.starts_with('(') && idx > 0 {
+                let mut p_idx = idx;
+                while p_idx > 0 {
+                    p_idx -= 1;
+                    let pt = lines[p_idx].trim();
+                    if pt.is_empty() || pt.starts_with('#') { continue; }
+                    if let Some(lw) = pt.split_whitespace().last() {
+                        let lw = lw.trim_start_matches(['$', '|', '&', '(', '[']);
+                        if !lw.is_empty() && lw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                            add_call(lw);
+                        }
+                    }
+                    break;
+                }
+            }
+            for c in &line_calls {
+                for &si in &targets_syms {
+                    if !self.facts.symbols[si].calls.iter().any(|x| x.line == line && x.path == *c) {
+                        self.facts.symbols[si].calls.push(Call { path: c.clone(), line });
+                    }
+                }
+            }
+        }
+
+        // Guaranteed line-0 safe call index per symbol
+        let mut safe_call_idx: Vec<usize> = Vec::with_capacity(self.facts.symbols.len());
+        for sym in &mut self.facts.symbols {
+            let pos = sym.calls.len();
+            sym.calls.push(Call { path: "tcl_eval".to_string(), line: 0 });
+            safe_call_idx.push(pos);
+        }
+
+        let tcl_delta = |s: &str| -> i32 {
+            let mut d = 0i32;
+            for &b in s.as_bytes() {
+                match b {
+                    b'(' | b'[' | b'{' => d += 1,
+                    b')' | b']' | b'}' => d -= 1,
+                    _ => {}
+                }
+            }
+            d
+        };
+
+        // Pass 2b: Emit flat x/r/a events per line
+        for idx in 0..n_lines {
+            let line = (idx + 1) as u32;
+            let tr = lines[idx].trim();
+            if tr.is_empty() || (tr.starts_with('#') && !tr.contains('"') && !tr.contains('$') && !tr.contains("::")) { continue; }
+            let targets_syms = enclosing_syms(line);
+
+            let mut base_parts: Vec<String> = Vec::new();
+            let mut lparen_count: usize = 0;
+            let mut space_count: usize = 0;
+            let add_tcl_tokens = |parts: &mut Vec<String>, s: &str, lc: &mut usize, sc: &mut usize| {
+                for &b in s.as_bytes() {
+                    if matches!(b, b'(' | b'[') { *lc += 1; }
+                    else if b == b' ' { *sc += 1; }
+                }
+                let push_n = |parts: &mut Vec<String>, nm: &str| {
+                    if nm.is_empty() || !nm.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_' || ch >= 0x80) {
+                        return;
+                    }
+                    let mut n = String::from("[\"n\",");
+                    push_string(&mut n, nm);
+                    n.push(']');
+                    if !parts.contains(&n) {
+                        parts.push(n);
+                    }
+                };
+                let push_k = |parts: &mut Vec<String>, nm: &str| {
+                    if nm.is_empty() || !nm.bytes().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == b'_') { return; }
+                    let mut k = String::from("[\"k\",");
+                    push_string(&mut k, nm);
+                    k.push_str(",0]");
+                    if !parts.contains(&k) { parts.push(k); }
+                };
+                let sb = s.as_bytes();
+                let mut j = 0;
+                while j < sb.len() {
+                    if sb[j] == b'=' {
+                        let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                        let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                        if !matches!(prev, b'=' | b'!' | b'<' | b'>') && next != b'=' {
+                            let mut end = j;
+                            while end > 0 && (sb[end - 1] == b' ' || sb[end - 1] == b'\t') { end -= 1; }
+                            let mut st = end;
+                            while st > 0 && (sb[st - 1].is_ascii_alphanumeric() || sb[st - 1] == b'_') { st -= 1; }
+                            if st < end { push_k(parts, &s[st..end]); }
+                        }
+                    }
+                    j += 1;
+                }
+                let s_dot = s.replace("::", ".").replace("->", ".").replace(". $", ".");
+                let mut collapsed = String::with_capacity(s_dot.len());
+                {
+                    let sb2 = s_dot.as_bytes();
+                    let mut ci = 0;
+                    while ci < sb2.len() {
+                        if sb2[ci] == b' ' || sb2[ci] == b'\t' {
+                            let mut cj = ci;
+                            while cj < sb2.len() && (sb2[cj] == b' ' || sb2[cj] == b'\t') { cj += 1; }
+                            if cj < sb2.len() && sb2[cj] == b'.' {
+                                collapsed.push('.');
+                                ci = cj + 1;
+                                continue;
+                            }
+                        }
+                        collapsed.push(sb2[ci] as char);
+                        ci += 1;
+                    }
+                }
+                let s_dot_sp = s_dot.replace(". ", ".");
+                let mut s_no_br = String::with_capacity(s_dot.len());
+                {
+                    let mut bd = 0i32;
+                    for c in s_dot.chars() {
+                        if c == '[' { bd += 1; }
+                        else if c == ']' { bd = (bd - 1).max(0); }
+                        else if bd == 0 { s_no_br.push(c); }
+                    }
+                }
+                let norm = format!("{s_dot} {collapsed} {s_dot_sp} {s_no_br}");
+                for raw_tok in norm.split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric() && !matches!(c, '_' | '.')) {
+                    let tok = raw_tok.trim_matches('.');
+                    if tok.is_empty() { continue; }
+                    push_n(parts, tok);
+                    if tok == "this" { push_n(parts, "self"); }
+                    if tok.contains('.') {
+                        let segs: Vec<&str> = tok.split('.').collect();
+                        for seg in &segs {
+                            push_n(parts, seg);
+                        }
+                        if segs.len() >= 3 {
