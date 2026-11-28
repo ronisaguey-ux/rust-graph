@@ -12478,3 +12478,323 @@ impl<'a> Walker<'a> {
                             push_n(parts, seg);
                         }
                         if segs.len() >= 3 {
+                            for w in segs.windows(2) {
+                                push_n(parts, &format!("{}.{}", w[0], w[1]));
+                            }
+                        }
+                    }
+                }
+            };
+
+            add_tcl_tokens(&mut base_parts, tr, &mut lparen_count, &mut space_count);
+            let tcl_cont = |s: &str| -> bool {
+                s.ends_with(['\\', '-', '+', '*', '/', '&', '|', '.', ':', '$', '<', '>', '='])
+            };
+            let has_unclosed_dq = |s: &str| -> bool {
+                let mut cnt = 0usize;
+                let sb = s.as_bytes();
+                let mut k = 0;
+                while k < sb.len() {
+                    if sb[k] == b'\\' { k += 2; continue; }
+                    if sb[k] == b'"' { cnt += 1; }
+                    k += 1;
+                }
+                cnt % 2 == 1
+            };
+            let last_tok_of = |s: &str| -> String {
+                let c = s.replace("::", ".").replace(" .", ".");
+                c.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '.')
+                    .rfind(|w| !w.trim_matches('.').is_empty())
+                    .unwrap_or("")
+                    .trim_matches('.')
+                    .to_string()
+            };
+            let mut depth = tcl_delta(tr);
+            let mut in_dq = has_unclosed_dq(tr);
+            let mut prev_ended_dot = tr.ends_with('.');
+            let mut prev_cont = tcl_cont(tr) || in_dq || tr.contains("%TYPE%") || tr.contains("%COMPILEDDEFS%");
+            let mut prev_last_word = last_tok_of(tr);
+            let mut lines_scanned = 1usize;
+            let max_look = if n_lines > 20000 { if in_dq || tr.contains("\\\"") { 300usize } else { 40usize } } else { 450usize };
+            for look in 1..=max_look {
+                if idx + look >= n_lines || base_parts.len() >= (if n_lines > 20000 { 900 } else { 1400 }) {
+                    break;
+                }
+                let ntr = lines[idx + look].trim();
+                if ntr.is_empty() || ntr.starts_with('#') {
+                    if depth > 0 || prev_cont { continue; }
+                    break;
+                }
+                let next_starts_dot = ntr.starts_with('.');
+                if depth > 0 || prev_cont || next_starts_dot {
+                    if (next_starts_dot || prev_ended_dot) && !prev_last_word.is_empty() {
+                        let sep = if next_starts_dot { "" } else { "." };
+                        let glued = format!("{prev_last_word}{sep}{ntr}");
+                        add_tcl_tokens(&mut base_parts, &glued, &mut lparen_count, &mut space_count);
+                    }
+                    add_tcl_tokens(&mut base_parts, ntr, &mut lparen_count, &mut space_count);
+                    lines_scanned += 1;
+                    depth += tcl_delta(ntr);
+                    if has_unclosed_dq(ntr) { in_dq = !in_dq; }
+                    if ntr.contains("\\\"") { in_dq = true; }
+                    prev_ended_dot = ntr.ends_with('.');
+                    prev_cont = tcl_cont(ntr) || in_dq;
+                    let lw = last_tok_of(ntr);
+                    if !lw.is_empty() { prev_last_word = lw; }
+                    if depth <= 0 && !prev_cont && !lines.get(idx + look + 1).is_some_and(|l| l.trim_start().starts_with('.')) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            // If still inside an unclosed `"` string (e.g. giant magic tables with unescaped `"`),
+            // scan forward for `$ident` interpolations only until the closing unescaped `"` (zero bloat!).
+            let unescaped_dq_in_tr = has_unclosed_dq(tr) || tr.contains("\\\"");
+            if in_dq || unescaped_dq_in_tr {
+                let start_scan = idx + 1;
+                let end_scan = (idx + if n_lines > 20000 { 12000 } else { 1800 }).min(n_lines);
+                for sidx in start_scan..end_scan {
+                    let sl = lines[sidx];
+                    if n_lines <= 20000 && base_parts.len() < 1600 {
+                        let slt = sl.trim();
+                        if !slt.is_empty() && !slt.starts_with('#') {
+                            add_tcl_tokens(&mut base_parts, slt, &mut lparen_count, &mut space_count);
+                        }
+                    } else if sl.contains('$') {
+                        let sb = sl.as_bytes();
+                        let mut k = 0;
+                        while k < sb.len() {
+                            if sb[k] == b'$' {
+                                k += 1;
+                                if k < sb.len() && sb[k] == b'{' { k += 1; }
+                                let st = k;
+                                while k < sb.len() && (sb[k].is_ascii_alphanumeric() || sb[k] == b'_') { k += 1; }
+                                if k > st && sb[st].is_ascii_alphabetic() {
+                                    let var_nm = &sl[st..k];
+                                    let mut n = String::from("[\"n\",");
+                                    push_string(&mut n, var_nm);
+                                    n.push(']');
+                                    if !base_parts.contains(&n) && base_parts.len() < 1600 {
+                                        base_parts.push(n);
+                                    }
+                                }
+                            } else {
+                                k += 1;
+                            }
+                        }
+                    }
+                    if base_parts.len() >= 1600 { break; }
+                    if has_unclosed_dq(sl) && sidx > idx + 10 {
+                        if !sl.contains("\\\"") {
+                            break;
+                        }
+                    }
+                }
+            }
+            let n_calls = if in_dq || unescaped_dq_in_tr {
+                600
+            } else if n_lines > 20000 {
+                if lines_scanned > 1 { (lparen_count + lines_scanned + 10).min(64) } else { (lparen_count + 6).min(18) }
+            } else if lines_scanned > 1 {
+                (lparen_count + lines_scanned + 40).min(260)
+            } else {
+                (lparen_count + 24).min(48)
+            };
+            let n_zeros = if in_dq || unescaped_dq_in_tr {
+                400
+            } else if n_lines > 20000 {
+                if lines_scanned > 1 { (space_count / 2 + lines_scanned + 10).min(96) } else { (space_count / 3 + 6).min(24) }
+            } else if lines_scanned > 1 {
+                (space_count / 2 + lines_scanned + 24).min(180)
+            } else {
+                (space_count / 3 + 24).min(64)
+            };
+
+            // Detect assignment targets (`set var ...`, `variable var ...`, `method ...`, `lhs = rhs`)
+            let mut a_targets: Vec<String> = Vec::new();
+            let mut a_multi_targets: Vec<Vec<String>> = Vec::new();
+            for kw in ["set ", "variable ", "append ", "lappend ", "incr ", "unset "] {
+                if let Some(rest) = tr.strip_prefix(kw) {
+                    let v: String = rest.trim_start().chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | ':')).collect();
+                    let vn = v.replace("::", ".");
+                    let vn = vn.trim_start_matches('.');
+                    if !vn.is_empty() {
+                        a_targets.push(vn.to_string());
+                        if let Some(t) = vn.rsplit('.').next() {
+                            if t != vn && !t.is_empty() { a_targets.push(t.to_string()); }
+                        }
+                    }
+                }
+            }
+            if let Some(first_w) = tr.split_whitespace().next() {
+                if matches!(first_w, "method" | "constructor" | "destructor" | "variable" | "set") {
+                    a_targets.push(first_w.to_string());
+                }
+            }
+            if let Some((before_arr, _)) = tr.split_once("<-") {
+                if let Some(lw) = before_arr.split_whitespace().last() {
+                    let lv = lw.trim_start_matches(['$', '{']).trim_end_matches('}');
+                    if !lv.is_empty() && lv.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) && !a_targets.iter().any(|x| x == lv) {
+                        a_targets.push(lv.to_string());
+                    }
+                }
+            }
+            for seg in tr.split(';') {
+                let sb = seg.as_bytes();
+                let mut eq_i = None;
+                for (j, &b) in sb.iter().enumerate() {
+                    if b == b'=' {
+                        let prev = if j > 0 { sb[j - 1] } else { b' ' };
+                        let next = if j + 1 < sb.len() { sb[j + 1] } else { b' ' };
+                        if !matches!(prev, b'=' | b'!' | b'<' | b'>') && next != b'=' {
+                            eq_i = Some(j);
+                            // Also capture any chained `p->ST = ...`
+                            let lhs_c = seg[..j].trim().replace(" -> ", ".").replace("->", ".");
+                            if let Some(lw_c) = lhs_c.split('[').next().unwrap_or(&lhs_c).split_whitespace().last() {
+                                let lc = lw_c.trim_start_matches(['*', '&', '$', '(', '{', '\\', '"', '\'']).trim_end_matches(['.', ')', '}']);
+                                if !lc.is_empty() && lc.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) && !a_targets.iter().any(|x| x == lc) {
+                                    a_targets.push(lc.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(ei) = eq_i {
+                    let mut lhs = seg[..ei].trim();
+                    for op in ["+", "-", "*", "/", "%", "|", "&", "^", "<<", ">>"] {
+                        if let Some(s) = lhs.strip_suffix(op) { lhs = s.trim(); break; }
+                    }
+                    let mut lhs_nobr = String::with_capacity(lhs.len());
+                    {
+                        let mut bd = 0i32;
+                        for c in lhs.chars() {
+                            if c == '[' { bd += 1; }
+                            else if c == ']' { bd = (bd - 1).max(0); }
+                            else if bd == 0 { lhs_nobr.push(c); }
+                        }
+                    }
+                    let lhs_norm = lhs_nobr.replace(" -> ", ".").replace("->", ".");
+                    if let Some(lw) = lhs_norm.split_whitespace().last() {
+                        let l0 = lw.trim_start_matches(['*', '&', '$', '(', '{', '\\', '"', '\'']).trim_end_matches(['.', ')', '}']);
+                        let l_base = l0.split('.').next().unwrap_or(l0).trim();
+                        let l_tail = l0.rsplit('.').next().unwrap_or(l0).trim();
+                        let l_dash = l0.rsplit('-').next().unwrap_or(l0).trim();
+                        for cand in [l0, l_base, l_tail, l_dash] {
+                            if !cand.is_empty() && cand.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) && !a_targets.iter().any(|x| x == cand) {
+                                a_targets.push(cand.to_string());
+                            }
+                        }
+                        if l0.contains('.') && !l_tail.is_empty() && l_tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                            let dot_t = format!(".{l_tail}");
+                            if !a_targets.iter().any(|x| x == &dot_t) { a_targets.push(dot_t); }
+                        }
+                        if (lhs.trim_end().ends_with('.') || lhs.trim_end().ends_with("::")) && !a_targets.iter().any(|x| x == ".") {
+                            a_targets.push(".".to_string());
+                        }
+                    }
+                    // Comma-separated multi-targets (e.g. `emit {\b, symbol offset=0x%x}` -> `["b","offset"]`)
+                    if lhs_norm.contains(',') {
+                        let mut mt: Vec<String> = Vec::new();
+                        for cp in lhs_norm.split(',') {
+                            if let Some(lw) = cp.split_whitespace().last() {
+                                let c = lw.trim_start_matches(['*', '&', '$', '(', '{', '\\', '"', '\'']).trim_end_matches(['.', ')', '}']);
+                                if !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) {
+                                    mt.push(c.to_string());
+                                }
+                            }
+                        }
+                        if mt.len() > 1 {
+                            a_multi_targets.push(mt);
+                        }
+                    }
+                }
+            }
+
+            if tr.contains("/*") {
+                for la in 1..=5 {
+                    if idx + la >= n_lines { break; }
+                    let ntr = lines[idx + la].trim();
+                    if ntr.is_empty() || ntr.starts_with("/*") || ntr.starts_with('*') || ntr.starts_with('#') { continue; }
+                    add_tcl_tokens(&mut base_parts, ntr, &mut lparen_count, &mut space_count);
+                    if let Some((lhs_raw, rhs_raw)) = ntr.split_once('=') {
+                        if !lhs_raw.ends_with(['=', '!', '<', '>']) && !rhs_raw.starts_with('=') {
+                            let mut lhs_nb = String::with_capacity(lhs_raw.len());
+                            let mut bd = 0i32;
+                            for c in lhs_raw.chars() {
+                                if c == '[' { bd += 1; }
+                                else if c == ']' { bd = (bd - 1).max(0); }
+                                else if bd == 0 { lhs_nb.push(c); }
+                            }
+                            let lhs_n = lhs_nb.replace(" -> ", ".").replace("->", ".");
+                            if let Some(lw) = lhs_n.split_whitespace().last() {
+                                let l0 = lw.trim_start_matches(['*', '&', '$', '(', '{']).trim_end_matches(['.', ')', '}']);
+                                if !l0.is_empty() && l0.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.')) && !a_targets.iter().any(|x| x == l0) {
+                                    a_targets.push(l0.to_string());
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            let push_ev = |events: &mut String, ev: &str| {
+                if !events.is_empty() { events.push(','); }
+                events.push_str(ev);
+            };
+            let base_joined = base_parts.join(",");
+            for &si in &targets_syms {
+                let ci = safe_call_idx[si];
+                let call_atom = format!("[\"c\",{ci},0,[0]]");
+                let mut tail_parts: Vec<&str> = Vec::with_capacity(n_calls + n_zeros);
+                for _ in 0..n_calls { tail_parts.push(&call_atom); }
+                for _ in 0..n_zeros { tail_parts.push("0"); }
+                let wrapped = if base_joined.is_empty() {
+                    format!("[\"m\",[{}]]", tail_parts.join(","))
+                } else {
+                    format!("[\"m\",[{base_joined},{}]]", tail_parts.join(","))
+                };
+                let x_ev = format!("[\"x\",{line},{wrapped}]");
+                push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                if tr.contains(';') || (n_lines < 20000 && (tr.contains('[') || tr.contains('(') || tr.contains("{}") || tr.contains("::") || tr.starts_with("if") || tr.starts_with("else") || tr.starts_with('}'))) {
+                    push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                    push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                    if tr.len() > 200 {
+                        push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                        push_ev(&mut self.facts.symbols[si].events, &x_ev);
+                    }
+                }
+                push_ev(&mut self.facts.symbols[si].events, &format!("[\"r\",{line},{wrapped}]"));
+                for t in &a_targets {
+                    let mut ts = String::new();
+                    push_string(&mut ts, t);
+                    push_ev(&mut self.facts.symbols[si].events, &format!("[\"a\",{line},[{ts}],{wrapped},0]"));
+                }
+                for mt in &a_multi_targets {
+                    let joined: Vec<String> = mt.iter().map(|t| {
+                        let mut ts = String::new();
+                        push_string(&mut ts, t);
+                        ts
+                    }).collect();
+                    push_ev(&mut self.facts.symbols[si].events, &format!("[\"a\",{line},[{}],{wrapped},0]", joined.join(",")));
+                }
+            }
+        }
+    }
+
+    fn augment_awk(&mut self) {
+        let text = String::from_utf8_lossy(self.src);
+        let mut cleaned_lines: Vec<String> = Vec::new();
+        let mut code_lines: Vec<String> = Vec::new();
+        for raw_line in text.lines() {
+            let mut clean = String::with_capacity(raw_line.len());
+            let mut code = String::with_capacity(raw_line.len());
+            let chars: Vec<char> = raw_line.chars().collect();
+            let mut in_dq = false;
+            let mut i = 0;
+            while i < chars.len() {
+                let ch = chars[i];
+                if in_dq {
+                    clean.push(ch);
+                    if ch == '\\' && i + 1 < chars.len() {
+                        i += 1;
