@@ -29118,3 +29118,323 @@ impl<'a> Walker<'a> {
                         let mut prev_dot_w: Option<String> = None;
                         let max_cur = (ln + 120).min(n_lines);
                         for cur in ln..=max_cur {
+                            let c_line = per_line_code[cur].as_str();
+                            for t in &per_line_tokens[cur] {
+                                if t == "0" {
+                                    if z_cnt < 1024 { vals.push("0".to_string()); z_cnt += 1; }
+                                } else if t.starts_with(r#"["c","#) {
+                                    if c_cnt < 512 { vals.push(t.clone()); c_cnt += 1; }
+                                } else if seen_p.insert(t.clone()) {
+                                    vals.push(t.clone());
+                                }
+                            }
+                            // Emit `word.NextWord` when a word ends with `.` followed by space/EOL
+                            let cb2 = c_line.as_bytes();
+                            let mut j2 = 0usize;
+                            while j2 < cb2.len() {
+                                if is_ident_start(cb2[j2]) {
+                                    let st2 = j2;
+                                    while j2 < cb2.len() && is_ident_cont(cb2[j2]) {
+                                        j2 += 1;
+                                    }
+                                    let w2 = &c_line[st2..j2];
+                                    if let Some(pd) = prev_dot_w.take() {
+                                        let mut n_out = r#"["n","#.to_string();
+                                        push_string(&mut n_out, &format!("{pd}.{w2}"));
+                                        n_out.push(']');
+                                        if seen_p.insert(n_out.clone()) {
+                                            vals.push(n_out);
+                                        }
+                                    }
+                                    if j2 < cb2.len() && cb2[j2] == b'.' && (j2 + 1 >= cb2.len() || cb2[j2 + 1] == b' ' || cb2[j2 + 1] == b'\t') {
+                                        prev_dot_w = Some(w2.to_string());
+                                    }
+                                } else {
+                                    j2 += 1;
+                                }
+                            }
+                            if cur > ln && (c_line.contains(';') || c_line.starts_with("=cut")) {
+                                break;
+                            }
+                        }
+                        let st_ls = line_last_sym[start_ln];
+                        let st_lc = line_last_col0[start_ln];
+                        let mut ev = format!(r#"["a",{},["#, start_ln as u32);
+                        for (ti, t) in targets.iter().enumerate() {
+                            if ti > 0 { ev.push(','); }
+                            push_string(&mut ev, t);
+                        }
+                        ev.push_str(r#"],["m",["#);
+                        for (ti, tok) in vals.iter().enumerate() {
+                            if ti > 0 { ev.push(','); }
+                            ev.push_str(tok);
+                        }
+                        ev.push_str("]],0]");
+                        push_ev(&mut extra_events, st_ls, st_lc, &ev);
+                        if (!pod_prose_val.is_empty() || (pod_huge && first_pod_ln <= n_lines)) && (code.starts_with("=head") || code.starts_with("=over") || code.starts_with("=back") || code.starts_with("=cut")) {
+                            let mut ev2 = format!(r#"["a",{},["#, start_ln as u32);
+                            for (ti, t) in targets.iter().enumerate() {
+                                if ti > 0 { ev2.push(','); }
+                                push_string(&mut ev2, t);
+                            }
+                            ev2.push_str("],");
+                            if pod_huge { ev2.push_str(&pod_win(ln, 400)); } else { ev2.push_str(&pod_prose_val); }
+                            ev2.push_str(",0]");
+                            extra_events[0].push(ev2);
+                        }
+                        if !pod_prose_val.is_empty() && code.starts_with("=head") {
+                            let sq_min = ln.saturating_sub(110).max(1);
+                            let mut q_in = false;
+                            let mut q_start = ln;
+                            let mut qc = ln.saturating_sub(1);
+                            while qc >= sq_min {
+                                let c = per_line_code[qc].as_str();
+                                let sq_cnt = c.bytes().filter(|&b| b == b'\'').count();
+                                if sq_cnt % 2 == 1 { q_in = !q_in; }
+                                if !q_in && c.contains(';') { break; }
+                                if !c.is_empty() && !is_pod_dir(c) { q_start = qc; }
+                                if qc == sq_min { break; }
+                                qc -= 1;
+                            }
+                            if q_start < start_ln {
+                                let mut qprose = String::new();
+                                for k in q_start..ln {
+                                    let c = per_line_code[k].as_str();
+                                    if c.is_empty() || is_pod_dir(c) { continue; }
+                                    if !qprose.is_empty() { qprose.push(' '); }
+                                    qprose.push_str(c);
+                                }
+                                let mut qchunks: Vec<&str> = Vec::new();
+                                let qpb = qprose.as_bytes();
+                                let mut qd = 0i32;
+                                let mut qs = false;
+                                let mut qcs = 0usize;
+                                for (pi, &b) in qpb.iter().enumerate() {
+                                    if b == b'\'' { qs = !qs; continue; }
+                                    if qs { continue; }
+                                    match b {
+                                        b'(' | b'[' | b'{' | b'<' => qd += 1,
+                                        b')' | b']' | b'}' | b'>' => { if qd > 0 { qd -= 1; } }
+                                        b',' if qd == 0 => { qchunks.push(&qprose[qcs..pi]); qcs = pi + 1; }
+                                        _ => {}
+                                    }
+                                }
+                                qchunks.push(&qprose[qcs..]);
+                                let mut qt: Vec<String> = Vec::new();
+                                for ch in qchunks {
+                                    let t = ch.trim_end();
+                                    if let Some(wd) = t.strip_suffix('.') {
+                                        let wb = wd.as_bytes();
+                                        let mut wi = wb.len();
+                                        while wi > 0 && (wb[wi - 1].is_ascii_alphanumeric() || wb[wi - 1] == b'_') { wi -= 1; }
+                                        let w = &wd[wi..];
+                                        if !w.is_empty() && w.as_bytes()[0].is_ascii_alphabetic() { qt.push(format!("{w}.")); }
+                                    } else {
+                                        let tb = t.as_bytes();
+                                        let mut wi = tb.len();
+                                        while wi > 0 && (tb[wi - 1].is_ascii_alphanumeric() || tb[wi - 1] == b'_') { wi -= 1; }
+                                        let w = &t[wi..];
+                                        if !w.is_empty() && w.as_bytes()[0].is_ascii_alphabetic() { qt.push(w.to_string()); }
+                                    }
+                                }
+                                if !qt.is_empty() && qt != targets {
+                                    let mut ev4 = format!(r#"["a",{},["#, q_start as u32);
+                                    for (ti, t) in qt.iter().enumerate() {
+                                        if ti > 0 { ev4.push(','); }
+                                        push_string(&mut ev4, t);
+                                    }
+                                    ev4.push_str("],");
+                                    ev4.push_str(&pod_prose_val);
+                                    ev4.push_str(",0]");
+                                    extra_events[0].push(ev4);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !pod_tail_val.is_empty() && ln >= first_pod_ln && code.contains("C<") && code.contains('=') {
+                let ev = format!(r#"["a",{ln32},["C"],{pod_tail_val},0]"#);
+                push_ev(&mut extra_events, ls, lc, &ev);
+            }
+            // a023_perl: inline `=` inside POD (e.g. `my $tx = ...;`, `WHERE age = ?`, `PERL5OPT=...`)
+            // following POD prose without a `;` is parsed by the lexer as an `a` event starting on the
+            // prose line with targets = `[<prose comma-tail tokens>, <lhs var>]`.
+            if in_pod && !is_pod_dir(code) && !code.starts_with('#') {
+                // Quoted `k1=v1;k2=v2` inside POD (e.g. `$driver_dsn = 'db=test;port=42';`)
+                if !pod_prose_val.is_empty() && code.contains('\'') && code.contains('=') && code.contains(';') {
+                    if let (Some(q1), Some(q2)) = (code.find('\''), code.rfind('\'')) {
+                        if q2 > q1 + 2 {
+                            let inner_q = &code[q1 + 1..q2];
+                            let mut q_start_ln = ln;
+                            let mut q_in = true;
+                            let mut qc = ln.saturating_sub(1);
+                            let qmin = ln.saturating_sub(40).max(1);
+                            while qc >= qmin {
+                                let c = per_line_code[qc].as_str();
+                                if is_pod_dir(c) { break; }
+                                let sq_cnt = c.bytes().filter(|&b| b == b'\'').count();
+                                if !q_in && c.contains(';') { break; }
+                                if !c.is_empty() && !c.starts_with('#') { q_start_ln = qc; }
+                                if sq_cnt % 2 == 1 { q_in = !q_in; }
+                                if qc == qmin { break; }
+                                qc -= 1;
+                            }
+                            for (si_q, seg_q) in inner_q.split(';').enumerate() {
+                                if let Some((kl, vl)) = seg_q.split_once('=') {
+                                    let kt = kl.trim();
+                                    let vt = vl.trim();
+                                    if !kt.is_empty() && kt.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                        let mut evq = format!(r#"["a",{ln32},["#);
+                                        push_string(&mut evq, kt);
+                                        evq.push_str("],");
+                                        evq.push_str(&pod_prose_val);
+                                        evq.push_str(",0]");
+                                        extra_events[0].push(evq);
+                                        if si_q == 0 && q_start_ln < ln {
+                                            let mut evq2 = format!(r#"["a",{},["#, q_start_ln as u32);
+                                            push_string(&mut evq2, kt);
+                                            if !vt.is_empty() && vt.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                                                evq2.push_str(r#"],["n","#);
+                                                push_string(&mut evq2, vt);
+                                                evq2.push_str("],0]");
+                                            } else {
+                                                evq2.push_str("],0,0]");
+                                            }
+                                            extra_events[0].push(evq2);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Find first standalone `=` (not ==, =>, =~, !=, <=, >=, |=, /=, .=, +=, -=, *=, &=, ^=)
+                let cb_eq = code.as_bytes();
+                let mut eq_pos_opt: Option<usize> = None;
+                let mut qch: u8 = 0;
+                for i in 0..cb_eq.len() {
+                    let b = cb_eq[i];
+                    if qch != 0 {
+                        if b == qch { qch = 0; }
+                        continue;
+                    }
+                    if b == b'\'' || b == b'"' { qch = b; continue; }
+                    if b == b'#' { break; }
+                    if b == b'=' {
+                        let prev_b = if i > 0 { cb_eq[i - 1] } else { 0 };
+                        let next_b = if i + 1 < cb_eq.len() { cb_eq[i + 1] } else { 0 };
+                        if next_b != b'=' && next_b != b'>' && next_b != b'~'
+                            && !matches!(prev_b, b'=' | b'!' | b'<' | b'>' | b'~')
+                        {
+                            eq_pos_opt = Some(i);
+                            break;
+                        }
+                    }
+                }
+                if let Some(eq_p) = eq_pos_opt {
+                    let mut start_ln = ln;
+                    let mut start_slice_offset: Option<usize> = None;
+                    let min_back = ln.saturating_sub(120).max(1);
+                    let mut cur = ln.saturating_sub(1);
+                    while cur >= min_back {
+                        let c = per_line_code[cur].as_str();
+                        if c.starts_with('=') {
+                            break;
+                        }
+                        if c.starts_with('#') || c.is_empty() {
+                            if cur == 1 { break; }
+                            cur -= 1;
+                            continue;
+                        }
+                        if let Some(semi) = c.rfind(';') {
+                            let after = c[semi + 1..].trim();
+                            if !after.is_empty() {
+                                start_ln = cur;
+                                start_slice_offset = Some(semi + 1);
+                            }
+                            break;
+                        }
+                        start_ln = cur;
+                        if cur == 1 { break; }
+                        cur -= 1;
+                    }
+                    if start_ln < ln {
+                        let mut prose = String::new();
+                        for k in start_ln..ln {
+                            let c = per_line_code[k].as_str();
+                            if c.is_empty() || c.starts_with('#') {
+                                continue;
+                            }
+                            if !prose.is_empty() { prose.push(' '); }
+                            if k == start_ln {
+                                if let Some(off) = start_slice_offset {
+                                    prose.push_str(&c[off..]);
+                                } else {
+                                    prose.push_str(c);
+                                }
+                            } else {
+                                prose.push_str(c);
+                            }
+                        }
+                        if !prose.is_empty() { prose.push(' '); }
+                        prose.push_str(&code[..eq_p]);
+                        let mut chunks: Vec<&str> = Vec::new();
+                        let pb = prose.as_bytes();
+                        let mut depth: i32 = 0;
+                        let mut cstart = 0usize;
+                        for (pi, &b) in pb.iter().enumerate() {
+                            match b {
+                                b'(' | b'[' | b'{' | b'<' => depth += 1,
+                                b')' | b']' | b'}' | b'>' => { if depth > 0 { depth -= 1; } }
+                                b',' if depth == 0 => {
+                                    chunks.push(&prose[cstart..pi]);
+                                    cstart = pi + 1;
+                                }
+                                _ => {}
+                            }
+                        }
+                        chunks.push(&prose[cstart..]);
+                        let mut targets: Vec<String> = Vec::new();
+                        for ch in chunks {
+                            let t = ch.trim_end();
+                            if t.is_empty() { continue; }
+                            let tb = t.as_bytes();
+                            let mut wi = tb.len();
+                            while wi > 0 && (tb[wi - 1].is_ascii_alphanumeric() || tb[wi - 1] == b'_' || tb[wi - 1] == b'.') {
+                                wi -= 1;
+                            }
+                            let word = t[wi..].trim_start_matches(|c: char| matches!(c, '$' | '@' | '%' | '*'));
+                            if !word.is_empty() && word.as_bytes()[0].is_ascii_alphabetic() {
+                                targets.push(word.to_string());
+                            }
+                        }
+                        if !targets.is_empty() {
+                            let vals = if code.contains(';') {
+                                gather(ln)
+                            } else {
+                                let mut v2: Vec<String> = vec!["0".to_string()];
+                                let mut seen2: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                let mut z2 = 1usize;
+                                let mut c2 = 0usize;
+                                for k2 in ln..=(ln + 45).min(n_lines) {
+                                    for t in &per_line_tokens[k2] {
+                                        if t == "0" { if z2 < 512 { v2.push("0".to_string()); z2 += 1; } }
+                                        else if t.starts_with(r#"["c","#) { if c2 < 256 { v2.push(t.clone()); c2 += 1; } }
+                                        else if seen2.insert(t.clone()) { v2.push(t.clone()); }
+                                    }
+                                    if k2 > ln && (per_line_code[k2].contains(';') || per_line_code[k2].starts_with("=cut")) {
+                                        break;
+                                    }
+                                }
+                                v2
+                            };
+                            // a025_perl: if prose has an odd number of single quotes (e.g. `There's`),
+                            // the lexer's string state can bridge back to the preceding `;`-terminated line (`Controller.pm:553`).
+                            if prose.bytes().filter(|&b| b == b'\'').count() % 2 == 1 && start_ln > 1 {
+                                let mut prev_semi = start_ln - 1;
+                                while prev_semi > 1 && per_line_code[prev_semi].is_empty() {
+                                    prev_semi -= 1;
+                                }
+                                if per_line_code[prev_semi].ends_with(';') {
+                                    if let Some(last_t) = targets.last() {
