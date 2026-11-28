@@ -30718,3 +30718,323 @@ impl<'a> Walker<'a> {
                 let mut out: Vec<String> = Vec::new();
                 let mut i = 0usize;
                 while i < nodes.len() {
+                    let c = nodes[i];
+                    let ck = w.kind(c);
+                    if ck == "type_argument" {
+                        let tkids = w.children(c);
+                        let f = emit_cr_type(w, &tkids);
+                        if !f.is_empty() {
+                            out.push(f);
+                        }
+                    } else if ck == "type_path" {
+                        let tname = w.text_string(c);
+                        if i + 1 < nodes.len() && w.kind(nodes[i + 1]) == "generic_arguments" {
+                            let idx = w.push_call(tname, w.line(c));
+                            let gkids = w.children(nodes[i + 1]);
+                            let mut args = Vec::new();
+                            for gc in gkids {
+                                if w.kind(gc) == "type_argument" {
+                                    let tk = w.children(gc);
+                                    let f = emit_cr_type(w, &tk);
+                                    if !f.is_empty() {
+                                        args.push(f);
+                                    }
+                                }
+                            }
+                            out.push(format!("[\"c\",{idx},0,[{}]]", args.join(",")));
+                            i += 2;
+                            continue;
+                        } else if !tname.is_empty() {
+                            let mut f = String::from("[\"n\",");
+                            push_string(&mut f, &tname);
+                            f.push(']');
+                            out.push(f);
+                        }
+                    }
+                    i += 1;
+                }
+                match out.len() {
+                    0 => String::new(),
+                    1 => out.remove(0),
+                    _ => format!("[\"m\",[{}]]", out.join(",")),
+                }
+            }
+            let type_form = emit_cr_type(self, &kids[1..]);
+            if !type_form.is_empty() {
+                parts.push(type_form);
+            }
+            if !parts.is_empty() {
+                let val = if parts.len() == 1 {
+                    parts.remove(0)
+                } else {
+                    format!("[\"m\",[{}]]", parts.join(","))
+                };
+                self.lexer_event(b'x', line, &[], &val, false);
+            }
+            return;
+        }
+        if kind == "annotation_definition" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let idx = self.push_call("annotation".to_string(), line);
+            let cname = self.children(id).into_iter().find(|&c| matches!(self.kind(c), "constant" | "scope")).map(|c| self.text_string(c)).unwrap_or_default();
+            let val = if cname.is_empty() {
+                format!("[\"c\",{idx},0,[]]")
+            } else {
+                let mut arg = String::from("[\"n\",");
+                push_string(&mut arg, &cname);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
+            };
+            self.lexer_event(b'x', line, &[], &val, false);
+        }
+        if kind == "lib_definition" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let idx = self.push_call("lib".to_string(), line);
+            let cname = self.children(id).into_iter().find(|&c| matches!(self.kind(c), "constant" | "scope")).map(|c| self.text_string(c)).unwrap_or_default();
+            let val = if cname.is_empty() {
+                format!("[\"c\",{idx},0,[]]")
+            } else {
+                let mut arg = String::from("[\"n\",");
+                push_string(&mut arg, &cname);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
+            };
+            self.lexer_event(b'x', line, &[], &val, false);
+        }
+        if kind == "fun_declaration" && self.facts.tag == "CR" {
+            let line = self.line(id);
+            let idx = self.push_call("fun".to_string(), line);
+            let children = self.children(id);
+            let fname = children.iter().copied().find(|&c| self.kind(c) == "identifier").map(|c| self.text_string(c)).unwrap_or_default();
+            let colon_pos = children.iter().position(|&c| self.kind(c) == ":");
+            let ret_type = colon_pos.and_then(|pos| {
+                children[pos + 1..].iter().copied().find(|&c| !self.is_layout(c))
+            });
+            let val = if fname.is_empty() {
+                format!("[\"c\",{idx},0,[]]")
+            } else if let Some(rt) = ret_type {
+                let rt_text = self.text_string(rt);
+                let rt_form = if !rt_text.is_empty() && rt_text.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') {
+                    let mut rf = String::from("[\"n\",");
+                    push_string(&mut rf, rt_text.trim_end_matches('*').trim());
+                    rf.push(']');
+                    rf
+                } else {
+                    let f = self.form(rt);
+                    if f.is_empty() { "0".to_string() } else { f }
+                };
+                let mut arg = String::from("[\"k\",");
+                push_string(&mut arg, &fname);
+                arg.push(',');
+                arg.push_str(&rt_form);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
+            } else {
+                let mut arg = String::from("[\"n\",");
+                push_string(&mut arg, &fname);
+                arg.push(']');
+                format!("[\"c\",{idx},0,[{arg}]]")
+            };
+            self.lexer_event(b'x', line, &[], &val, false);
+            if let Some(rt) = ret_type {
+                if !fname.is_empty() && self.text_string(id).trim().ends_with('*') {
+                    self.lexer_event(b'a', line, &[fname], "0", false);
+                }
+            }
+        }
+        if let Some(def) = self.kinds.definitions.iter().find(|def| def.kind == kind) {
+            if self.facts.tag == "GROOVY"
+                && kind == "field_or_method"
+                && self.child_of_kind(id, "parameter_list").is_none()
+            {
+                if let Some(init) = self.child_of_kind(id, "initializer") {
+                    let line = self.line(id);
+                    let children = self.children(id);
+                    let init_pos = children.iter().position(|&c| c == init).unwrap_or(children.len());
+                    let target = children[..init_pos]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&c| self.kind(c) == "identifier")
+                        .map(|c| self.text_string(c));
+                    if let (Some(target), Some(rhs)) = (
+                        target,
+                        self.children(init).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "="),
+                    ) {
+                        let ctor = if self.kind(rhs) == "constructor_call" {
+                            Some(rhs)
+                        } else if self.kind(rhs) == "call" {
+                            self.children(rhs).first().copied().filter(|&c| self.kind(c) == "constructor_call")
+                        } else {
+                            None
+                        };
+                        if let Some(ctor) = ctor {
+                            if let Some(t) = self.children(ctor).into_iter().find(|&c| !self.is_layout(c) && self.kind(c) != "new") {
+                                let cname = if self.kind(t) == "call" {
+                                    self.children(t).first().copied().and_then(|c| self.leaf_name(c))
+                                } else {
+                                    self.leaf_name(t)
+                                };
+                                if let Some(cname) = cname {
+                                    self.facts.vars.push((target.clone(), cname));
+                                }
+                            }
+                        } else if self.kind(rhs) == "call" {
+                            if let Some(callee) = self.children(rhs).first().copied().and_then(|c| self.leaf_name(c)) {
+                                if callee.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+                                    self.facts.vars.push((target.clone(), callee));
+                                }
+                            }
+                        }
+                        let val = self.form(rhs);
+                        self.lexer_event(b'a', line, &[target], &val, false);
+                    }
+                    return;
+                }
+            } else {
+                self.open_definition(id, def);
+                if self.language.name == "csharp" && !def.container {
+                    self.cs_arrow_body(id, self.line(id));
+                }
+                return;
+            }
+        }
+        if self.facts.tag == "GROOVY" && kind == "annotation" {
+            let line = self.line(id);
+            let names: Vec<String> = self
+                .children(id)
+                .into_iter()
+                .filter(|&c| self.kind(c) == "identifier")
+                .map(|c| self.text_string(c))
+                .collect();
+            if !names.is_empty() {
+                let full = names.join(".");
+                if let Some(arg_list) = self.child_of_kind(id, "argument_list") {
+                    let idx = self.push_call(full, line);
+                    let args = self.arguments(arg_list);
+                    self.lexer_event(b'x', line, &[], &format!("[\"c\",{idx},0,{args}]"), false);
+                } else {
+                    let mut val = String::from("[\"n\",");
+                    push_string(&mut val, &full);
+                    val.push(']');
+                    self.lexer_event(b'x', line, &[], &val, false);
+                }
+            }
+            return;
+        }
+        if self.has_kind(id, self.kinds.imports) {
+            self.import(id);
+            return;
+        }
+        // Go and Java write a statement where Python writes an expression and
+        // JavaScript a declarator; their arms are the lexer's statement model,
+        // read off the tree, and none of them is any arm below.
+        match self.kinds.family {
+            Family::Go => {
+                self.go_enter(id);
+                return;
+            }
+            Family::Java => {
+                self.java_enter(id);
+                return;
+            }
+            Family::Plain | Family::Js | Family::Rust => {}
+        }
+        match kind {
+            // A field declaration is a statement to the lexer: `private readonly
+            // DeserializationTracker _tracker;` is an `x` event over the whole
+            // header, and nothing read the node, so every C# field an API
+            // declares left an event the tree never wrote. Go has the same arm
+            // in its own statement model.
+            "field_declaration" | "event_field_declaration" | "event_declaration" => {
+                // A field initialised with a call is an assignment to the
+                // lexer; anything else is the header event.
+                if !self.cs_field_assignment(id) {
+                    // `private int _mask = 31;`: a field with a constant
+                    // initialiser is an assignment to 0 for the lexer, and the
+                    // arm wrote the header alone - no event on the line at all.
+                    let children = self.children(id);
+                    let assigned = children.iter().position(|&child| self.kind(child) == "=");
+                    let target = assigned.and_then(|at| self.cs_decl_target(&children[..at]));
+                    match (assigned, target) {
+                        (Some(at), Some(name)) => {
+                            // C#: the initialiser is the value. `public bool Flag
+                            // = false;` is `a [Flag] n:false` to the lexer, and
+                            // writing the constant `0` for every field but a call
+                            // left each such field a disagreement. A keyword
+                            // literal is a name to the one-pass reader, and a
+                            // constant's initialiser merges the name and the
+                            // constant, so the written form is the child's own.
+                            // Other languages keep the constant: the model is the
+                            // C# arm's, measured here, not theirs.
+                            let form = if self.language.name == "csharp" {
+                                let child = children[at + 1..]
+                                    .iter()
+                                    .copied()
+                                    .find(|&c| !self.is_layout(c) && self.kind(c) != "ref");
+                                let kind = child.map(|node| self.kind(node)).unwrap_or("");
+                                let first_form = match kind {
+                                    "true" | "false" | "null" => format!("[\"n\",\"{kind}\"]"),
+                                    "" => "0".to_string(),
+                                    _ => child
+                                        .map(|node| self.form(node))
+                                        .filter(|form| !form.is_empty() && form != "0")
+                                        .unwrap_or_else(|| "0".to_string()),
+                                };
+                                let mut multi = vec![first_form];
+                                for (idx, &c) in children.iter().enumerate() {
+                                    if idx > at && self.kind(c) == "=" {
+                                        if let Some(&rhs) = children[idx + 1..]
+                                            .iter()
+                                            .find(|&&n| !self.is_layout(n) && self.kind(n) != "ref")
+                                        {
+                                            let rhs_form = self.form(rhs);
+                                            if let Some(t_name) = children[..idx].iter().rev().find_map(|&n| self.leaf_name(n)) {
+                                                let mut tf = String::from("[\"n\",");
+                                                push_string(&mut tf, &t_name);
+                                                tf.push(']');
+                                                let rhs_val = if rhs_form.is_empty() { "0" } else { rhs_form.as_str() };
+                                                multi.push(format!("[\"m\",[{tf},{rhs_val}]]"));
+                                            }
+                                        }
+                                    }
+                                }
+                                if multi.len() == 1 {
+                                    multi.remove(0)
+                                } else {
+                                    format!("[\"t\",[{}]]", multi.join(","))
+                                }
+                            } else {
+                                "0".to_string()
+                            };
+                            let line = self.line(id);
+                            self.lexer_event(b'a', line, &[name], &form, false);
+                        }
+                        _ => {
+                            self.decl_statement(id);
+                            self.field_initializer_calls(id);
+                        }
+                    }
+                }
+                self.cs_declared_vars(id);
+                if self.language.name == "csharp" {
+                    self.cs_lambda_symbol(id);
+                }
+            }
+            // `uint A(int hc) => hc.ToHashCode();`: an expression-bodied member
+            // writes its body after the arrow, and the one-pass reader drops
+            // the member header before `=>` and records only that body.
+            "expression_bodied_member" if self.language.name == "csharp" => {
+                self.cs_arrow_body(id, self.line(id));
+            }
+            // `var o = JObject.Parse(text);` and `int depth = 0;` and `using var x = ...;`:
+            // C# local and using declarations are assignment statements to the
+            // lexer. `cs_field_assignment` handles direct calls/creations; any
+            // other initialised declaration (literals, names, member reads,
+            // expressions) still writes an `a` event, matching `field_declaration`.
+            "local_variable_declaration" | "using_declaration"
+                if self.kinds.calls.contains(&"object_creation_expression") =>
+            {
+                if !self.cs_field_assignment(id) {
+                    let children = self.children(id);
+                    let assigned = children.iter().position(|&child| self.kind(child) == "=");
