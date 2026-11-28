@@ -35838,3 +35838,323 @@ impl<'a> Walker<'a> {
                         // line, so every binding lost its line (21 rows in
                         // AnsiColor.scala alone).
                         // The binders are the identifiers before the type
+                        // annotation: `var a, b: T = …` declares both, and a
+                        // type annotation (`val A: RecordType = …`) puts
+                        // another identifier after the colon, which is not a
+                        // binder (21 rows in RecordType.scala). Only the first
+                        // was read, so `b` was missing from every such line.
+                        let colon = children[..at].iter().position(|&child| self.text_string(child) == ":").unwrap_or(at);
+                        let names: Vec<String> = children[..colon]
+                            .iter()
+                            .filter(|&&child| self.kind(child) == "identifier")
+                            .map(|&child| self.text_string(child))
+                            .collect();
+                        if !names.is_empty() {
+                            let line = self.line(id);
+                            // The lexer also binds a val whose initialiser is a
+                            // constructor call to the class it builds
+                            // (`val bldr = new JLSBuilder(..)` binds `bldr` to
+                            // `JLSBuilder`). Reading only the event left every
+                            // such typed member as a variable the CST missed.
+                            if let Some(class) = self.constructed(value) {
+                                for name in &names {
+                                    self.facts.vars.push((name.clone(), class.clone()));
+                                }
+                            }
+                            self.lexer_event(b'a', line, &names, &form, false);
+                        }
+                    }
+                }
+            }
+            // `(x: T) => self.apply(x)`: Scala's lambda body is an expression,
+            // and nothing formed it, so every call written there was missing
+            // from the call table. A nested lambda is visited on its own.
+            "lambda_expression" if self.language.name == "scala" => {
+                let mut calls = Vec::new();
+                self.scala_calls_in_lambda(id, &mut calls);
+                for call in calls {
+                    self.form(call);
+                }
+            }
+            // `Assert.Throws<X>(() => new Foo());`: a lambda's expression body
+            // holds a call, and no arm read the node, so every call written in
+            // a lambda passed as an argument was missing from the CST's record
+            // (C# corpus: the largest remaining call cluster, 44 files). A
+            // block body is walked by the generic walk and needs nothing here.
+            "lambda_expression" if self.facts.tag == "CS" => {
+                if let Some(body) = self.cs_expression_body(id) {
+                    self.form(body);
+                }
+            }
+            // Scala's `def f(): T = expr` writes the body as a `def_body` whose
+            // child is the expression itself. Nothing read that node, so a call
+            // in an expression-bodied def never reached the record.
+            "def_body" => self.expression_statement(id),
+            // Erlang writes a function's expressions under one `body`, separated
+            // by commas. Reading only the first left every later call out of the
+            // record (`A = f(), B:g().` recorded `f` and neither remote call).
+            "body" if self.facts.tag == "ERL" => {
+                let kids: Vec<u32> = self.children(id).into_iter().filter(|&c| !self.is_layout(c) && !matches!(self.kind(c), "," | ".")).collect();
+                for (ki, &child) in kids.iter().enumerate() {
+                    if self.kind(child) == "ERROR" {
+                        if let Some(&next) = kids.get(ki + 1) {
+                            if matches!(self.kind(next), "paren_expression" | "call_arguments" | "parameter_group" | "(") {
+                                let mut leaves = Vec::new();
+                                self.cs_collect_leaves(child, &mut leaves);
+                                if let Some(&last_tok) = leaves.iter().rev().find(|&&t| self.erl_leaf_name(t).is_some()) {
+                                    if let Some(nm) = self.erl_leaf_name(last_tok) {
+                                        let _ = self.push_call(nm, self.line(last_tok));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.statement_node(child, child);
+                }
+            }
+            "attribute" if self.facts.tag == "ERL" => {
+                let attr_name = self
+                    .child_of_kind(id, "attribute_name")
+                    .map(|c| self.text_string(c))
+                    .unwrap_or_default();
+                if matches!(attr_name.as_str(), "define" | "if" | "elif" | "record") {
+                    if let Some(grp) = self.child_of_kind(id, "attribute_group") {
+                        if let Some(args) = self.child_of_kind(grp, "attribute_arguments") {
+                            let exprs: Vec<u32> = self
+                                .children(args)
+                                .into_iter()
+                                .filter(|&c| !self.is_layout(c) && self.kind(c) != ",")
+                                .collect();
+                            for &expr in &exprs {
+                                let _ = self.form(expr);
+                            }
+                        }
+                    }
+                }
+            }
+            // After a parse error inside an Erlang function body, recovery pops back to `forms`
+            // and parses the next call `foo(Args);` as a `function_head` with `function_name`
+            // and `parameter_group` followed by `ERROR MISSING` for `->` and `body`. When there
+            // is no `->` / `body`, it is a call, not a function clause header.
+            "function_head" if self.facts.tag == "ERL" => {
+                let has_arrow = self.children(id).into_iter().any(|c| matches!(self.kind(c), "->" | "body"));
+                if !has_arrow {
+                    if let (Some(fname), Some(_pg)) = (
+                        self.child_of_kind(id, "function_name"),
+                        self.child_of_kind(id, "parameter_group"),
+                    ) {
+                        let name = self.text_string(fname).trim_matches('\'').to_string();
+                        if !name.is_empty() {
+                            self.push_call(name, self.line(fname));
+                        }
+                    }
+                }
+            }
+            "parameter_group" if self.facts.tag == "ERL" => {
+                let pline = self.line(id);
+                let mut parts = Vec::new();
+                if let Some(params) = self.child_of_kind(id, "parameters") {
+                    for expr in self.children(params) {
+                        if !self.is_layout(expr) && self.kind(expr) != "," {
+                            let v = self.form(expr);
+                            if !v.is_empty() && v != "0" {
+                                parts.push(v);
+                            }
+                        }
+                    }
+                }
+                if !parts.is_empty() {
+                    let val = if parts.len() == 1 {
+                        parts.remove(0)
+                    } else {
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    };
+                    self.lexer_event(b'x', pline, &[], &val, false);
+                }
+            }
+            "guard" if self.facts.tag == "ERL" => {
+                let gline = self.line(id);
+                let mut first_checked = false;
+                let mut parts = vec!["[\"n\",\"when\"]".to_string()];
+                for child in self.children(id) {
+                    if self.kind(child) == "guard_sequence" {
+                        for expr in self.children(child) {
+                            if !self.is_layout(expr) && !matches!(self.kind(expr), ";" | ",") {
+                                if !first_checked {
+                                    first_checked = true;
+                                    if self.kind(expr) == "paren_expression" {
+                                        self.push_call("when".to_string(), gline);
+                                    }
+                                }
+                                let eline = self.line(expr);
+                                let v = self.form(expr);
+                                if !v.is_empty() && v != "0" {
+                                    parts.push(v.clone());
+                                    self.lexer_event(b'x', eline, &[], &v, false);
+                                }
+                                // Erlang guards with `=:=` or `=` can be read by the one-pass
+                                // lexer as assignment events (`Alt =:= alt` -> target `Alt`).
+                                if self.kind(expr) == "comparison" {
+                                    let kids: Vec<u32> = self.children(expr).into_iter().filter(|&c| !self.is_layout(c)).collect();
+                                    if kids.len() >= 3 && matches!(self.kind(kids[1]), "=:=" | "=/=" | "==" | "/=" | "=<") {
+                                        if let Some(lhs_name) = self.leaf_name(kids[0]) {
+                                            let rhs_v = self.form(kids[2]);
+                                            self.lexer_event(b'a', eline, &[lhs_name], &rhs_v, false);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if parts.len() > 1 {
+                    let val = format!("[\"m\",[{}]]", parts.join(","));
+                    self.lexer_event(b'x', gline, &[], &val, false);
+                }
+            }
+            // `companion object { … }`: the one-pass lexer files the introducer
+            // as a header statement (`m:[n:companion,n:object,n:Name]`), and no
+            // arm wrote an event for the tree's `companion_object`, so every
+            // class that declares one lost that line.
+            "companion_object" if self.is_kotlin() => self.java_header_event(id),
+            // `val x = object : B() { }`: a supertype constructor is not a
+            // `call_expression`, so no arm recorded the call the lexer reads
+            // from `B()` when the object is written as an expression. A class
+            // header already reads its supertypes through `decl_value`, which
+            // is why only the expression form lost them.
+            "superclass_constructor" if self.is_kotlin() => {
+                let children = self.children(id);
+                if let Some(&ty) = children.first() {
+                    let path = self.path_of(ty);
+                    if !path.is_empty() {
+                        let line = self.line(ty);
+                        self.push_call(path, line);
+                    }
+                }
+                if let Some(list) = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                {
+                    self.arguments(list);
+                }
+            }
+            // `constructor(x: Int) : this(x)` / `: super(x)`: a secondary
+            // constructor's delegation is a call to `self` or `super` with its
+            // arguments, not a `call_expression`, so no arm recorded the call.
+            "constructor_delegation" if self.is_kotlin() => {
+                let children = self.children(id);
+                if let Some(&target) = children.iter().find(|&&child| !self.is_layout(child)) {
+                    let kind = self.kind(target);
+                    if matches!(kind, "this" | "super") {
+                        let path = if kind == "this" { "self" } else { kind };
+                        self.push_call(path.to_string(), self.line(target));
+                    }
+                }
+                if let Some(list) = children
+                    .iter()
+                    .copied()
+                    .find(|&child| matches!(self.kind(child), "arguments" | "argument_list"))
+                {
+                    self.arguments(list);
+                }
+            }
+            // `fun f(): T = expr` writes the body as a `function_body` whose
+            // child is the expression itself; a block body is the other
+            // alternative. The lexer writes the expression's value as the
+            // function's `r` event, so the arm does too, and a call in the
+            // expression reaches the record with it. Two lanes fixed this at
+            // once; the arm that states the return wins.
+            "function_body" if self.is_kotlin() => self.function_body(id),
+            // `get() = foo()` writes the same expression straight onto the
+            // accessor, with no `function_body` between them.
+            "accessor" if self.is_kotlin() => {
+                let children = self.children(id);
+                let body = children
+                    .iter()
+                    .position(|&child| self.kind(child) == "=")
+                    .and_then(|at| children.get(at + 1).copied())
+                    .filter(|&child| !self.is_layout(child));
+                if let Some(body) = body {
+                    let line = self.line(body);
+                    let was = self.in_kotlin_expr_body;
+                    self.in_kotlin_expr_body = true;
+                    let value = self.form(body);
+                    self.in_kotlin_expr_body = was;
+                    // A property's accessor is an assignment to the lexer — it
+                    // files the body on that line as an `x` event — while a
+                    // function's expression body is its `r` value. Written as
+                    // `r` the getter's line found no partner, so every property
+                    // whose getter stood before another member lost its value
+                    // (`get() = keys.length` in a class with more members).
+                    self.event(&format!("[\"x\",{line},{value}]"));
+                } else {
+                    // `override var size: Int = 0` / `private set`: a bare
+                    // accessor writes its modifiers and keyword as one value on
+                    // its own line (`m:[n:private,n:set]`), and nothing was read
+                    // for it, so every such property lost a statement
+                    // (ArrayDeque.kt, SlidingWindow.kt, SequenceTest.kt).
+                    let line = self.line(id);
+                    let mut parts: Vec<String> = Vec::new();
+                    for child in self.children(id) {
+                        match self.kind(child) {
+                            "modifiers" => {
+                                for modifier in self.children(child) {
+                                    let word = self.text_string(modifier);
+                                    if !word.is_empty() {
+                                        let mut atom = String::from("[\"n\",");
+                                        push_string(&mut atom, &word);
+                                        atom.push(']');
+                                        parts.push(atom);
+                                    }
+                                }
+                            }
+                            "get" | "set" => {
+                                let mut atom = String::from("[\"n\",");
+                                push_string(&mut atom, &self.text_string(child));
+                                atom.push(']');
+                                parts.push(atom);
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !parts.is_empty() {
+                        self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                    }
+                }
+            }
+            "return_statement" if self.facts.tag == "LUA" => {
+                let line = self.line(id);
+                let mut vals: Vec<String> = Vec::new();
+                let mut expr_nodes: Vec<u32> = Vec::new();
+                if let Some(el) = self.children(id).into_iter().find(|&c| self.kind(c) == "expression_list") {
+                    for ec in self.children(el) {
+                        let eck = self.kind(ec);
+                        if matches!(eck, "nil" | "true" | "false") {
+                            vals.push(format!("[\"n\",\"{eck}\"]"));
+                        } else if matches!(eck, "string" | "number" | "...") {
+                            vals.push("0".to_string());
+                        } else if !self.is_layout(ec) && eck != "," {
+                            expr_nodes.push(ec);
+                            let f = self.form(ec);
+                            vals.push(if f.is_empty() { "0".to_string() } else { f });
+                        }
+                    }
+                }
+                if !vals.is_empty() {
+                    let val = if vals.len() == 1 {
+                        vals.remove(0)
+                    } else {
+                        format!("[\"t\",[{}]]", vals.join(","))
+                    };
+                    self.lexer_event(b'r', line, &[], &val, false);
+                    let mut extra_lines: Vec<u32> = Vec::new();
+                    for &en in &expr_nodes {
+                        self.lua_collect_expr_lines(en, line, &mut extra_lines);
+                    }
+                    extra_lines.sort_unstable();
+                    extra_lines.dedup();
+                    for ln in extra_lines {
+                        self.lexer_event(b'x', ln, &[], &val, false);
+                    }
+                }
