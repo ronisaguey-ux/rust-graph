@@ -11518,3 +11518,323 @@ impl<'a> Walker<'a> {
                 }
                 for &si in &syms {
                     if existing_calls[si].insert((callee.to_string(), ln32)) {
+                        self.facts.symbols[si].calls.push(Call {
+                            path: callee.to_string(),
+                            line: ln32,
+                        });
+                    }
+                }
+            };
+
+            let mut search_from = 0usize;
+            while let Some(pos) = sb[search_from..].find("new ") {
+                let p = search_from + pos + 4;
+                let prev_ok = pos == 0 || !sb.as_bytes()[search_from + pos - 1].is_ascii_alphanumeric();
+                if prev_ok {
+                    let rest = sb[p..].trim_start();
+                    let ty: String = rest
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                        .collect();
+                    if !ty.is_empty() {
+                        push_call(&ty);
+                    }
+                }
+                search_from = p;
+            }
+
+            let sbb = sb.as_bytes();
+            let mut ci = 0usize;
+            while ci < sbb.len() {
+                if sbb[ci] == b'(' {
+                    let mut j = ci;
+                    while j > 0 && sbb[j - 1] == b' ' { j -= 1; }
+                    let end = j;
+                    while j > 0 && (sbb[j - 1].is_ascii_alphanumeric() || sbb[j - 1] == b'_' || sbb[j - 1] == b'.') {
+                        j -= 1;
+                    }
+                    let callee = sb[j..end].trim_start_matches('.');
+                    if !callee.is_empty() {
+                        push_call(callee);
+                        if j >= 2 && sbb[j - 1] == b'.' && sbb[j - 2] == b')' {
+                            for bk in (ln.saturating_sub(10).max(1)..=ln).rev() {
+                                let bl = strip_brackets(code_lines[bk].trim());
+                                if let Some(op) = bl.find('(') {
+                                    let mut bi = op;
+                                    while bi > 0 && (bl.as_bytes()[bi - 1].is_ascii_alphanumeric() || bl.as_bytes()[bi - 1] == b'_' || bl.as_bytes()[bi - 1] == b'.') {
+                                        bi -= 1;
+                                    }
+                                    let head = &bl[bi..op];
+                                    if !head.is_empty() && head.as_bytes()[0].is_ascii_uppercase() {
+                                        push_call(&format!("{head}().{callee}"));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if sb.starts_with('.') && j <= 1 {
+                            let mut parts: Vec<String> = vec![callee.to_string()];
+                            for bk in (ln.saturating_sub(5).max(1)..ln).rev() {
+                                let bl = strip_brackets(code_lines[bk].trim());
+                                if let Some(after_d) = bl.strip_prefix('.') {
+                                    let seg: String = after_d.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                                    if !seg.is_empty() { parts.push(seg); }
+                                } else {
+                                    let bl_clean = bl.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.');
+                                    let mut bi = bl_clean.len();
+                                    let bb = bl_clean.as_bytes();
+                                    while bi > 0 && (bb[bi - 1].is_ascii_alphanumeric() || bb[bi - 1] == b'_' || bb[bi - 1] == b'.') {
+                                        bi -= 1;
+                                    }
+                                    let head = &bl_clean[bi..];
+                                    if !head.is_empty() {
+                                        parts.push(head.to_string());
+                                    }
+                                    break;
+                                }
+                            }
+                            if parts.len() >= 2 {
+                                parts.reverse();
+                                push_call(&parts.join("."));
+                            }
+                        }
+                    }
+                }
+                ci += 1;
+            }
+
+            // Vars + Assignment events
+            let mut rest = t;
+            // Strip leading `@annotation` tokens (e.g. `@`inline` private[this] implicit def elemTag...`)
+            while rest.starts_with('@') {
+                let mut ai = 1usize;
+                let rb = rest.as_bytes();
+                let mut pd = 0i32;
+                while ai < rb.len() {
+                    if rb[ai] == b'(' { pd += 1; }
+                    else if rb[ai] == b')' { pd -= 1; }
+                    else if rb[ai] == b' ' && pd <= 0 { break; }
+                    ai += 1;
+                }
+                rest = rest[ai..].trim_start();
+            }
+            loop {
+                let mut changed = false;
+                for kw in [
+                    "private ", "protected ", "override ", "final ", "sealed ", "abstract ",
+                    "implicit ", "inline ", "lazy ",
+                ] {
+                    if let Some(r) = rest.strip_prefix(kw) {
+                        rest = r.trim_start();
+                        changed = true;
+                    }
+                }
+                if rest.starts_with("private[") || rest.starts_with("protected[") {
+                    if let Some(cb) = rest.find(']') {
+                        rest = rest[cb + 1..].trim_start();
+                        changed = true;
+                    }
+                }
+                if !changed { break; }
+            }
+
+            // Extract var bindings from `def name: Type = Rhs(...)` (e.g. `def elemTag: ClassTag[A] = ClassTag(...)`, `def iterator = new RangeIterator(...)`)
+            if let Some(after_d) = rest.strip_prefix("def ") {
+                if let Some(eq_p) = after_d.find('=') {
+                    let next_b = after_d.as_bytes().get(eq_p + 1).copied().unwrap_or(0);
+                    if next_b != b'=' && next_b != b'>' {
+                        let lhs_raw = after_d[..eq_p].trim();
+                        let nm: String = lhs_raw.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                        let rhs = after_d[eq_p + 1..].trim();
+                        let r_clean = rhs.strip_prefix("new ").map(|x| x.trim_start()).unwrap_or(rhs);
+                        let r_sb = strip_brackets(r_clean);
+                        let r_head: String = r_sb.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                        let last_seg = r_head.rsplit('.').next().unwrap_or("");
+                        if !nm.is_empty() && !last_seg.is_empty() && last_seg.as_bytes()[0].is_ascii_uppercase() {
+                            if existing_vars.insert((nm.clone(), last_seg.to_string())) {
+                                self.facts.vars.push((nm.clone(), last_seg.to_string()));
+                            }
+                        }
+                        if let Some(colon) = lhs_raw.rfind(':') {
+                            let ty_s = lhs_raw[colon + 1..].trim();
+                            let ty_head: String = ty_s.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                            let last_ty = ty_head.rsplit('.').next().unwrap_or("");
+                            if !nm.is_empty() && !last_ty.is_empty() && last_ty.as_bytes()[0].is_ascii_uppercase() {
+                                if existing_vars.insert((nm.clone(), last_ty.to_string())) {
+                                    self.facts.vars.push((nm.clone(), last_ty.to_string()));
+                                }
+                            }
+                            if !last_ty.is_empty() && !last_seg.is_empty() && last_ty.as_bytes()[0].is_ascii_uppercase() && last_seg.as_bytes()[0].is_ascii_uppercase() {
+                                if existing_vars.insert((last_ty.to_string(), last_seg.to_string())) {
+                                    self.facts.vars.push((last_ty.to_string(), last_seg.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Strip leading `while (...)` or `if (...)` for one-line body assignment
+            let mut body_after_cond: Option<&str> = None;
+            if rest.starts_with("while ") || rest.starts_with("while(") || rest.starts_with("if ") || rest.starts_with("if(") {
+                if let Some(op) = rest.find('(') {
+                    let rb = rest.as_bytes();
+                    let mut pd = 0i32;
+                    let mut cp = None;
+                    for (ri, &ch) in rb.iter().enumerate().skip(op) {
+                        if ch == b'(' { pd += 1; }
+                        else if ch == b')' {
+                            pd -= 1;
+                            if pd == 0 { cp = Some(ri); break; }
+                        }
+                    }
+                    if let Some(ri) = cp {
+                        let after = rest[ri + 1..].trim();
+                        if !after.is_empty() {
+                            body_after_cond = Some(after);
+                        }
+                    }
+                }
+            }
+
+            let check_str = body_after_cond.unwrap_or(rest);
+            let mut target_opt: Option<String> = None;
+            let mut rhs_opt: Option<&str> = None;
+            let mut type_ann_opt: Option<String> = None;
+
+            if let Some(after_v) = check_str.strip_prefix("val ").or_else(|| check_str.strip_prefix("var ")) {
+                if let Some(eq_p) = after_v.find('=') {
+                    let next_b = after_v.as_bytes().get(eq_p + 1).copied().unwrap_or(0);
+                    if next_b != b'=' && next_b != b'>' {
+                        let lhs_raw = after_v[..eq_p].trim();
+                        let mut parts = lhs_raw.splitn(2, ':');
+                        let lhs = parts.next().unwrap_or("").trim();
+                        if let Some(ty_s) = parts.next() {
+                            let ty_head: String = ty_s.trim().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                            let last_ty = ty_head.rsplit('.').next().unwrap_or("");
+                            if !last_ty.is_empty() && last_ty.as_bytes()[0].is_ascii_uppercase() {
+                                type_ann_opt = Some(last_ty.to_string());
+                            }
+                        }
+                        if !lhs.is_empty() && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                            target_opt = Some(lhs.to_string());
+                            rhs_opt = Some(after_v[eq_p + 1..].trim());
+                        } else if lhs.starts_with('(') && lhs.ends_with(')') {
+                            let inner_t: Vec<String> = lhs[1..lhs.len() - 1]
+                                .split(',')
+                                .map(|x| x.split(':').next().unwrap_or("").trim().to_string())
+                                .filter(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+                                .collect();
+                            if inner_t.len() >= 2 {
+                                let val_json = gather_stmt(ln, 4);
+                                let mut ev = format!(r#"["a",{ln32},["#);
+                                for (ti, tn) in inner_t.iter().enumerate() {
+                                    if ti > 0 { ev.push(','); }
+                                    push_string(&mut ev, tn);
+                                }
+                                ev.push_str("],");
+                                ev.push_str(&val_json);
+                                ev.push_str(",0]");
+                                for &si in &syms {
+                                    let sidx = safe_call_idx[si];
+                                    extra_events[si].push(if sidx == 0 { ev.clone() } else { ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if check_str.starts_with("for(") || check_str.starts_with("for ") {
+                if let Some(semi) = check_str.find(';') {
+                    let before_semi = check_str[..semi].trim();
+                    let tok: String = before_semi.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect::<String>().chars().rev().collect();
+                    if !tok.is_empty() {
+                        target_opt = Some(tok);
+                    }
+                } else if let Some(la) = check_str.find("<-") {
+                    let after_la = check_str[la + 2..].trim();
+                    let tok: String = after_la.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                    if !tok.is_empty() {
+                        target_opt = Some(tok);
+                    }
+                }
+            } else if let Some(op_p) = check_str.find("+=").or_else(|| check_str.find("-=")).or_else(|| check_str.find("*=")).or_else(|| check_str.find("/=")).or_else(|| check_str.find("|=")).or_else(|| check_str.find("&=")).or_else(|| check_str.find("^=")) {
+                let before_op = check_str[..op_p].trim().trim_end_matches(')').trim();
+                let tok: String = before_op.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect::<String>().chars().rev().collect();
+                if !tok.is_empty() {
+                    target_opt = Some(tok);
+                }
+            } else if let Some(larrow) = check_str.find("<-") {
+                let lhs = check_str[..larrow].trim();
+                if !lhs.is_empty() && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                    target_opt = Some(lhs.to_string());
+                    rhs_opt = Some(check_str[larrow + 2..].trim());
+                }
+            } else if rest.starts_with('(') && rest.contains("= {") {
+                if let Some(colon) = rest.find(':') {
+                    let after_c = rest[colon + 1..].trim();
+                    let ty: String = after_c.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                    if !ty.is_empty() && ty.as_bytes()[0].is_ascii_uppercase() {
+                        target_opt = Some(ty);
+                    }
+                }
+            } else if !check_str.starts_with("def ") && !check_str.starts_with("type ") && !check_str.starts_with("case ") {
+                if let Some(eq_p) = check_str.find('=') {
+                    let prev_b = if eq_p > 0 { check_str.as_bytes()[eq_p - 1] } else { 0 };
+                    let next_b = check_str.as_bytes().get(eq_p + 1).copied().unwrap_or(0);
+                    if !matches!(prev_b, b'=' | b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/') && next_b != b'=' && next_b != b'>' {
+                        let lhs = check_str[..eq_p].trim();
+                        if !lhs.is_empty()
+                            && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+                            && !lhs.starts_with('.')
+                            && !lhs.ends_with('.')
+                        {
+                            target_opt = Some(lhs.to_string());
+                            rhs_opt = Some(check_str[eq_p + 1..].trim());
+                        }
+                    }
+                }
+            }
+
+            if let Some(tgt) = target_opt {
+                if let Some(ty) = type_ann_opt.as_ref() {
+                    if existing_vars.insert((tgt.clone(), ty.clone())) {
+                        self.facts.vars.push((tgt.clone(), ty.clone()));
+                    }
+                }
+                if let Some(rhs) = rhs_opt {
+                    let r_clean = rhs.strip_prefix("new ").map(|x| x.trim_start()).unwrap_or(rhs);
+                    let r_sb = strip_brackets(r_clean);
+                    let r_head: String = r_sb
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                        .collect();
+                    let last_seg = r_head.rsplit('.').next().unwrap_or("");
+                    if !last_seg.is_empty() && last_seg.as_bytes()[0].is_ascii_uppercase() {
+                        if existing_vars.insert((tgt.clone(), last_seg.to_string())) {
+                            self.facts.vars.push((tgt.clone(), last_seg.to_string()));
+                        }
+                        if let Some(ty) = type_ann_opt.as_ref() {
+                            if existing_vars.insert((ty.clone(), last_seg.to_string())) {
+                                self.facts.vars.push((ty.clone(), last_seg.to_string()));
+                            }
+                        }
+                    }
+                }
+                let has_tq = raw_lines[ln - 1].contains("\"\"\"") || (ln < n_lines && raw_lines[ln].contains("\"\"\""));
+                let extra_m = if has_tq { 14 } else { 2 };
+                let val_json = gather_stmt(ln, extra_m);
+                let mut tgts: Vec<String> = vec![tgt.clone()];
+                if let Some(rest_this) = tgt.strip_prefix("this.") {
+                    tgts.push(format!("self.{rest_this}"));
+                }
+                for tname in tgts {
+                    let mut ev = format!(r#"["a",{ln32},["#);
+                    push_string(&mut ev, &tname);
+                    ev.push_str("],");
+                    ev.push_str(&val_json);
+                    ev.push_str(",0]");
+                    for &si in &syms {
+                        let sidx = safe_call_idx[si]; extra_events[si].push(if sidx == 0 { ev.clone() } else { ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                    }
+                }
+            }
