@@ -6078,3 +6078,323 @@ impl<'a> Walker<'a> {
                             }
                             continue;
                         }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+            // JAVA_NEXT_RULE
+            }
+            if li < n && src[li] == b'\n' { li += 1; lno += 1; }
+        }
+    }
+
+    fn augment_kotlin(&mut self) {
+        let src = self.orig_src;
+        let n = src.len();
+        let mut li = 0usize;
+        let mut lno = 1u32;
+        let mut in_block_comment = 0usize;
+        while li < n {
+            let line_start = li;
+            while li < n && src[li] != b'\n' { li += 1; }
+            let raw = &src[line_start..li];
+            let line_starts_in_comment = in_block_comment > 0;
+            let mut code_end = raw.len();
+            let mut k = 0usize;
+            let mut in_str = false;
+            while k < raw.len() {
+                if in_block_comment > 0 {
+                    if k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'*' { in_block_comment += 1; k += 2; continue; }
+                    if k + 1 < raw.len() && raw[k] == b'*' && raw[k + 1] == b'/' { in_block_comment -= 1; k += 2; continue; }
+                    k += 1;
+                    continue;
+                }
+                if raw[k] == b'"' && (k == 0 || raw[k - 1] != b'\\') { in_str = !in_str; k += 1; continue; }
+                if !in_str && k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'/' { code_end = k; break; }
+                if !in_str && k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'*' { in_block_comment += 1; k += 2; continue; }
+                k += 1;
+            }
+            if !line_starts_in_comment {
+                let code = &raw[..code_end];
+                let trimmed = {
+                    let mut t0 = 0;
+                    while t0 < code.len() && matches!(code[t0], b' ' | b'\t') { t0 += 1; }
+                    &code[t0..]
+                };
+                let owner_idx = self
+                    .facts
+                    .symbols
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .filter(|(_, sym)| sym.line <= lno && lno <= sym.end_line)
+                    .max_by_key(|(_, sym)| sym.line)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
+
+                // K1. Kotlin expression-line call scanning (dotted, unqualified, generic `<T>(...)`, inside lambdas/branches).
+                if trimmed.contains(&b'(') && !trimmed.starts_with(b"fun ") && !trimmed.starts_with(b"class ")
+                    && !trimmed.starts_with(b"interface ") && !trimmed.starts_with(b"object ")
+                {
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            let mut lk = rk;
+                            if lk < trimmed.len() && trimmed[lk] == b'<' {
+                                let mut ad = 1usize; lk += 1;
+                                while lk < trimmed.len() && ad > 0 {
+                                    if trimmed[lk] == b'<' { ad += 1; } else if trimmed[lk] == b'>' { ad -= 1; }
+                                    lk += 1;
+                                }
+                            }
+                            if !full.is_empty() && lk < trimmed.len() && trimmed[lk] == b'('
+                                && !matches!(full.as_str(), "if" | "while" | "for" | "when" | "catch" | "fun" | "class" | "constructor" | "synchronized")
+                            {
+                                if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                    if !sym.calls.iter().any(|c| c.line == lno && c.path == full) {
+                                        sym.calls.push(Call { path: full, line: lno });
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                }
+
+                // K2. Kotlin property getter/setter `get() = expr` / `set(v) = expr` (emitted to symbol 0 + owner).
+                if trimmed.starts_with(b"get()") || trimmed.starts_with(b"set(") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "when" | "while" | "for" | "in" | "is" | "as" | "true" | "false" | "null" | "return" | "throw" | "try" | "catch") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(0) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(0) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // K3. Kotlin `val`/`var` bindings (single/multi-line `when`/`if`/block RHS, emitted to owner + symbol 0 when class-level).
+                if let Some(vpos) = trimmed.windows(4).position(|w| w == b"val " || w == b"var ") {
+                    if (vpos == 0 || matches!(trimmed[vpos - 1], b' ' | b'\t')) && trimmed[vpos + 4..].contains(&b'=') {
+                        let mut p0 = vpos + 4;
+                        while p0 < trimmed.len() && matches!(trimmed[p0], b' ' | b'\t') { p0 += 1; }
+                        let mut p1 = p0;
+                        while p1 < trimmed.len() && (trimmed[p1].is_ascii_alphanumeric() || trimmed[p1] == b'_') { p1 += 1; }
+                        if p1 > p0 && (trimmed[p0].is_ascii_alphabetic() || trimmed[p0] == b'_') {
+                            let target = String::from_utf8_lossy(&trimmed[p0..p1]).to_string();
+                            if let Some(eq_rel) = trimmed[p1..].iter().position(|&b| b == b'=') {
+                                let eq = p1 + eq_rel;
+                                if eq + 1 < trimmed.len() && !matches!(trimmed[eq + 1], b'=' | b'>') {
+                                    let abs_eq = line_start + (trimmed.as_ptr() as usize - raw.as_ptr() as usize) + eq;
+                                    let scan_lim = (abs_eq + 900).min(n);
+                                    let mut pk = abs_eq + 1;
+                                    let mut bd = 0usize;
+                                    let mut seen_b = false;
+                                    let mut parts: Vec<String> = Vec::new();
+                                    while pk < scan_lim {
+                                        if src[pk] == b'\n' && bd == 0 && !seen_b && !parts.is_empty() { break; }
+                                        if src[pk] == b'{' { bd += 1; seen_b = true; pk += 1; continue; }
+                                        if src[pk] == b'}' { if bd > 0 { bd -= 1; } pk += 1; if seen_b && bd == 0 { break; } continue; }
+                                        if src[pk].is_ascii_alphabetic() || src[pk] == b'_' {
+                                            let r0 = pk;
+                                            while pk < scan_lim && (src[pk].is_ascii_alphanumeric() || src[pk] == b'_' || src[pk] == b'.') { pk += 1; }
+                                            let full = String::from_utf8_lossy(&src[r0..pk]).trim_matches('.').to_string();
+                                            if !full.is_empty() && !matches!(full.as_str(), "as" | "is" | "in" | "true" | "false" | "null") {
+                                                if pk < scan_lim && src[pk] == b'(' {
+                                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                                            sym.calls.len() - 1
+                                                        });
+                                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                                    }
+                                                }
+                                                parts.push(format!("[\"n\",\"{full}\"]"));
+                                            }
+                                            continue;
+                                        }
+                                        pk += 1;
+                                    }
+                                    if !parts.is_empty() {
+                                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                                        let ev = format!("[\"a\",{lno},[\"{target}\"],{val},0]");
+                                        for si in [owner_idx, 0usize] {
+                                            if si == 0 && owner_idx == 0 { continue; }
+                                            if let Some(sym) = self.facts.symbols.get_mut(si) {
+                                                if !sym.events.is_empty() { sym.events.push(','); }
+                                                sym.events.push_str(&ev);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // K4. Kotlin trailing-lambda/DSL block expressions (`buildPacket {`, `onMessage {`, `when (x) {`).
+                if trimmed.contains(&b'{') && !trimmed.starts_with(b"class ") && !trimmed.starts_with(b"fun ") && !trimmed.starts_with(b"interface ") && !trimmed.starts_with(b"object ") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "when" | "while" | "for" | "in" | "is" | "as" | "true" | "false" | "null" | "return" | "throw" | "try" | "catch") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(0) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(0) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // K5. Kotlin `->` lambda / `when`-branch expressions (emitted to symbol 0).
+                if trimmed.windows(2).any(|w| w == b"->") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "when" | "while" | "for" | "in" | "is" | "as" | "true" | "false" | "null" | "return" | "throw" | "try" | "catch") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(0) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(0) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // K6. Kotlin `->` lambda / `when`-branch expressions (emitted to owner_idx).
+                if trimmed.windows(2).any(|w| w == b"->") {
+                    let mut parts: Vec<String> = Vec::new();
+                    let mut rk = 0usize;
+                    let mut instr = false;
+                    while rk < trimmed.len() {
+                        if trimmed[rk] == b'"' && (rk == 0 || trimmed[rk - 1] != b'\\') { instr = !instr; rk += 1; continue; }
+                        if instr { rk += 1; continue; }
+                        if trimmed[rk].is_ascii_alphabetic() || trimmed[rk] == b'_' {
+                            let r0 = rk;
+                            while rk < trimmed.len() && (trimmed[rk].is_ascii_alphanumeric() || trimmed[rk] == b'_' || trimmed[rk] == b'.') { rk += 1; }
+                            let full = String::from_utf8_lossy(&trimmed[r0..rk]).trim_matches('.').to_string();
+                            if !full.is_empty() && !matches!(full.as_str(), "if" | "else" | "when" | "while" | "for" | "in" | "is" | "as" | "true" | "false" | "null" | "return" | "throw" | "try" | "catch") {
+                                if rk < trimmed.len() && trimmed[rk] == b'(' {
+                                    let recv = full.rsplit_once('.').map(|(r, _)| format!("[\"n\",\"{r}\"]")).unwrap_or_else(|| "0".to_string());
+                                    if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                                        let cidx = sym.calls.iter().position(|c| c.line == lno && c.path == full).unwrap_or_else(|| {
+                                            sym.calls.push(Call { path: full.clone(), line: lno });
+                                            sym.calls.len() - 1
+                                        });
+                                        parts.push(format!("[\"c\",{cidx},{recv},[0]]"));
+                                    }
+                                }
+                                parts.push(format!("[\"n\",\"{full}\"]"));
+                            }
+                            continue;
+                        }
+                        rk += 1;
+                    }
+                    if !parts.is_empty() {
+                        let val = if parts.len() == 1 { parts.remove(0) } else { format!("[\"m\",[{}]]", parts.join(",")) };
+                        let ev = format!("[\"x\",{lno},{val}]");
+                        if let Some(sym) = self.facts.symbols.get_mut(owner_idx) {
+                            if !sym.events.is_empty() { sym.events.push(','); }
+                            sym.events.push_str(&ev);
+                        }
+                    }
+                }
+
+                // K7. Kotlin `fun <name>` symbol recovery (including `suspend`/`inline`/`override`/`private` & extension `Type.name`).
+                if let Some(fpos) = trimmed.windows(4).position(|w| w == b"fun ") {
+                    if fpos == 0 || matches!(trimmed[fpos - 1], b' ' | b'\t') {
+                        let rest = String::from_utf8_lossy(&trimmed[fpos + 4..]);
+                        let before_lp = rest.split('(').next().unwrap_or("").trim();
+                        let fname = before_lp.rsplit('.').next().unwrap_or("").split('<').next().unwrap_or("").trim().to_string();
