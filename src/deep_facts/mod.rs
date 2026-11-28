@@ -35838,3 +35838,323 @@ impl<'a> Walker<'a> {
                     let segs: Vec<&str> = t
                         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
                         .map(|s| s.trim_start_matches('-'))
+                        .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                        .collect();
+                    if !segs.is_empty() {
+                        let val = if segs.len() == 1 {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, segs[0]);
+                            n.push(']');
+                            n
+                        } else {
+                            let parts: Vec<String> = segs
+                                .iter()
+                                .map(|s| {
+                                    let mut n = String::from("[\"n\",");
+                                    push_string(&mut n, s);
+                                    n.push(']');
+                                    n
+                                })
+                                .collect();
+                            format!("[\"m\",[{}]]", parts.join(","))
+                        };
+                        self.lexer_event(b'x', line, &[], &val, false);
+                    }
+                }
+            }
+            "fi" | "done" | "esac" | "then" | "else" | "do" if self.facts.tag == "SH" => {
+                self.lexer_event(b'x', self.line(id), &[], &format!("[\"n\",\"{kind}\"]"), false);
+            }
+            "simple_command" if self.facts.tag == "SH" => {
+                let children = self.children(id);
+                let line = self.line(id);
+                // Helper closure to extract Bash identifier segments (preserving internal '-')
+                let sh_segs = |text: &str| -> String {
+                    let segs: Vec<&str> = text
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+                        .map(|s| s.trim_start_matches('-'))
+                        .filter(|s| !s.is_empty() && s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_'))
+                        .collect();
+                    if segs.is_empty() {
+                        "0".to_string()
+                    } else if segs.len() == 1 {
+                        let mut n = String::from("[\"n\",");
+                        push_string(&mut n, segs[0]);
+                        n.push(']');
+                        n
+                    } else {
+                        let parts: Vec<String> = segs
+                            .iter()
+                            .map(|s| {
+                                let mut n = String::from("[\"n\",");
+                                push_string(&mut n, s);
+                                n.push(']');
+                                n
+                            })
+                            .collect();
+                        format!("[\"m\",[{}]]", parts.join(","))
+                    }
+                };
+
+                // Extract identifiers/digits that the flat lexer sees outside quotes
+                // when a double-quoted string contains `$(... "..." ...)`.
+                let extract_nested_dq_calls = |text: &str| -> Vec<String> {
+                    let mut out = Vec::new();
+                    if !text.contains("$(") {
+                        return out;
+                    }
+                    let b = text.as_bytes();
+                    let mut quotes = Vec::new();
+                    let mut i = 0;
+                    while i < b.len() {
+                        if b[i] == b'\\' && i + 1 < b.len() {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == b'"' {
+                            quotes.push(i);
+                        }
+                        i += 1;
+                    }
+                    if quotes.len() < 4 {
+                        return out;
+                    }
+                    // Spans (quotes[1]+1 .. quotes[2]), (quotes[3]+1 .. quotes[4]), ...
+                    let mut qi = 1;
+                    while qi + 1 < quotes.len() {
+                        let span = &text[quotes[qi] + 1..quotes[qi + 1]];
+                        for tok in span.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.') {
+                            let tok = tok.trim_matches(|c: char| c == '-' || c == '.');
+                            if tok.is_empty() {
+                                continue;
+                            }
+                            if tok.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-' || ch == b'.') {
+                                out.push(tok.to_string());
+                            }
+                        }
+                        qi += 2;
+                    }
+                    out
+                };
+
+                let wrap_sh_expr = |text: &str, mut base: String, cid: usize| -> String {
+                    let has_cmdsub = text.contains("$(") || text.contains('`');
+                    let dq = text.bytes().filter(|&b| b == b'"').count() / 2;
+                    let sq = text.bytes().filter(|&b| b == b'\'').count() / 2;
+                    let pipes = text.bytes().filter(|&b| b == b'|').count();
+                    let subs = text.matches("$(").count() + text.bytes().filter(|&b| b == b'`').count() / 2;
+                    let n_zeros = dq + sq + usize::from(has_cmdsub);
+                    let n_calls = if has_cmdsub || cid != 0 {
+                        (subs + pipes + dq + sq + 1).min(8)
+                    } else {
+                        0
+                    };
+                    if n_zeros > 0 {
+                        let mut parts = vec![base];
+                        for _ in 0..n_zeros.min(6) {
+                            parts.push("0".to_string());
+                        }
+                        base = format!("[\"m\",[{}]]", parts.join(","));
+                    }
+                    for k in 0..n_calls {
+                        let c = if k == 0 { cid } else { 0 };
+                        base = format!("[\"c\",{c},0,[{base}]]");
+                    }
+                    base
+                };
+
+                // Check if this simple_command is a pure assignment (`VAR=val`, `VAR=(...)`, `emoji[k]=v`)
+                let mut items: Vec<(u32, Option<String>, String, bool)> = Vec::new();
+                let mut raw_words: Vec<String> = Vec::new();
+                let mut pending_assign: Option<(u32, String, Vec<String>)> = None;
+
+                for c in children {
+                    let ck = self.kind(c);
+                    let cline = self.line(c);
+                    if matches!(ck, "whitespace" | "comment" | "heredoc_redirect") {
+                        continue;
+                    }
+                    let t = self.text_string(c);
+                    if t.is_empty() {
+                        continue;
+                    }
+                    let only_decl_prefix = raw_words.iter().all(|w| {
+                        matches!(w.as_str(), "local" | "export" | "declare" | "readonly" | "typeset")
+                            || w.starts_with('-')
+                    });
+                    if pending_assign.is_none()
+                        && only_decl_prefix
+                        && (ck == "assignment_word"
+                            || (ck == "word"
+                                && t.contains('=')
+                                && t.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')))
+                    {
+                        if let Some((lhs_raw, rhs_raw)) = t.split_once('=') {
+                            let lhs_base = lhs_raw.split('[').next().unwrap_or(lhs_raw);
+                            let lhs = lhs_base.trim_end_matches('+').trim().to_string();
+                            if !lhs.is_empty() {
+                                let mut rhs_parts = Vec::new();
+                                let rhs_t = rhs_raw.trim();
+                                if !rhs_t.is_empty() && !rhs_t.starts_with("$'") {
+                                    let f = sh_segs(rhs_t);
+                                    let dq_calls = extract_nested_dq_calls(rhs_t);
+                                    let mut last_cid = 0usize;
+                                    for cn in dq_calls {
+                                        last_cid = self.push_call(cn, cline);
+                                    }
+                                    if last_cid != 0 || rhs_t.contains("$(") || rhs_t.contains('`') {
+                                        rhs_parts.push(wrap_sh_expr(rhs_t, f, last_cid));
+                                    } else if f != "0" {
+                                        rhs_parts.push(wrap_sh_expr(rhs_t, f, 0));
+                                    } else if let Some(d) = rhs_t.strip_prefix('$') {
+                                        let d = d.trim_matches(|c| c == '{' || c == '}');
+                                        if !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) {
+                                            rhs_parts.push(format!("[\"n\",\"{d}\"]"));
+                                        }
+                                    }
+                                }
+                                pending_assign = Some((cline, lhs, rhs_parts));
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some((aline, ref _lhs, ref mut rhs_parts)) = pending_assign {
+                        if cline == aline && !t.starts_with("$'") {
+                            let f = sh_segs(&t);
+                            let dq_calls = extract_nested_dq_calls(&t);
+                            let mut last_cid = 0usize;
+                            for cn in dq_calls {
+                                last_cid = self.push_call(cn, cline);
+                            }
+                            if last_cid != 0 || matches!(ck, "command_substitution" | "backtick_substitution") || t.contains("$(") || t.contains('`') {
+                                rhs_parts.push(wrap_sh_expr(&t, f, last_cid));
+                            } else if f != "0" {
+                                rhs_parts.push(wrap_sh_expr(&t, f, 0));
+                            } else if let Some(d) = t.strip_prefix('$') {
+                                let d = d.trim_matches(|c| c == '{' || c == '}');
+                                if !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) {
+                                    rhs_parts.push(format!("[\"n\",\"{d}\"]"));
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    raw_words.push(t.clone());
+                    if matches!(ck, "variable" | "parameter_expansion") {
+                        if let Some(vn) = Self::tcl_var_name(&t) {
+                            let mut n = String::from("[\"n\",");
+                            push_string(&mut n, &vn);
+                            n.push(']');
+                            items.push((cline, Some(vn), n, true));
+                        } else {
+                            items.push((cline, None, "0".to_string(), true));
+                        }
+                    } else if ck == "string_literal" {
+                        let inner = t.trim_matches(|ch| ch == '"' || ch == '\'');
+                        let ib = inner.as_bytes();
+                        let mut qvars: Vec<String> = Vec::new();
+                        if t.starts_with('"') {
+                            let mut qj = 0;
+                            while qj < ib.len() {
+                                if ib[qj] == b'\\' && qj + 1 < ib.len() {
+                                    qj += 2;
+                                    continue;
+                                }
+                                if ib[qj] == b'$' {
+                                    if let Some(vn) = Self::tcl_var_name(&inner[qj..]) {
+                                        let clean_vn = vn.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or(&vn);
+                                        if !clean_vn.is_empty() {
+                                            let mut n = String::from("[\"n\",");
+                                            push_string(&mut n, clean_vn);
+                                            n.push(']');
+                                            qvars.push(n);
+                                        }
+                                    }
+                                }
+                                qj += 1;
+                            }
+                        }
+                        let dq_calls = extract_nested_dq_calls(&t);
+                        let qform = if !dq_calls.is_empty() {
+                            let mut last_cid = 0usize;
+                            for cn in dq_calls {
+                                last_cid = self.push_call(cn, cline);
+                            }
+                            let inner_f = if qvars.is_empty() {
+                                sh_segs(&t)
+                            } else if qvars.len() == 1 {
+                                qvars.remove(0)
+                            } else {
+                                format!("[\"m\",[{}]]", qvars.join(","))
+                            };
+                            wrap_sh_expr(&t, inner_f, last_cid)
+                        } else if qvars.is_empty() {
+                            "0".to_string()
+                        } else if qvars.len() == 1 {
+                            qvars.remove(0)
+                        } else {
+                            format!("[\"m\",[{}]]", qvars.join(","))
+                        };
+                        items.push((cline, None, qform, true));
+                    } else if matches!(ck, "command_substitution" | "backtick_substitution" | "process_substitution" | "arithmetic") {
+                        let f = sh_segs(&t);
+                        let cf = if matches!(ck, "command_substitution" | "backtick_substitution") {
+                            wrap_sh_expr(&t, f, 0)
+                        } else {
+                            f
+                        };
+                        items.push((cline, None, cf, false));
+                    } else {
+                        let is_flag = t.starts_with('-') && t.len() > 1 && t.as_bytes()[1].is_ascii_alphabetic();
+                        let norm = t.trim_start_matches('-').to_string();
+                        let clean_tail = if norm.starts_with("zsh/") {
+                            norm.rsplit('/').next().unwrap_or(&norm)
+                        } else {
+                            norm.as_str()
+                        };
+                        let is_ident = ck != "redirect"
+                            && clean_tail.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && clean_tail.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.');
+                        let seg_form = sh_segs(&t);
+                        const SH_NOISE: &[&str] = &[
+                            "await", "yield", "new", "not", "typeof", "delete", "void", "throw", "raise", "async",
+                            "lambda", "in", "is", "and", "or", "if", "else", "for", "of", "as", "then", "do",
+                            "instanceof", "sizeof", "return", "my", "local", "let", "var", "const", "final",
+                            "mut", "ref", "unsafe", "defer", "go", "our", "pub",
+                        ];
+                        if !is_flag && SH_NOISE.contains(&clean_tail) {
+                            items.push((cline, None, "0".to_string(), false));
+                        } else if is_ident {
+                            let cname = if norm.contains('/') { clean_tail.to_string() } else { norm.clone() };
+                            let is_val = !is_flag && t.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+                            items.push((cline, Some(cname), seg_form, is_val));
+                        } else {
+                            let is_val = !is_flag && ck != "redirect" && t.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+                            items.push((cline, None, seg_form, is_val));
+                        }
+                    }
+                }
+                if let Some((aline, lhs, mut rhs_parts)) = pending_assign {
+                    let rhs_form = if rhs_parts.is_empty() {
+                        "0".to_string()
+                    } else if rhs_parts.len() == 1 {
+                        rhs_parts.remove(0)
+                    } else {
+                        format!("[\"m\",[{}]]", rhs_parts.join(","))
+                    };
+                    self.lexer_event(b'a', aline, &[lhs], &rhs_form, false);
+                }
+                if let Some(first) = raw_words.first() {
+                    if matches!(first.as_str(), "source" | ".") {
+                        if let Some(target) = raw_words.get(1) {
+                            let module = target.trim_matches(|c| c == '"' || c == '\'').to_string();
+                            let last = module.rsplit('/').next().unwrap_or(&module).to_string();
+                            if !module.is_empty() {
+                                self.facts.imports.push(Import { line, module: module.clone(), alias: last.clone(), kind: IMPORT_STAR, ..Import::default() });
+                                if let Some((_, ext)) = last.rsplit_once('.') {
+                                    if !ext.is_empty() {
+                                        self.facts.imports.push(Import { line, module, alias: ext.to_string(), kind: IMPORT_STAR, ..Import::default() });
+                                    }
+                                }
+                            }
+                        }
