@@ -39038,3 +39038,323 @@ impl<'a> Walker<'a> {
             // target was a `binary_expression` and `c_path` named nothing -
             // every macro initialiser on a pointer declaration lost the
             // binding the lexer makes from the capitalised call on the right.
+            // The product's right operand is the declared name.
+            "assignment_expression"
+                if matches!(self.facts.tag.as_str(), "C" | "CPP" | "OBJC")
+                    && self.c_product_declarator(id).is_some() =>
+            {
+                let (name, value) = self.c_product_declarator(id).unwrap();
+                if self.kind(value) == "call_expression" {
+                    let path = self.decl_path(value);
+                    let last = path.rsplit('.').next().unwrap_or("").to_string();
+                    if !last.is_empty() {
+                        self.facts.vars.push((name, last));
+                    }
+                }
+            }
+            // `ts.chunked_encoding = Curl_compareheader(x);`: an assignment
+            // to a member is a binding to the lexer - the dotted target is the
+            // name and the call's last segment is what it holds - and nothing
+            // read it in the C family, so every such assignment in curl lost a
+            // variable.
+            "assignment_expression"
+                if matches!(self.facts.tag.as_str(), "C" | "CPP" | "OBJC") =>
+            {
+                let children = self.children(id);
+                // `mh->overhead += kvstoreMemUsage(k);`: a compound assignment
+                // spells its operator as its own token, so a search for `=`
+                // found nothing and the statement kept only the call. A right
+                // shift is two tokens, `>joined` then `>=`.
+                let op = children.iter().position(|&child| {
+                    matches!(
+                        self.kind(child),
+                        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">="
+                    )
+                });
+                if let Some(op) = op {
+                    let shifted = op > 0 && self.kind(children[op - 1]) == ">joined";
+                    let weak = self.kind(children[op]) != "=";
+                    let target = children[..op - usize::from(shifted)]
+                        .iter()
+                        .rev()
+                        .find(|&&child| !self.is_layout(child))
+                        .copied();
+                    let value = children.get(op + 1).copied();
+                    if let (Some(target), Some(value)) = (target, value) {
+                        let name = self.c_path(target).unwrap_or_default();
+                        if !name.is_empty() {
+                            // Every assignment is an `a` event to the lexer -
+                            // `ai->ai_next = ai;` is `a ["prevai.ai_next"] n:ai`
+                            // - and the reader wrote none of them for the C
+                            // family, so each such statement lost its line.
+                            let mut form = self.form(value);
+                            if self.kind(value) == "sizeof_expression" {
+                                // `sizeof(struct sockaddr_in)`: names, not 0.
+                                let words: Vec<String> = self
+                                    .children(value)
+                                    .into_iter()
+                                    .flat_map(|child| self.c_words_of(child))
+                                    .map(|word| {
+                                        let mut part = String::from("[\"n\",");
+                                        push_string(&mut part, &word);
+                                        part.push(']');
+                                        part
+                                    })
+                                    .collect();
+                                if !words.is_empty() {
+                                    form = format!("[\"m\",[{}]]", words.join(","));
+                                }
+                            }
+                            let line = self.line(id);
+                            self.lexer_event(b'a', line, &[name.clone()], &form, weak);
+                            if self.kind(value) == "call_expression" {
+                                let path = self.decl_path(value);
+                                let last = path.rsplit('.').next().unwrap_or("").to_string();
+                                if !last.is_empty() {
+                                    self.facts.vars.push((name, last));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // `ticks = DateTimeUtils.ConvertDateTimeToJavaScriptTicks(d);`:
+            // the lexer reads a plain assignment as a declaration of its
+            // target, binding the last name of the call on the right. Nothing
+            // here read the statement at all, so every such reassignment in
+            // the corpus was a variable the lexer had and the tree did not.
+            "assignment_expression" if self.kinds.calls.contains(&"object_creation_expression") => {
+                self.cs_lambda_symbol(id);
+                let children = self.children(id);
+                if let Some(at) = children.iter().position(|&child| self.kind(child) == "=") {
+                    // `context.Response.Headers = ToBase64String(x)` binds the
+                    // dotted path, and `bytes[i / 2] = Convert.ToByte(..)` binds
+                    // the indexed name's base: both are bindings of a name, and
+                    // reading only a bare identifier lost all of them.
+                    let target = children[..at]
+                        .iter()
+                        .copied()
+                        .rev()
+                        .find(|&child| !self.is_layout(child))
+                        .and_then(|child| match self.kind(child) {
+                            "identifier" => Some(self.text_string(child)),
+                            "element_access" | "indexer" => self
+                                .children(child)
+                                .into_iter()
+                                .find(|&node| !self.is_layout(node))
+                                .map(|node| self.path_of(node)),
+                            "member_access" | "field_access" => Some(self.path_of(child)),
+                            _ => None,
+                        })
+                        .filter(|path| !path.is_empty());
+                    let value = children.get(at + 1).copied();
+                    if let (Some(target), Some(value)) = (target, value) {
+                        self.cs_bind_constructed(target, value);
+                    }
+                }
+            }
+            "throw_statement" => self.expression_statement(id),
+            // `@dec` / `@Component({...})` decorates the declaration that
+            // follows; in JS/TS it is not a statement. Read as an expression
+            // statement it wrote an assignment of `dec` on the decorator line,
+            // and the lexer records only the name there, so the decorated
+            // member's event had no counterpart (the last TS construct in
+            // P4-02). Python spells a decorator with the same node kind but its
+            // reader does model the line, so only the JS family skips it.
+            "decorator" => {
+                if !self.is_js() {
+                    self.expression_statement(id);
+                }
+            }
+            // `raise E(x) from c(y)`, `assert a(v), b(v)`, `del xs[k(v)]`:
+            // every value-bearing child is read, not only the first.
+            // `raise ConfigError(f"..")`: the form fills the call table, but
+            // the statement itself emitted nothing, so the one-pass reader's
+            // event for it had no counterpart.
+            "raise_statement" => {
+                let mut parts = Vec::new();
+                for child in self.children(id) {
+                    if self.is_layout(child) || self.kind(child) == "raise" {
+                        continue;
+                    }
+                    let form = self.form(child);
+                    if form != "0" {
+                        parts.push(form);
+                    }
+                }
+                if !parts.is_empty() {
+                    let line = self.line(id);
+                    self.event(&format!("[\"x\",{line},[\"m\",[{}]]]", parts.join(",")));
+                }
+            }
+            "assert_statement" | "delete_statement" => self.statement_values(id),
+            // `pass`, `break`, `continue`: the one-pass lexer reads the word as
+            // an expression and files an `x` event for it, so the CST does too.
+            // The module symbol is emitted only when it has events, so losing
+            // the event for a module-level `pass` dropped the whole symbol.
+            "pass_statement" | "break_statement" | "continue_statement" | "goto_statement" => {
+                let line = self.line(id);
+                // The node's text carries the statement terminator: a JS
+                // `break;` was written as the name `break;` while the lexer
+                // wrote `break`, and a name the lexer read but the CST did not
+                // is a fallback with nothing wrong underneath it. The word is
+                // the first run of text before the `;` or the newline.
+                let raw = self.text_string(id);
+                let word = raw
+                    .split(|ch: char| ch == ';' || ch == '\n' || ch.is_whitespace())
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let label = self
+                    .children(id)
+                    .into_iter()
+                    .skip(1)
+                    .find_map(|child| self.leaf_name(child));
+                if let Some(label) = label {
+                    let mut text = format!("[\"x\",{line},[\"m\",[[\"n\",");
+                    push_string(&mut text, &word);
+                    text.push_str("],[\"n\",");
+                    push_string(&mut text, &label);
+                    text.push_str("]]]]");
+                    self.event(&text);
+                } else {
+                    let mut text = format!("[\"x\",{line},[\"n\",");
+                    push_string(&mut text, &word);
+                    text.push_str("]]");
+                    self.event(&text);
+                }
+            }
+            // `guard cond else { … }` is an `if` whose body runs when the
+            // condition fails: the same condition event and block as `if`.
+            "if_statement" | "guard_statement" => {
+                if !(self.language.name == "swift" && (self.swift_binding_then_call(id) || self.swift_call_then_binding(id))) {
+                    self.condition_before(id);
+                }
+                self.event("[\"b\"]");
+            }
+            // `guard let member = transform(m) else { return nil }` binds
+            // `member` to its initialiser, as `for` does. Nothing read the
+            // condition's binding, so the line had a return and no assignment,
+            // and the call in the initialiser was lost with it.
+            "guard_statement" => {
+                // `guard cond else { … }` tests its condition like an `if`: the
+                // condition's call or comparison is an event before the block.
+                self.condition_before(id);
+                if let Some((targets, value)) = self.swift_guard_binding(id) {
+                    self.assignment_event(targets, value, self.line(id), false);
+                }
+            }
+            "elif_clause" | "else_clause" => {
+                self.event("[\"e\"]");
+                if kind == "elif_clause" {
+                    self.condition_before(id);
+                } else {
+                    // `["f"]`: an arm with no condition, so the branches cover
+                    // every case. The lexer writes it for a bare `else`; the
+                    // events are the same fact either way.
+                    self.event("[\"f\"]");
+                }
+            }
+            // `strings.forEach { (string, contiguous) in`: two plain names in a
+            // closure head are one tuple event on the header line, which the
+            // one-pass lexer writes; the CST wrote nothing for the head. A single
+            // name is folded into the body's value by the closure form instead,
+            // so only two or more names are an event here.
+            "closure_signature" if self.language.name == "swift" => {
+                let source = self.child_of_kind(id, "closure_parameter_group").unwrap_or(id);
+                let items: Vec<u32> = self
+                    .children(source)
+                    .into_iter()
+                    .filter(|&child| !self.is_layout(child) && !matches!(self.kind(child), "(" | ")" | "," | "in"))
+                    .collect();
+                if items.len() >= 2 && items.iter().all(|&child| self.kind(child) == "identifier") {
+                    let mut names = Vec::new();
+                    for child in items {
+                        let mut form = String::from("[\"n\",");
+                        push_string(&mut form, &self.text_string(child));
+                        form.push(']');
+                        names.push(form);
+                    }
+                    let line = self.line(id);
+                    self.event(&format!("[\"x\",{line},[\"t\",[{}]]]", names.join(",")));
+                }
+            }
+            "with_statement" => {
+                // `with A(), B() as f:` has one value per context manager. The
+                // bound one carries the assignment event; every other is still
+                // an expression whose calls are facts, and reading only the
+                // first dropped `open()` from `with nullcontext(), open(p)`.
+                self.event("[\"b\"]");
+                let bound = self.loop_binding(id);
+                let bound_value = bound.as_ref().map(|(_, value)| *value);
+                if let Some((targets, value)) = bound {
+                    self.assignment_event(targets, value, self.line(id), false);
+                    for child in self.children(id) {
+                        if Some(child) == bound_value
+                            || self.is_layout(child)
+                            || matches!(self.kind(child), "block" | "statement_block")
+                        {
+                            continue;
+                        }
+                        let value = self.form(child);
+                        if value != "0" {
+                            let line = self.line(child);
+                            self.event(&format!("[\"x\",{line},{value}]"));
+                        }
+                    }
+                } else {
+                    // `with self._lock:` binds nothing, and `with a, b:` is read
+                    // by the lexer as one tuple event on the header line.
+                    let mut values = Vec::new();
+                    for child in self.children(id) {
+                        if self.is_layout(child) || matches!(self.kind(child), "block" | "statement_block") {
+                            continue;
+                        }
+                        let value = self.form(child);
+                        if value != "0" {
+                            values.push(value);
+                        }
+                    }
+                    let line = self.line(id);
+                    match values.len() {
+                        0 => {}
+                        1 => self.event(&format!("[\"x\",{line},{}]", values[0])),
+                        _ => self.event(&format!("[\"x\",{line},[\"t\",[{}]]]", values.join(","))),
+                    }
+                }
+            }
+            "for_statement" | "for_in_statement" | "foreach_statement" => {
+                self.event("[\"b\"]");
+                if let Some((target, value)) = self.loop_binding(id) {
+                    self.assignment_event(target, value, self.line(id), false);
+                } else if let Some(header) = self.child_of_kind(id, "for_header") {
+                    let inner = self.children(header);
+                    if let Some(semi) = inner.iter().position(|&c| self.kind(c) == ";") {
+                        // `for (i = length; …)`: an init that is not a
+                        // declaration is an assignment, and the lexer files it
+                        // as one. Only looking after the first `;` dropped the
+                        // target and its value. The grammar wraps the init in
+                        // an `expressions` node, so the assignment is one level
+                        // down.
+                        for &child in &inner[..semi] {
+                            self.for_init(child);
+                        }
+                        for &child in &inner[semi + 1..] {
+                            if !self.is_layout(child) {
+                                let value = self.form(child);
+                                if value != "0" {
+                                    let line = self.line(child);
+                                    self.event(&format!("[\"x\",{line},{value}]"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "while_statement" => {
+                self.condition_before(id);
+                self.event("[\"b\"]");
+            }
+            // `lock (obj) stmt`: evaluates the lock expression and opens a
+            // block, like `while`, rather than walking the body via `lambda_calls`.
+            "lock_statement" if self.language.name == "csharp" => {
