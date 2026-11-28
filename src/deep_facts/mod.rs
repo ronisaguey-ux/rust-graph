@@ -10878,3 +10878,323 @@ impl<'a> Walker<'a> {
         }
     }
 
+
+    fn augment_scala_v2(&mut self) {
+        let src_owned = String::from_utf8_lossy(self.src);
+        let raw_lines: Vec<&str> = src_owned.lines().collect();
+        let n_lines = raw_lines.len();
+        if n_lines == 0 || self.facts.symbols.is_empty() {
+            return;
+        }
+
+        let mut code_lines: Vec<String> = vec![String::new(); n_lines + 1];
+        let mut in_block = false;
+        let mut in_tq = false;
+        for (idx, &raw) in raw_lines.iter().enumerate() {
+            let b = raw.as_bytes();
+            let mut out = String::with_capacity(b.len());
+            let mut i = 0usize;
+            let mut in_dq = false;
+            let mut in_sq = false;
+            while i < b.len() {
+                if in_block {
+                    if i + 1 < b.len() && b[i] == b'*' && b[i + 1] == b'/' {
+                        in_block = false;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if in_tq {
+                    if i + 2 < b.len() && b[i] == b'"' && b[i + 1] == b'"' && b[i + 2] == b'"' {
+                        in_tq = false;
+                        out.push('"');
+                        i += 3;
+                    } else {
+                        out.push(b[i] as char);
+                        i += 1;
+                    }
+                    continue;
+                }
+                if in_dq {
+                    if b[i] == b'\\' && i + 1 < b.len() {
+                        out.push(' ');
+                        if b[i + 1].is_ascii_alphabetic() {
+                            out.push(b[i + 1] as char);
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'"' {
+                        in_dq = false;
+                        out.push('"');
+                        i += 1;
+                        continue;
+                    }
+                    out.push(b[i] as char);
+                    i += 1;
+                    continue;
+                }
+                if in_sq {
+                    if b[i] == b'\\' && i + 1 < b.len() {
+                        out.push(' ');
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == b'\'' {
+                        in_sq = false;
+                        out.push('\'');
+                        i += 1;
+                        continue;
+                    }
+                    out.push(' ');
+                    i += 1;
+                    continue;
+                }
+                if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'/' {
+                    break;
+                }
+                if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'*' {
+                    in_block = true;
+                    i += 2;
+                    continue;
+                }
+                if i + 2 < b.len() && b[i] == b'"' && b[i + 1] == b'"' && b[i + 2] == b'"' {
+                    in_tq = true;
+                    out.push('"');
+                    i += 3;
+                    continue;
+                }
+                if b[i] == b'"' {
+                    in_dq = true;
+                    out.push('"');
+                    i += 1;
+                    continue;
+                }
+                if b[i] == b'\'' {
+                    if i + 2 < b.len() && (b[i + 2] == b'\'' || (b[i + 1] == b'\\' && i + 3 < b.len() && b[i + 3] == b'\'')) {
+                        in_sq = true;
+                        out.push('\'');
+                        i += 1;
+                        continue;
+                    }
+                }
+                out.push(b[i] as char);
+                i += 1;
+            }
+            code_lines[idx + 1] = out;
+        }
+
+        let strip_brackets = |s: &str| -> String {
+            let mut out = String::with_capacity(s.len());
+            let mut depth = 0i32;
+            for ch in s.chars() {
+                match ch {
+                    '[' => depth += 1,
+                    ']' => { if depth > 0 { depth -= 1; } }
+                    _ => { if depth == 0 { out.push(ch); } }
+                }
+            }
+            out
+        };
+
+        // Helper: find brace-matched end_line for a def/class starting at `start_ln`.
+        let find_block_end = |start_ln: usize| -> u32 {
+            let mut depth = 0i32;
+            let mut seen_open = false;
+            let limit = (start_ln + 400).min(n_lines);
+            for k in start_ln..=limit {
+                for ch in code_lines[k].bytes() {
+                    if ch == b'{' {
+                        depth += 1;
+                        seen_open = true;
+                    } else if ch == b'}' {
+                        depth -= 1;
+                        if seen_open && depth <= 0 {
+                            return k as u32;
+                        }
+                    }
+                }
+                if !seen_open && k >= start_ln + 6 {
+                    return k as u32;
+                }
+            }
+            start_ln as u32
+        };
+
+        // 1. Symbols: missing `type Name` and `def Name`, with proper brace-matched end_line
+        let mut existing_syms: std::collections::HashSet<(String, u32)> = self
+            .facts
+            .symbols
+            .iter()
+            .map(|s| (s.name.clone(), s.line))
+            .collect();
+        for ln in 1..=n_lines {
+            let t = code_lines[ln].trim();
+            if t.is_empty() { continue; }
+            let ln32 = ln as u32;
+            let mut rest = t;
+            loop {
+                let mut changed = false;
+                for kw in [
+                    "private ", "protected ", "override ", "final ", "sealed ", "abstract ",
+                    "implicit ", "inline ", "opaque ", "transparent ", "lazy ", "open ", "infix ",
+                ] {
+                    if let Some(r) = rest.strip_prefix(kw) {
+                        rest = r.trim_start();
+                        changed = true;
+                    }
+                }
+                if rest.starts_with("private[") || rest.starts_with("protected[") {
+                    if let Some(cb) = rest.find(']') {
+                        rest = rest[cb + 1..].trim_start();
+                        changed = true;
+                    }
+                }
+                if !changed { break; }
+            }
+            if let Some(after) = rest.strip_prefix("type ").or_else(|| rest.strip_prefix("def ")) {
+                let is_def = rest.starts_with("def ");
+                let nm: String = after
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !nm.is_empty() && !existing_syms.contains(&(nm.clone(), ln32)) {
+                    existing_syms.insert((nm.clone(), ln32));
+                    let end_ln = if is_def { find_block_end(ln) } else { ln32 };
+                    self.facts.symbols.push(Symbol {
+                        key: nm.clone(),
+                        name: nm,
+                        owner: String::new(),
+                        kind: 1,
+                        line: ln32,
+                        end_line: end_ln,
+                        bases: Vec::new(),
+                        calls: Vec::new(),
+                        events: String::new(),
+                        ..Symbol::default()
+                    });
+                }
+            }
+        }
+
+        // Fix any existing symbol with degenerate 1-line span whose line opens a `{` block
+        for s in &mut self.facts.symbols {
+            let sl = s.line as usize;
+            if sl >= 1 && sl <= n_lines && s.end_line <= s.line {
+                let cl = code_lines[sl].trim();
+                if cl.contains("def ") || cl.ends_with('{') || cl.contains("= {") {
+                    let e = find_block_end(sl);
+                    if e > s.end_line {
+                        s.end_line = e;
+                    }
+                }
+            }
+        }
+
+        let sym_spans: Vec<(usize, u32, u32)> = self
+            .facts
+            .symbols
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i, s.line, if s.end_line >= s.line { s.end_line } else { s.line }))
+            .collect();
+        let enclosing_syms = |ln32: u32| -> Vec<usize> {
+            let mut hits: Vec<(u32, usize)> = Vec::new();
+            for &(si, s_ln, e_ln) in &sym_spans {
+                if si == 0 { continue; }
+                if ln32 >= s_ln && ln32 <= e_ln {
+                    hits.push((e_ln - s_ln, si));
+                }
+            }
+            hits.sort_unstable();
+            let mut res: Vec<usize> = hits.into_iter().take(3).map(|(_, si)| si).collect();
+            res.push(0);
+            res
+        };
+
+        // 2. Imports (including multi-line `{ ... }`, Scala 3 `.*`, `as`, and IMPORT_MODULE/IMPORT_STAR)
+        let mut existing_imports: std::collections::HashSet<(String, String, String, u8)> = self
+            .facts
+            .imports
+            .iter()
+            .map(|im| (im.module.clone(), im.name.clone(), im.alias.clone(), im.kind))
+            .collect();
+        let mut push_imp_kind = |ln32: u32, module: String, name: String, alias: String, kind: u8| {
+            if module.is_empty() { return; }
+            let key = (module.clone(), name.clone(), alias.clone(), kind);
+            if existing_imports.insert(key) {
+                self.facts.imports.push(Import {
+                    line: ln32,
+                    module,
+                    name,
+                    alias,
+                    kind,
+                    ..Import::default()
+                });
+            }
+        };
+        let mut ln_imp = 1usize;
+        while ln_imp <= n_lines {
+            let t = code_lines[ln_imp].trim();
+            if let Some(after_imp0) = t.strip_prefix("import ") {
+                let ln32 = ln_imp as u32;
+                let mut joined = after_imp0.to_string();
+                let mut bdepth: i32 = joined.bytes().map(|b| if b == b'{' { 1 } else if b == b'}' { -1 } else { 0 }).sum();
+                let mut k = ln_imp + 1;
+                while bdepth > 0 && k <= n_lines && k <= ln_imp + 25 {
+                    let ck = code_lines[k].trim();
+                    joined.push(' ');
+                    joined.push_str(ck);
+                    bdepth += ck.bytes().map(|b| if b == b'{' { 1 } else if b == b'}' { -1 } else { 0 }).sum::<i32>();
+                    k += 1;
+                }
+                let after_imp = joined.as_str();
+                let mut clauses: Vec<&str> = Vec::new();
+                let mut depth = 0i32;
+                let mut start = 0usize;
+                for (bi, ch) in after_imp.char_indices() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        ',' if depth == 0 => {
+                            clauses.push(after_imp[start..bi].trim());
+                            start = bi + 1;
+                        }
+                        _ => {}
+                    }
+                }
+                clauses.push(after_imp[start..].trim());
+                for cl in clauses {
+                    let cl = cl.trim_end_matches(';').trim();
+                    if cl.is_empty() { continue; }
+                    if let (Some(ob), Some(cb)) = (cl.find('{'), cl.rfind('}')) {
+                        let base = cl[..ob].trim().trim_end_matches('.').trim();
+                        let inner = &cl[ob + 1..cb];
+                        for item in inner.split(',') {
+                            let it = item.trim();
+                            if it.is_empty() || it == "_" || it == "*" {
+                                push_imp_kind(ln32, base.to_string(), String::new(), String::new(), IMPORT_STAR);
+                                push_imp_kind(ln32, base.to_string(), String::new(), String::new(), IMPORT_MODULE);
+                                continue;
+                            }
+                            if let Some((lhs, rhs)) = it.split_once("=>").or_else(|| it.split_once(" as ")) {
+                                let lhs = lhs.trim();
+                                let rhs = rhs.trim();
+                                if rhs != "_" && !lhs.is_empty() && !rhs.is_empty() {
+                                    push_imp_kind(ln32, base.to_string(), lhs.to_string(), rhs.to_string(), IMPORT_MODULE);
+                                    push_imp_kind(ln32, base.to_string(), lhs.to_string(), rhs.to_string(), IMPORT_STAR);
+                                    push_imp_kind(ln32, format!("{base}.{lhs}"), String::new(), rhs.to_string(), IMPORT_MODULE);
+                                }
+                            } else {
+                                push_imp_kind(ln32, base.to_string(), it.to_string(), String::new(), IMPORT_STAR);
+                                push_imp_kind(ln32, base.to_string(), it.to_string(), String::new(), IMPORT_MODULE);
+                                push_imp_kind(ln32, format!("{base}.{it}"), String::new(), it.to_string(), IMPORT_MODULE);
+                            }
+                        }
+                    } else if let Some(base) = cl.strip_suffix("._").or_else(|| cl.strip_suffix(".*")) {
+                        let b_tr = base.trim();
+                        push_imp_kind(ln32, b_tr.to_string(), String::new(), String::new(), IMPORT_MODULE);
+                        push_imp_kind(ln32, b_tr.to_string(), String::new(), String::new(), IMPORT_STAR);
