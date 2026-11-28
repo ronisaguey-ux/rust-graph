@@ -9598,3 +9598,323 @@ impl<'a> Walker<'a> {
                     if let Some(cp) = rest.find(')') {
                         rest = rest[cp + 1..].trim_start();
                         changed = true;
+                    }
+                }
+                if !changed { break; }
+            }
+
+            let mut target_opt: Option<String> = None;
+            let mut rhs_opt: Option<&str> = None;
+            let mut type_ann_opt: Option<String> = None;
+
+            // Multi-clause `if cond, let x = ...` / `guard cond, let x = ...` spanning lines
+            let raw_trim = t.trim_start_matches('}').trim_start();
+            let raw_trim = raw_trim.strip_prefix("else ").map(|x| x.trim_start()).unwrap_or(raw_trim);
+            if (raw_trim.starts_with("if ") || raw_trim.starts_with("guard ")) && raw_trim.ends_with(',') {
+                let mut joined = raw_trim.strip_prefix("if ").or_else(|| raw_trim.strip_prefix("guard ")).unwrap_or("").trim().to_string();
+                for k in (ln + 1)..=(ln + 4).min(n_lines) {
+                    joined.push(' ');
+                    joined.push_str(code_lines[k].trim());
+                    if joined.contains('=') { break; }
+                }
+                if let Some(eq_p) = joined.find('=') {
+                    let next_b = joined.as_bytes().get(eq_p + 1).copied().unwrap_or(0);
+                    let prev_b = if eq_p > 0 { joined.as_bytes()[eq_p - 1] } else { 0 };
+                    if next_b != b'=' && !matches!(prev_b, b'=' | b'!' | b'<' | b'>') {
+                        let before_eq = &joined[..eq_p];
+                        let mut m_tgts: Vec<String> = Vec::new();
+                        for part in before_eq.split(',') {
+                            let mut pt = part.trim();
+                            for pfx in ["let ", "var ", "case ", "!"] {
+                                if let Some(r) = pt.strip_prefix(pfx) { pt = r.trim(); }
+                            }
+                            if let Some((_, rhs_cmp)) = pt.split_once("==").or_else(|| pt.split_once("!=")) {
+                                pt = rhs_cmp.trim();
+                            }
+                            let tok: String = pt.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '$').collect();
+                            if !tok.is_empty() { m_tgts.push(tok); }
+                        }
+                        if m_tgts.len() >= 2 {
+                            let val_json = gather_stmt(ln, 5);
+                            let mut ev = format!(r#"["a",{ln32},["#);
+                            for (ti, tn) in m_tgts.iter().enumerate() {
+                                if ti > 0 { ev.push(','); }
+                                push_string(&mut ev, tn);
+                            }
+                            ev.push_str("],");
+                            ev.push_str(&val_json);
+                            ev.push_str(",0]");
+                            for &si in &syms {
+                                let sidx = safe_call_idx[si];
+                                extra_events[si].push(if sidx == 0 { ev.clone() } else { ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(after_c) = rest.strip_prefix("case ") {
+                if let Some(eq_p) = after_c.find('=') {
+                    let lhs = after_c[..eq_p].trim();
+                    if lhs.starts_with('.') {
+                        let id: String = lhs.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                        if id.len() > 1 {
+                            target_opt = Some(format!("case{id}"));
+                            rhs_opt = Some(after_c[eq_p + 1..].trim());
+                        }
+                    }
+                }
+            } else if let Some(after_v) = rest.strip_prefix("let ").or_else(|| rest.strip_prefix("var ")) {
+                if let Some(eq_p) = after_v.find('=') {
+                    let next_b = after_v.as_bytes().get(eq_p + 1).copied().unwrap_or(0);
+                    if next_b != b'=' {
+                        let lhs_raw = after_v[..eq_p].trim();
+                        let mut parts = lhs_raw.splitn(2, ':');
+                        let lhs = parts.next().unwrap_or("").trim().trim_matches('`');
+                        if let Some(ty_s) = parts.next() {
+                            let ty_head: String = ty_s.trim().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect();
+                            let last_ty = ty_head.rsplit('.').next().unwrap_or("");
+                            if !last_ty.is_empty() && last_ty.as_bytes()[0].is_ascii_uppercase() {
+                                type_ann_opt = Some(last_ty.to_string());
+                            }
+                        }
+                        if !lhs.is_empty() && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') {
+                            target_opt = Some(lhs.to_string());
+                            rhs_opt = Some(after_v[eq_p + 1..].trim());
+                        } else if lhs.starts_with('(') && lhs.ends_with(')') {
+                            let inner_t: Vec<String> = lhs[1..lhs.len() - 1]
+                                .split(',')
+                                .map(|x| x.split(':').next().unwrap_or("").trim().to_string())
+                                .filter(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+                                .collect();
+                            if inner_t.len() >= 2 {
+                                let val_json = gather_stmt(ln, 4);
+                                let mut ev = format!(r#"["a",{ln32},["#);
+                                for (ti, tn) in inner_t.iter().enumerate() {
+                                    if ti > 0 { ev.push(','); }
+                                    push_string(&mut ev, tn);
+                                }
+                                ev.push_str("],");
+                                ev.push_str(&val_json);
+                                ev.push_str(",0]");
+                                for &si in &syms {
+                                    let sidx = safe_call_idx[si];
+                                    extra_events[si].push(if sidx == 0 { ev.clone() } else { ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if let Some(op_p) = rest.find(">>=").or_else(|| rest.find("<<=")).or_else(|| rest.find("+=")).or_else(|| rest.find("-=")).or_else(|| rest.find("*=")).or_else(|| rest.find("/=")).or_else(|| rest.find("|=")).or_else(|| rest.find("&=")) {
+                let before_op = rest[..op_p].trim().trim_end_matches(')').trim();
+                let tok: String = before_op.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').collect::<String>().chars().rev().collect();
+                if !tok.is_empty() {
+                    target_opt = Some(tok);
+                }
+            } else if !rest.starts_with("func ") && !rest.starts_with("typealias ") && !rest.starts_with("case ") {
+                if let Some(eq_p) = rest.find('=') {
+                    let prev_b = if eq_p > 0 { rest.as_bytes()[eq_p - 1] } else { 0 };
+                    let next_b = rest.as_bytes().get(eq_p + 1).copied().unwrap_or(0);
+                    if !matches!(prev_b, b'=' | b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/') && next_b != b'=' {
+                        let lhs = rest[..eq_p].trim().replace("?.", ".").replace("!.", ".");
+                        if !lhs.is_empty()
+                            && lhs.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'$')
+                            && !lhs.starts_with('.')
+                            && !lhs.ends_with('.')
+                        {
+                            target_opt = Some(lhs.clone());
+                            rhs_opt = Some(rest[eq_p + 1..].trim());
+                        } else if let Some(cp_dot) = lhs.rfind(").") {
+                            if let Some(op) = lhs[..cp_dot].rfind('(') {
+                                let inner = lhs[op + 1..cp_dot].trim();
+                                let field = lhs[cp_dot + 2..].trim();
+                                if !inner.is_empty() && !field.is_empty()
+                                    && inner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+                                    && field.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+                                {
+                                    target_opt = Some(format!("{inner}.{field}"));
+                                    rhs_opt = Some(rest[eq_p + 1..].trim());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(tgt) = target_opt {
+                if let Some(ty) = type_ann_opt.as_ref() {
+                    if existing_vars.insert((tgt.clone(), ty.clone())) {
+                        self.facts.vars.push((tgt.clone(), ty.clone()));
+                    }
+                }
+                if let Some(rhs) = rhs_opt {
+                    let mut r_clean = rhs;
+                    for pfx in ["try ", "try? ", "try! ", "await ", "consume "] {
+                        if let Some(rc) = r_clean.strip_prefix(pfx) {
+                            r_clean = rc.trim_start();
+                        }
+                    }
+                    let r_sg = strip_generics(r_clean);
+                    let r_head: String = r_sg
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                        .collect();
+                    let last_seg = r_head.rsplit('.').next().unwrap_or("");
+                    if !last_seg.is_empty() && last_seg.as_bytes()[0].is_ascii_uppercase() {
+                        if existing_vars.insert((tgt.clone(), last_seg.to_string())) {
+                            self.facts.vars.push((tgt.clone(), last_seg.to_string()));
+                        }
+                    }
+                }
+                let has_tq = raw_lines[ln - 1].contains("\"\"\"") || (ln < n_lines && raw_lines[ln].contains("\"\"\""));
+                let extra_m = if has_tq { 14 } else if t.starts_with("} else") || t.ends_with(',') { 12 } else { 2 };
+                let val_json = gather_stmt(ln, extra_m);
+                let mut ev = format!(r#"["a",{ln32},["#);
+                push_string(&mut ev, &tgt);
+                ev.push_str("],");
+                ev.push_str(&val_json);
+                ev.push_str(",0]");
+                for &si in &syms {
+                    let sidx = safe_call_idx[si];
+                    extra_events[si].push(if sidx == 0 { ev.clone() } else { ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                }
+                if let Some(dot) = tgt.rfind('.') {
+                    let short_t = &tgt[dot + 1..];
+                    let mut ev2 = format!(r#"["a",{ln32},["#);
+                    push_string(&mut ev2, short_t);
+                    ev2.push_str("],");
+                    ev2.push_str(&val_json);
+                    ev2.push_str(",0]");
+                    for &si in &syms {
+                        let sidx = safe_call_idx[si];
+                        extra_events[si].push(if sidx == 0 { ev2.clone() } else { ev2.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                    }
+                }
+            }
+
+            if rest.starts_with("return ") || rest.contains(" return ") {
+                let val_json = gather_stmt(ln, 2);
+                let ev = format!(r#"["r",{ln32},{val_json},0]"#);
+                for &si in &syms {
+                    let sidx = safe_call_idx[si];
+                    extra_events[si].push(if sidx == 0 { ev.clone() } else { ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                }
+            }
+
+            if !per_line_tokens[ln].is_empty() {
+                let has_tq2 = raw_lines[ln - 1].contains("\"\"\"") || (ln < n_lines && raw_lines[ln].contains("\"\"\""));
+                let extra_min = if has_tq2 { 14 } else { 2 };
+                let val_json = gather_stmt(ln, extra_min);
+                let ev = format!(r#"["x",{ln32},{val_json},0]"#);
+                for &si in &syms {
+                    let sidx = safe_call_idx[si];
+                    extra_events[si].push(if sidx == 0 { ev.clone() } else { ev.replace(r#"["c",0,"#, &format!(r#"["c",{sidx},"#)) });
+                }
+            }
+        }
+
+        for (si, evs) in extra_events.into_iter().enumerate() {
+            if evs.is_empty() { continue; }
+            let sym = &mut self.facts.symbols[si];
+            for ev in evs {
+                if !sym.events.is_empty() { sym.events.push(','); }
+                sym.events.push_str(&ev);
+            }
+        }
+    }
+
+    fn augment_swift(&mut self) {
+        let src = self.orig_src;
+        let n = src.len();
+        let mut li = 0usize;
+        let mut lno = 1u32;
+        while li < n {
+            let line_start = li;
+            while li < n && src[li] != b'\n' {
+                li += 1;
+            }
+            let raw = &src[line_start..li];
+            // Strip `//` line comment
+            let code = {
+                let mut end = raw.len();
+                let mut k = 0usize;
+                let mut in_str = false;
+                while k < raw.len() {
+                    if raw[k] == b'"' && (k == 0 || raw[k - 1] != b'\\') {
+                        in_str = !in_str;
+                    } else if !in_str && k + 1 < raw.len() && raw[k] == b'/' && raw[k + 1] == b'/' {
+                        end = k;
+                        break;
+                    }
+                    k += 1;
+                }
+                &raw[..end]
+            };
+            let owner_idx = self
+                .facts
+                .symbols
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter(|(_, sym)| sym.line <= lno && lno <= sym.end_line)
+                .max_by_key(|(_, sym)| sym.line)
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            // 1. Recover `func open(` / `func type(` / contextual keyword function definitions.
+            let mut k = 0usize;
+            while k < code.len() && matches!(code[k], b' ' | b'\t') { k += 1; }
+            if let Some(fpos) = code.windows(5).position(|w| w == b"func ") {
+                let after = fpos + 5;
+                if fpos == 0 || !code[fpos - 1].is_ascii_alphanumeric() {
+                    let mut p0 = after;
+                    while p0 < code.len() && matches!(code[p0], b' ' | b'\t') { p0 += 1; }
+                    let mut p1 = p0;
+                    while p1 < code.len() && (code[p1].is_ascii_alphanumeric() || code[p1] == b'_') { p1 += 1; }
+                    if p1 > p0 {
+                        let fname = String::from_utf8_lossy(&code[p0..p1]).to_string();
+                        if matches!(fname.as_str(), "open" | "type" | "get" | "set" | "any" | "some") {
+                            if !self.facts.symbols.iter().any(|sym| sym.name == fname && sym.line == lno) {
+                                let owner = self.facts.symbols.get(owner_idx).map(|s| s.key.clone()).unwrap_or_default();
+                                let key = if owner.is_empty() { fname.clone() } else { format!("{owner}.{fname}") };
+                                self.facts.symbols.push(Symbol {
+                                    key,
+                                    name: fname,
+                                    owner,
+                                    kind: 1,
+                                    line: lno,
+                                    end_line: lno,
+                                    ..Symbol::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Scan dotted generic calls `A.B<T>(` and contextual keyword calls `open(`, `obj.open(`, `type(`.
+            let mut i = 0usize;
+            let mut in_str = false;
+            while i < code.len() {
+                if code[i] == b'"' && (i == 0 || code[i - 1] != b'\\') {
+                    in_str = !in_str;
+                    i += 1;
+                    continue;
+                }
+                if in_str {
+                    i += 1;
+                    continue;
+                }
+                if code[i].is_ascii_alphabetic() || code[i] == b'_' {
+                    let s0 = i;
+                    let mut segs: Vec<String> = Vec::new();
+                    loop {
+                        let p0 = i;
+                        while i < code.len() && (code[i].is_ascii_alphanumeric() || code[i] == b'_') {
+                            i += 1;
+                        }
+                        if i > p0 {
+                            segs.push(String::from_utf8_lossy(&code[p0..i]).to_string());
+                        }
+                        if i < code.len() && code[i] == b'.' && i + 1 < code.len() && (code[i + 1].is_ascii_alphabetic() || code[i + 1] == b'_') {
+                            i += 1;
